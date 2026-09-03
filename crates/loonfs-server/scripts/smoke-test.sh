@@ -239,9 +239,9 @@ pass "built a throwaway CLI profile for $BASE_URL"
 
 # 6. The object store. Readiness never touches it, so this is the check that
 #    catches a wrong bucket, a wrong region, or an expired credential.
-loonfs admin store probe \
-  || fail "loonfs admin store probe found an object-store problem"
-pass "loonfs admin store probe passed every check"
+loonfs maintenance store probe \
+  || fail "loonfs maintenance store probe found an object-store problem"
+pass "loonfs maintenance store probe passed every check"
 
 # 7. A file through a namespace of this run's own, and the same bytes back.
 NAMESPACE="smoke-$(random_hex 4)"

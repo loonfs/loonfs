@@ -47,8 +47,8 @@ Inspection:
   completion  Print a shell completion script
   version     Print version and build metadata
 
-Administration:
-  admin       Run administrative operations
+Maintenance:
+  maintenance  Run maintenance operations
 
 Options:
 {options}{after-help}\
@@ -201,9 +201,9 @@ pub(crate) enum Command {
     /// Check the selected deployment without writing to it.
     Doctor(DoctorArgs),
     /// Maintenance operations: checkpoints, steps, retention, GC, indexes.
-    Admin {
+    Maintenance {
         #[command(subcommand)]
-        command: AdminCommand,
+        command: MaintenanceCommand,
     },
     /// Inspect the CLI config file.
     Config {
@@ -250,15 +250,13 @@ impl Command {
                 | Self::Trash(_)
                 | Self::Changes(_)
                 | Self::Doctor(_)
-                | Self::Admin {
-                    command: AdminCommand::Checkpoint { .. }
-                        | AdminCommand::Index { .. }
-                        | AdminCommand::Maintenance {
-                            command: AdminMaintenanceCommand::Step(_)
-                                | AdminMaintenanceCommand::Flush(_),
-                        }
-                        | AdminCommand::Retention { .. }
-                        | AdminCommand::Gc(_),
+                | Self::Maintenance {
+                    command: MaintenanceCommand::Checkpoint { .. }
+                        | MaintenanceCommand::Index { .. }
+                        | MaintenanceCommand::Step(_)
+                        | MaintenanceCommand::Flush(_)
+                        | MaintenanceCommand::Retention { .. }
+                        | MaintenanceCommand::Gc(_),
                 }
         )
     }
@@ -273,10 +271,10 @@ impl Command {
             Self::Snapshot {
                 command: SnapshotCommand::List(args),
             } => Some(PaginationFlags::from(&args.pagination)),
-            Self::Admin {
+            Self::Maintenance {
                 command:
-                    AdminCommand::Checkpoint {
-                        command: AdminCheckpointCommand::List(args),
+                    MaintenanceCommand::Checkpoint {
+                        command: MaintenanceCheckpointCommand::List(args),
                     },
             } => Some(PaginationFlags::from(&args.pagination)),
             _ => None,
@@ -1210,80 +1208,71 @@ pub(crate) struct SnapshotReleaseArgs {
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum AdminCommand {
+pub(crate) enum MaintenanceCommand {
+    /// Run maintenance for selected namespaces. Requires an embedded profile.
+    Run(MaintenanceRunArgs),
+    /// Run one metadata maintenance step.
+    Step(MaintenanceStepArgs),
+    /// Flush the WAL tail into a durable segment.
+    Flush(MaintenanceNamespaceArgs),
     /// Create, list, or release checkpoint pins.
     Checkpoint {
         #[command(subcommand)]
-        command: AdminCheckpointCommand,
+        command: MaintenanceCheckpointCommand,
     },
     /// Inspect and manage the gram content index.
     Index {
         #[command(subcommand)]
-        command: AdminIndexCommand,
-    },
-    /// Run or directly trigger maintenance work.
-    Maintenance {
-        #[command(subcommand)]
-        command: AdminMaintenanceCommand,
+        command: MaintenanceIndexCommand,
     },
     /// Manage retained replay history.
     Retention {
         #[command(subcommand)]
-        command: AdminRetentionCommand,
+        command: MaintenanceRetentionCommand,
     },
     /// Run a mark-and-sweep garbage-collection pass.
-    Gc(AdminGcArgs),
+    Gc(MaintenanceGcArgs),
     /// Inspect and manage the profile's object store.
     Store {
         #[command(subcommand)]
-        command: AdminStoreCommand,
+        command: MaintenanceStoreCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum AdminCheckpointCommand {
+pub(crate) enum MaintenanceCheckpointCommand {
     /// Pin the namespace's current state under a named checkpoint.
-    Create(AdminCheckpointArgs),
+    Create(MaintenanceCheckpointArgs),
     /// List active checkpoint pins in checkpoint-id order.
-    List(AdminCheckpointListArgs),
+    List(MaintenanceCheckpointListArgs),
     /// Release a checkpoint pin.
-    Release(AdminCheckpointReleaseArgs),
+    Release(MaintenanceCheckpointReleaseArgs),
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum AdminIndexCommand {
+pub(crate) enum MaintenanceIndexCommand {
     /// Enable the gram content index and wait for its backfill to reach the
     /// sequence the namespace was at when this command started.
-    Enable(AdminIndexEnableArgs),
+    Enable(MaintenanceIndexEnableArgs),
     /// Disable the gram content index.
-    Disable(AdminNamespaceArgs),
+    Disable(MaintenanceNamespaceArgs),
     /// Show whether the gram content index is disabled, backfilling, or active.
-    Status(AdminNamespaceArgs),
+    Status(MaintenanceNamespaceArgs),
     /// Collect the namespace's unreferenced gram-index objects.
-    Gc(AdminIndexGcArgs),
+    Gc(MaintenanceIndexGcArgs),
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum AdminMaintenanceCommand {
-    /// Run maintenance for selected namespaces. Requires an embedded profile.
-    Run(AdminRunArgs),
-    /// Run one metadata maintenance step.
-    Step(AdminStepArgs),
-    /// Flush the WAL tail into a durable segment.
-    Flush(AdminNamespaceArgs),
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum AdminRetentionCommand {
+pub(crate) enum MaintenanceRetentionCommand {
     /// Advance the retention floor and discard older replay history.
     /// This does not remove file revisions.
-    Advance(AdminNamespaceArgs),
+    Advance(MaintenanceNamespaceArgs),
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum AdminStoreCommand {
+pub(crate) enum MaintenanceStoreCommand {
     /// Test the object-store operations LoonFS requires.
-    Probe(AdminStoreProbeArgs),
+    Probe(MaintenanceStoreProbeArgs),
 }
 
 /// Minimum `--poll-interval-ms`. Each poll reads durable state for every
@@ -1292,7 +1281,7 @@ pub(crate) enum AdminStoreCommand {
 const MIN_POLL_INTERVAL_MS: u64 = 100;
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminRunArgs {
+pub(crate) struct MaintenanceRunArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
@@ -1320,7 +1309,7 @@ pub(crate) struct AdminRunArgs {
     pub deadline_ms: Option<u64>,
 }
 
-/// Jobs accepted by `admin maintenance run --job`.
+/// Jobs accepted by `maintenance run --job`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum MaintenanceJobArg {
     /// Flush the WAL tail past its threshold and fold one reorganization
@@ -1335,7 +1324,7 @@ pub(crate) enum MaintenanceJobArg {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminIndexEnableArgs {
+pub(crate) struct MaintenanceIndexEnableArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Return as soon as the index is enabled, without waiting for the
@@ -1354,7 +1343,7 @@ pub(crate) struct AdminIndexEnableArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminIndexGcArgs {
+pub(crate) struct MaintenanceIndexGcArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Spend at most this many reads and return after one bounded pass.
@@ -1367,13 +1356,13 @@ pub(crate) struct AdminIndexGcArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminNamespaceArgs {
+pub(crate) struct MaintenanceNamespaceArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminCheckpointArgs {
+pub(crate) struct MaintenanceCheckpointArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Label recorded on the checkpoint record (a label, not a key).
@@ -1386,7 +1375,7 @@ pub(crate) struct AdminCheckpointArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminCheckpointListArgs {
+pub(crate) struct MaintenanceCheckpointListArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     #[command(flatten)]
@@ -1394,7 +1383,7 @@ pub(crate) struct AdminCheckpointListArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminCheckpointReleaseArgs {
+pub(crate) struct MaintenanceCheckpointReleaseArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Checkpoint id to release.
@@ -1403,7 +1392,7 @@ pub(crate) struct AdminCheckpointReleaseArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminStepArgs {
+pub(crate) struct MaintenanceStepArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Flush the visible WAL tail into metadata segments when it reaches this many
@@ -1420,7 +1409,7 @@ pub(crate) struct AdminStepArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminGcArgs {
+pub(crate) struct MaintenanceGcArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Objects younger than this are never deleted (server default when
@@ -1442,7 +1431,7 @@ pub(crate) struct AdminGcArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminStoreProbeArgs {
+pub(crate) struct MaintenanceStoreProbeArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
@@ -1545,19 +1534,19 @@ command_kinds! {
     Changes => "changes",
     Capabilities => "capabilities",
     Doctor => "doctor",
-    AdminCheckpointCreate => "admin_checkpoint_create",
-    AdminCheckpointList => "admin_checkpoint_list",
-    AdminCheckpointRelease => "admin_checkpoint_release",
-    AdminMaintenanceFlush => "admin_maintenance_flush",
-    AdminRetentionAdvance => "admin_retention_advance",
-    AdminMaintenanceRun => "admin_maintenance_run",
-    AdminMaintenanceStep => "admin_maintenance_step",
-    AdminGc => "admin_gc",
-    AdminStoreProbe => "admin_store_probe",
-    AdminIndexEnable => "admin_index_enable",
-    AdminIndexDisable => "admin_index_disable",
-    AdminIndexStatus => "admin_index_status",
-    AdminIndexGc => "admin_index_gc",
+    MaintenanceCheckpointCreate => "maintenance_checkpoint_create",
+    MaintenanceCheckpointList => "maintenance_checkpoint_list",
+    MaintenanceCheckpointRelease => "maintenance_checkpoint_release",
+    MaintenanceFlush => "maintenance_flush",
+    MaintenanceRetentionAdvance => "maintenance_retention_advance",
+    MaintenanceRun => "maintenance_run",
+    MaintenanceStep => "maintenance_step",
+    MaintenanceGc => "maintenance_gc",
+    MaintenanceStoreProbe => "maintenance_store_probe",
+    MaintenanceIndexEnable => "maintenance_index_enable",
+    MaintenanceIndexDisable => "maintenance_index_disable",
+    MaintenanceIndexStatus => "maintenance_index_status",
+    MaintenanceIndexGc => "maintenance_index_gc",
     ConfigPath => "config_path",
     ConfigShow => "config_show",
     Version => "version",
@@ -1614,29 +1603,33 @@ impl Cli {
             Command::Changes(_) => CommandKind::Changes,
             Command::Capabilities(_) => CommandKind::Capabilities,
             Command::Doctor(_) => CommandKind::Doctor,
-            Command::Admin { command } => match command {
-                AdminCommand::Checkpoint { command } => match command {
-                    AdminCheckpointCommand::Create(_) => CommandKind::AdminCheckpointCreate,
-                    AdminCheckpointCommand::List(_) => CommandKind::AdminCheckpointList,
-                    AdminCheckpointCommand::Release(_) => CommandKind::AdminCheckpointRelease,
+            Command::Maintenance { command } => match command {
+                MaintenanceCommand::Run(_) => CommandKind::MaintenanceRun,
+                MaintenanceCommand::Step(_) => CommandKind::MaintenanceStep,
+                MaintenanceCommand::Flush(_) => CommandKind::MaintenanceFlush,
+                MaintenanceCommand::Checkpoint { command } => match command {
+                    MaintenanceCheckpointCommand::Create(_) => {
+                        CommandKind::MaintenanceCheckpointCreate
+                    }
+                    MaintenanceCheckpointCommand::List(_) => CommandKind::MaintenanceCheckpointList,
+                    MaintenanceCheckpointCommand::Release(_) => {
+                        CommandKind::MaintenanceCheckpointRelease
+                    }
                 },
-                AdminCommand::Index { command } => match command {
-                    AdminIndexCommand::Enable(_) => CommandKind::AdminIndexEnable,
-                    AdminIndexCommand::Disable(_) => CommandKind::AdminIndexDisable,
-                    AdminIndexCommand::Status(_) => CommandKind::AdminIndexStatus,
-                    AdminIndexCommand::Gc(_) => CommandKind::AdminIndexGc,
+                MaintenanceCommand::Index { command } => match command {
+                    MaintenanceIndexCommand::Enable(_) => CommandKind::MaintenanceIndexEnable,
+                    MaintenanceIndexCommand::Disable(_) => CommandKind::MaintenanceIndexDisable,
+                    MaintenanceIndexCommand::Status(_) => CommandKind::MaintenanceIndexStatus,
+                    MaintenanceIndexCommand::Gc(_) => CommandKind::MaintenanceIndexGc,
                 },
-                AdminCommand::Maintenance { command } => match command {
-                    AdminMaintenanceCommand::Run(_) => CommandKind::AdminMaintenanceRun,
-                    AdminMaintenanceCommand::Step(_) => CommandKind::AdminMaintenanceStep,
-                    AdminMaintenanceCommand::Flush(_) => CommandKind::AdminMaintenanceFlush,
+                MaintenanceCommand::Retention { command } => match command {
+                    MaintenanceRetentionCommand::Advance(_) => {
+                        CommandKind::MaintenanceRetentionAdvance
+                    }
                 },
-                AdminCommand::Retention { command } => match command {
-                    AdminRetentionCommand::Advance(_) => CommandKind::AdminRetentionAdvance,
-                },
-                AdminCommand::Gc(_) => CommandKind::AdminGc,
-                AdminCommand::Store { command } => match command {
-                    AdminStoreCommand::Probe(_) => CommandKind::AdminStoreProbe,
+                MaintenanceCommand::Gc(_) => CommandKind::MaintenanceGc,
+                MaintenanceCommand::Store { command } => match command {
+                    MaintenanceStoreCommand::Probe(_) => CommandKind::MaintenanceStoreProbe,
                 },
             },
             Command::Config { command } => match command {
@@ -1668,7 +1661,7 @@ mod tests {
 
         let between_subcommands = Cli::try_parse_from([
             "loonfs",
-            "admin",
+            "maintenance",
             "--profile",
             "prod",
             "checkpoint",
@@ -1750,10 +1743,10 @@ mod tests {
         assert_eq!(cli.namespace.as_deref(), Some(namespace));
         let target = match &cli.command {
             Command::Ls(args) => Some(&args.target),
-            Command::Admin {
+            Command::Maintenance {
                 command:
-                    AdminCommand::Checkpoint {
-                        command: AdminCheckpointCommand::List(args),
+                    MaintenanceCommand::Checkpoint {
+                        command: MaintenanceCheckpointCommand::List(args),
                     },
             } => Some(&args.target),
             _ => None,
@@ -1830,7 +1823,7 @@ mod tests {
             ],
             &[
                 "loonfs",
-                "admin",
+                "maintenance",
                 "checkpoint",
                 "list",
                 "--limit",
@@ -1887,7 +1880,7 @@ mod tests {
             &[
                 "loonfs",
                 "--json",
-                "admin",
+                "maintenance",
                 "checkpoint",
                 "list",
                 "--all",
@@ -1914,7 +1907,7 @@ mod tests {
     fn index_gc_accepts_the_same_cursor_flag_as_core_gc() {
         let cli = Cli::try_parse_from([
             "loonfs",
-            "admin",
+            "maintenance",
             "index",
             "gc",
             "--max-objects",
@@ -1925,16 +1918,16 @@ mod tests {
         .expect("index gc arguments");
         assert!(matches!(
             &cli.command,
-            Command::Admin {
-                command: AdminCommand::Index {
-                    command: AdminIndexCommand::Gc(_),
+            Command::Maintenance {
+                command: MaintenanceCommand::Index {
+                    command: MaintenanceIndexCommand::Gc(_),
                 },
             }
         ));
-        if let Command::Admin {
+        if let Command::Maintenance {
             command:
-                AdminCommand::Index {
-                    command: AdminIndexCommand::Gc(args),
+                MaintenanceCommand::Index {
+                    command: MaintenanceIndexCommand::Gc(args),
                 },
         } = &cli.command
         {
@@ -1981,29 +1974,30 @@ mod tests {
         let snapshot = subcommand(&command, "snapshot");
         assert_subcommands(snapshot, &["create", "list", "extend", "release"]);
 
-        let admin = subcommand(&command, "admin");
+        let maintenance = subcommand(&command, "maintenance");
         assert_subcommands(
-            admin,
+            maintenance,
             &[
+                "run",
+                "step",
+                "flush",
                 "checkpoint",
                 "index",
-                "maintenance",
                 "retention",
                 "gc",
                 "store",
             ],
         );
         assert_subcommands(
-            subcommand(admin, "checkpoint"),
+            subcommand(maintenance, "checkpoint"),
             &["create", "list", "release"],
         );
         assert_subcommands(
-            subcommand(admin, "index"),
+            subcommand(maintenance, "index"),
             &["enable", "disable", "status", "gc"],
         );
-        assert_subcommands(subcommand(admin, "maintenance"), &["run", "step", "flush"]);
-        assert_subcommands(subcommand(admin, "retention"), &["advance"]);
-        assert_subcommands(subcommand(admin, "store"), &["probe"]);
+        assert_subcommands(subcommand(maintenance, "retention"), &["advance"]);
+        assert_subcommands(subcommand(maintenance, "store"), &["probe"]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use loonfs_api::v0::{GrepGcRequest, GrepGcResponse, GrepIndex};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
-    GrepRequest, GrepResponse, NamespaceId, FEATURE_ADMIN_GREP_INDEX, FEATURE_QUERY_GREP,
+    GrepRequest, GrepResponse, NamespaceId, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
 };
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
 
@@ -147,9 +147,9 @@ pub(super) async fn grep_queries_not_served() -> ApiResponseError {
 /// nothing here may enable, disable, or collect one.
 pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
     ApiResponseError::not_supported(
-        FEATURE_ADMIN_GREP_INDEX,
+        FEATURE_MAINTENANCE_GREP_INDEX,
         "this deployment does not maintain the grep index; set `[grep].mode` to \
-         `maintain_only` or `serve_and_maintain`, or administer the index where it is maintained",
+         `maintain_only` or `serve_and_maintain`, or maintain the index on another deployment",
     )
 }
 
@@ -159,8 +159,8 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         post,
         operation_id = "enable_grep_index",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/admin/namespaces/{namespace_id}/grep/index/enable",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
+        tag = "maintenance",
         summary = "Enable the grep index",
         description = "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
@@ -208,8 +208,8 @@ pub(super) async fn enable_grep_index(
         get,
         operation_id = "get_grep_index",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/admin/namespaces/{namespace_id}/grep/index",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/grep/index",
+        tag = "maintenance",
         summary = "Get grep index status",
         description = "Returns whether the namespace's grep index is `disabled`, `backfilling`, or `active`, including build progress when available. A namespace that has never enabled the index is `disabled`. This operation requires a deployment that maintains grep indexes and does not change the index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
@@ -248,8 +248,8 @@ async fn read_grep_index_status(
         post,
         operation_id = "disable_grep_index",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/admin/namespaces/{namespace_id}/grep/index/disable",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
+        tag = "maintenance",
         summary = "Disable the grep index",
         description = "Disables the namespace's grep root and clears its segment references with one durable compare-and-swap; index maintenance stops on its own once a step reads the disabled root. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
@@ -300,8 +300,8 @@ pub(super) async fn disable_grep_index(
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-retries" = json!({"disabled": true})),
         ),
-        path = "/v0/admin/namespaces/{namespace_id}/grep/index/gc",
-        tag = "admin",
+        path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
+        tag = "maintenance",
         summary = "Collect grep-index garbage",
         description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. `max_objects` bounds the reads the pass spends and returns a `next_cursor` when keys remain; resuming re-reads liveness and the grep root, so a cursor only skips enumeration. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),

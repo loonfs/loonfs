@@ -542,7 +542,7 @@ fn upload_body_too_large_error() -> ApiResponseError {
         ErrorCode::ContentTooLarge,
         "request body exceeds this deployment's limit; check the \
          `upload.max_content_bytes` capability limit, and use `direct_put` \
-         for large content when `core.uploads.direct_put` is advertised",
+         for large content when `filesystem.uploads.direct_put` is advertised",
     )
 }
 

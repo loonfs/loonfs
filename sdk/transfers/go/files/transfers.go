@@ -22,9 +22,9 @@ import (
 const (
 	multipartMinimumBytes = 8 * 1024 * 1024
 
-	featureDirectGet           = "core.downloads.direct_get"
-	featureDirectPut           = "core.uploads.direct_put"
-	featureDirectMultipart     = "core.uploads.direct_multipart"
+	featureDirectGet           = "filesystem.downloads.direct_get"
+	featureDirectPut           = "filesystem.uploads.direct_put"
+	featureDirectMultipart     = "filesystem.uploads.direct_multipart"
 	limitUploadMaximumBytes    = "upload.max_content_bytes"
 	limitDirectPutMaximumBytes = "upload.direct_put_max_content_bytes"
 

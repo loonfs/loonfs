@@ -9,10 +9,10 @@ A server can run the job with its other maintenance work. A separate process
 can maintain namespaces named on the command line:
 
 ```console
-loonfs admin maintenance run --namespaces docs --namespaces source --job grep-index
-loonfs admin maintenance run --namespaces docs --job grep-index --drain
-loonfs admin maintenance run --namespaces docs --job grep-gc --drain
-loonfs admin index gc --namespace docs
+loonfs maintenance run --namespaces docs --namespaces source --job grep-index
+loonfs maintenance run --namespaces docs --job grep-index --drain
+loonfs maintenance run --namespaces docs --job grep-gc --drain
+loonfs maintenance index gc --namespace docs
 ```
 
 Without `--drain`, the command runs until it receives a stop signal and
@@ -22,7 +22,7 @@ limit that work. Omitting `--job` also runs metadata and core garbage
 collection.
 
 The `grep-gc` job resumes bounded collection passes where the previous pass
-stopped. `loonfs admin index gc` runs those passes directly for one namespace,
+stopped. `loonfs maintenance index gc` runs those passes directly for one namespace,
 including an absent or deleted namespace whose old index data remains.
 
 `GrepWorkerConfig` controls how much work one step may perform. A server reads

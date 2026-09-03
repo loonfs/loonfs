@@ -19,9 +19,9 @@ writer_id = "loonfs-server-local"
 # "automatic" (the default) registers the metadata, collection, and — when
 # the grep mode below maintains — index jobs, and lets the writer schedule
 # them; "manual" registers none of them and schedules nothing, leaving every
-# `loonfs admin` operation working exactly as before. Set "manual" on a
+# `loonfs maintenance` operation working exactly as before. Set "manual" on a
 # write-serving node when a dedicated maintenance process owns these
-# namespaces, and assign them to it with `loonfs admin maintenance run --namespaces ...`.
+# namespaces, and assign them to it with `loonfs maintenance run --namespaces ...`.
 # This word and the grep mode are the only maintenance switches.
 #maintenance = "automatic"
 
@@ -57,7 +57,7 @@ writer_id = "loonfs-server-local"
 # presign a create-only PUT and report a durable checksum, and the endpoint is
 # a first-party AWS S3 or Cloudflare R2 domain, so it is unavailable on this
 # local-fs store.
-# Clients gate on `core.uploads.direct_put` in the capability document.
+# Clients gate on `filesystem.uploads.direct_put` in the capability document.
 
 # Optional runtime cache overrides; omitted fields keep the runtime defaults.
 # `max_cached_namespaces` bounds every cache counted in entries: head anchors,

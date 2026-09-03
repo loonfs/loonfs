@@ -1,7 +1,7 @@
 //! Renders command outcomes as human-readable text or `--json`.
 
 mod human;
-mod human_admin;
+mod human_maintenance;
 mod json;
 mod summaries;
 

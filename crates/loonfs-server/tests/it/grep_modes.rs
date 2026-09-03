@@ -9,9 +9,10 @@ use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
 use loonfs::{FsAdmin, FsReader};
 use loonfs_api::v0::{GrepGcResponse, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
-    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, FEATURE_ADMIN_GREP_INDEX,
-    FEATURE_QUERY_GREP, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
-    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, PROFILE_QUERY_V0,
+    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId,
+    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    PLANE_QUERY_V0,
 };
 use loonfs_grep::root::{load_grep_root, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
@@ -41,9 +42,11 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 
     let capabilities = capabilities(&router).await;
     assert!(!capabilities.features.contains_key(FEATURE_QUERY_GREP));
-    assert!(!capabilities.features.contains_key(FEATURE_ADMIN_GREP_INDEX));
+    assert!(!capabilities
+        .features
+        .contains_key(FEATURE_MAINTENANCE_GREP_INDEX));
     assert!(
-        !capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0),
+        !capabilities.planes.iter().any(|p| p == PLANE_QUERY_V0),
         "a deployment that answers `not_supported` on every query route must not advertise \
          the plane"
     );
@@ -52,7 +55,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     }
     assert!(!maintains_grep_index(&server.writer));
 
-    // Searching and administering gate on their own keys, so a refusal names
+    // Searching and maintaining gate on their own keys, so a refusal names
     // the key whose absence the client just read.
     assert_not_supported(
         &router,
@@ -62,15 +65,22 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
         FEATURE_QUERY_GREP,
     )
     .await;
-    for path in admin_grep_paths(&namespace_id) {
-        assert_not_supported(&router, Method::POST, &path, None, FEATURE_ADMIN_GREP_INDEX).await;
+    for path in maintenance_grep_paths(&namespace_id) {
+        assert_not_supported(
+            &router,
+            Method::POST,
+            &path,
+            None,
+            FEATURE_MAINTENANCE_GREP_INDEX,
+        )
+        .await;
     }
     assert_not_supported(
         &router,
         Method::GET,
         &status_path(&namespace_id),
         None,
-        FEATURE_ADMIN_GREP_INDEX,
+        FEATURE_MAINTENANCE_GREP_INDEX,
     )
     .await;
     server
@@ -177,7 +187,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         send(
             &router,
             Method::POST,
-            &format!("/v0/admin/namespaces/{namespace_id}/grep/index/enable"),
+            &format!("/v0/maintenance/namespaces/{namespace_id}/grep/index/enable"),
             None,
         )
         .await,
@@ -219,7 +229,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         send(
             &router,
             Method::POST,
-            &format!("/v0/admin/namespaces/{namespace_id}/grep/index/enable"),
+            &format!("/v0/maintenance/namespaces/{namespace_id}/grep/index/enable"),
             None,
         )
         .await,
@@ -245,10 +255,10 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     let capabilities = capabilities(&router).await;
     assert!(capabilities.supports(FEATURE_QUERY_GREP));
     assert!(
-        capabilities.supports(FEATURE_ADMIN_GREP_INDEX),
+        capabilities.supports(FEATURE_MAINTENANCE_GREP_INDEX),
         "a deployment doing both jobs advertises both keys"
     );
-    assert!(capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0));
+    assert!(capabilities.planes.iter().any(|p| p == PLANE_QUERY_V0));
     for limit in grep_limits() {
         assert!(capabilities.limits.contains_key(limit));
     }
@@ -295,7 +305,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         send(
             &router,
             Method::POST,
-            &format!("/v0/admin/namespaces/{namespace_id}/grep/index/gc"),
+            &format!("/v0/maintenance/namespaces/{namespace_id}/grep/index/gc"),
             None,
         )
         .await,
@@ -438,7 +448,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 }
 
 #[tokio::test]
-async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
+async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "serve-only").await;
     let (router, server) = app(
@@ -450,36 +460,43 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
     assert!(!maintains_grep_index(&server.writer));
 
     // The document says the same thing the routes do: searches yes,
-    // administration no.
+    // maintenance no.
     let capabilities = capabilities(&router).await;
     assert!(capabilities.supports(FEATURE_QUERY_GREP));
-    assert!(capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0));
+    assert!(capabilities.planes.iter().any(|p| p == PLANE_QUERY_V0));
     assert!(
-        !capabilities.features.contains_key(FEATURE_ADMIN_GREP_INDEX),
-        "a deployment that refuses every index-admin route must not advertise that it \
-         administers one"
+        !capabilities
+            .features
+            .contains_key(FEATURE_MAINTENANCE_GREP_INDEX),
+        "a deployment that refuses every index-maintenance route must not advertise that it \
+         maintains one"
     );
 
     // Every route that would mutate a grep root belongs where the index is
     // maintained, so this deployment refuses all three.
-    for path in admin_grep_paths(&namespace_id) {
-        let error =
-            assert_not_supported(&router, Method::POST, &path, None, FEATURE_ADMIN_GREP_INDEX)
-                .await;
+    for path in maintenance_grep_paths(&namespace_id) {
+        let error = assert_not_supported(
+            &router,
+            Method::POST,
+            &path,
+            None,
+            FEATURE_MAINTENANCE_GREP_INDEX,
+        )
+        .await;
         assert!(
             error.message.contains("does not maintain"),
             "{}",
             error.message
         );
     }
-    // Reading the index's lifecycle is administering it: a deployment that
+    // Reading the index's lifecycle is maintaining it: a deployment that
     // maintains nothing has no authority over the state it would report.
     let error = assert_not_supported(
         &router,
         Method::GET,
         &status_path(&namespace_id),
         None,
-        FEATURE_ADMIN_GREP_INDEX,
+        FEATURE_MAINTENANCE_GREP_INDEX,
     )
     .await;
     assert!(
@@ -535,15 +552,15 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         "a deployment that answers no searches must not advertise that it does"
     );
     assert!(
-        capabilities.supports(FEATURE_ADMIN_GREP_INDEX),
-        "the index this deployment maintains is administered through these routes"
+        capabilities.supports(FEATURE_MAINTENANCE_GREP_INDEX),
+        "the index this deployment maintains is maintained through these routes"
     );
-    // The administration key is parented by the admin plane the runtime
+    // The maintenance key is parented by the maintenance plane the runtime
     // already advertises, which is why a deployment that serves no searches
     // can still advertise it: a `query.` key here would name a plane this
     // document does not carry.
     assert!(
-        !capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0),
+        !capabilities.planes.iter().any(|p| p == PLANE_QUERY_V0),
         "maintaining an index is not serving one"
     );
     let error = assert_not_supported(
@@ -594,7 +611,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
 }
 
 #[tokio::test]
-async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
+async fn manual_maintenance_registers_no_index_job_and_still_maintains_one() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
     let (router, server) = app(
@@ -744,7 +761,7 @@ async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
 
 /// This deployment's capability document, checked for well-formedness on
 /// the way past: every advertised feature key has to be parented by an
-/// advertised profile, and each grep mode advertises a different set.
+/// advertised plane, and each grep mode advertises a different set.
 async fn capabilities(router: &Router) -> CapabilityDocument {
     let document: CapabilityDocument =
         response_json(send(router, Method::GET, "/v0/capabilities", None).await).await;
@@ -783,15 +800,15 @@ fn query_path_with_pattern(namespace_id: &NamespaceId, pattern: &str) -> String 
     )
 }
 
-fn admin_grep_paths(namespace_id: &NamespaceId) -> Vec<String> {
+fn maintenance_grep_paths(namespace_id: &NamespaceId) -> Vec<String> {
     ["enable", "disable", "gc"]
         .into_iter()
-        .map(|action| format!("/v0/admin/namespaces/{namespace_id}/grep/index/{action}"))
+        .map(|action| format!("/v0/maintenance/namespaces/{namespace_id}/grep/index/{action}"))
         .collect()
 }
 
 fn status_path(namespace_id: &NamespaceId) -> String {
-    format!("/v0/admin/namespaces/{namespace_id}/grep/index")
+    format!("/v0/maintenance/namespaces/{namespace_id}/grep/index")
 }
 
 async fn index_status(router: &Router, namespace_id: &NamespaceId) -> GrepIndex {
@@ -804,7 +821,7 @@ async fn enable_grep(router: &Router, namespace_id: &NamespaceId) -> StatusCode 
     send(
         router,
         Method::POST,
-        &format!("/v0/admin/namespaces/{namespace_id}/grep/index/enable"),
+        &format!("/v0/maintenance/namespaces/{namespace_id}/grep/index/enable"),
         None,
     )
     .await
@@ -815,7 +832,7 @@ async fn disable_grep(router: &Router, namespace_id: &NamespaceId) -> GrepIndex 
     let response = send(
         router,
         Method::POST,
-        &format!("/v0/admin/namespaces/{namespace_id}/grep/index/disable"),
+        &format!("/v0/maintenance/namespaces/{namespace_id}/grep/index/disable"),
         None,
     )
     .await;
@@ -907,7 +924,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
 }
 
 /// The api.md section 2.1 example describes a reference deployment: the
-/// runtime's core and admin planes plus the query plane the server composes
+/// runtime's filesystem and maintenance planes plus the query plane the server composes
 /// from `loonfs-grep`. `loonfs`'s `capability_conformance` pins the
 /// runtime's half; this pins the merged document a served deployment
 /// answers with. A deployment adds its own limits on top, so the example is
@@ -934,8 +951,8 @@ fn assert_served_document_covers_the_spec_example(served: &CapabilityDocument) {
     served.validate().expect("served document is well-formed");
     assert_eq!(served.protocol_version, expected.protocol_version);
     assert_eq!(
-        served.profiles, expected.profiles,
-        "the served profiles drifted from the api.md section 2.1 example"
+        served.planes, expected.planes,
+        "the served planes drifted from the api.md section 2.1 example"
     );
     assert_eq!(
         served_features, expected.features,

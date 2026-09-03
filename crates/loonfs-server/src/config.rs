@@ -247,8 +247,8 @@ pub struct RuntimeCacheConfigOverrides {
 ///
 /// `automatic` schedules metadata, garbage collection, and enabled grep
 /// index jobs for namespaces used by this process. `manual` schedules no
-/// jobs; use it when another server or `loonfs admin maintenance run`
-/// maintains those namespaces. Explicit admin operations remain available
+/// jobs; use it when another server or `loonfs maintenance run`
+/// maintains those namespaces. Explicit maintenance operations remain available
 /// in both modes. Retention is never advanced automatically.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -258,7 +258,7 @@ pub enum MaintenanceMode {
     #[default]
     Automatic,
     /// Nothing is scheduled and no automatic job is registered. Explicit
-    /// admin operations remain available.
+    /// maintenance operations remain available.
     Manual,
 }
 
@@ -305,7 +305,7 @@ impl GrepMode {
     }
 
     /// Whether this server's writer registers the grep index job — which is
-    /// also what the index-administration endpoints act through.
+    /// also what the index-maintenance endpoints act through.
     pub fn maintains_index(self) -> bool {
         matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
     }

@@ -45,7 +45,7 @@ use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, 
 /// scheduled work before the one-shot process exits. A publish gated on
 /// `maintenance_required` waits for the step that same gated publish
 /// scheduled, then resubmits, so embedded writes recover from WAL debt
-/// instead of hard-stopping. `loonfs admin` commands remain the explicit path
+/// instead of hard-stopping. `loonfs maintenance` commands remain the explicit path
 /// for everything else (GC, retention, forced steps).
 pub(crate) struct EmbeddedBackend {
     pub(crate) writer: FsWriter,
@@ -800,7 +800,7 @@ impl EmbeddedBackend {
             .scoped(namespace_id)
     }
 
-    // The admin methods mirror the server handlers' error scoping exactly:
+    // The maintenance methods mirror the server handlers' error scoping exactly:
     // every operation addressing an existing namespace names it when the
     // runtime reports namespace_not_found. Parity keeps embedded and remote
     // outputs identical.
@@ -1079,7 +1079,7 @@ mod tests {
             .get()
     }
 
-    /// Jobs selected when `admin maintenance run` omits `--job`.
+    /// Jobs selected when `maintenance run` omits `--job`.
     fn every_job() -> [MaintenanceJobId; 4] {
         [
             MaintenanceJobId::METADATA,
@@ -1446,7 +1446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_admin_methods_surface_registry_codes_for_missing_namespaces() {
+    async fn embedded_maintenance_methods_surface_registry_codes_for_missing_namespaces() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
@@ -1497,7 +1497,7 @@ mod tests {
         // More publishes than the WAL backpressure cap: the Enabled policy
         // must keep stepping the tail down so no write ever stalls on
         // `maintenance_required` (each stall used to require a manual
-        // `loonfs admin maintenance step`).
+        // `loonfs maintenance step`).
         for index in 0..140 {
             target
                 .backend

@@ -25,7 +25,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "create_checkpoint",
         SdkName {
-            group: &["admin", "checkpoints"],
+            group: &["maintenance", "checkpoints"],
             method: "create",
             request: None,
         },
@@ -89,7 +89,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "disable_grep_index",
         SdkName {
-            group: &["admin", "grepIndex"],
+            group: &["maintenance", "grepIndex"],
             method: "disable",
             request: Some("DisableGrepIndexRequest"),
         },
@@ -97,7 +97,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "enable_grep_index",
         SdkName {
-            group: &["admin", "grepIndex"],
+            group: &["maintenance", "grepIndex"],
             method: "enable",
             request: Some("EnableGrepIndexRequest"),
         },
@@ -121,7 +121,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "gc_grep_index",
         SdkName {
-            group: &["admin", "grepIndex"],
+            group: &["maintenance", "grepIndex"],
             method: "gc",
             request: None,
         },
@@ -153,7 +153,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "get_grep_index",
         SdkName {
-            group: &["admin", "grepIndex"],
+            group: &["maintenance", "grepIndex"],
             method: "retrieve",
             request: Some("GetGrepIndexRequest"),
         },
@@ -177,7 +177,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "get_namespace_diagnostics",
         SdkName {
-            group: &["admin", "diagnostics"],
+            group: &["maintenance", "diagnostics"],
             method: "retrieve",
             request: Some("GetNamespaceDiagnosticsRequest"),
         },
@@ -217,7 +217,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "list_checkpoints",
         SdkName {
-            group: &["admin", "checkpoints"],
+            group: &["maintenance", "checkpoints"],
             method: "list",
             request: Some("ListCheckpointsRequest"),
         },
@@ -273,7 +273,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "probe_store",
         SdkName {
-            group: &["admin", "store"],
+            group: &["maintenance", "store"],
             method: "probe",
             request: None,
         },
@@ -289,7 +289,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "release_checkpoint",
         SdkName {
-            group: &["admin", "checkpoints"],
+            group: &["maintenance", "checkpoints"],
             method: "release",
             request: Some("ReleaseCheckpointRequest"),
         },
@@ -305,8 +305,8 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
     (
         "run_maintenance",
         SdkName {
-            group: &["admin", "maintenance"],
-            method: "run",
+            group: &["maintenance", "runs"],
+            method: "create",
             request: None,
         },
     ),

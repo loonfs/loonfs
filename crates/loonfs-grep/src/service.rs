@@ -403,7 +403,7 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
         // This union is the query's largest temporary allocation. In the worst
         // case it holds one `(inode, revision)` pair per indexed revision. A
         // streaming intersection would reduce memory but add probe-ordering
-        // complexity, so it is deferred until profiles show this allocation matters.
+        // complexity, so it is deferred until measurements show this allocation matters.
         let mut set_postings = BTreeSet::new();
         for chunk in probes.chunks(MAX_GREP_READ_IO) {
             let batches = try_join_all(chunk.iter().map(|(gram_lookup, descriptor)| {

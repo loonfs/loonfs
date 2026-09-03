@@ -32,7 +32,7 @@ done
 curl --fail --silent --output /dev/null "$server_url/readiness"
 export LOONFS_CONFIG="$work_dir/loonfs-config.toml"
 loonfs --no-input profile create remote smoke --server-url "$server_url" >/dev/null
-loonfs admin store probe >/dev/null
+loonfs maintenance store probe >/dev/null
 
 loonfs namespace create "$namespace" >/dev/null
 namespace_created=true

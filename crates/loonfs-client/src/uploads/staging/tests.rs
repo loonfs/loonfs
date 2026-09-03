@@ -13,7 +13,7 @@ use futures::stream::StreamExt;
 use loonfs_api::v0::UploadMode;
 use loonfs_api::{
     CapabilityDocument, ContentId, ContentRef, ContentRefKind, FEATURE_UPLOADS_DIRECT_PUT,
-    PROFILE_CORE_V0, PROTOCOL_VERSION,
+    PLANE_FILESYSTEM_V0, PROTOCOL_VERSION,
 };
 use loonfs_test_support::ids::content_ref;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -186,7 +186,7 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
     }
     json(&CapabilityDocument {
         protocol_version: PROTOCOL_VERSION.to_owned(),
-        profiles: vec![PROFILE_CORE_V0.to_owned()],
+        planes: vec![PLANE_FILESYSTEM_V0.to_owned()],
         features,
         limits,
     })

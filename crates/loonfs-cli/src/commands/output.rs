@@ -406,7 +406,7 @@ mod tests {
     fn inspection_data_uses_the_expected_kind_names() {
         let capabilities = CommandData::Capabilities(CapabilityDocument {
             protocol_version: loonfs_api::PROTOCOL_VERSION.to_owned(),
-            profiles: Vec::new(),
+            planes: Vec::new(),
             features: BTreeMap::new(),
             limits: BTreeMap::new(),
         });

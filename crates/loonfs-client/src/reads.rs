@@ -56,7 +56,7 @@ impl Client {
             .await
     }
 
-    /// Deletes a namespace (feature `core.namespaces.delete`): terminal,
+    /// Deletes a namespace (feature `filesystem.namespaces.delete`): terminal,
     /// and the id is permanently retired. Pass `expected_head_seq` to delete
     /// only if the namespace is still where you last observed it
     /// (`stale_head` on mismatch). Deleting an already-deleted namespace

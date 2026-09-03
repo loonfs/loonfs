@@ -7,7 +7,7 @@ use crate::config::{CliConfig, ProfileConfig};
 use crate::profiles::ProfileSummary;
 use loonfs_api::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
 
-use super::human_admin::*;
+use super::human_maintenance::*;
 
 pub(crate) fn human_success(output: &CommandOutput) -> String {
     match &output.data {
@@ -428,8 +428,8 @@ fn human_config_show_degraded(error: &str, config_toml: &str) -> String {
 }
 
 fn human_capabilities(document: &loonfs_api::CapabilityDocument) -> String {
-    let mut profiles = document.profiles.clone();
-    profiles.sort();
+    let mut planes = document.planes.clone();
+    planes.sort();
 
     let enabled = document
         .features
@@ -454,7 +454,7 @@ fn human_capabilities(document: &loonfs_api::CapabilityDocument) -> String {
             "protocol version",
             std::slice::from_ref(&document.protocol_version),
         ),
-        capability_group("profiles", &profiles),
+        capability_group("planes", &planes),
         capability_group("enabled features", &enabled),
         capability_group("disabled features", &disabled),
         capability_group("limits", &limits),

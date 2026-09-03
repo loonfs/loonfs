@@ -144,7 +144,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
 
     let raw: ListCheckpointsResponse = get_json(
         &format!(
-            "{}/v0/admin/namespaces/demo/checkpoints?limit=1",
+            "{}/v0/maintenance/namespaces/demo/checkpoints?limit=1",
             harness.server_url
         ),
         "test-token",

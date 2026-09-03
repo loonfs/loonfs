@@ -4,7 +4,7 @@ Every mutation includes an actor, such as
 `{ "kind": "user", "id": "usr_8f3c" }`.
 
 Your backend authenticates and authorizes the request. LoonFS records the
-actor exactly as sent; it does not verify the identity or manage profiles. Use
+actor exactly as sent; it does not verify or manage identities. Use
 a stable internal ID, not an email address or display name.
 
 - `user`: a known person caused the change. Use this even when a backend or

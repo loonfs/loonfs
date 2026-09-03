@@ -331,7 +331,7 @@ fn json_covers_command_lines_the_parser_rejects() {
         vec!["--json", "mkdir"],
         vec![
             "--json",
-            "admin",
+            "maintenance",
             "maintenance",
             "run",
             "--namespaces",
@@ -404,7 +404,7 @@ fn json_all_is_invalid_usage_even_with_a_limit() {
         vec!["--json", "changes", "--all", "--limit", "1"],
         vec![
             "--json",
-            "admin",
+            "maintenance",
             "checkpoint",
             "list",
             "--all",
@@ -506,7 +506,7 @@ fn help_lists_the_context_commands() {
         "Filesystem:",
         "Context and configuration:",
         "Inspection:",
-        "Administration:",
+        "Maintenance:",
     ] {
         assert!(stdout.contains(heading), "{stdout}");
     }

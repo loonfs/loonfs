@@ -6,7 +6,9 @@
 use super::*;
 use crate::transport::test_transport::{self, Outcome};
 use loonfs_api::v0::ObjectTransferAccess;
-use loonfs_api::{CapabilityDocument, ContentId, ContentRef, PROFILE_CORE_V0, PROTOCOL_VERSION};
+use loonfs_api::{
+    CapabilityDocument, ContentId, ContentRef, PLANE_FILESYSTEM_V0, PROTOCOL_VERSION,
+};
 use std::collections::BTreeMap;
 
 /// Default maximum size of a proxied read response.
@@ -29,7 +31,7 @@ fn client() -> Client {
 fn capabilities(direct_get: bool, proxy_cap_bytes: Option<u64>) -> Outcome {
     let document = CapabilityDocument {
         protocol_version: PROTOCOL_VERSION.to_owned(),
-        profiles: vec![PROFILE_CORE_V0.to_owned()],
+        planes: vec![PLANE_FILESYSTEM_V0.to_owned()],
         features: BTreeMap::from([(FEATURE_DOWNLOADS_DIRECT_GET.to_owned(), direct_get)]),
         limits: proxy_cap_bytes
             .map(|cap| BTreeMap::from([(LIMIT_DOWNLOAD_MAX_CONTENT_BYTES.to_owned(), cap)]))

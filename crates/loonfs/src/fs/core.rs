@@ -16,7 +16,7 @@ use loonfs_api::{
     FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
     FEATURE_SNAPSHOTS, LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    PLANE_FILESYSTEM_V0, PLANE_MAINTENANCE_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataSegmentCache, StoredMetadataBlockCache, WalTailProjectionCache,
@@ -199,13 +199,16 @@ impl ReadCore {
     pub(crate) fn get_capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],
+            planes: vec![
+                PLANE_FILESYSTEM_V0.to_owned(),
+                PLANE_MAINTENANCE_V0.to_owned(),
+            ],
             features: BTreeMap::from([
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
                 (FEATURE_SNAPSHOTS.to_owned(), true),
-                // Attributes are core, implemented by this crate, so the
+                // Attributes are implemented by this crate, so the
                 // answer does not depend on what a serving host composes.
                 (FEATURE_ATTRIBUTES.to_owned(), true),
                 (FEATURE_INODES_LIST_CHILDREN.to_owned(), true),

@@ -19,8 +19,8 @@ use tempfile::tempdir;
 type ApiResult<T> = Result<T, Box<ApiError>>;
 
 fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
-    post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoints"),
+    post_maintenance_json_body(
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints"),
         "test-token",
         serde_json::json!({ "name": "nightly" }),
     )
@@ -31,9 +31,9 @@ fn post_checkpoint_release(
     namespace: &str,
     checkpoint_id: &str,
 ) -> ApiResult<loonfs_api::ReleaseCheckpointResponse> {
-    post_admin_json(
+    post_maintenance_json(
         &format!(
-            "{server_url}/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release"
+            "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{checkpoint_id}/release"
         ),
         "test-token",
     )
@@ -60,8 +60,8 @@ fn post_gc_with(
     namespace: &str,
     gc: serde_json::Value,
 ) -> ApiResult<loonfs_api::GcResponse> {
-    let step: ApiResult<loonfs_api::MaintenanceStepResponse> = post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
+    let step: ApiResult<loonfs_api::MaintenanceStepResponse> = post_maintenance_json_body(
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
         serde_json::json!({ "gc": gc }),
     );
@@ -75,8 +75,8 @@ fn post_maintenance_step(
     server_url: &str,
     namespace: &str,
 ) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
-    post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
+    post_maintenance_json_body(
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
         serde_json::json!({ "metadata_maintenance": {} }),
     )
@@ -86,8 +86,8 @@ fn post_empty_maintenance_step(
     server_url: &str,
     namespace: &str,
 ) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
-    post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
+    post_maintenance_json_body(
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
         serde_json::json!({}),
     )
@@ -97,23 +97,26 @@ fn post_retention_advance(
     server_url: &str,
     namespace: &str,
 ) -> ApiResult<loonfs_api::MaintenanceStepResponse> {
-    post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/run"),
+    post_maintenance_json_body(
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
         serde_json::json!({ "retention": {} }),
     )
 }
 
-fn post_admin_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> ApiResult<T> {
+fn post_maintenance_json<T: serde::de::DeserializeOwned>(
+    url: &str,
+    auth_token: &str,
+) -> ApiResult<T> {
     retry_result_on_macos_teardown_einval(|| {
         let request = raw_agent()
             .post(url)
             .set("authorization", &format!("Bearer {auth_token}"));
-        decode_admin_response(request.call())
+        decode_maintenance_response(request.call())
     })
 }
 
-fn post_admin_json_body<T: serde::de::DeserializeOwned>(
+fn post_maintenance_json_body<T: serde::de::DeserializeOwned>(
     url: &str,
     auth_token: &str,
     body: serde_json::Value,
@@ -122,11 +125,11 @@ fn post_admin_json_body<T: serde::de::DeserializeOwned>(
         let request = raw_agent()
             .post(url)
             .set("authorization", &format!("Bearer {auth_token}"));
-        decode_admin_response(request.send_json(body.clone()))
+        decode_maintenance_response(request.send_json(body.clone()))
     })
 }
 
-fn decode_admin_response<T: serde::de::DeserializeOwned>(
+fn decode_maintenance_response<T: serde::de::DeserializeOwned>(
     result: Result<ureq::Response, ureq::Error>,
 ) -> ApiResult<T> {
     match result {
@@ -164,12 +167,12 @@ fn decode_admin_response<T: serde::de::DeserializeOwned>(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
+async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loonfs-server-admin",
-        "http-admin",
+        "loonfs-server-maintenance",
+        "http-maintenance",
     ))
     .await;
     let client = harness.client.clone();
@@ -182,7 +185,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         .await
         .expect("create namespace");
     client
-        .put_file_bytes(&target, b"hello admin\n", &replace_file_options())
+        .put_file_bytes(&target, b"hello maintenance\n", &replace_file_options())
         .await
         .expect("write file");
 
@@ -277,7 +280,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         .get_file_bytes(&target, &Default::default())
         .await
         .expect("read file");
-    assert_eq!(bytes, b"hello admin\n");
+    assert_eq!(bytes, b"hello maintenance\n");
 
     match client
         .list_changes(&namespace, ChangeSeq(0), &Default::default())
@@ -297,12 +300,12 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
+async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
         "loonfs-server-gc",
-        "http-admin-gc",
+        "http-maintenance-gc",
     ))
     .await;
     let client = harness.client.clone();
@@ -355,12 +358,12 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
+async fn http_maintenance_step_reports_outcomes_not_errors() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
         "loonfs-server-step",
-        "http-admin-step",
+        "http-maintenance-step",
     ))
     .await;
     let client = harness.client.clone();
@@ -433,12 +436,12 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
+async fn http_maintenance_retention_advance_uses_initial_manifest_after_create() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loonfs-server-admin-missing-checkpoint",
-        "http-admin-missing-checkpoint",
+        "loonfs-server-maintenance-missing-checkpoint",
+        "http-maintenance-missing-checkpoint",
     ))
     .await;
     let client = harness.client.clone();
@@ -464,15 +467,15 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     let store_root = temp_dir.path().join("store");
     let harness = start_server(test_config(
         store_root.clone(),
-        "loonfs-server-admin-corrupt",
-        "http-admin-corrupt",
+        "loonfs-server-maintenance-corrupt",
+        "http-maintenance-corrupt",
     ))
     .await;
     // A new server must read the corrupted manifest; the first server has a valid cached snapshot.
     let cold = start_server(test_config(
         store_root,
         "loonfs-server-cold-reader",
-        "http-admin-corrupt",
+        "http-maintenance-corrupt",
     ))
     .await;
     let client = harness.client.clone();
@@ -527,17 +530,17 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_store_probe_reports_unique_successes_from_the_configured_store() {
+async fn http_maintenance_store_probe_reports_unique_successes_from_the_configured_store() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
         "loonfs-server-probe",
-        "http-admin-probe",
+        "http-maintenance-probe",
     ))
     .await;
 
-    let probe: loonfs_api::v0::StoreProbeResponse = post_admin_json_body(
-        &format!("{}/v0/admin/store/probe", harness.server_url),
+    let probe: loonfs_api::v0::StoreProbeResponse = post_maintenance_json_body(
+        &format!("{}/v0/maintenance/store/probe", harness.server_url),
         "test-token",
         serde_json::json!({}),
     )
@@ -581,18 +584,18 @@ async fn http_admin_store_probe_reports_unique_successes_from_the_configured_sto
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_store_probe_requires_a_token_and_accepts_a_bodyless_request() {
+async fn http_maintenance_store_probe_requires_a_token_and_accepts_a_bodyless_request() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
         "loonfs-server-probe-auth",
-        "http-admin-probe-auth",
+        "http-maintenance-probe-auth",
     ))
     .await;
-    let url = format!("{}/v0/admin/store/probe", harness.server_url);
+    let url = format!("{}/v0/maintenance/store/probe", harness.server_url);
 
     let unauthorized: ApiResult<loonfs_api::v0::StoreProbeResponse> =
-        post_admin_json_body(&url, "wrong-token", serde_json::json!({}));
+        post_maintenance_json_body(&url, "wrong-token", serde_json::json!({}));
     assert_eq!(
         unauthorized.expect_err("a wrong token is refused").code,
         "unauthorized"
@@ -600,7 +603,7 @@ async fn http_admin_store_probe_requires_a_token_and_accepts_a_bodyless_request(
 
     // An absent body is treated as an empty object.
     let bodyless: loonfs_api::v0::StoreProbeResponse =
-        post_admin_json(&url, "test-token").expect("probe with no body");
+        post_maintenance_json(&url, "test-token").expect("probe with no body");
     assert!(
         !bodyless.checks.is_empty(),
         "a bodyless request runs the probe rather than selecting nothing"

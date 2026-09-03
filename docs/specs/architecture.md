@@ -29,7 +29,7 @@ Control-plane state should still be durable when losing it on restart would viol
 
 ## 3. Client usage patterns
 
-A client pattern is defined by the protocol surface a client uses, not by what the client is: a CLI, desktop app, or service may implement several. (API *profiles* — `core/v0`, `admin/v0` — are a different concept; see `api.md`.)
+A client pattern is defined by the protocol surface a client uses, not by what the client is: a CLI, desktop app, or service may implement several. (API *planes* — `filesystem/v0`, `maintenance/v0` — are a different concept; see `api.md`.)
 
 | Client pattern | Primary surface | Typical state |
 | --- | --- | --- |
@@ -96,7 +96,7 @@ provider outage does not make every namespace retry at the same time.
 
 Retention is not automatic because it intentionally discards replay history.
 An operator must request it through a maintenance step or
-`loonfs admin retention advance`. Garbage collection may run automatically
+`loonfs maintenance retention advance`. Garbage collection may run automatically
 because it removes state that is no longer reachable. Grep garbage collection
 also requires an explicit request, but it uses a maintenance job so it can
 resume across bounded steps and share the runner's concurrency limit.
@@ -109,7 +109,7 @@ it.
 
 A **touched** namespace has been written, queried, or otherwise used by the
 current process. An **assigned** namespace is named explicitly with
-`loonfs admin maintenance run --namespaces`. Assign inactive namespaces to a
+`loonfs maintenance run --namespaces`. Assign inactive namespaces to a
 maintenance process if they must continue receiving maintenance.
 
 ### Hosts
@@ -120,7 +120,7 @@ The same runner and jobs can run in several kinds of process:
 | --- | --- | --- |
 | **Server** | Runtime jobs, plus the grep index job when configured. | Namespaces the server uses while automatic maintenance is enabled. |
 | **Embedded process** | Whatever the library host registers on its writer. | Namespaces it touches. |
-| **`loonfs admin maintenance run`** | Runtime jobs selected by `--job`. | Namespaces passed with `--namespaces`. It runs until stopped, or completes the current assignments and exits with `--drain`. |
+| **`loonfs maintenance run`** | Runtime jobs selected by `--job`. | Namespaces passed with `--namespaces`. It runs until stopped, or completes the current assignments and exits with `--drain`. |
 
 After a stop signal, the process calls `FsWriter::shutdown`. The writer stops
 accepting new maintenance work and publications, then waits for accepted work

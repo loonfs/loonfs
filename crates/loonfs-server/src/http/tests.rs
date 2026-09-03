@@ -659,7 +659,7 @@ async fn app_validates_directly_built_configs() {
 }
 
 #[tokio::test]
-async fn admin_namespace_diagnostics_route_answers_storage_fields() {
+async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     use tower::ServiceExt;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -690,7 +690,7 @@ async fn admin_namespace_diagnostics_route_answers_storage_fields() {
     let response = router
         .oneshot(
             axum::http::Request::builder()
-                .uri("/v0/admin/namespaces/diagnostics/diagnostics")
+                .uri("/v0/maintenance/namespaces/diagnostics/diagnostics")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
                 .body(axum::body::Body::empty())
                 .expect("diagnostics request"),
@@ -1567,7 +1567,8 @@ async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() 
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     writer.shutdown().await.expect("shutdown writer");
 
-    let harness = start_grep_admin_error_server(store, temp_dir.path(), "conflict-server").await;
+    let harness =
+        start_grep_maintenance_error_server(store, temp_dir.path(), "conflict-server").await;
     fault_store.fail_next(1);
     let client = &harness.client;
     let result = client.enable_grep_index(&namespace_id);
@@ -2156,16 +2157,16 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("POST", "/v0/namespaces/demo/snapshots"),
         ("POST", "/v0/namespaces/demo/snapshots/chk_test/extend"),
         ("POST", "/v0/namespaces/demo/snapshots/chk_test/release"),
-        ("GET", "/v0/admin/namespaces/demo/diagnostics"),
+        ("GET", "/v0/maintenance/namespaces/demo/diagnostics"),
         ("GET", "/v0/namespaces/demo/filesystem/entries"),
         ("GET", "/v0/namespaces/demo/filesystem/entry"),
         ("GET", "/v0/namespaces/demo/filesystem/content"),
         ("POST", "/v0/namespaces/demo/filesystem/downloads"),
         ("GET", "/v0/namespaces/demo/grep"),
-        ("GET", "/v0/admin/namespaces/demo/grep/index"),
-        ("POST", "/v0/admin/namespaces/demo/grep/index/enable"),
-        ("POST", "/v0/admin/namespaces/demo/grep/index/disable"),
-        ("POST", "/v0/admin/namespaces/demo/grep/index/gc"),
+        ("GET", "/v0/maintenance/namespaces/demo/grep/index"),
+        ("POST", "/v0/maintenance/namespaces/demo/grep/index/enable"),
+        ("POST", "/v0/maintenance/namespaces/demo/grep/index/disable"),
+        ("POST", "/v0/maintenance/namespaces/demo/grep/index/gc"),
         ("GET", "/v0/namespaces/demo/filesystem/revisions"),
         ("GET", "/v0/namespaces/demo/inodes/ino_1"),
         ("GET", "/v0/namespaces/demo/inodes/ino_1/children"),
@@ -2187,14 +2188,14 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("POST", "/v0/namespaces/demo/uploads/upl_test/abort"),
         ("GET", "/v0/namespaces/demo/uploads/upl_test"),
         ("GET", "/v0/namespaces/demo/changes"),
-        ("GET", "/v0/admin/namespaces/demo/checkpoints"),
-        ("POST", "/v0/admin/namespaces/demo/checkpoints"),
+        ("GET", "/v0/maintenance/namespaces/demo/checkpoints"),
+        ("POST", "/v0/maintenance/namespaces/demo/checkpoints"),
         (
             "POST",
-            "/v0/admin/namespaces/demo/checkpoints/chk_test/release",
+            "/v0/maintenance/namespaces/demo/checkpoints/chk_test/release",
         ),
-        ("POST", "/v0/admin/namespaces/demo/maintenance/run"),
-        ("POST", "/v0/admin/store/probe"),
+        ("POST", "/v0/maintenance/namespaces/demo/runs"),
+        ("POST", "/v0/maintenance/store/probe"),
     ];
 
     for (method, uri) in protected_routes {
@@ -2496,7 +2497,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "unauthorized",
     );
 
-    let grep_gc_url = format!("http://{addr}/v0/admin/namespaces/demo/grep/index/gc");
+    let grep_gc_url = format!("http://{addr}/v0/maintenance/namespaces/demo/grep/index/gc");
     expect_enveloped(
         || raw_agent().post(&grep_gc_url).call(),
         "grep index collection should require authorization",
@@ -3418,7 +3419,7 @@ async fn start_grep_error_server(
 }
 
 /// Administering a grep root belongs to a deployment that maintains one.
-async fn start_grep_admin_error_server(
+async fn start_grep_maintenance_error_server(
     store: SharedObjectStore,
     root: &Path,
     writer_id: &str,

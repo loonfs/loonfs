@@ -1,9 +1,9 @@
 # LoonFS API Specification
 
 This document is the normative specification of the LoonFS client-facing API:
-profiles, capability discovery, the standard error contract, operation
+planes, capability discovery, the standard error contract, operation
 statefulness, and the representative v0 HTTP binding. It is **normative where implemented** — a
-deployment chooses which optional profiles to expose, but every op it does
+deployment chooses which optional planes to expose, but every op it does
 expose must have the shape specified here.
 
 The companion document is `format.md` — the durable format, mandatory for
@@ -14,34 +14,34 @@ server: both expose the same operations, advertise their capabilities the
 same way, and report unsupported surface area with the same errors. The only
 difference a client observes is *which* capabilities a deployment advertises.
 
-## 1. Profiles are functional planes
+## 1. Planes
 
-**A profile is a functional plane** — a coherent area of responsibility with
-its own endpoint set — not a resource type. Profiles
-are **all-or-nothing** conformance units: a deployment MUST NOT advertise a
-profile unless every required op in it is implemented. Optional behavior
+Planes are coherent areas of responsibility with their own endpoint sets,
+not resource types. They are **all-or-nothing** conformance units: a deployment MUST NOT advertise a
+plane unless every required op in it is implemented. Optional behavior
 within a plane is expressed as **named features** (section 2).
 
-| Profile | Plane | Ops | Status |
-| --- | --- | --- | --- |
-| `core/v0` | Data plane | Path and inode reads (stat, list, content, revisions), path mutations, staged uploads, the change feed, namespace state by id, `GET /v0/capabilities`, and the standard error contract. Namespace `create`, `fork`, and `delete` are **features** within this profile, as is inode child listing (`core.inodes.list_children`). | **Mandatory** for any conforming deployment |
-| `admin/v0` | Maintenance plane | Read namespace storage diagnostics; create and release checkpoints; run one-shot maintenance steps that select any of metadata upkeep (WAL flush plus reorganization), retention-floor advancement, and garbage collection. Maintenance triggers for derived indexes arrive as features in this plane: grep-index administration is the `admin.grep.index` **feature**. | Optional |
-| `query/v0` | Query plane | Content search over derived indexes (`GET /v0/namespaces/{namespace_id}/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized active grep root for the namespace. | Optional |
-| `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
+| Plane | Ops | Status |
+| --- | --- | --- |
+| `filesystem/v0` | Path and inode reads, path mutations, uploads, the change feed, namespace state, capability discovery, and standard errors. Namespace lifecycle, snapshots, attributes, inode child listing, and direct transfers are features. | **Mandatory** for any conforming deployment |
+| `maintenance/v0` | Namespace diagnostics, checkpoints, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep-index maintenance as a feature. | Optional |
+| `query/v0` | Content search over derived indexes as the `query.grep` feature. | Optional |
+
+Planes are client contracts. They do not describe node roles or deployment topology.
 
 Notes:
 
-- An embedded engine is `core/v0` (with the namespace-management features enabled) plus
-  `admin/v0` (maintenance is manually triggerable). A minimal server that
-  wraps the embedded engine over HTTP advertises the same two profiles and is
+- An embedded engine is `filesystem/v0` (with the namespace-management features enabled) plus
+  `maintenance/v0` (maintenance is manually triggerable). A minimal server that
+  wraps the embedded engine over HTTP advertises the same two planes and is
   fully conformant.
 - A hosted server may disable individual features per tenant and typically
-  hides `admin/v0` because maintenance runs automatically. Both choices are
+  hides `maintenance/v0` because maintenance runs automatically. Both choices are
   fully conformant.
-- Profiles version independently (`core/v0` could coexist with a future
-  `admin/v1`). The plane name — the segment before the slash — is the stable
+- Planes version independently (`filesystem/v0` could coexist with a future
+  `maintenance/v1`). The plane name — the segment before the slash — is the stable
   identity that feature keys reference.
-- No queue or job-scheduling semantics exist in this document. `admin/v0`
+- No queue or job-scheduling semantics exist in this document. `maintenance/v0`
   exposes *trigger* and *status* shapes only; how work is scheduled is
   implementation freedom.
 
@@ -52,7 +52,7 @@ When new behavior arrives, three questions decide where it belongs:
 1. Does it change bytes or metadata another implementation must interpret?
    It belongs in `format.md`, and it is mandatory.
 2. Is it a client-visible operation whose shape should be uniform wherever it
-   exists? It belongs here, inside a profile or as a named feature.
+   exists? It belongs here, inside a plane or as a named feature.
 3. Is it about *how* work gets done — queues, schedulers, caches? That is
    implementation freedom and belongs in no specification document.
 
@@ -65,25 +65,25 @@ client fetches it from `GET /v0/capabilities` and caches it for the connection; 
 embedded engine exposes the same document as a constant. SDK gating logic is
 therefore identical for both backends.
 
-The example below is the reference deployment: the runtime's own `core/v0`
-and `admin/v0` planes plus the `query/v0` plane the server composes from the
+The example below is the reference deployment: the runtime's own `filesystem/v0`
+and `maintenance/v0` planes plus the `query/v0` plane the server composes from the
 grep extension. A host that composes no extension advertises neither that
-profile nor the two grep feature keys: `query.grep` for searching an index
-and `admin.grep.index` for administering one. Clients gate on the document
+plane nor the two grep feature keys: `query.grep` for searching an index
+and `maintenance.grep.index` for administering one. Clients gate on the document
 either way.
 
 ```json
 {
   "protocol_version": "v0",
-  "profiles": ["core/v0", "admin/v0", "query/v0"],
+  "planes": ["filesystem/v0", "maintenance/v0", "query/v0"],
   "features": {
-    "admin.grep.index": true,
-    "core.namespaces.create": true,
-    "core.namespaces.fork": true,
-    "core.namespaces.delete": true,
-    "core.snapshots": true,
-    "core.attributes": true,
-    "core.inodes.list_children": true,
+    "maintenance.grep.index": true,
+    "filesystem.namespaces.create": true,
+    "filesystem.namespaces.fork": true,
+    "filesystem.namespaces.delete": true,
+    "filesystem.snapshots": true,
+    "filesystem.attributes": true,
+    "filesystem.inodes.list_children": true,
     "query.grep": true
   },
   "limits": {
@@ -105,17 +105,17 @@ either way.
 | Field | Meaning |
 | --- | --- |
 | `protocol_version` | The protocol generation, currently `v0`. |
-| `profiles` | The advertised profiles. Each entry is `plane/version`. |
+| `planes` | The advertised planes. Each entry is `plane/version`. |
 | `features` | Named features and whether this deployment supports them. An absent key means unsupported. |
 | `limits` | Advisory numeric limits clients may use to pre-validate requests. May be empty. |
 
 Rules:
 
-- Profiles are all-or-nothing for their required ops; clients never probe
-  op-by-op inside an advertised profile.
+- Planes are all-or-nothing for their required ops; clients never probe
+  op-by-op inside an advertised plane.
 - **Feature-key rule (normative):** every feature key is dotted and its first
-  segment MUST be the plane name of an advertised profile. A feature whose
-  first segment does not match an advertised profile is malformed; clients
+  segment MUST be the plane name of an advertised plane. A feature whose
+  first segment does not match an advertised plane is malformed; clients
   MUST reject the document or ignore that key.
 - Clients must ignore unknown feature keys and unknown document fields.
 - Limits are advisory; the authoritative outcome is the server's response to
@@ -127,10 +127,10 @@ Registered limit keys:
 | --- | --- |
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. An explicit `limit=0` is rejected with 400 `invalid_request`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. A `limit` greater than this value is rejected with 400 `invalid_request`. |
-| `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `core.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
-| `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds service-proxied uploads. A size hint above this limit returns `content_too_large` at begin, and completion checks the actual stored size. Advertised only alongside `core.uploads.direct_put`. |
+| `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `filesystem.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
+| `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds service-proxied uploads. A size hint above this limit returns `content_too_large` at begin, and completion checks the actual stored size. Advertised only alongside `filesystem.uploads.direct_put`. |
 | `upload.completion_max_body_bytes` | Largest JSON body accepted by `POST .../uploads/{upload_id}/complete`. Larger requests return `content_too_large`. |
-| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through the corresponding path or inode download grant when `core.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
+| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
@@ -154,21 +154,20 @@ hoc.
 
 | Feature key | Gates | Notes |
 | --- | --- | --- |
-| `admin.grep.index` | Administering a namespace's grep index: `GET /v0/admin/namespaces/{ns}/grep/index` and its `enable`, `disable`, and `gc` routes. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers all four routes `not_supported` with this key. |
-| `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
-| `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
-| `core.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
-| `core.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. |
-| `core.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `core/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
-| `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `core.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
-| `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
-| `core.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
+| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable`, `disable`, and `gc` routes. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers all four routes `not_supported` with this key. |
+| `filesystem.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
+| `filesystem.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
+| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance step that selects `gc` alone (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
+| `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
+| `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
+| `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
+| `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `filesystem.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
+| `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
+| `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
-`admin/v0`'s only feature key is `admin.grep.index`; the rest of that plane
-is required ops. `acl.*` keys are unregistered until that plane
-materializes.
+`maintenance/v0`'s only feature key is `maintenance.grep.index`; the rest of that plane
+is required ops.
 
 Namespace listing is intentionally not supported in v0. Callers must address
 namespaces by id until LoonFS has a scalable namespace catalog/index design.
@@ -261,7 +260,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
-| `content_too_large` | 413 | A request or proxied response exceeds its advertised size limit. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.completion_max_body_bytes`. For large reads, request a download grant when `core.downloads.direct_get` is available. |
+| `content_too_large` | 413 | A request or proxied response exceeds its advertised size limit. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.completion_max_body_bytes`. For large reads, request a download grant when `filesystem.downloads.direct_get` is available. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no head, so it does not exist. |
@@ -366,8 +365,8 @@ opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
   either backend.
 - Generated SDKs group operations by resource, not by plane. `capabilities`,
   `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`,
-  and `uploads` sit at the client root. The `admin` plane keeps its prefix as
-  a nested group, as in `admin.checkpoints.create`, because a hosted
+  and `uploads` sit at the client root. The `maintenance` plane keeps its prefix as
+  a nested group, as in `maintenance.checkpoints.create`, because a hosted
   deployment may hide the whole plane. A method on a group's own resource is
   a bare verb: `create`, `retrieve`, `list`, `delete`, or the action, as in
   `fork` and `grep`. A sub-resource of one file or inode is verb plus noun on
@@ -681,7 +680,7 @@ API that implements them.
 HTTP is one transport binding for these abstract operations. It is not the
 underlying semantics.
 
-GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `run`, `release`, `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/admin/` is the only plane prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
+GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `release`, `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/maintenance/` is the only plane prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
 
 Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `release_checkpoint`. Operation IDs are the wire registry only. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, which every operation must appear in or be explicitly excluded from.
 
@@ -765,18 +764,18 @@ The table below lists the retry class for every v0 operation.
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling |
 | Release a snapshot | `release_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/release` (idempotent and one-way) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks` |
-| Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
-| Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/admin/namespaces/{ns}/diagnostics` |
-| Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/admin/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
-| List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; records owned by another operation are rejected) |
-| Run maintenance | `run_maintenance` | `not_idempotent` | `POST /v0/admin/namespaces/{ns}/maintenance/run` |
+| Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `filesystem.namespaces.delete`; the precondition is optional) |
+| Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
+| Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
+| List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
+| Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; records owned by another operation are rejected) |
+| Run maintenance | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs` |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
-| Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/admin/namespaces/{ns}/grep/index` |
-| Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/admin/namespaces/{ns}/grep/index/enable`; idempotent |
-| Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/admin/namespaces/{ns}/grep/index/disable`; idempotent |
-| Collect grep index garbage | `gc_grep_index` | `not_idempotent` | `POST /v0/admin/namespaces/{ns}/grep/index/gc`; supports `max_objects` and `next_cursor` |
-| Test object storage | `probe_store` | `not_idempotent` | `POST /v0/admin/store/probe` with body `{}` |
+| Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
+| Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable`; idempotent |
+| Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable`; idempotent |
+| Collect grep index garbage | `gc_grep_index` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/gc`; supports `max_objects` and `next_cursor` |
+| Test object storage | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe` with body `{}` |
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
 The status, enable, and disable routes all return one flat grep-index object:
@@ -897,7 +896,7 @@ For example, a create response is:
 {"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}
 ```
 
-`GET /v0/admin/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns active
+`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns active
 checkpoints in ascending `checkpoint_id` order. Each entry is the same
 checkpoint object returned by create. User checkpoints can be released by
 id. Fork checkpoints retain their `fork` owner and remain while their target
@@ -941,7 +940,7 @@ never moves the expiry past `snapshot.max_lifetime_ms` from the record's
 `snapshot.max_live_per_namespace` live snapshots.
 
 Snapshot listing returns only snapshot-owned records whose leases have not
-expired. The admin checkpoint listing keeps expired records visible until
+expired. The maintenance checkpoint listing keeps expired records visible until
 collection releases them. Snapshot release is idempotent and one-way. A
 second release succeeds, including after the record is reaped.
 
@@ -991,7 +990,7 @@ uploads. That trust comes from the endpoint allowlist behind the
 `uploads.direct_put` capability, because a probe exercises the server's own
 request path and never a presigned capability handed to a client.
 
-Routes under `/v0/admin/` belong to the `admin/v0` profile. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `core/v0`.
+Routes under `/v0/maintenance/` belong to the `maintenance/v0` plane. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `filesystem/v0`.
 
 When a GC pass sees a future reclamation deadline, its response includes
 `next_reclamation_at_ms`, the soonest time still ahead of the pass at which
@@ -1054,8 +1053,8 @@ independent.
 The first is the **metadata retention floor**. It limits how far back clients
 can replay the WAL. Advancing the floor makes older WAL segments eligible for
 garbage collection. It advances only through an explicit request:
-`POST .../maintenance/run` with a body naming `retention`, or
-`loonfs admin retention advance`. It does not remove file revisions.
+`POST .../runs` with a body naming `retention`, or
+`loonfs maintenance retention advance`. It does not remove file revisions.
 
 The second is the **content reclamation grace**, which is slightly longer than
 seven days and is derived rather than configured. Upload sessions stage
@@ -1073,7 +1072,7 @@ The runtime schedules another garbage-collection pass at
 Active namespaces do not need a separate cron job for this cleanup.
 
 LoonFS does not enumerate namespaces for maintenance. Use
-`loonfs admin maintenance run --namespaces <id>` to maintain inactive
+`loonfs maintenance run --namespaces <id>` to maintain inactive
 namespaces explicitly. The command runs until stopped, or performs one
 bounded pass with `--drain`. An inactive namespace receives no maintenance
 unless a process is assigned to it.
@@ -1081,7 +1080,7 @@ unless a process is assigned to it.
 When a pass keeps more than it deletes, `retained` above says why. The one
 answer that is an operator decision rather than a wait is
 `checkpoint_not_releasable`: a pin holds its basis for as long as it exists,
-so `GET /v0/admin/namespaces/{ns}/checkpoints` is where to look next.
+so `GET /v0/maintenance/namespaces/{ns}/checkpoints` is where to look next.
 
 #### Service-proxied upload
 
@@ -1141,7 +1140,7 @@ Arbitrary S3-compatible gateways are unproven because HMAC interoperability
 does not prove that the gateway enforces create-only requests or reports the
 stored checksum. The feature key is absent on unproven endpoints, and
 beginning `direct_put` answers `not_supported` with
-`feature = "core.uploads.direct_put"`. The server-mediated upload path remains
+`feature = "filesystem.uploads.direct_put"`. The server-mediated upload path remains
 available and is the default.
 
 The reference server offers `direct_put` only where its adapter can presign a
@@ -1423,7 +1422,7 @@ The `Namespace` object has exactly these fields:
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 
-The admin endpoint `GET /v0/admin/namespaces/{ns}/diagnostics` returns the
+The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` returns the
 namespace state plus storage details used by maintenance:
 
 | Field | Meaning |
@@ -1566,7 +1565,7 @@ target remains the authority for what is being listed. Responses include
 The inode route addresses the directory by its stable identity instead of a
 name, so a listing and its resumption stay on the same directory across
 concurrent renames or moves of the parent; entry paths reflect the parent's
-location at each page's head. It is gated by the `core.inodes.list_children`
+location at each page's head. It is gated by the `filesystem.inodes.list_children`
 feature. An unknown or hidden target inode answers `inode_not_found`, and a
 file target answers `path_conflict`: an inode-addressed caller asked for
 children, never for the entry itself, so there is no single-entry file
@@ -2238,7 +2237,7 @@ That is the whole rule, and it is why this exists: `direct_put` and
 read buffers the file for one response and refuses anything past
 `download.max_content_bytes`. Without a read that does not buffer, a
 deployment could hold a file it had no way to return. So
-`core.downloads.direct_get` is advertised by every deployment that offers
+`filesystem.downloads.direct_get` is advertised by every deployment that offers
 any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.
 
@@ -2324,7 +2323,7 @@ the same way a `direct_put` client does.
 The capability is short-lived — a transfer's worth of time, not a session's.
 A reader that runs out of time asks for another grant, which costs one small
 request and no retransfer. A deployment that cannot presign reads answers 501
-`not_supported` with `feature = "core.downloads.direct_get"`, and its proxied
+`not_supported` with `feature = "filesystem.downloads.direct_get"`, and its proxied
 read stays available under its own limit; because such a deployment cannot
 presign writes either, no file it holds can be larger than it will proxy.
 
@@ -2597,8 +2596,8 @@ A conforming server must:
    out of namespace history and the change feed;
 10. preserve per-commit idempotency, ordering, and change-feed identity even
     when physically batching logical commits in a WAL segment;
-11. advertise its profiles and features truthfully through the capability
-    document, never advertising a profile whose required ops are not
+11. advertise its planes and features truthfully through the capability
+    document, never advertising a plane whose required ops are not
     implemented; and
 12. answer unimplemented or disabled surface area with `not_supported` (and
     its `feature` name), never with undefined behavior.
@@ -2625,7 +2624,7 @@ reconciliation logic.
 These patterns are defined by the surface a client uses, not by whether the
 implementation is a CLI, desktop app, web app, SDK, or service. A single
 client may implement more than one pattern. (These are usage patterns, not
-the conformance profiles of section 1.)
+the conformance planes of section 1.)
 
 ### 8.1 Path-oriented client
 
@@ -2803,7 +2802,7 @@ matter.
 | Commit validation | Authoritative | Supplies preconditions and commit ids where needed. |
 | Namespace visibility | Authoritative | Observes committed sequence receipts and change-feed deltas. |
 | Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |
-| Capability truthfulness | Advertises only implemented profiles and features. | Gates on the capability document; reconciles via `not_supported`. |
+| Capability truthfulness | Advertises only implemented planes and features. | Gates on the capability document; reconciles via `not_supported`. |
 
 ## 11. Extension points
 
@@ -2812,7 +2811,7 @@ such as indexers, notification services, preview builders, or policy engines
 should consume committed changes rather than becoming part of the core
 mutation path.
 
-New client-visible operations arrive as profile ops or named features here;
+New client-visible operations arrive as plane ops or named features here;
 new durable state arrives in `format.md`; new scheduling machinery is
 implementation freedom. Cross-store discovery — naming authority, search,
 ownership, quotas — is out of scope for this specification.

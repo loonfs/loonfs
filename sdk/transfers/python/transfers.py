@@ -35,9 +35,9 @@ from .types import (
 )
 
 _MULTIPART_MIN_BYTES = 8 * 1024 * 1024
-_DIRECT_GET_FEATURE = "core.downloads.direct_get"
-_DIRECT_MULTIPART_FEATURE = "core.uploads.direct_multipart"
-_DIRECT_PUT_FEATURE = "core.uploads.direct_put"
+_DIRECT_GET_FEATURE = "filesystem.downloads.direct_get"
+_DIRECT_MULTIPART_FEATURE = "filesystem.uploads.direct_multipart"
+_DIRECT_PUT_FEATURE = "filesystem.uploads.direct_put"
 _PROXY_UPLOAD_LIMIT = "upload.max_content_bytes"
 _DIRECT_PUT_LIMIT = "upload.direct_put_max_content_bytes"
 

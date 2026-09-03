@@ -106,9 +106,9 @@ const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
     "/v0/namespaces/{namespace_id}/filesystem/content",
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
-    "/v0/admin/namespaces/{namespace_id}/maintenance/run",
-    "/v0/admin/store/probe",
-    "/v0/admin/namespaces/{namespace_id}/grep/index/gc",
+    "/v0/maintenance/namespaces/{namespace_id}/runs",
+    "/v0/maintenance/store/probe",
+    "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
 ];
 
 /// Assigns each request a correlation id: every response carries it as the
@@ -287,7 +287,7 @@ fn router(state: AppState) -> Router {
             post(release_snapshot),
         )
         .route(
-            "/v0/admin/namespaces/{namespace_id}/diagnostics",
+            "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
             get(get_namespace_diagnostics),
         )
         .route(
@@ -316,7 +316,7 @@ fn router(state: AppState) -> Router {
             gated(serves_grep, get(grep), get(grep_queries_not_served)),
         )
         .route(
-            "/v0/admin/namespaces/{namespace_id}/grep/index",
+            "/v0/maintenance/namespaces/{namespace_id}/grep/index",
             gated(
                 maintains_index,
                 get(get_grep_index),
@@ -324,7 +324,7 @@ fn router(state: AppState) -> Router {
             ),
         )
         .route(
-            "/v0/admin/namespaces/{namespace_id}/grep/index/enable",
+            "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
             gated(
                 maintains_index,
                 post(enable_grep_index),
@@ -332,7 +332,7 @@ fn router(state: AppState) -> Router {
             ),
         )
         .route(
-            "/v0/admin/namespaces/{namespace_id}/grep/index/disable",
+            "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
             gated(
                 maintains_index,
                 post(disable_grep_index),
@@ -340,7 +340,7 @@ fn router(state: AppState) -> Router {
             ),
         )
         .route(
-            "/v0/admin/namespaces/{namespace_id}/grep/index/gc",
+            "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
             gated(
                 maintains_index,
                 post(gc_grep_index),
@@ -406,20 +406,23 @@ fn router(state: AppState) -> Router {
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes))
         .route(
-            "/v0/admin/namespaces/{namespace_id}/checkpoints",
+            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             post(create_checkpoint).get(list_checkpoints),
         )
         .route(
-            "/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
+            "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
             post(release_checkpoint),
         )
         .route(
-            "/v0/admin/namespaces/{namespace_id}/maintenance/run",
+            "/v0/maintenance/namespaces/{namespace_id}/runs",
             post(run_maintenance),
         )
-        // The one admin route whose subject is the store rather than a
+        // The one maintenance route whose subject is the store rather than a
         // namespace, so it sits beside them rather than under one.
-        .route("/v0/admin/store/probe", post(handlers_store::probe_store))
+        .route(
+            "/v0/maintenance/store/probe",
+            post(handlers_store::probe_store),
+        )
         .route_layer(middleware::from_fn(move |request: Request, next: Next| {
             with_request_deadline(request_deadline_ms, request, next)
         }))
@@ -465,7 +468,7 @@ async fn method_not_allowed() -> ApiResponseError {
 ///
 /// The long-lived server writer opts into background maintenance; the
 /// reader shares its caches so read endpoints observe writes immediately;
-/// the admin handle drives the explicit maintenance endpoints under its own
+/// the `FsAdmin` handle drives the explicit maintenance endpoints under its own
 /// actor identity, sharing the writer's decoded-block cache under the
 /// configured budget. All three deliberately share one provider client
 /// inside this one runtime ownership domain.

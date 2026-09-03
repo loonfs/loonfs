@@ -491,7 +491,7 @@ fn tls_server_config(
 /// This checks the TLS identity and opens the local cache through the same
 /// paths used at startup. It does not bind the configured address or contact
 /// the object store. Use `loonfs-server --probe-store` or
-/// `loonfs admin store probe` to test storage access. Constructing a local
+/// `loonfs maintenance store probe` to test storage access. Constructing a local
 /// store still creates its root directory.
 pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     config.validate()?;

@@ -146,7 +146,7 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
-/// The administrative status of a namespace's grep index.
+/// The maintenance status of a namespace's grep index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepIndex {
@@ -161,7 +161,7 @@ pub struct GrepIndex {
     pub reorganize_pending: bool,
 }
 
-/// One explicit grep-index garbage-collection pass (admin plane).
+/// One explicit grep-index garbage-collection pass (maintenance plane).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -174,7 +174,7 @@ pub struct GrepGcRequest {
     pub cursor: Option<String>,
 }
 
-/// Result of one explicit grep-index garbage-collection pass (admin plane).
+/// Result of one explicit grep-index garbage-collection pass (maintenance plane).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepGcResponse {
