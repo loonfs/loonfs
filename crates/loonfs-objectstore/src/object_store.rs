@@ -445,6 +445,8 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Reads one byte range together with the object's metadata.
     ///
     /// `metadata.size_bytes` is the whole object's size, not the range's.
+    /// A store may leave `metadata.etag` absent when naming the object's
+    /// identity would cost reading the whole object.
     async fn get_range_with_metadata(
         &self,
         key: &str,

@@ -127,7 +127,7 @@ impl LocalFsStore {
             return Ok(None);
         };
         let content_digest = sha256_digest(&content_bytes);
-        Self::metadata_from_fs_metadata(key, &metadata, &content_digest, path).map(Some)
+        Self::metadata_from_fs_metadata(key, &metadata, Some(&content_digest), path).map(Some)
     }
 
     /// Reads the object's bytes for the digest, answering `None` when the
@@ -146,7 +146,7 @@ impl LocalFsStore {
     fn metadata_from_fs_metadata(
         key: &str,
         metadata: &std::fs::Metadata,
-        content_digest: &str,
+        content_digest: Option<&str>,
         path: &Path,
     ) -> Result<ObjectMetadata> {
         if !metadata.is_file() {
@@ -162,7 +162,7 @@ impl LocalFsStore {
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
             .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
         Ok(ObjectMetadata {
-            etag: Some(format!("local-fs-v1:{content_digest}")),
+            etag: content_digest.map(|digest| format!("local-fs-v1:{digest}")),
             version: None,
             size_bytes: metadata.len(),
             last_modified_ms,
@@ -357,7 +357,8 @@ impl LocalFsStore {
             .map_err(|err| io_error(key, err))?;
 
         let content_digest = sha256_digest(&bytes);
-        let metadata = Self::metadata_from_fs_metadata(key, &fs_metadata, &content_digest, &path)?;
+        let metadata =
+            Self::metadata_from_fs_metadata(key, &fs_metadata, Some(&content_digest), &path)?;
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
@@ -393,16 +394,10 @@ impl LocalFsStore {
             .read_to_end(&mut bytes)
             .await
             .map_err(|err| io_error(key, err))?;
-
-        file.seek(SeekFrom::Start(0))
-            .await
-            .map_err(|err| io_error(key, err))?;
-        let mut content_bytes = Vec::new();
-        file.read_to_end(&mut content_bytes)
-            .await
-            .map_err(|err| io_error(key, err))?;
-        let content_digest = sha256_digest(&content_bytes);
-        let metadata = Self::metadata_from_fs_metadata(key, &fs_metadata, &content_digest, &path)?;
+        // The etag here is a digest of the whole object, and computing it
+        // would read every byte a ranged read exists to skip; the range
+        // carries no identity.
+        let metadata = Self::metadata_from_fs_metadata(key, &fs_metadata, None, &path)?;
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
@@ -501,7 +496,7 @@ impl LocalFsStore {
             }
             Err(err) => return Err(io_error(key, err)),
         };
-        Self::metadata_from_fs_metadata(key, &metadata, &content_digest, &path)
+        Self::metadata_from_fs_metadata(key, &metadata, Some(&content_digest), &path)
     }
 
     async fn delete_object(&self, key: &str) -> Result<()> {
@@ -996,6 +991,7 @@ mod tests {
             .expect("object exists");
         assert_eq!(body.bytes, b"456");
         assert_eq!(body.metadata.size_bytes, payload.len() as u64);
+        assert_eq!(body.metadata.etag, None, "a ranged read carries no digest");
         assert_eq!(
             store
                 .get(&key, range(7, 99))
