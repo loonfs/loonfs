@@ -12,6 +12,7 @@
 
 The embedded runtime exposes `FsReader`, `FsWriter`, and `FsMaintenance` handles.
 Snapshot listing is an `FsReader` operation; snapshot create, extend, and release are `FsWriter` operations.
+`FsWriter::open_namespace` and `FsWriter::close_namespace` control its namespace writer sessions.
 
 Namespaces and content stores are separate durable domains. A namespace owns filesystem metadata and history; a content store owns immutable file bytes. A namespace descriptor references exactly one content store, but that reference is not lifecycle ownership. Forked namespaces share the source namespace's content store while keeping independent future metadata history. Fork provenance and GC pins may record source-owned immutable files needed by the fork.
 

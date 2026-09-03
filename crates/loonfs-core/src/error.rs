@@ -135,6 +135,10 @@ pub enum CoreError {
     ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
+    #[error("writer session for namespace `{namespace_id}` is closed; new work is not admitted")]
+    WriterSessionClosed { namespace_id: NamespaceId },
+    #[error("writer session capacity is {max_open_namespaces}; new work is not admitted")]
+    WriterCapacityExceeded { max_open_namespaces: usize },
     /// The service is shutting down. New requests are rejected, while requests
     /// accepted earlier may finish.
     #[error("shutting down; new work is not admitted")]
@@ -430,6 +434,8 @@ impl CoreError {
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
+            CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
+            CoreError::WriterCapacityExceeded { .. } => ErrorCode::WriterCapacityExceeded,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             // An over-budget publication aborts pre-CAS and is retryable
             // after maintenance, exactly the checkpoint_unavailable contract.
@@ -523,6 +529,8 @@ impl CoreError {
             | CoreError::CommitIdReuseConflict { .. }
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
+            | CoreError::WriterSessionClosed { .. }
+            | CoreError::WriterCapacityExceeded { .. }
             | CoreError::ShuttingDown
             | CoreError::CheckpointUnavailable(_)
             | CoreError::InvalidCheckpointRequest(_)

@@ -3,16 +3,31 @@
 use super::{owning_runtime, FsReader, HandleBuilderCore};
 use crate::fs::{ReadCore, WriterBits, WriterIdentity};
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
-use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver, PublisherRegistry};
+use crate::publisher::{
+    CloseNamespaceReport, NamespaceAdvanceHint, NamespaceAdvanceObserver, NamespaceSessionState,
+    PublisherRegistry, WriterSessionStats,
+};
 use crate::{
-    CapabilityDocument, FsMaintenance, MaintenanceHint, MaintenanceHintObserver, Result,
-    RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
-    TraceStoreKind,
+    CapabilityDocument, FsMaintenance, MaintenanceHint, MaintenanceHintObserver, NamespaceId,
+    Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
+    TraceMode, TraceStoreKind,
 };
 #[cfg(test)]
 use loonfs_core::cache::MetadataSegmentCache;
 use loonfs_core::cache::StoredMetadataBlockCache;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+
+/// How a writer treats a namespace it has no open session for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceSessionPolicy {
+    /// The first mutation opens a session. Used by the reference server and CLI.
+    OpenOnFirstWrite,
+    /// Only [`FsWriter::open_namespace`] opens a session.
+    ///
+    /// A mutation without an open session fails with `writer_session_closed`.
+    ExplicitOpen,
+}
 
 /// Write-capable runtime handle for applications and servers.
 ///
@@ -86,6 +101,65 @@ impl FsWriter {
         self.publisher.clone()
     }
 
+    /// Opens a session for `namespace_id`, or returns if one is open.
+    ///
+    /// Fails with `writer_capacity_exceeded` at the limit, with
+    /// `writer_session_closed` while a close is draining, and with
+    /// `shutting_down` after shutdown begins. Opening acquires no writer
+    /// epoch; the first publish does.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.open_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "open_namespace",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<()> {
+        self.core.record_trace_context(&tracing::Span::current());
+        self.publisher.open_namespace(namespace_id)?;
+        Ok(())
+    }
+
+    /// Closes and drains the session for `namespace_id`.
+    ///
+    /// Admissions stop for every clone of the publisher. Admitted work
+    /// finishes, and a later open starts a new session. Calling this for a
+    /// closed namespace has no additional effect.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.close_namespace",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "close_namespace",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn close_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<CloseNamespaceReport> {
+        self.core.record_trace_context(&tracing::Span::current());
+        Ok(self.publisher.close_namespace(namespace_id).await?)
+    }
+
+    /// Returns the writer session state for `namespace_id`.
+    pub fn namespace_session_state(&self, namespace_id: &NamespaceId) -> NamespaceSessionState {
+        self.publisher.namespace_session_state(namespace_id)
+    }
+
+    /// Returns this writer's namespace session totals and capacity.
+    pub fn writer_session_stats(&self) -> WriterSessionStats {
+        self.publisher.writer_session_stats()
+    }
+
     /// Closes publication admission before shutdown drains.
     ///
     /// Later mutations fail with `shutting_down`. Calling this more than once
@@ -149,6 +223,8 @@ pub struct FsWriterBuilder {
     core: HandleBuilderCore,
     writer_id: Option<String>,
     min_publish_interval_ms: u64,
+    namespace_session_policy: NamespaceSessionPolicy,
+    max_open_namespaces: NonZeroUsize,
     namespace_advance_observer: Option<NamespaceAdvanceObserver>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
 }
@@ -159,6 +235,9 @@ impl FsWriterBuilder {
             core,
             writer_id: None,
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
+            namespace_session_policy: NamespaceSessionPolicy::OpenOnFirstWrite,
+            max_open_namespaces: NonZeroUsize::new(crate::config::DEFAULT_MAX_OPEN_NAMESPACES)
+                .expect("default maximum open namespaces should be nonzero"),
             namespace_advance_observer: None,
             maintenance_hint_observer: None,
         }
@@ -190,6 +269,22 @@ impl FsWriterBuilder {
     /// batching that in-flight publications force.
     pub fn min_publish_interval_ms(mut self, min_publish_interval_ms: u64) -> Self {
         self.min_publish_interval_ms = min_publish_interval_ms;
+        self
+    }
+
+    /// Sets how namespaces without an open writer session are handled.
+    /// Defaults to [`NamespaceSessionPolicy::OpenOnFirstWrite`].
+    pub fn namespace_sessions(mut self, policy: NamespaceSessionPolicy) -> Self {
+        self.namespace_session_policy = policy;
+        self
+    }
+
+    /// Sets the maximum number of writer sessions held at once.
+    ///
+    /// Opening past the limit fails with `writer_capacity_exceeded`. The
+    /// default is [`crate::DEFAULT_MAX_OPEN_NAMESPACES`].
+    pub fn max_open_namespaces(mut self, limit: NonZeroUsize) -> Self {
+        self.max_open_namespaces = limit;
         self
     }
 
@@ -304,6 +399,8 @@ impl FsWriterBuilder {
             Arc::downgrade(&bits),
             runtime,
             std::time::Duration::from_millis(self.min_publish_interval_ms),
+            self.namespace_session_policy,
+            self.max_open_namespaces,
         );
         Ok(FsWriter {
             core,

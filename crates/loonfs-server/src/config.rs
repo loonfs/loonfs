@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use thiserror::Error;
 
@@ -42,6 +43,9 @@ pub struct ServerConfig {
     #[serde(default)]
     pub content_token_secret: SecretString,
     pub writer_id: String,
+    /// Maximum writer sessions held by this server.
+    #[serde(default)]
+    pub max_open_namespaces: Option<NonZeroUsize>,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
     /// The node-local cache of encoded metadata blocks, if this deployment

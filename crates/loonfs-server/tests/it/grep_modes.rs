@@ -706,6 +706,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: format!("grep-mode-{mode:?}"),
+        max_open_namespaces: None,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: GrepConfig {

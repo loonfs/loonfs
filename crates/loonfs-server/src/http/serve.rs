@@ -445,6 +445,9 @@ pub(super) async fn build_handles(
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());
+    if let Some(limit) = config.max_open_namespaces {
+        writer_builder = writer_builder.max_open_namespaces(limit);
+    }
     if let Some(observer) = maintenance_hint_observer {
         writer_builder = writer_builder.maintenance_hint_observer(move |hint| observer(hint));
     }

@@ -3522,6 +3522,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: writer_id.to_owned(),
+        max_open_namespaces: None,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {

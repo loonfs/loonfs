@@ -415,6 +415,20 @@ impl RuntimeInstruments {
             .set(i64::try_from(queue_depth).unwrap_or(i64::MAX));
     }
 
+    pub(crate) fn publisher_sessions(&self, open: usize, closing: usize) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed
+            .publisher
+            .sessions_open
+            .set(i64::try_from(open).unwrap_or(i64::MAX));
+        installed
+            .publisher
+            .sessions_closing
+            .set(i64::try_from(closing).unwrap_or(i64::MAX));
+    }
+
     /// Reports the WAL-tail projections this writer retains across its
     /// namespace publishers, after one publish or eviction settled them.
     pub(crate) fn publisher_retained_projections(&self, projections: usize, decoded_bytes: usize) {
@@ -956,6 +970,8 @@ struct PublisherInstruments {
     wal_folds: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
+    sessions_open: Arc<dyn GaugeHandle>,
+    sessions_closing: Arc<dyn GaugeHandle>,
     retained_projections: Arc<dyn GaugeHandle>,
     retained_projection_bytes: Arc<dyn GaugeHandle>,
     publishes: LabeledCounters<PublishOutcome>,
@@ -986,6 +1002,16 @@ impl PublisherInstruments {
             queue_depth: recorder.register_gauge(
                 "loonfs.publisher.queue_depth",
                 "Candidates queued at the namespace publisher that last admitted or took work",
+                &[],
+            ),
+            sessions_open: recorder.register_gauge(
+                "loonfs.publisher.sessions_open",
+                "Open namespace writer sessions",
+                &[],
+            ),
+            sessions_closing: recorder.register_gauge(
+                "loonfs.publisher.sessions_closing",
+                "Namespace writer sessions draining a close",
                 &[],
             ),
             // Totals, not samples: these are what the writer holds across
