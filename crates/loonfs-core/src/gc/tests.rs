@@ -2258,7 +2258,8 @@ async fn namespace_with_staged_output(
         .put_if_absent(&staged_key, Bytes::from_static(b"staged segment"))
         .await
         .expect("write a staged segment");
-    let lease_key = metadata_compaction_lease(namespace_id, metadata_compaction_id);
+    let lease_key =
+        metadata_compaction_lease(namespace_id, loonfs_api::MetadataFamilyGroup::Bindings);
     (store, staged_key, lease_key)
 }
 
@@ -2304,7 +2305,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
         loonfs_api::wire::control::encode_control_object(&envelope).expect("encode a lease");
     store
         .put(
-            &metadata_compaction_lease(namespace_id, metadata_compaction_id),
+            &metadata_compaction_lease(namespace_id, loonfs_api::MetadataFamilyGroup::Bindings),
             Bytes::from(bytes),
             PutMode::Overwrite,
         )
@@ -2496,8 +2497,8 @@ async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
     )
     .await;
 
-    // The lease sorts before the staged segment. GC claims it first, then this
-    // injected metadata failure makes the segment decision return early.
+    // GC claims the cached group lease before deciding the staged segment,
+    // then this injected metadata failure makes the decision return early.
     let store = FailStore::new(
         inner,
         KeyPredicate::exact(staged_key.clone()),
@@ -2546,18 +2547,11 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
         died_at_ms,
     )
     .await;
-    let reclaimable = context(
-        now_after_newest_object(
-            store.inner(),
-            &namespace_id,
-            METADATA_COMPACTION_STAGING_GRACE_MS + 1,
-        )
-        .await,
-    );
+    let reclaimable = context(died_at_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS + 1);
     let marking = marking_units(&store, &namespace_id, &reclaimable).await;
 
-    // Resume immediately before compaction staging and buy exactly its lease
-    // candidate. The staged segment is the lookahead that stops the pass.
+    // Resume immediately before compaction staging and buy exactly its staged
+    // segment. The lease family is the lookahead that stops the pass.
     let mut bounded = config();
     bounded.max_objects = Some(marking + 1);
     bounded.cursor = Some(
@@ -2589,7 +2583,7 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
             .await
             .expect("head the unvisited segment")
             .is_some(),
-        "the cursor leaves the unvisited segment for the resumed pass"
+        "the claimed job's young segment remains for a later pass"
     );
 }
 
@@ -2755,7 +2749,7 @@ async fn a_published_jobs_lease_expires_and_the_pass_removes_only_the_lease() {
     .await;
     let staged =
         crate::checkpoint::tests::staged_keys_of_the_current_manifest(&store, &namespace_id).await;
-    let lease_key = metadata_compaction_lease(&namespace_id, spec.job_id());
+    let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
     assert!(
         store
             .head(&lease_key)

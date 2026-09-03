@@ -63,7 +63,9 @@ pub use self::streaming_compaction::{
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 
-pub(crate) use self::compaction_lease::{claim_compaction_prefix, CompactionPrefixOwner};
+pub(crate) use self::compaction_lease::{
+    claim_loaded_group_lease, load_group_lease, CompactionPrefixOwner, LoadedCompactionLease,
+};
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::data_block_load::DecodedRowWeight;
 pub(crate) use self::files::list_checkpoint_files_page;

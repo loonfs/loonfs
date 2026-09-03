@@ -4,7 +4,7 @@
 //! independent of the size of what it merges.
 
 use super::super::compaction_lease::{
-    claim_compaction_prefix, CompactionLease, CompactionPrefixOwner, LeaseHold,
+    claim_group_lease, CompactionLease, CompactionPrefixOwner, LeaseHold,
 };
 use super::super::reorganize::{
     group_run_descriptors, select_reorganization_input, FrozenBasePolicy, ReorganizationPlan,
@@ -622,12 +622,29 @@ async fn write_active_lease<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     heartbeat_at_ms: u64,
 ) {
+    write_lease_in_state(
+        store,
+        namespace_id,
+        spec,
+        heartbeat_at_ms,
+        loonfs_api::wire::control::CompactionLeaseStatus::Active {},
+    )
+    .await;
+}
+
+async fn write_lease_in_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    heartbeat_at_ms: u64,
+    status: loonfs_api::wire::control::CompactionLeaseStatus,
+) {
     let state = loonfs_api::wire::control::MetadataCompactionLeaseState {
         job_id: spec.job_id().clone(),
         namespace_id: namespace_id.clone(),
         group: spec.group(),
         writer_id: "test-writer".to_owned(),
-        status: loonfs_api::wire::control::CompactionLeaseStatus::Active {},
+        status,
         started_at_ms: heartbeat_at_ms,
         heartbeat_at_ms,
     };
@@ -638,7 +655,7 @@ async fn write_active_lease<S: ObjectStore + ?Sized>(
     .expect("encode lease");
     store
         .put_overwrite(
-            &metadata_compaction_lease(namespace_id, spec.job_id()),
+            &metadata_compaction_lease(namespace_id, spec.group()),
             Bytes::from(bytes),
         )
         .await
@@ -937,7 +954,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
 }
 
 #[tokio::test]
-async fn an_active_lease_excludes_its_group_until_it_expires() {
+async fn held_group_leases_are_skipped_and_an_expired_lease_is_available() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -953,10 +970,13 @@ async fn an_active_lease_excludes_its_group_until_it_expires() {
         METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_add(10_000),
     );
     let active_dir = tempdir().expect("tempdir");
+    let reaping_dir = tempdir().expect("tempdir");
     let expired_dir = tempdir().expect("tempdir");
     copy_store_tree(temp_dir.path(), active_dir.path());
+    copy_store_tree(temp_dir.path(), reaping_dir.path());
     copy_store_tree(temp_dir.path(), expired_dir.path());
     let active_store = LocalFsStore::new(active_dir.path()).expect("store");
+    let reaping_store = LocalFsStore::new(reaping_dir.path()).expect("store");
     let expired_store = LocalFsStore::new(expired_dir.path()).expect("store");
 
     write_active_lease(&active_store, &namespace_id, &spec, context.now_ms).await;
@@ -979,6 +999,35 @@ async fn an_active_lease_excludes_its_group_until_it_expires() {
     assert_ne!(
         active_group, group,
         "the active lease excludes its family group"
+    );
+
+    write_lease_in_state(
+        &reaping_store,
+        &namespace_id,
+        &spec,
+        0,
+        loonfs_api::wire::control::CompactionLeaseStatus::Reaping {},
+    )
+    .await;
+    let reaping = super::super::reorganize_metadata_step(
+        &reaping_store,
+        &namespace_id,
+        &context,
+        policy,
+        FrozenBasePolicy::default(),
+    )
+    .await
+    .expect("step with reaping lease");
+    let MetadataReorganizeOutcome::UnitPublished {
+        group: reaping_group,
+        ..
+    } = reaping.outcome
+    else {
+        panic!("expected another group to merge, got {:?}", reaping.outcome);
+    };
+    assert_ne!(
+        reaping_group, group,
+        "the reaping lease excludes its family group"
     );
 
     write_active_lease(&expired_store, &namespace_id, &spec, 0).await;
@@ -2091,6 +2140,8 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
         &namespace_id,
     )
     .await;
+    let store = LocalFsStore::new(interrupted_dir.path()).expect("store");
+    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
 
     let mut orphans = BTreeSet::new();
     let mut cancelled_attempts = 0;
@@ -2102,7 +2153,6 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
             reads_before_cancel,
             reads: AtomicUsize::new(0),
         };
-        let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
         let outcome = run_compaction(
             &store,
             &namespace_id,
@@ -2137,7 +2187,6 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
 
     // The re-run from the same spec, against the same durable state.
     let store = LocalFsStore::new(interrupted_dir.path()).expect("store");
-    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let Ok(result) = run_compaction(
         &store,
@@ -2210,7 +2259,7 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
     let group = MetadataFamilyGroup::Bindings;
     let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
     let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
-    let lease_key = metadata_compaction_lease(&namespace_id, spec.job_id());
+    let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
 
     let outcome = run_metadata_compaction_job(
         &store,
@@ -2227,8 +2276,8 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
         MetadataCompactionJobOutcome::Published { .. }
     ));
 
-    // The job writes every object under its own prefix, and the manifest now
-    // references the segments.
+    // The job writes every segment under its own prefix, and the manifest now
+    // references them.
     let staged = staged_object_keys(&store, &namespace_id).await;
     let referenced = referenced_segment_keys(&store, &namespace_id).await;
     let job_prefix = format!(
@@ -2241,16 +2290,79 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
         "every object a job writes belongs to that job's prefix: {staged:?}"
     );
     assert!(
-        !staged.is_empty()
-            && staged
-                .iter()
-                .all(|key| key == &lease_key || referenced.contains(key)),
+        !staged.is_empty() && staged.iter().all(|key| referenced.contains(key)),
         "the manifest must name every segment the job published"
     );
     assert!(
-        staged.contains(&lease_key),
+        store
+            .head(&lease_key)
+            .await
+            .expect("head the group lease")
+            .is_some(),
         "a published job leaves its final lease standing for the pass that has not seen the new \
          root yet"
+    );
+}
+
+#[tokio::test]
+async fn group_lease_acquisition_supersedes_a_second_job_and_fences_an_expired_owner() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let policy = small_segment_policy();
+    let first_spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let second_spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let timer = StdMonotonicTimer::default();
+    let mut first_lease = test_lease(&store, &namespace_id, &first_spec, &timer).await;
+
+    let staged_before = staged_object_keys(&store, &namespace_id).await;
+    let held = run_metadata_compaction_job(
+        &store,
+        &namespace_id,
+        &test_context(),
+        &second_spec,
+        policy,
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("try the held group");
+    assert_eq!(held, MetadataCompactionJobOutcome::Superseded);
+    assert_eq!(
+        staged_object_keys(&store, &namespace_id).await,
+        staged_before,
+        "a superseded job writes no staged object"
+    );
+
+    let takeover_context = mutation_context(
+        "takeover-writer",
+        test_context()
+            .now_ms
+            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS)
+            .saturating_add(1),
+    );
+    let taken_over = run_metadata_compaction_job(
+        &store,
+        &namespace_id,
+        &takeover_context,
+        &second_spec,
+        policy,
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("take over the expired lease");
+    assert!(matches!(
+        taken_over,
+        MetadataCompactionJobOutcome::Published { .. }
+    ));
+    assert_eq!(
+        first_lease
+            .heartbeat(&store)
+            .await
+            .expect("heartbeat the old lease"),
+        LeaseHold::Fenced
     );
 }
 
@@ -2286,9 +2398,15 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
     // stamped its lease off a real clock, so the pass's clock has to clear
     // whatever it spent running.
     let expired_ms = test_context().now_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS * 2;
-    let owner = claim_compaction_prefix(&store, &namespace_id, spec.job_id(), expired_ms)
-        .await
-        .expect("claim the expired prefix");
+    let owner = claim_group_lease(
+        &store,
+        &namespace_id,
+        spec.group(),
+        spec.job_id(),
+        expired_ms,
+    )
+    .await
+    .expect("claim the expired prefix");
     assert_eq!(
         owner,
         CompactionPrefixOwner::ThisCollector,
@@ -2340,7 +2458,7 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     seed_bindings_workload(&store, &namespace_id).await;
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let lease_key = metadata_compaction_lease(&namespace_id, spec.job_id());
+    let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
     // The stepping clock below moves each heartbeat's stamp forward a few
     // seconds, so the pass's clock is set well past the expiry rather than one
     // millisecond past it.
@@ -2360,7 +2478,13 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     );
     gated.block_next();
     let (claimed, beat) = tokio::join!(
-        claim_compaction_prefix(&gated, &namespace_id, spec.job_id(), expired_ms),
+        claim_group_lease(
+            &gated,
+            &namespace_id,
+            spec.group(),
+            spec.job_id(),
+            expired_ms,
+        ),
         async {
             gated.wait_until_blocked().await;
             let beat = lease.heartbeat(&store).await.expect("heartbeat the lease");
@@ -2382,9 +2506,15 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     // The other order, on the same lease: the claim lands, and the heartbeat
     // behind it finds an etag it does not hold.
     assert_eq!(
-        claim_compaction_prefix(&store, &namespace_id, spec.job_id(), expired_ms)
-            .await
-            .expect("claim the prefix"),
+        claim_group_lease(
+            &store,
+            &namespace_id,
+            spec.group(),
+            spec.job_id(),
+            expired_ms,
+        )
+        .await
+        .expect("claim the prefix"),
         CompactionPrefixOwner::ThisCollector
     );
     assert_eq!(
@@ -2876,12 +3006,12 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             steps_with_a_job_running += 1;
             if steps_with_a_job_running % 3 == 0 {
                 store
-                    .delete(&metadata_compaction_lease(&namespace_id, spec.job_id()))
+                    .delete(&metadata_compaction_lease(&namespace_id, spec.group()))
                     .await
                     .expect("remove the test lease before the job creates it");
                 publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
                 store
-                    .delete(&metadata_compaction_lease(&namespace_id, spec.job_id()))
+                    .delete(&metadata_compaction_lease(&namespace_id, spec.group()))
                     .await
                     .expect("expire the completed test job's lease");
                 published_jobs += 1;
@@ -2983,7 +3113,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
     // the test picked, so several thresholds are tried until one lands after
     // the job has written something.
     let mut orphans = BTreeSet::new();
-    for reads_before_cancel in [8usize, 16, 24, 32] {
+    for (attempt, reads_before_cancel) in [8usize, 16, 24, 32].into_iter().enumerate() {
         let cancellation = MetadataCompactionCancellation::default();
         let dying_store = CancelAfterReadsStore {
             inner: LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -2991,10 +3121,18 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             reads_before_cancel,
             reads: AtomicUsize::new(0),
         };
+        let attempt_context = mutation_context(
+            "test-writer",
+            context.now_ms.saturating_add(
+                u64::try_from(attempt)
+                    .expect("four attempts should fit in u64")
+                    .saturating_mul(METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_mul(2)),
+            ),
+        );
         let outcome = run_metadata_compaction_job(
             &dying_store,
             &namespace_id,
-            &context,
+            &attempt_context,
             &spec,
             policy,
             &cancellation,
@@ -3008,7 +3146,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         );
         assert!(
             store
-                .head(&metadata_compaction_lease(&namespace_id, spec.job_id()))
+                .head(&metadata_compaction_lease(&namespace_id, spec.group()))
                 .await
                 .expect("head the lease")
                 .is_some(),
@@ -3045,7 +3183,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         "test-writer",
         context
             .now_ms
-            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_mul(2)),
+            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_mul(10)),
     );
     let spec =
         step_until_a_compaction_is_planned(&store, &namespace_id, &expired_context, policy).await;

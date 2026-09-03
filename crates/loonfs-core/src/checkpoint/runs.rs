@@ -30,15 +30,7 @@ pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 10] = [
     MetadataRowFamily::Attributes,
 ];
 
-pub(super) const REORGANIZE_FAMILY_GROUPS: [MetadataFamilyGroup; 7] = [
-    MetadataFamilyGroup::Bindings,
-    MetadataFamilyGroup::Revisions,
-    MetadataFamilyGroup::Inodes,
-    MetadataFamilyGroup::Tombstones,
-    MetadataFamilyGroup::ActiveDeletions,
-    MetadataFamilyGroup::CommitReceipts,
-    MetadataFamilyGroup::Attributes,
-];
+pub(super) const REORGANIZE_FAMILY_GROUPS: [MetadataFamilyGroup; 7] = MetadataFamilyGroup::ALL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataFamilySegments {

@@ -12,7 +12,7 @@
 use super::block_fetch::segment_object_len;
 use super::build::MetadataSegmentDestination;
 use super::cache::{MetadataSegmentCache, MetadataSegmentCacheConfig};
-use super::compaction_lease::{CompactionLease, LeaseHold};
+use super::compaction_lease::{CompactionLease, LeaseAcquire, LeaseHold};
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping,
     MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
@@ -80,9 +80,9 @@ const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 ///
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataCompactionSpec {
-    /// This job's identity, and the prefix its output and its lease live
-    /// under. Generated with the plan, so two plans for one group never write
-    /// into each other's prefix.
+    /// This job's identity and the prefix its output lives under. Generated
+    /// with the plan, so two plans for one group never write into each other's
+    /// prefix.
     job_id: MetadataCompactionId,
     group: MetadataFamilyGroup,
     /// Every run the group held when the plan was made, by run number. That
@@ -350,12 +350,12 @@ pub enum MetadataCompactionJobOutcome {
     /// group again from what the manifest now holds.
     Abandoned,
     /// The job lost its lease: it stopped heartbeating for longer than the
-    /// lease expiry and garbage collection claimed its prefix. Ownership does
-    /// not come back, so the job publishes nothing and the collector reclaims
-    /// what it wrote. A later step plans the group again.
+    /// lease expiry and garbage collection claimed its group's lease.
+    /// Ownership does not come back, so the job publishes nothing and the
+    /// collector reclaims what it wrote. A later step plans the group again.
     Fenced,
-    /// Every publication attempt lost the root race. The job is thrown away
-    /// and a later step plans it again.
+    /// Another job or collector held the group lease, or every publication
+    /// attempt lost the root race. A later step plans the group again.
     Superseded,
 }
 
@@ -388,7 +388,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     };
     // The lease is written before the first output object, so no object under
     // the job's prefix is ever unclaimed.
-    let mut lease = CompactionLease::create(
+    let lease = CompactionLease::acquire(
         store,
         namespace_id,
         spec,
@@ -397,6 +397,9 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         &timer,
     )
     .await?;
+    let LeaseAcquire::Acquired(mut lease) = lease else {
+        return Ok(MetadataCompactionJobOutcome::Superseded);
+    };
     tracing::info!(
         namespace_id = namespace_id.as_str(),
         job_id = spec.job_id().as_str(),
@@ -518,7 +521,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             return Ok(MetadataCompactionJobOutcome::Cancelled);
         }
         // Refresh the lease before publishing. Its expiry exceeds the
-        // publication budget, so GC cannot claim the prefix before the CAS.
+        // publication budget, so GC cannot claim the group lease before the CAS.
         if lease.heartbeat(store).await? == LeaseHold::Fenced {
             return Ok(MetadataCompactionJobOutcome::Fenced);
         }

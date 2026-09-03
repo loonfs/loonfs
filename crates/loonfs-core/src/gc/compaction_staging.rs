@@ -1,24 +1,36 @@
 //! Determines whether streaming-compaction output may be collected.
 //!
-//! A current lease protects every object under a compaction job's prefix. To
-//! collect an expired job, the collector first changes its lease from `Active`
-//! to `Reaping` with compare-and-swap. This fences the job from publishing and
-//! lets later passes safely resume collection.
+//! A current group lease protects only the staged objects written by its
+//! named job. Garbage collection claims expired leases before reclaiming that
+//! job's output, which fences the job from publishing.
 
-use crate::checkpoint::{claim_compaction_prefix, CompactionPrefixOwner};
+use crate::checkpoint::{
+    claim_loaded_group_lease, load_group_lease, CompactionPrefixOwner, LoadedCompactionLease,
+};
 use crate::error::{CoreError, Result};
-use loonfs_api::{MetadataCompactionId, NamespaceId};
-use loonfs_objectstore::keys::{metadata_compaction_job_id_from_key, metadata_compaction_lease};
+use loonfs_api::wire::control::CompactionLeaseStatus;
+use loonfs_api::{MetadataCompactionId, MetadataFamilyGroup, NamespaceId};
+use loonfs_objectstore::keys::{
+    metadata_compaction_job_id_from_key, metadata_compaction_lease_group_from_key,
+};
 use loonfs_objectstore::ObjectStore;
+use std::collections::BTreeMap;
 
-/// Tracks the confirmed owner of the current job prefix and any claimed lease
-/// that must be deleted after that prefix is processed.
+/// What the lease-key sweep should do with one recognized lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GroupLeaseSweep {
+    Retain,
+    Delete,
+}
+
+/// Tracks the seven group leases and any claim awaiting prefix completion.
 #[derive(Debug, Default)]
 pub(super) struct CompactionLeases {
+    by_job_id: BTreeMap<MetadataCompactionId, LoadedCompactionLease>,
     last_read: Option<LastPrefixRead>,
-    /// A successfully claimed lease, retained until all earlier staged objects
-    /// in the same job prefix have been processed.
     claimed_lease: Option<String>,
+    staging_complete: bool,
+    loaded: bool,
 }
 
 #[derive(Debug)]
@@ -28,9 +40,35 @@ struct LastPrefixRead {
 }
 
 impl CompactionLeases {
-    /// Returns the confirmed owner of `key`'s job prefix, or `None` when the
-    /// key names no job. One claim per job prefix is reused for every key
-    /// under it.
+    /// Reads every deterministic group lease once for this pass.
+    pub(super) async fn load_once<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        namespace_id: &NamespaceId,
+    ) -> Result<()> {
+        if self.loaded {
+            return Ok(());
+        }
+        let mut by_job_id = BTreeMap::new();
+        for group in MetadataFamilyGroup::ALL {
+            let Some(loaded) = load_group_lease(store, namespace_id, group).await? else {
+                continue;
+            };
+            if by_job_id
+                .insert(loaded.state.job_id.clone(), loaded)
+                .is_some()
+            {
+                return Err(CoreError::Internal(
+                    "two metadata family-group leases name the same compaction job".to_owned(),
+                ));
+            }
+        }
+        self.by_job_id = by_job_id;
+        self.loaded = true;
+        Ok(())
+    }
+
+    /// Returns the confirmed owner of `key`'s job prefix.
     pub(super) async fn owner_of<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
@@ -46,18 +84,25 @@ impl CompactionLeases {
         let owner = match &self.last_read {
             Some(read) if read.job_id == metadata_compaction_id => read.owner,
             _ => {
-                // A different job prefix has started, so the previously
-                // claimed lease can now be deleted.
                 self.delete_claimed_lease(store).await?;
-                let owner =
-                    claim_compaction_prefix(store, namespace_id, &metadata_compaction_id, now_ms)
+                let owner = match self.by_job_id.get(&metadata_compaction_id).cloned() {
+                    Some(loaded) => {
+                        let lease_key = loaded.object_key.clone();
+                        let owner = claim_loaded_group_lease(
+                            store,
+                            namespace_id,
+                            &metadata_compaction_id,
+                            loaded,
+                            now_ms,
+                        )
                         .await?;
-                if owner == CompactionPrefixOwner::ThisCollector {
-                    self.claimed_lease = Some(metadata_compaction_lease(
-                        namespace_id,
-                        &metadata_compaction_id,
-                    ));
-                }
+                        if owner == CompactionPrefixOwner::ThisCollector {
+                            self.claimed_lease = Some(lease_key);
+                        }
+                        owner
+                    }
+                    None => CompactionPrefixOwner::NoOne,
+                };
                 self.last_read = Some(LastPrefixRead {
                     job_id: metadata_compaction_id,
                     owner,
@@ -68,16 +113,51 @@ impl CompactionLeases {
         Ok(Some(owner))
     }
 
-    /// Whether `key` is the lease this collector claimed for the current job.
-    pub(super) fn is_claimed_lease(&self, key: &str) -> bool {
-        self.claimed_lease.as_deref() == Some(key)
+    /// Records that the complete staging-prefix listing finished.
+    pub(super) fn staging_finished(&mut self) {
+        self.staging_complete = true;
+    }
+
+    /// Decides one lease object after the staging prefix has been walked.
+    pub(super) async fn sweep_group_lease<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        namespace_id: &NamespaceId,
+        key: &str,
+        now_ms: u64,
+    ) -> Result<Option<GroupLeaseSweep>> {
+        let Some(group) = metadata_compaction_lease_group_from_key(key) else {
+            return Ok(None);
+        };
+        let Some(loaded) = self
+            .by_job_id
+            .values()
+            .find(|loaded| loaded.state.group == group)
+            .cloned()
+        else {
+            return Ok(Some(GroupLeaseSweep::Retain));
+        };
+        if !self.staging_complete
+            || (loaded.state.status == (CompactionLeaseStatus::Active {})
+                && now_ms
+                    <= loaded
+                        .state
+                        .heartbeat_at_ms
+                        .saturating_add(crate::limits::METADATA_COMPACTION_LEASE_EXPIRY_MS))
+        {
+            return Ok(Some(GroupLeaseSweep::Retain));
+        }
+        let job_id = loaded.state.job_id.clone();
+        let owner = claim_loaded_group_lease(store, namespace_id, &job_id, loaded, now_ms).await?;
+        Ok(Some(match owner {
+            CompactionPrefixOwner::ThisCollector => GroupLeaseSweep::Delete,
+            CompactionPrefixOwner::LiveJob | CompactionPrefixOwner::NoOne => {
+                GroupLeaseSweep::Retain
+            }
+        }))
     }
 
     /// Deletes a claimed lease after its job prefix has been processed.
-    ///
-    /// This runs when the pass reaches another job and again when the pass
-    /// ends. The lease does not need an age check because this collector
-    /// already claimed it with compare-and-swap.
     pub(super) async fn finish<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
         self.delete_claimed_lease(store).await
     }

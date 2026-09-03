@@ -2019,9 +2019,15 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     let segments = load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
         .await
         .expect("load manifest segments");
-    let group =
-        super::reorganize::select_family_group(&segments.manifest().payload, &BTreeSet::new())
-            .expect("a family group with delta rows to fold");
+    let group = super::reorganize::select_family_group(
+        store,
+        namespace_id,
+        &segments.manifest().payload,
+        0,
+    )
+    .await
+    .expect("read family-group leases")
+    .expect("a family group with delta rows to fold");
     let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
     let selection = super::reorganize::select_reorganization_input(
         &segments,
