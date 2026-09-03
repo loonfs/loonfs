@@ -895,7 +895,7 @@ async fn drain_reorganization(
     for _ in 0..16 {
         let report = harness
             .engine
-            .reorganize_metadata(loonfs_core::MetadataCompactionView::default())
+            .reorganize_metadata(loonfs_core::FrozenBasePolicy::default())
             .await
             .expect("reorganize metadata");
         match report.outcome {

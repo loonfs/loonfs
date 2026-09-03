@@ -42,7 +42,7 @@ use super::streaming_compaction::{
 };
 use super::{
     block_fetch, create, data_block_load, flush, load, record, reorganize,
-    reorganize_metadata_step, row, scan, MetadataCompactionView, MetadataReorganizeOutcome,
+    reorganize_metadata_step, row, scan, FrozenBasePolicy, MetadataReorganizeOutcome,
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::{MetadataState, MetadataStateBuilder};
@@ -347,7 +347,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
             namespace_id,
             context,
             fold_policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("reorganization step");
@@ -464,7 +464,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
         namespace_id,
         context,
         policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("plan a streaming compaction");
@@ -653,7 +653,7 @@ fn base_runs_per_family_group(
 fn group_containing(family: ApiMetadataRowFamily) -> &'static [ApiMetadataRowFamily] {
     REORGANIZE_FAMILY_GROUPS
         .into_iter()
-        .find(|group| group.contains(family))
+        .find(|group| group.families().contains(&family))
         .expect("every family belongs to a reorganization group")
         .families()
 }
@@ -949,6 +949,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         writer_epoch: head.writer_epoch,
         next_inode_id: head.next_inode_id,
         next_run_no,
+        frozen_base_delta_merges: Default::default(),
         retention_floor_seq: source.retention_floor_seq,
         runs,
     })

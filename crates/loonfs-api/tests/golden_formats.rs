@@ -31,9 +31,9 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
-    DeletedDirentry, MetadataRow, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
-    NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier, TombstoneGeneration,
-    TombstoneRowAction,
+    DeletedDirentry, MetadataFamilyGroup, MetadataRow, MetadataRowFamily, MetadataRunRef,
+    MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
+    TombstoneGeneration, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
@@ -335,6 +335,10 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
         writer_epoch: WriterEpoch(3),
         next_inode_id: InodeId(10),
         next_run_no: RunNo(1),
+        frozen_base_delta_merges: std::collections::BTreeMap::from([(
+            MetadataFamilyGroup::Bindings,
+            2,
+        )]),
         retention_floor_seq: ChangeSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
@@ -496,7 +500,7 @@ fn assert_wal_segment_is_corrupt(payload: WalSegmentPayload) -> String {
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("encode");
-    assert_matches_golden("namespace_manifest.v1.json", &encoded);
+    assert_matches_golden("namespace_manifest.v2.json", &encoded);
     let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
@@ -505,7 +509,7 @@ fn namespace_manifest_matches_golden_bytes() {
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v2.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
 }
@@ -709,12 +713,13 @@ fn control_objects_match_golden_bytes() {
     // like every other family's so a field rename cannot silently change what
     // either party reads that claim out of.
     check_control_golden(
-        "control_compaction_lease.v1.json",
+        "control_compaction_lease.v2.json",
         ControlObjectKind::CompactionLease,
         MetadataCompactionLeaseState {
             job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
                 .expect("valid compaction id"),
             namespace_id: namespace_id(),
+            group: MetadataFamilyGroup::Bindings,
             writer_id: "writer-1".to_owned(),
             status: CompactionLeaseStatus::Active {},
             started_at_ms: 1_000,
@@ -864,7 +869,7 @@ fn every_durable_status_is_a_kind_tagged_object() {
         "control_checkpoint_record.v1.json",
         "control_checkpoint_record_released.v1.json",
         "control_upload_session.v1.json",
-        "control_compaction_lease.v1.json",
+        "control_compaction_lease.v2.json",
     ];
     for fixture in fixtures {
         let document: serde_json::Value =
@@ -1302,7 +1307,7 @@ fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
 }
 
 #[test]
-fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback() {
+fn control_object_decoders_reject_wrong_format_version_without_fallback() {
     let cases = [
         (
             ControlObjectKind::CheckpointRecord,
@@ -1344,6 +1349,20 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 },
             })
             .expect("upload state"),
+        ),
+        (
+            ControlObjectKind::CompactionLease,
+            serde_json::to_value(MetadataCompactionLeaseState {
+                job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
+                    .expect("valid compaction id"),
+                namespace_id: namespace_id(),
+                group: MetadataFamilyGroup::Bindings,
+                writer_id: "writer-1".to_owned(),
+                status: CompactionLeaseStatus::Active {},
+                started_at_ms: 1_000,
+                heartbeat_at_ms: 3_000,
+            })
+            .expect("compaction lease state"),
         ),
     ];
     for (kind, state) in cases {
@@ -1704,7 +1723,7 @@ fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
             err,
             EnvelopeCodecError::UnsupportedFormatVersion {
                 found: 7,
-                supported: 1,
+                supported: 2,
                 ..
             }
         ),

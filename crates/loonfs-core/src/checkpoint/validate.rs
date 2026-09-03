@@ -325,7 +325,8 @@ fn validate_one_base_run_per_family_group(
         let mut base_runs = runs.iter().filter(|run| {
             run.tier == RunTier::Base
                 && run.segments.iter().any(|family_segments| {
-                    group.contains(family_segments.family) && !family_segments.segments.is_empty()
+                    group.families().contains(&family_segments.family)
+                        && !family_segments.segments.is_empty()
                 })
         });
         let (Some(first), Some(second)) = (base_runs.next(), base_runs.next()) else {

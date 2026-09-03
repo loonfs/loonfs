@@ -3,16 +3,11 @@
 //! Each namespace may have one queued or running compaction. A process-wide
 //! semaphore limits total concurrency. Jobs do not consume bounded-step
 //! permits and are cancelled and joined during writer shutdown.
-//!
-//! The in-memory state also counts delta merges over each frozen base so the
-//! planner eventually requests a full compaction. Losing this state only
-//! delays replanning after restart.
 
 use super::{MaintenanceJobId, RunnerInner};
 use crate::{FsAdmin, NamespaceId};
 use loonfs_core::{
-    FrozenBasePolicy, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionSpec, MetadataFamilyGroup,
+    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -24,7 +19,6 @@ pub(crate) const MAX_CONCURRENT_COMPACTIONS: usize = 2;
 /// The one job a namespace may have, from the moment it claims the slot to
 /// the moment it ends — including the time it spends waiting for a permit.
 struct ActiveCompaction {
-    spec: MetadataCompactionSpec,
     cancellation: MetadataCompactionCancellation,
 }
 
@@ -32,17 +26,6 @@ struct ActiveCompaction {
 #[derive(Default)]
 pub(super) struct NamespaceCompactions {
     active: Option<ActiveCompaction>,
-    /// Delta merges that have published over a family group's frozen base,
-    /// since that group's last completed job. A group is listed here only
-    /// while it is blocked, so the map holds the groups that are stuck and
-    /// nothing else.
-    published_delta_merges_over_frozen_base: BTreeMap<MetadataFamilyGroup, u32>,
-}
-
-impl NamespaceCompactions {
-    fn is_empty(&self) -> bool {
-        self.active.is_none() && self.published_delta_merges_over_frozen_base.is_empty()
-    }
 }
 
 /// Shared access to this process's background compactions.
@@ -80,87 +63,13 @@ impl BackgroundCompactions {
         }
     }
 
-    /// The plan of the job this namespace has running or queued, which is the
-    /// group every step must leave alone.
-    ///
-    /// Cloned rather than borrowed because the lock is released before the
-    /// step runs: a step reads durable state and publishes, which is far too
-    /// long to hold a map every other step consults.
-    pub(crate) fn active_spec(&self, namespace_id: &NamespaceId) -> Option<MetadataCompactionSpec> {
-        self.lock()
-            .get(namespace_id)?
-            .active
-            .as_ref()
-            .map(|active| active.spec.clone())
-    }
-
-    /// The amortization this process has watched the namespace's stuck groups
-    /// spend, as the policy a planner runs under.
-    pub(crate) fn amortization(&self, namespace_id: &NamespaceId) -> FrozenBasePolicy {
-        FrozenBasePolicy::Amortized {
-            published_delta_merges_over_frozen_base: self
-                .lock()
-                .get(namespace_id)
-                .map(|entry| entry.published_delta_merges_over_frozen_base.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Records what one published merge unit said about its group.
-    ///
-    /// A merge that ran above a frozen base is one more delta merge the group
-    /// published without its retention restarting; a merge that started at the
-    /// group's oldest run means the base is not frozen, so the count goes.
-    pub(crate) fn record_merge(
-        &self,
-        namespace_id: &NamespaceId,
-        group: MetadataFamilyGroup,
-        bottom_anchored_merge_blocked: bool,
-    ) {
-        if !bottom_anchored_merge_blocked {
-            self.clear_published_delta_merges(namespace_id, group);
-            return;
-        }
-        *self
-            .lock()
-            .entry(namespace_id.clone())
-            .or_default()
-            .published_delta_merges_over_frozen_base
-            .entry(group)
-            .or_default() += 1;
-    }
-
-    /// Clears a group's published-delta-merge count after a job rebuilt it.
-    ///
-    /// The base is no longer frozen, so the group starts counting again from
-    /// nothing.
-    pub(crate) fn clear_published_delta_merges(
-        &self,
-        namespace_id: &NamespaceId,
-        group: MetadataFamilyGroup,
-    ) {
-        let mut namespaces = self.lock();
-        let Some(entry) = namespaces.get_mut(namespace_id) else {
-            return;
-        };
-        entry.published_delta_merges_over_frozen_base.remove(&group);
-        if entry.is_empty() {
-            namespaces.remove(namespace_id);
-        }
-    }
-
-    /// Claims the namespace's compaction slot for `spec`, or `None` when a
-    /// job already holds it.
+    /// Claims the namespace's compaction slot, or `None` when a job holds it.
     ///
     /// The claim carries a process permit when one was free. When none was,
     /// the claim is queued and [`CompactionClaim::admitted`] is what waits
-    /// for one. Either way the plan is in the map from here on, so the next
-    /// step leaves this group alone.
-    pub(crate) fn claim(
-        &self,
-        namespace_id: &NamespaceId,
-        spec: &MetadataCompactionSpec,
-    ) -> Option<CompactionClaim> {
+    /// for one. Either way the namespace claim is in the map from here on, so
+    /// this process does not start a second job for it.
+    pub(crate) fn claim(&self, namespace_id: &NamespaceId) -> Option<CompactionClaim> {
         let cancellation = MetadataCompactionCancellation::default();
         {
             let mut namespaces = self.lock();
@@ -169,7 +78,6 @@ impl BackgroundCompactions {
                 return None;
             }
             entry.active = Some(ActiveCompaction {
-                spec: spec.clone(),
                 cancellation: cancellation.clone(),
             });
         }
@@ -201,7 +109,7 @@ impl BackgroundCompactions {
         let Some(runner) = self.runner.upgrade() else {
             return CompactionStart::NoRunner;
         };
-        let Some(mut claim) = self.claim(namespace_id, &spec) else {
+        let Some(mut claim) = self.claim(namespace_id) else {
             return CompactionStart::AlreadyRunning;
         };
         let queued = claim.is_queued();
@@ -352,12 +260,8 @@ impl Drop for CompactionSlot {
     fn drop(&mut self) {
         {
             let mut namespaces = self.lock();
-            let Some(entry) = namespaces.get_mut(&self.namespace_id) else {
+            if namespaces.remove(&self.namespace_id).is_none() {
                 return;
-            };
-            entry.active = None;
-            if entry.is_empty() {
-                namespaces.remove(&self.namespace_id);
             }
         }
         self.report_counts();

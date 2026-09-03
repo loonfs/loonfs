@@ -6,7 +6,7 @@ use crate::envelope::EnvelopeCodecError;
 use crate::{
     wal_segment_id_start_seq, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId,
     ContentId, ContentRef, ContentRefKind, ContentStoreId, InodeId, ManifestNo, ManifestObjectId,
-    MetadataCompactionId, NamespaceId, UploadId, WalSegmentId,
+    MetadataCompactionId, MetadataFamilyGroup, NamespaceId, UploadId, WalSegmentId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -59,7 +59,7 @@ impl ControlObjectKind {
             Self::MetadataRoot => 1,
             Self::CheckpointRecord => 1,
             Self::UploadSession => 1,
-            Self::CompactionLease => 1,
+            Self::CompactionLease => 2,
         }
     }
 
@@ -179,6 +179,8 @@ pub struct MetadataCompactionLeaseState {
     pub job_id: MetadataCompactionId,
     /// Namespace whose family group the job is rebuilding.
     pub namespace_id: NamespaceId,
+    /// Family group the job is rebuilding.
+    pub group: MetadataFamilyGroup,
     /// Writer identity the job runs under, for an operator reading the
     /// object. This is the same label the namespace head records.
     pub writer_id: String,

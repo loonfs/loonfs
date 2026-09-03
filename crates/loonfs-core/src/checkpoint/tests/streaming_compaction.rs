@@ -469,22 +469,6 @@ async fn publish_one_operation<S: ObjectStore + ?Sized>(
 // Driving a job
 // -------------------------------------------------------------------------
 
-/// The view a step sees while `spec`'s job is rebuilding its group.
-fn rebuilding(spec: &MetadataCompactionSpec) -> MetadataCompactionView<'_> {
-    MetadataCompactionView {
-        active: Some(spec),
-        frozen_base: FrozenBasePolicy::default(),
-    }
-}
-
-/// The policy an amortizing runtime hands the planner once `group` has
-/// published `merges` delta runs over its frozen base.
-fn amortized(group: MetadataFamilyGroup, merges: u32) -> FrozenBasePolicy {
-    FrozenBasePolicy::Amortized {
-        published_delta_merges_over_frozen_base: BTreeMap::from([(group, merges)]),
-    }
-}
-
 /// A budget that admits the whole group in one step, so the ordinary fold can
 /// rebuild in one unit whatever the streaming job did incrementally.
 fn fold_everything_policy() -> MetadataLsmPolicy {
@@ -522,7 +506,7 @@ async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
         .iter()
         .filter(|run| run.tier == RunTier::Base)
         .flat_map(|run| run.segments.iter())
-        .filter(|family_segments| group.contains(family_segments.family))
+        .filter(|family_segments| group.families().contains(&family_segments.family))
         .flat_map(|family_segments| &family_segments.segments)
         .map(|descriptor| descriptor.row_count)
         .sum();
@@ -571,7 +555,8 @@ fn snapshot_runs_for_group(
         .into_iter()
         .filter(|run| {
             run.segments.iter().any(|family_segments| {
-                group.contains(family_segments.family) && !family_segments.segments.is_empty()
+                group.families().contains(&family_segments.family)
+                    && !family_segments.segments.is_empty()
             })
         })
         .collect()
@@ -622,13 +607,42 @@ async fn test_lease<'a, S: ObjectStore + ?Sized>(
     CompactionLease::open_for_test(
         store,
         namespace_id,
-        spec.job_id(),
+        spec,
         context.writer_id.as_str(),
         context.now_ms,
         timer,
     )
     .await
     .expect("open the job's lease")
+}
+
+async fn write_active_lease<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    heartbeat_at_ms: u64,
+) {
+    let state = loonfs_api::wire::control::MetadataCompactionLeaseState {
+        job_id: spec.job_id().clone(),
+        namespace_id: namespace_id.clone(),
+        group: spec.group(),
+        writer_id: "test-writer".to_owned(),
+        status: loonfs_api::wire::control::CompactionLeaseStatus::Active {},
+        started_at_ms: heartbeat_at_ms,
+        heartbeat_at_ms,
+    };
+    let bytes = loonfs_api::wire::control::encode_control_state(
+        loonfs_api::wire::control::ControlObjectKind::CompactionLease,
+        &state,
+    )
+    .expect("encode lease");
+    store
+        .put_overwrite(
+            &metadata_compaction_lease(namespace_id, spec.job_id()),
+            Bytes::from(bytes),
+        )
+        .await
+        .expect("write lease");
 }
 
 async fn run_compaction<S: ObjectStore + ?Sized>(
@@ -810,7 +824,7 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
         namespace_id,
         &test_context(),
         fold_everything_policy(),
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("fold the group whole");
@@ -902,7 +916,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
         &namespace_id,
         &test_context(),
         starving_policy(),
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("budgeted step");
@@ -923,74 +937,73 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
 }
 
 #[tokio::test]
-async fn a_step_leaves_the_group_a_running_job_is_rebuilding_alone() {
+async fn an_active_lease_excludes_its_group_until_it_expires() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     seed_bindings_workload(&store, &namespace_id).await;
     let group = MetadataFamilyGroup::Bindings;
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
     let policy = MetadataLsmPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
+    let context = mutation_context(
+        "test-writer",
+        METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_add(10_000),
+    );
+    let active_dir = tempdir().expect("tempdir");
+    let expired_dir = tempdir().expect("tempdir");
+    copy_store_tree(temp_dir.path(), active_dir.path());
+    copy_store_tree(temp_dir.path(), expired_dir.path());
+    let active_store = LocalFsStore::new(active_dir.path()).expect("store");
+    let expired_store = LocalFsStore::new(expired_dir.path()).expect("store");
 
-    // Same durable state, twice. With no job in flight this group is what a
-    // step takes: it holds the most delta rows.
-    let fold_dir = tempdir().expect("tempdir");
-    copy_store_tree(temp_dir.path(), fold_dir.path());
-    let fold_store = LocalFsStore::new(fold_dir.path()).expect("store");
-    let without = super::super::reorganize_metadata_step(
-        &fold_store,
+    write_active_lease(&active_store, &namespace_id, &spec, context.now_ms).await;
+    let active = super::super::reorganize_metadata_step(
+        &active_store,
         &namespace_id,
-        &test_context(),
+        &context,
         policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
-    .expect("step with no job running");
-    let MetadataReorganizeOutcome::UnitPublished { group: folded, .. } = without.outcome else {
-        panic!("expected a merge, got {:?}", without.outcome);
+    .expect("step with active lease");
+    let MetadataReorganizeOutcome::UnitPublished {
+        group: active_group,
+        ..
+    } = active.outcome
+    else {
+        panic!("expected another group to merge, got {:?}", active.outcome);
     };
-    assert_eq!(
-        folded, group,
-        "the seed must leave this group the one a step would take"
+    assert_ne!(
+        active_group, group,
+        "the active lease excludes its family group"
     );
 
-    // With the job's plan in hand, every step folds another group and none
-    // touches this one, so the job's input is exactly what it was.
-    let mut other_groups_folded = 0usize;
-    for _ in 0..16 {
-        let report = super::super::reorganize_metadata_step(
-            &store,
-            &namespace_id,
-            &test_context(),
-            policy,
-            rebuilding(&spec),
-        )
-        .await
-        .expect("step with the job running");
-        match report.outcome {
-            MetadataReorganizeOutcome::UnitPublished { group: folded, .. } => {
-                assert_ne!(
-                    folded, group,
-                    "a step must not merge the group a job is rebuilding"
-                );
-                other_groups_folded += 1;
-            }
-            MetadataReorganizeOutcome::NotNeeded { .. } => break,
-            other => panic!("unexpected outcome {other:?}"),
-        }
-    }
-    assert!(
-        other_groups_folded > 0,
-        "ordinary maintenance must keep going while a job runs"
-    );
+    write_active_lease(&expired_store, &namespace_id, &spec, 0).await;
+    let expired = super::super::reorganize_metadata_step(
+        &expired_store,
+        &namespace_id,
+        &context,
+        policy,
+        FrozenBasePolicy::default(),
+    )
+    .await
+    .expect("step with expired lease");
+    let MetadataReorganizeOutcome::UnitPublished {
+        group: expired_group,
+        ..
+    } = expired.outcome
+    else {
+        panic!(
+            "expected the leased group to merge, got {:?}",
+            expired.outcome
+        );
+    };
     assert_eq!(
-        snapshot_keys_now(&store, &namespace_id, &spec).await,
-        snapshot_keys,
-        "the job's input must be exactly what it was when the job was planned"
+        expired_group, group,
+        "an expired lease does not exclude its family group"
     );
 }
 
@@ -1028,10 +1041,7 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
             &namespace_id,
             &context,
             policy,
-            MetadataCompactionView {
-                active: None,
-                frozen_base: amortized(group, delta_merges_over_the_frozen_base),
-            },
+            FrozenBasePolicy::Amortized,
         )
         .await
         .expect("maintenance step");
@@ -1092,7 +1102,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             &namespace_id,
             &context,
             policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("maintenance step");
@@ -1139,7 +1149,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             &namespace_id,
             &context,
             policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("maintenance step");
@@ -1796,10 +1806,11 @@ async fn install_synthetic_bindings_base(
         .iter()
         .find(|run| {
             run.tier == RunTier::Base
-                && run
-                    .segments
-                    .iter()
-                    .any(|descriptor| MetadataFamilyGroup::Bindings.contains(descriptor.family))
+                && run.segments.iter().any(|descriptor| {
+                    MetadataFamilyGroup::Bindings
+                        .families()
+                        .contains(&descriptor.family)
+                })
         })
         .expect("the namespace has been folded into a base run");
     let base_run_no = base_run.run_no;
@@ -1829,9 +1840,11 @@ async fn install_synthetic_bindings_base(
         .iter_mut()
         .find(|run| run.run_no == base_run_no)
         .expect("the base run should still exist");
-    base_run
-        .segments
-        .retain(|descriptor| !MetadataFamilyGroup::Bindings.contains(descriptor.family));
+    base_run.segments.retain(|descriptor| {
+        !MetadataFamilyGroup::Bindings
+            .families()
+            .contains(&descriptor.family)
+    });
     base_run
         .segments
         .extend(flatten_manifest_segments(run_segments));
@@ -2729,7 +2742,7 @@ async fn group_segments_outside_the_job<S: ObjectStore + ?Sized>(
         .iter()
         .filter(|run| !inputs.contains(&run.run_no))
         .flat_map(|run| &run.segments)
-        .filter(|descriptor| group.contains(descriptor.family))
+        .filter(|descriptor| group.families().contains(&descriptor.family))
         .map(metadata_segment_object_key)
         .collect()
 }
@@ -2784,10 +2797,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             &namespace_id,
             &context,
             policy,
-            active.as_ref().map_or_else(
-                MetadataCompactionView::default,
-                |spec: &MetadataCompactionSpec| rebuilding(spec),
-            ),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("maintenance step");
@@ -2811,6 +2821,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                 if active.is_none() {
                     assert_eq!(planned_group, group, "this budget starves this group first");
                     active = Some(spec.clone());
+                    write_active_lease(&store, &namespace_id, spec, context.now_ms).await;
                     if arrived_keys.is_empty() {
                         // A run arrives while the first job runs. It is
                         // outside that job's snapshot, so the job never reads
@@ -2864,7 +2875,15 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
         if let Some(spec) = active.clone() {
             steps_with_a_job_running += 1;
             if steps_with_a_job_running % 3 == 0 {
+                store
+                    .delete(&metadata_compaction_lease(&namespace_id, spec.job_id()))
+                    .await
+                    .expect("remove the test lease before the job creates it");
                 publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
+                store
+                    .delete(&metadata_compaction_lease(&namespace_id, spec.job_id()))
+                    .await
+                    .expect("expire the completed test job's lease");
                 published_jobs += 1;
                 active = None;
                 if published_jobs == 1 {
@@ -2927,7 +2946,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
             namespace_id,
             context,
             policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("maintenance step");
@@ -3020,9 +3039,17 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         "and nothing may reference them"
     );
 
-    // The next step plans the group again, and the second attempt finishes.
-    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
-    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
+    // Once the abandoned lease expires, the next step plans the group again,
+    // and the second attempt finishes.
+    let expired_context = mutation_context(
+        "test-writer",
+        context
+            .now_ms
+            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_mul(2)),
+    );
+    let spec =
+        step_until_a_compaction_is_planned(&store, &namespace_id, &expired_context, policy).await;
+    publish_planned_compaction(&store, &namespace_id, &expired_context, policy, &spec).await;
 
     assert_eq!(
         visible_namespace(&store, &namespace_id).await,

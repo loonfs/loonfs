@@ -592,7 +592,7 @@ async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
             &namespace_id,
             &context,
             fold_policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         {

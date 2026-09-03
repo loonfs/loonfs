@@ -13,7 +13,9 @@ use crate::{
     MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionOutcome, MoveOptions,
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore,
 };
-use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily, RunTier};
+use loonfs_api::wire::manifest::{
+    decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
+};
 use loonfs_api::{GcRequest, MetadataMaintenanceRequest};
 use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -300,6 +302,25 @@ async fn manifest_runs<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<ManifestRun> {
+    current_manifest_payload(store, namespace_id)
+        .await
+        .runs
+        .iter()
+        .flat_map(|run| {
+            run.segments.iter().map(|descriptor| ManifestRun {
+                run_seq: run.run_seq.0,
+                tier: run.tier,
+                family: descriptor.family,
+                rows: descriptor.row_count,
+            })
+        })
+        .collect()
+}
+
+async fn current_manifest_payload<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> NamespaceManifestPayload {
     let root = loonfs_core::control::load_namespace_metadata_root_control(store, namespace_id)
         .await
         .expect("read the metadata root");
@@ -312,17 +333,6 @@ async fn manifest_runs<S: ObjectStore + ?Sized>(
     decode_namespace_manifest_json(&bytes)
         .expect("decode the manifest")
         .payload
-        .runs
-        .iter()
-        .flat_map(|run| {
-            run.segments.iter().map(|descriptor| ManifestRun {
-                run_seq: run.run_seq.0,
-                tier: run.tier,
-                family: descriptor.family,
-                rows: descriptor.row_count,
-            })
-        })
-        .collect()
 }
 
 /// The runs the bindings group holds right now, and the rows in them.
@@ -374,6 +384,59 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         ReorganizeStepOutcome::UnitPublished,
         "an amortizing planner takes the delta merge above the frozen base"
     );
+    let response = scheduled
+        .run_maintenance(&automatic, metadata_request())
+        .await
+        .expect("run the second writer-scheduled step");
+    let metadata = match response {
+        MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
+        _ => None,
+    }
+    .expect("a metadata request should return a metadata response");
+    assert_eq!(metadata.reorganize, ReorganizeStepOutcome::UnitPublished);
+    assert_eq!(
+        current_manifest_payload(&store, &automatic)
+            .await
+            .frozen_base_delta_merges
+            .get(&BINDINGS),
+        Some(&2),
+        "the manifest records both delta merges over the frozen base"
+    );
+
+    writer.shutdown().await.expect("shut down the first writer");
+    let fresh_store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
+    let fresh_writer = FsWriter::builder_with_store(Arc::clone(&fresh_store))
+        .writer_id("fresh-writer")
+        .background_work(FsBackgroundWork::ManualOnly)
+        .build()
+        .await
+        .expect("build a fresh writer");
+    let fresh_scheduled = FsAdmin::builder_with_store(fresh_store)
+        .actor_id("fresh-scheduled-admin")
+        .over_writer(&fresh_writer)
+        .build()
+        .await
+        .expect("build a fresh writer-backed admin")
+        .starve_reorganization_row_budget(budget);
+    let response = fresh_scheduled
+        .run_maintenance(&automatic, metadata_request())
+        .await
+        .expect("run the third step through the fresh handle");
+    let metadata = match response {
+        MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
+        _ => None,
+    }
+    .expect("a metadata request should return a metadata response");
+    assert_eq!(
+        metadata.reorganize,
+        ReorganizeStepOutcome::CompactionStarted,
+        "the fresh handle reads the manifest count and plans full compaction on the third step"
+    );
+    fresh_writer
+        .shutdown()
+        .await
+        .expect("shut down the fresh writer");
 
     let (runs_before, rows_before) = bindings_runs(&store, &explicit).await;
     assert!(

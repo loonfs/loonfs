@@ -51,9 +51,7 @@ pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCu
 pub use self::flush::{ensure_metadata_publication_budget, next_run_no_after};
 pub use self::list::CheckpointPageCursor;
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
-pub use self::reorganize::{
-    FrozenBasePolicy, MetadataCompactionView, MetadataReorganizeOutcome, MetadataReorganizeReport,
-};
+pub use self::reorganize::{FrozenBasePolicy, MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub use self::runs::MetadataFamilyGroup;
 pub(crate) use self::runs::MetadataLsmPolicy;
 pub use self::snapshot::load_snapshot_read_basis;

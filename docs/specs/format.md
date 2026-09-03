@@ -1846,11 +1846,11 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Grep root pointer | `grep_root` | JSON, uncompressed | 1 |
 | Grep manifest | `grep_manifest` | JSON, uncompressed | 1 |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the grep manifest) |
-| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
+| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 2 |
 | Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
-| Compaction lease | `compaction_lease` | JSON, uncompressed | 1 |
+| Compaction lease | `compaction_lease` | JSON, uncompressed | 2 |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -1897,6 +1897,8 @@ the delta run it writes across every family. A rebuild takes one number for
 the run it writes for one family group. So `run_no` and `family` together name
 one family's segment list inside one run, and `segment_index` numbers that
 list from zero, once each, in the order the segments were written.
+
+The manifest also records, per family group, how many delta merges have published above a frozen base since that base was last rebuilt.
 
 A run also carries `run_seq`, the namespace sequence it materialized through,
 and `tier`, which is either `delta` or `base`. A WAL flush writes a delta run,
@@ -2482,8 +2484,8 @@ publishing CAS) — under these rules:
    The lease says so instead. Every job owns the prefix
    `namespaces/{namespace_id}/metadata/compactions/{job_id}/`, writes its
    output under `segments/` inside it, and holds a lease at `lease.json` beside
-   that directory. The lease carries ownership only — job, namespace, owner,
-   the tagged `status`, `started_at_ms`, `heartbeat_at_ms` — and never a
+   that directory. The lease carries ownership only — job, namespace, group,
+   owner, the tagged `status`, `started_at_ms`, `heartbeat_at_ms` — and never a
    cursor, an output descriptor, an offset, or resumable progress. The job
    creates it `active` with create-if-absent before its first output object,
    and refreshes it by compare-and-swap on the etag it last observed, every

@@ -132,6 +132,7 @@ pub(super) fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceMan
             writer_epoch: WriterEpoch(0),
             next_inode_id: genesis_next_inode_id(),
             next_run_no: RunNo(0),
+            frozen_base_delta_merges: Default::default(),
             retention_floor_seq: ChangeSeq(0),
             runs: Vec::new(),
         },

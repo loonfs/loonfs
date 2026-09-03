@@ -917,20 +917,18 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// [`crate::checkpoint::MetadataReorganizeOutcome::CompactionPlanned`]
     /// instead. The caller runs that plan with
     /// [`Self::run_metadata_compaction`] as a background job and includes its
-    /// specification in `compactions` while the job runs. This prevents a
-    /// bounded step from merging the same group concurrently. `compactions`
-    /// also records how many delta merges have run above an oversized base so
-    /// the planner knows when to request the full compaction.
+    /// specification. The job's lease prevents a bounded step from merging
+    /// the same group concurrently.
     pub async fn reorganize_metadata(
         &self,
-        compactions: crate::checkpoint::MetadataCompactionView<'_>,
+        frozen_base: crate::checkpoint::FrozenBasePolicy,
     ) -> Result<crate::checkpoint::MetadataReorganizeReport> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
             self.metadata_lsm_policy(),
-            compactions,
+            frozen_base,
         )
         .await
     }
