@@ -2,7 +2,7 @@
 //! candidates as one WAL segment and one head compare-and-swap, then returns
 //! one result per candidate.
 
-use crate::checkpoint::{fold_publish_tail_projection, MetadataSegmentCache};
+use crate::checkpoint::MetadataSegmentCache;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataViewError, Result, WriterFence};
@@ -22,10 +22,8 @@ use loonfs_api::wire::control::{AcquiredWriter, HeadState};
 use loonfs_api::{ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
-use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tracing::Instrument;
 
 /// One namespace mutation together with the result of preparing any content
 /// it references.
@@ -168,14 +166,25 @@ impl CommitCandidate {
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
     pub results: Vec<Result<ApiCommitResponse>>,
-    /// Whether this publish first folded the WAL tail into a manifest.
-    pub folded: bool,
     /// WAL tail length observed by this publish, for opportunistic
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
     /// Read state produced by a successful, unambiguous head CAS. Callers can
     /// use it to update read caches without reloading from object storage.
     pub resulting_read_state: Option<ResultingReadState>,
+}
+
+/// The tail a fold publishes: the head it was replayed against, the basis
+/// the manifest builds on, and the rows themselves. Cheap to take: an `Arc`
+/// clone and two small clones.
+#[derive(Debug, Clone)]
+pub struct WalFoldSnapshot {
+    pub head: HeadState,
+    pub head_etag: String,
+    pub basis: MetadataBasis,
+    pub retention_floor_seq: Option<ChangeSeq>,
+    pub tail_state: Arc<MetadataState>,
+    pub wal_tail_segments: u64,
 }
 
 /// A read anchor plus the projected WAL tail as of one landed publish.
@@ -218,7 +227,6 @@ pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
 pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
     publish_tail_projection: Option<PublishTailProjection>,
-    fold_wal_tail_at: Option<NonZeroU64>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionState`].
     session: SharedWriterSessionState,
@@ -235,7 +243,6 @@ impl NamespaceCommitEngine {
         Self {
             namespace_id,
             publish_tail_projection: None,
-            fold_wal_tail_at: None,
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
@@ -246,12 +253,6 @@ impl NamespaceCommitEngine {
     /// persist across engine instances.
     pub fn writer_session(mut self, session: SharedWriterSessionState) -> Self {
         self.session = session;
-        self
-    }
-
-    /// Folds the WAL tail before a publish that observes this many segments.
-    pub fn fold_wal_tail_at(mut self, threshold: Option<NonZeroU64>) -> Self {
-        self.fold_wal_tail_at = threshold;
         self
     }
 
@@ -287,6 +288,24 @@ impl NamespaceCommitEngine {
         self.publish_tail_projection
             .as_ref()
             .map(PublishTailProjection::weight)
+    }
+
+    /// The retained projection as a fold input, or `None` when the engine
+    /// holds no projection.
+    ///
+    /// A completed fold needs no invalidation: the projection key carries the
+    /// basis identity, so the next view load reloads after the root changes.
+    pub fn wal_fold_snapshot(&self) -> Option<WalFoldSnapshot> {
+        self.publish_tail_projection
+            .as_ref()
+            .map(|projection| WalFoldSnapshot {
+                head: projection.head.clone(),
+                head_etag: projection.head_etag().to_owned(),
+                basis: projection.basis().clone(),
+                retention_floor_seq: projection.retention_floor_seq,
+                tail_state: Arc::clone(&projection.tail_state),
+                wal_tail_segments: projection.wal_tail_segments,
+            })
     }
 
     /// Returns the session's writer epoch, acquiring it on first use. A fenced
@@ -354,26 +373,7 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
-        Box::pin(self.publish_batch_inner(store, candidates, context, tail_options, None)).await
-    }
-
-    /// Publishes a batch and instruments any configured WAL fold with `fold_span`.
-    pub async fn publish_batch_with_fold_span<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        candidates: Vec<CommitCandidate>,
-        context: &MutationContext,
-        tail_options: &PublishTailOptions,
-        fold_span: tracing::Span,
-    ) -> NamespaceCommitEnginePublishResult {
-        Box::pin(self.publish_batch_inner(
-            store,
-            candidates,
-            context,
-            tail_options,
-            Some(fold_span),
-        ))
-        .await
+        Box::pin(self.publish_batch_inner(store, candidates, context, tail_options)).await
     }
 
     async fn publish_batch_inner<S: ObjectStore + ?Sized>(
@@ -382,12 +382,10 @@ impl NamespaceCommitEngine {
         candidates: Vec<CommitCandidate>,
         context: &MutationContext,
         tail_options: &PublishTailOptions,
-        fold_span: Option<tracing::Span>,
     ) -> NamespaceCommitEnginePublishResult {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
-                folded: false,
                 wal_tail_segments: 0,
                 resulting_read_state: None,
             };
@@ -399,18 +397,17 @@ impl NamespaceCommitEngine {
             Err(error) => {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
-                    folded: false,
                     wal_tail_segments: 0,
                     resulting_read_state: None,
                 };
             }
         };
 
-        let (mut publish_view, mut projection) = match load_publish_metadata_view(
+        let (publish_view, projection) = match load_publish_metadata_view(
             store,
             self.segment_cache.as_deref(),
             &self.namespace_id,
-            acquired_writer.clone(),
+            acquired_writer,
             self.publish_tail_projection.as_ref(),
             tail_options,
         )
@@ -424,75 +421,11 @@ impl NamespaceCommitEngine {
                 }
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
-                    folded: false,
                     wal_tail_segments: 0,
                     resulting_read_state: None,
                 };
             }
         };
-
-        let mut folded = false;
-        if self
-            .fold_wal_tail_at
-            .is_some_and(|threshold| projection.wal_tail_segments >= threshold.get())
-        {
-            let wal_tail_segments = projection.wal_tail_segments;
-            let fold = fold_publish_tail_projection(
-                store,
-                &self.namespace_id,
-                &publish_view,
-                &projection,
-                context,
-                self.timer.as_ref(),
-            );
-            let fold = match fold_span {
-                Some(fold_span) => fold.instrument(fold_span).await,
-                None => fold.await,
-            };
-            match fold {
-                Ok(_) => {
-                    drop(publish_view);
-                    drop(projection);
-                    self.invalidate_projection();
-                    folded = true;
-                    match load_publish_metadata_view(
-                        store,
-                        self.segment_cache.as_deref(),
-                        &self.namespace_id,
-                        acquired_writer,
-                        None,
-                        tail_options,
-                    )
-                    .await
-                    {
-                        Ok((fresh_view, fresh_projection)) => {
-                            publish_view = fresh_view;
-                            projection = fresh_projection;
-                        }
-                        Err(error) => {
-                            if let CoreError::WriterFenced(fence) = &error {
-                                *self.lock_session() = WriterSessionState::Fenced(fence.clone());
-                            }
-                            return NamespaceCommitEnginePublishResult {
-                                results: repeated_error(candidate_count, error),
-                                folded,
-                                wal_tail_segments: 0,
-                                resulting_read_state: None,
-                            };
-                        }
-                    }
-                }
-                Err(error) => {
-                    // A failed fold does not fail the publish.
-                    tracing::info!(
-                        namespace_id = %self.namespace_id,
-                        wal_tail_segments,
-                        error = %error.message(),
-                        "WAL-tail fold failed; continuing the publish"
-                    );
-                }
-            }
-        }
 
         let reject_writes_at_segments = crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
         // `wal_tail_segments` is the tail this publish would extend, so
@@ -508,7 +441,6 @@ impl NamespaceCommitEngine {
             };
             return NamespaceCommitEnginePublishResult {
                 results: repeated_error(candidate_count, CoreError::from(error)),
-                folded,
                 wal_tail_segments,
                 resulting_read_state: None,
             };
@@ -545,7 +477,6 @@ impl NamespaceCommitEngine {
         };
         NamespaceCommitEnginePublishResult {
             results: published.results,
-            folded,
             wal_tail_segments,
             resulting_read_state,
         }
@@ -595,7 +526,7 @@ impl NamespaceCommitEngine {
                 for record in &records {
                     tail_state.apply_committed_wal_record_mut(record);
                 }
-                projection.reanchor(head.seq, head_etag);
+                projection.reanchor(head, head_etag);
                 if projection.within_limits(tail_options) {
                     self.publish_tail_projection = Some(projection);
                 } else {

@@ -8,6 +8,7 @@
 //! [`create`](super::create).
 
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
+use super::cache::MetadataSegmentCache;
 use super::load::{head_from_manifest, load_basis_metadata_segments};
 use super::publish::{
     manifest_ref_for, manifest_write_failure, publish_metadata_root, write_namespace_manifest,
@@ -16,6 +17,7 @@ use super::publish::{
 use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit::CommitHeadPublishError;
+use crate::commit_engine::WalFoldSnapshot;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::CoreError;
@@ -23,9 +25,9 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
 use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::MetadataState;
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::{metadata_basis_without_root, MetadataBasis};
+use crate::namespace::control::load_metadata_root_object_if_present;
 use crate::namespace::control_snapshot::{load_control_snapshot, resolve_retention_floor_seq};
-use crate::protocol::{PublishMetadataView, PublishTailProjection};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
     ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
@@ -225,26 +227,44 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     })))
 }
 
-pub(crate) async fn fold_publish_tail_projection<S: ObjectStore + ?Sized>(
+pub async fn fold_wal_tail_snapshot<S: ObjectStore + ?Sized>(
     store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    publish_view: &PublishMetadataView<'_, S>,
-    projection: &PublishTailProjection,
+    snapshot: WalFoldSnapshot,
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<FlushWalResponse> {
-    let floor_seq = match publish_view.retention_floor_seq() {
+    let loaded_basis = load_basis_metadata_segments(
+        store,
+        segment_cache,
+        namespace_id,
+        &snapshot.basis,
+        snapshot.head.created_at_ms,
+    )
+    .await?;
+    let current_root = load_metadata_root_object_if_present(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    let current_basis = current_root.map_or_else(
+        || metadata_basis_without_root(&snapshot.head),
+        |root| MetadataBasis::Manifest(root.state.manifest),
+    );
+    if current_basis != snapshot.basis {
+        return flush_wal(store, namespace_id, context).await;
+    }
+    let floor_seq = match snapshot.retention_floor_seq {
         Some(floor_seq) => floor_seq,
-        None => resolve_retention_floor_seq(store, publish_view.head())
+        None => resolve_retention_floor_seq(store, &snapshot.head)
             .await
             .map_err(CoreError::ControlObjectLoad)?,
     };
     let root_projection = RootProjection {
-        head: publish_view.head().clone(),
-        basis: projection.basis().clone(),
+        head: snapshot.head,
+        basis: snapshot.basis,
         floor_seq,
-        manifest_segments: ProjectionManifestSegments::Borrowed(publish_view.manifest_segments()),
-        tail_state: Arc::clone(&projection.tail_state),
+        manifest_segments: ProjectionManifestSegments::Loaded(loaded_basis.segments),
+        tail_state: snapshot.tail_state,
     };
     // A fold publishes metadata without updating the namespace head.
     match try_flush_wal_projection(store, namespace_id, &root_projection, context, timer).await? {
@@ -265,7 +285,6 @@ fn flush_wal_response(namespace_id: &NamespaceId, basis: FlushedBasis) -> FlushW
 
 pub(super) enum ProjectionManifestSegments<'a, S: ObjectStore + ?Sized> {
     Loaded(VerifiedMetadataSegments<'a, S>),
-    Borrowed(&'a VerifiedMetadataSegments<'a, S>),
 }
 
 impl<'a, S: ObjectStore + ?Sized> std::ops::Deref for ProjectionManifestSegments<'a, S> {
@@ -274,7 +293,6 @@ impl<'a, S: ObjectStore + ?Sized> std::ops::Deref for ProjectionManifestSegments
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Loaded(segments) => segments,
-            Self::Borrowed(segments) => segments,
         }
     }
 }

@@ -32,7 +32,6 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) acquired_writer: AcquiredWriter,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
     tail_state: Arc<MetadataState>,
-    retention_floor_seq: Option<ChangeSeq>,
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
@@ -42,18 +41,6 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 
     pub(crate) fn content_store_id(&self) -> &ContentStoreId {
         &self.content_store_id
-    }
-
-    pub(crate) fn head(&self) -> &HeadState {
-        &self.head
-    }
-
-    pub(crate) fn manifest_segments(&self) -> &VerifiedMetadataSegments<'_, S> {
-        &self.manifest_segments
-    }
-
-    pub(crate) fn retention_floor_seq(&self) -> Option<ChangeSeq> {
-        self.retention_floor_seq
     }
 
     pub(super) async fn find_commit_receipt(
@@ -120,6 +107,8 @@ struct PublishProjectionKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishTailProjection {
     key: PublishProjectionKey,
+    pub(crate) head: HeadState,
+    pub(crate) retention_floor_seq: Option<ChangeSeq>,
     pub(crate) wal_tail_segments: u64,
     pub(crate) tail_state: Arc<MetadataState>,
 }
@@ -158,8 +147,12 @@ impl PublishTailProjection {
         self.key.basis.manifest_head_seq()
     }
 
-    pub(crate) fn reanchor(&mut self, seq: ChangeSeq, etag: String) {
-        self.key.head = HeadAnchor { seq, etag };
+    pub(crate) fn reanchor(&mut self, head: HeadState, etag: String) {
+        self.key.head = HeadAnchor {
+            seq: head.seq,
+            etag,
+        };
+        self.head = head;
     }
 }
 
@@ -207,7 +200,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     {
         cached.clone()
     } else {
-        load_publish_tail_projection(store, &head, key, &loaded_basis).await?
+        load_publish_tail_projection(store, &head, retention_floor_seq, key, &loaded_basis).await?
     };
 
     let manifest_segments = loaded_basis.segments;
@@ -223,7 +216,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             acquired_writer,
             manifest_segments,
             tail_state,
-            retention_floor_seq,
         },
         projection,
     ))
@@ -232,6 +224,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     store: &S,
     head: &HeadState,
+    retention_floor_seq: Option<ChangeSeq>,
     key: PublishProjectionKey,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<PublishTailProjection> {
@@ -266,6 +259,8 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
     let projection = PublishTailProjection {
         key,
+        head: head.clone(),
+        retention_floor_seq,
         wal_tail_segments,
         tail_state: Arc::new(replayed.resulting_metadata_state),
     };
@@ -367,7 +362,16 @@ mod tests {
     }
 
     fn projection(key: PublishProjectionKey) -> PublishTailProjection {
+        let mut head = HeadState::initial(
+            key.namespace_id.clone(),
+            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+                .expect("valid content store id"),
+            1_000,
+        );
+        head.seq = key.head.seq;
         PublishTailProjection {
+            head,
+            retention_floor_seq: Some(ChangeSeq(0)),
             key,
             wal_tail_segments: 3,
             tail_state: Arc::new(bootstrap_metadata_state(1_000)),

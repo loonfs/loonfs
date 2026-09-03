@@ -150,6 +150,24 @@ impl FsWriter {
         Ok(self.publisher.close_namespace(namespace_id).await?)
     }
 
+    /// Waits for this writer's in-flight WAL-tail fold for `namespace_id`.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.wait_for_fold",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "wait_for_fold",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn wait_for_fold(&self, namespace_id: &NamespaceId) -> Result<()> {
+        self.core.record_trace_context(&tracing::Span::current());
+        self.publisher.wait_for_fold(namespace_id).await
+    }
+
     /// Returns the writer session state for `namespace_id`.
     pub fn namespace_session_state(&self, namespace_id: &NamespaceId) -> NamespaceSessionState {
         self.publisher.namespace_session_state(namespace_id)

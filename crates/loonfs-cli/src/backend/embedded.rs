@@ -115,6 +115,10 @@ impl EmbeddedBackend {
             if !gated {
                 break;
             }
+            self.writer
+                .wait_for_fold(namespace_id)
+                .await
+                .map_err(map_runtime_error)?;
             self.runner.drain().await.map_err(map_runtime_error)?;
             result = attempt().await;
         }

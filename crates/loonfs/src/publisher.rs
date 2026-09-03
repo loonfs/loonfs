@@ -13,8 +13,8 @@ use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespaceSessionPolicy,
-    RuntimeCacheConfig, RuntimeError,
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespacePublication,
+    NamespaceSessionPolicy, RuntimeCacheConfig, RuntimeError,
 };
 use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
@@ -23,7 +23,8 @@ use loonfs_core::cache::Recency;
 use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
 use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, CONTENTION_RETRY_LIMIT};
 use loonfs_core::publish::{
-    NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
+    NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WalFoldSnapshot,
+    WriterSessionState,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::collections::{HashMap, VecDeque};
@@ -572,6 +573,22 @@ impl PublisherRegistry {
         }
     }
 
+    pub(crate) async fn wait_for_fold(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<(), RuntimeError> {
+        let publisher = self
+            .shared
+            .lock_state()
+            .publishers
+            .get(namespace_id)
+            .cloned();
+        if let Some(publisher) = publisher {
+            publisher.wait_for_fold().await?;
+        }
+        Ok(())
+    }
+
     fn report_session_counts(&self, open: usize, closing: usize) {
         self.read_core
             .instruments()
@@ -617,8 +634,14 @@ impl PublisherRegistry {
             .collect();
         // Awaited outside the registry lock, for the same nesting reason as
         // the admission sweep.
-        for publisher in publishers {
+        for publisher in &publishers {
             publisher.wait_for_worker().await;
+        }
+        let mut task_error = None;
+        for publisher in publishers {
+            if let Err(error) = publisher.wait_for_fold().await {
+                task_error.get_or_insert(error);
+            }
         }
         let closes = self
             .shared
@@ -635,6 +658,9 @@ impl PublisherRegistry {
             return Err(RuntimeError::RuntimeTask(format!(
                 "{panicked} publisher task(s) panicked"
             )));
+        }
+        if let Some(error) = task_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -664,6 +690,13 @@ async fn finish_namespace_close(
 ) {
     let fenced = match AssertUnwindSafe(async {
         publisher.wait_for_worker().await;
+        if let Err(error) = publisher.wait_for_fold().await {
+            tracing::info!(
+                namespace_id = %publisher.namespace_id,
+                error = %error,
+                "wal fold failed while the namespace session closed"
+            );
+        }
         publisher.session_is_fenced()
     })
     .catch_unwind()
@@ -757,6 +790,8 @@ struct NamespacePublisherState {
     /// finds the queue empty. That single flight is what makes the delete
     /// barrier's admission order deterministic.
     worker: Option<WorkerHandle>,
+    fold: Option<FoldHandle>,
+    next_fold_generation: u64,
     /// Earliest instant the next head compare-and-swap may start. `None` is
     /// a cold namespace: it publishes immediately.
     next_allowed_cas_at: Option<u64>,
@@ -767,9 +802,23 @@ struct WorkerHandle {
     liveness: watch::Receiver<bool>,
 }
 
+struct FoldHandle {
+    generation: u64,
+    task: JoinHandle<()>,
+    liveness: watch::Receiver<bool>,
+}
+
 struct WorkerExit(watch::Sender<bool>);
 
 impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
+}
+
+struct FoldExit(watch::Sender<bool>);
+
+impl Drop for FoldExit {
     fn drop(&mut self) {
         let _ = self.0.send(true);
     }
@@ -835,6 +884,8 @@ impl NamespacePublisher {
                 in_flight: HashMap::new(),
                 admission: PublisherAdmissionState::Open,
                 worker: None,
+                fold: None,
+                next_fold_generation: 0,
                 next_allowed_cas_at: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
@@ -1239,7 +1290,7 @@ impl NamespacePublisher {
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
-        let results = crate::fs::publish_batch_with_engine(
+        let publish = crate::fs::publish_batch_with_engine(
             &self.read_core,
             writer,
             &self.namespace_id,
@@ -1247,8 +1298,28 @@ impl NamespacePublisher {
             candidates,
         )
         .await;
+        let write_stopped =
+            !publish.results.is_empty() && publish.results.iter().all(is_maintenance_required);
+        if write_stopped {
+            self.read_core.instruments().publisher_write_stop_refusal();
+        }
+        let fold_start = if publish.wal_tail_segments >= CHECKPOINT_AT_WAL_SEGMENTS || write_stopped
+        {
+            engine
+                .wal_fold_snapshot()
+                .and_then(|snapshot| self.start_fold(snapshot, publish.wal_tail_segments))
+        } else {
+            None
+        };
+        if !self.read_core.control_cache_enabled() {
+            engine.invalidate_projection();
+        }
         self.settle_retained_projection(engine.retained_tail_weight());
-        results
+        drop(slot);
+        if let Some(start) = fold_start {
+            let _ = start.send(());
+        }
+        publish.results
     }
 
     /// Returns the publisher's lazily created commit engine.
@@ -1260,8 +1331,101 @@ impl NamespacePublisher {
             NamespaceCommitEngine::new(self.namespace_id.clone())
                 .segment_cache(self.read_core.metadata_segment_cache())
                 .writer_session(Arc::clone(&slot.session))
-                .fold_wal_tail_at(std::num::NonZeroU64::new(CHECKPOINT_AT_WAL_SEGMENTS))
         })
+    }
+
+    fn start_fold(
+        &self,
+        snapshot: WalFoldSnapshot,
+        wal_tail_segments: u64,
+    ) -> Option<oneshot::Sender<()>> {
+        let mut state = self.lock_state();
+        if state
+            .fold
+            .as_ref()
+            .is_some_and(|fold| !fold.task.is_finished())
+        {
+            return None;
+        }
+        let generation = state.next_fold_generation;
+        state.next_fold_generation = state.next_fold_generation.wrapping_add(1);
+        let (start, started) = oneshot::channel();
+        let (exit, liveness) = watch::channel(false);
+        let publisher = self.clone();
+        let task = self.runtime.spawn(async move {
+            let _exit = FoldExit(exit);
+            if started.await.is_err() {
+                return;
+            }
+            if AssertUnwindSafe(publisher.run_fold(snapshot, wal_tail_segments))
+                .catch_unwind()
+                .await
+                .is_err()
+            {
+                publisher.record_panic();
+            }
+        });
+        state.fold = Some(FoldHandle {
+            generation,
+            task,
+            liveness,
+        });
+        Some(start)
+    }
+
+    async fn run_fold(&self, snapshot: WalFoldSnapshot, wal_tail_segments: u64) {
+        let Some(writer) = self.writer.upgrade() else {
+            return;
+        };
+        let context = match writer.identity.mutation_context() {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::info!(
+                    namespace_id = %self.namespace_id,
+                    wal_tail_segments,
+                    error = %error,
+                    "WAL-tail fold failed"
+                );
+                return;
+            }
+        };
+        let started_ms = self.timer.monotonic_now_ms();
+        let segment_cache = self.read_core.metadata_segment_cache();
+        let result = loonfs_core::fold_wal_tail_snapshot(
+            self.read_core.store(),
+            Some(segment_cache.as_ref()),
+            &self.namespace_id,
+            snapshot,
+            &context,
+            self.timer.as_ref(),
+        )
+        .instrument(phase_span!(self.read_core, "wal_fold", self.namespace_id))
+        .await;
+        self.read_core
+            .instruments()
+            .publisher_wal_fold_duration(self.elapsed_ms_since(started_ms));
+        match result {
+            Ok(_) => {
+                self.read_core.instruments().publisher_wal_fold();
+                writer.notify_after_publish(
+                    &self.namespace_id,
+                    &NamespacePublication {
+                        namespace_id: self.namespace_id.clone(),
+                        committed_through_seq: None,
+                        folded: true,
+                        wal_tail_segments: 0,
+                    },
+                );
+            }
+            Err(error) => {
+                tracing::info!(
+                    namespace_id = %self.namespace_id,
+                    wal_tail_segments,
+                    error = %error.message(),
+                    "WAL-tail fold failed"
+                );
+            }
+        }
     }
 
     /// Runs the delete barrier. Returns true when the publisher is now
@@ -1363,6 +1527,44 @@ impl NamespacePublisher {
                 }
             }
         }
+    }
+
+    async fn wait_for_fold(&self) -> Result<(), RuntimeError> {
+        let fold = self.lock_state().fold.as_ref().map(|fold| {
+            (
+                fold.generation,
+                fold.liveness.clone(),
+                fold.task.is_finished(),
+            )
+        });
+        let Some((generation, mut liveness, finished)) = fold else {
+            return Ok(());
+        };
+        if !finished {
+            while !*liveness.borrow_and_update() {
+                if liveness.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        let task = {
+            let mut state = self.lock_state();
+            if state
+                .fold
+                .as_ref()
+                .is_some_and(|fold| fold.generation == generation)
+            {
+                state.fold.take().map(|fold| fold.task)
+            } else {
+                None
+            }
+        };
+        if let Some(task) = task {
+            task.await.map_err(|error| {
+                RuntimeError::RuntimeTask(format!("WAL-tail fold task failed: {error}"))
+            })?;
+        }
+        Ok(())
     }
 
     /// Waits until the namespace may start another head CAS.
@@ -1577,6 +1779,14 @@ fn is_retryable_head_publish(result: &CommitResult) -> bool {
         Err(RuntimeError::Core(CoreError::HeadPublish(
             CommitHeadPublishError::StaleHead | CommitHeadPublishError::OutcomeUnknown(_)
         )))
+    )
+}
+
+fn is_maintenance_required(result: &CommitResult) -> bool {
+    matches!(
+        result,
+        Err(RuntimeError::Core(error))
+            if error.code() == loonfs_core::ErrorCode::MaintenanceRequired
     )
 }
 

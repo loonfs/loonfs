@@ -17,6 +17,10 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+const WAL_FOLD_MS_BOUNDARIES: &[f64] = &[
+    1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1_000.0, 3_000.0, 10_000.0, 30_000.0, 60_000.0, 120_000.0,
+];
+
 trait MetricLabel: Copy + PartialEq + 'static {
     const VALUES: &'static [Self];
 
@@ -460,6 +464,20 @@ impl RuntimeInstruments {
             return;
         };
         installed.publisher.wal_folds.increment(1);
+    }
+
+    pub(crate) fn publisher_wal_fold_duration(&self, elapsed_ms: u64) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.publisher.wal_fold_ms.record(elapsed_ms as f64);
+    }
+
+    pub(crate) fn publisher_write_stop_refusal(&self) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.publisher.write_stop_refusals.increment(1);
     }
 
     /// Reports one publication result delivered to its caller.
@@ -968,6 +986,8 @@ impl CompactionInstruments {
 struct PublisherInstruments {
     batches: Arc<dyn CounterHandle>,
     wal_folds: Arc<dyn CounterHandle>,
+    wal_fold_ms: Arc<dyn HistogramHandle>,
+    write_stop_refusals: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
     sessions_open: Arc<dyn GaugeHandle>,
@@ -987,7 +1007,18 @@ impl PublisherInstruments {
             ),
             wal_folds: recorder.register_counter(
                 "loonfs.publisher.wal_folds",
-                "WAL tails folded on the publication path",
+                "WAL tails folded by namespace publishers",
+                &[],
+            ),
+            wal_fold_ms: recorder.register_histogram(
+                "loonfs.publisher.wal_fold_ms",
+                "Duration of a WAL-tail fold in milliseconds",
+                &[],
+                WAL_FOLD_MS_BOUNDARIES,
+            ),
+            write_stop_refusals: recorder.register_counter(
+                "loonfs.publisher.write_stop_refusals",
+                "Mutation batches refused because the WAL tail reached its write-stop bound",
                 &[],
             ),
             batch_size: recorder.register_histogram(
@@ -1381,6 +1412,8 @@ mod tests {
 
         instruments.publisher_batch(4);
         instruments.publisher_wal_fold();
+        instruments.publisher_wal_fold_duration(5);
+        instruments.publisher_write_stop_refusal();
         instruments.publisher_publish(PublishOutcome::Ok);
         MaintenanceInstruments::new(None).maintenance_step(
             MaintenanceJobId::GC,
