@@ -946,8 +946,15 @@ pub(crate) async fn publish_batch_with_engine(
     // Boxing erases the engine's deeply nested publish future; without
     // it, callers awaiting a put or commit (CLI, server, embedding
     // crates) exceed rustc's type-recursion depth.
-    let mut publish =
-        Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options)).await;
+    let fold_span = phase_span!(core, "wal_fold", namespace_id);
+    let mut publish = Box::pin(engine.publish_batch_with_fold_span(
+        &store,
+        candidates,
+        &context,
+        &tail_options,
+        fold_span,
+    ))
+    .await;
     if !core.control_cache_enabled() {
         // Diagnostic mode: the publisher's engine outlives the publish
         // even with caches off, so drop the tail projection it just
@@ -971,6 +978,10 @@ pub(crate) async fn publish_batch_with_engine(
         }
     }
     let wal_tail_segments = publish.wal_tail_segments;
+    let folded = publish.folded;
+    if folded {
+        core.instruments().publisher_wal_fold();
+    }
     let results = publish
         .results
         .into_iter()
@@ -980,6 +991,7 @@ pub(crate) async fn publish_batch_with_engine(
         namespace_id,
         &NamespacePublication {
             committed_through_seq: highest_committed_seq(&results),
+            folded,
             wal_tail_segments,
         },
     );

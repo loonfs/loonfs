@@ -15,9 +15,12 @@
 //! installed, and the assertion is deterministic.
 
 use loonfs::{
-    CreateNamespaceOptions, FsBackgroundWork, FsWriter, MetadataMaintenanceOptions, NamespaceId,
-    PutFileOptions, StoreConfig,
+    CreateNamespaceOptions, FsBackgroundWork, FsWriter, MaintenanceJobId,
+    MetadataMaintenanceOptions, NamespaceId, StoreConfig,
 };
+use loonfs_core::test_support::append_wal_segments;
+use loonfs_core::MutationContext;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -51,18 +54,19 @@ async fn writer(root: &Path) -> FsWriter {
         .expect("build writer")
 }
 
-async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &NamespaceId) {
-    for round in 0..writes_past_wal_tail_threshold() {
-        writer
-            .put_file_bytes(
-                namespace_id,
-                &format!("/docs/file-{round}.txt"),
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect("put file");
-    }
+async fn fill_wal_tail_past_threshold(root: &Path, namespace_id: &NamespaceId) {
+    let store = LocalFsStore::new(root).expect("open tail store");
+    append_wal_segments(
+        &store,
+        namespace_id,
+        u64::from(writes_past_wal_tail_threshold()),
+        &MutationContext {
+            writer_id: loonfs_api::WriterId::parse("tracing-tail-writer").expect("writer id"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("fill WAL tail past threshold");
 }
 
 struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
@@ -102,7 +106,10 @@ fn background_step_conclusions_emit_debug_events() {
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
-        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+        fill_wal_tail_past_threshold(temp_dir.path(), &namespace_id).await;
+        writer
+            .maintenance()
+            .nudge(MaintenanceJobId::METADATA, &namespace_id);
         writer
             .flush_background()
             .await

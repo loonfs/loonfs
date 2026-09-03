@@ -69,7 +69,7 @@ pub(crate) use self::compaction_lease::{claim_compaction_prefix, CompactionPrefi
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::data_block_load::DecodedRowWeight;
 pub(crate) use self::files::list_checkpoint_files_page;
-pub(crate) use self::flush::flush_wal;
+pub(crate) use self::flush::{flush_wal, fold_publish_tail_projection};
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
     head_from_manifest, load_basis_metadata_segments, load_namespace_manifest_envelope,

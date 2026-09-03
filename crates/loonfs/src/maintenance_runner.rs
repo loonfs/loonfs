@@ -155,6 +155,8 @@ impl MaintenanceStepReport {
 pub struct NamespacePublication {
     /// Highest sequence committed by the attempt, if any.
     pub committed_through_seq: Option<ChangeSeq>,
+    /// Whether the publish first folded the WAL tail into a manifest.
+    pub folded: bool,
     /// Visible WAL-tail length, or zero if the attempt did not read it.
     pub wal_tail_segments: u64,
 }
