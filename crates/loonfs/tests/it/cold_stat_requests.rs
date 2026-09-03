@@ -10,8 +10,8 @@
 //! wave count.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MetadataMaintenanceOptions, NamespaceId,
-    PutFileOptions,
+    CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
+    NamespaceId, PutFileOptions,
 };
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_api::AbsolutePath;
@@ -55,11 +55,11 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("coldstat-admin")
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("coldstat-maintenance")
         .build()
         .await
-        .expect("build admin");
+        .expect("build maintenance");
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -78,7 +78,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         )
         .await
         .expect("seed the first manifest");
-    admin
+    maintenance
         .flush_wal(&namespace_id)
         .await
         .expect("publish first manifest");
@@ -129,7 +129,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             ));
         }
         publish_candidates(&writer, &namespace_id, candidates).await;
-        admin
+        maintenance
             .maintain_metadata(
                 &namespace_id,
                 MetadataMaintenanceOptions {

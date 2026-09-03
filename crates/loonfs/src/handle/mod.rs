@@ -1,17 +1,17 @@
 //! Purpose-specific filesystem handles.
 //!
-//! [`FsWriter`] mutates namespaces, [`FsReader`] serves reads, and [`FsAdmin`]
+//! [`FsWriter`] mutates namespaces, [`FsReader`] serves reads, and [`FsMaintenance`]
 //! runs explicit maintenance. Each handle must be opened in the Tokio runtime
 //! where it will be used. Prefer builders that accept
 //! [`StoreConfig`](crate::StoreConfig); use `builder_with_store` only when the
 //! supplied store is safe to use from that runtime.
 
-mod admin;
 mod builder_core;
+mod maintenance;
 mod reader;
 mod writer;
 
-pub use admin::{FsAdmin, FsAdminBuilder};
+pub use maintenance::{FsMaintenance, FsMaintenanceBuilder};
 pub use reader::{FsReader, FsReaderBuilder};
 pub use writer::{FsWriter, FsWriterBuilder};
 

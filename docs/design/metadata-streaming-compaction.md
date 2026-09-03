@@ -92,7 +92,7 @@ The planner balances these cases with the manifest's record of how many delta me
 
 The count is stored in the namespace manifest for each `MetadataFamilyGroup`. It is cleared after successful full compaction or after a bottom-anchored merge becomes possible.
 
-Callers provide a `FrozenBasePolicy` when planning. Background maintenance uses `Amortized`, which reads the manifest's per-group count. `FsAdmin::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction. A bounded maintenance step without a background runner also uses `CompactImmediately`, allowing it to report that compaction is required instead of repeatedly publishing delta merges that cannot rebuild the base.
+Callers provide a `FrozenBasePolicy` when planning. Background maintenance uses `Amortized`, which reads the manifest's per-group count. `FsMaintenance::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction. A bounded maintenance step without a background runner also uses `CompactImmediately`, allowing it to report that compaction is required instead of repeatedly publishing delta merges that cannot rebuild the base.
 
 The planner excludes every family group whose compaction lease is active and unexpired. A process keeps one compaction claim per namespace so it does not start two jobs itself, and allows at most two compaction jobs to run. Maintenance may continue processing unrelated groups in the same namespace. Shutdown cancels both queued and running jobs.
 
@@ -177,9 +177,9 @@ Cancellation and lease fencing never publish a partial result. A process restart
 
 ## Maintenance results and observability
 
-The maintenance API reports `compaction_started` when a step launches a background job. `compaction_at_capacity` means the job is queued for a process permit, `compaction_running` means the namespace already has a queued or running job, and `compaction_required` means the current handle has no background runner and an operator must call `FsAdmin::compact_metadata`.
+The maintenance API reports `compaction_started` when a step launches a background job. `compaction_at_capacity` means the job is queued for a process permit, `compaction_running` means the namespace already has a queued or running job, and `compaction_required` means the current handle has no background runner and an operator must call `FsMaintenance::compact_metadata`.
 
-An explicit `FsAdmin::compact_metadata` call reports `NoWork`, `BoundedMergePublished`, `AlreadyRunning`, or `Ran`. The separate no-work and bounded-merge outcomes tell callers whether the method changed the manifest without starting a full compaction.
+An explicit `FsMaintenance::compact_metadata` call reports `NoWork`, `BoundedMergePublished`, `AlreadyRunning`, or `Ran`. The separate no-work and bounded-merge outcomes tell callers whether the method changed the manifest without starting a full compaction.
 
 Lifecycle logging covers job selection, start, progress, publication, cancellation, abandonment, supersession, and failure. Progress records include the namespace, family group, input-run count, rows processed, output-segment count, peak retention rows, elapsed time, and final outcome.
 

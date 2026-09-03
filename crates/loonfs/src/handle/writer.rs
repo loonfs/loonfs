@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// `FsWriter` owns the writer identity, mutations, uploads, namespace
 /// lifecycle, and commit publication. With [`FsBackgroundWork::Enabled`], it
 /// also schedules metadata maintenance and upload garbage collection.
-/// Retention-floor advancement remains an explicit [`FsAdmin`](crate::FsAdmin)
+/// Retention-floor advancement remains an explicit [`FsMaintenance`](crate::FsMaintenance)
 /// operation.
 ///
 /// Build the handle inside the Tokio runtime that will use it. Do not share a
@@ -310,7 +310,7 @@ impl FsWriterBuilder {
     /// Handles that share this writer's decoded cache also share this local
     /// cache. The host owns and closes it; object storage remains authoritative.
     ///
-    /// [`FsAdminBuilder::over_writer`]: crate::FsAdminBuilder::over_writer
+    /// [`FsMaintenanceBuilder::over_writer`]: crate::FsMaintenanceBuilder::over_writer
     pub fn stored_metadata_block_cache(
         mut self,
         stored_metadata_block_cache: Arc<dyn StoredMetadataBlockCache>,
@@ -427,8 +427,8 @@ impl FsWriterBuilder {
             runtime,
             std::time::Duration::from_millis(self.min_publish_interval_ms),
         );
-        // The runtime's own executors register last: they run as an admin
-        // over this writer's parts, so both have to exist first.
+        // The runtime's own executors register last: they run as a maintenance
+        // handle over this writer's parts, so both have to exist first.
         register_core_jobs(&bits.maintenance, &core, &bits, &publisher)?;
         Ok(FsWriter {
             core,

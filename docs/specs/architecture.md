@@ -10,6 +10,9 @@
 | **Access-control service** | Evaluates ACLs and shares, then authorizes LoonFS operations. This may be part of the authoritative runtime in a simple deployment. |
 | **Background workers** | Publish namespace manifests, create checkpoint records, advance retention safely, clean up expired control objects, and reclaim unreachable content. |
 
+The embedded runtime exposes `FsReader`, `FsWriter`, and `FsMaintenance` handles.
+Snapshot listing is an `FsReader` operation; snapshot create, extend, and release are `FsWriter` operations.
+
 Namespaces and content stores are separate durable domains. A namespace owns filesystem metadata and history; a content store owns immutable file bytes. A namespace descriptor references exactly one content store, but that reference is not lifecycle ownership. Forked namespaces share the source namespace's content store while keeping independent future metadata history. Fork provenance and GC pins may record source-owned immutable files needed by the fork.
 
 ## 2. Data plane, metadata plane, and control plane

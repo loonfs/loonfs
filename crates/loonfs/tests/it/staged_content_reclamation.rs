@@ -8,7 +8,7 @@
 //! referenced by metadata or reclaimed, and none of them is immortal.
 //!
 //! Garbage collection is driven through `loonfs_core::gc_namespace` rather
-//! than `FsAdmin::gc_namespace`, because the admin handle stamps its pass
+//! than `FsMaintenance::gc_namespace`, because the maintenance handle stamps its pass
 //! from the wall clock and these deadlines are days out. The store is the
 //! same one the runtime wrote through, so the pass sees exactly what the
 //! puts left behind.

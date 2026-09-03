@@ -468,7 +468,7 @@ async fn method_not_allowed() -> ApiResponseError {
 ///
 /// The long-lived server writer opts into background maintenance; the
 /// reader shares its caches so read endpoints observe writes immediately;
-/// the `FsAdmin` handle drives the explicit maintenance endpoints under its own
+/// the `FsMaintenance` handle drives the explicit maintenance endpoints under its own
 /// actor identity, sharing the writer's decoded-block cache under the
 /// configured budget. All three deliberately share one provider client
 /// inside this one runtime ownership domain.

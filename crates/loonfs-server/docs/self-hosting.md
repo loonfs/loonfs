@@ -371,7 +371,7 @@ default. Long metadata compactions can log progress for an extended period.
 No action is required unless failures repeat.
 
 `compaction_required` applies only to embedded deployments without a
-background worker. Those deployments must call `FsAdmin::compact_metadata`.
+background worker. Those deployments must call `FsMaintenance::compact_metadata`.
 The self-hosted server schedules that work itself.
 
 ## Current limitations

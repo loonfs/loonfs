@@ -6,7 +6,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
-use loonfs::{FsAdmin, FsReader};
+use loonfs::{FsMaintenance, FsReader};
 use loonfs_api::v0::{GrepGcResponse, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
     ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId,
@@ -915,12 +915,12 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .build()
         .await
         .expect("build reader");
-    let admin = FsAdmin::builder_with_store(store.clone())
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
         .actor_id(actor)
         .build()
         .await
-        .expect("build admin");
-    GrepWorker::new(store.clone(), reader, admin)
+        .expect("build maintenance");
+    GrepWorker::new(store.clone(), reader, maintenance)
 }
 
 /// The api.md section 2.1 example describes a reference deployment: the

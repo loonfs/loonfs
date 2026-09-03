@@ -577,7 +577,7 @@ impl FsWriter {
     ///
     /// Deletion is tombstone-first: the commit hides the path without erasing
     /// history. Physical reclamation is explicit garbage collection: nothing
-    /// sweeps unless an operator asks, through `FsAdmin::gc_namespace` or a
+    /// sweeps unless an operator asks, through `FsMaintenance::gc_namespace` or a
     /// maintenance step that opted in.
     #[tracing::instrument(
         level = "debug",

@@ -1,4 +1,4 @@
-//! The administrative and maintenance runtime handle.
+//! The maintenance runtime handle.
 
 use super::HandleBuilderCore;
 use crate::fs::{ReadCore, WriterIdentity};
@@ -11,16 +11,12 @@ use crate::{
 };
 use std::sync::Arc;
 
-/// Administrative and maintenance handle.
-///
-/// `FsAdmin` provides namespace diagnostics, checkpoints, retention changes,
-/// garbage collection, and one-shot maintenance steps. Each call runs in the
-/// caller's async task; this handle does not start background workers.
-///
-/// Admin operations that mutate durable control state carry the builder's
-/// `actor_id` for tracing, reports, and auditability.
+/// Maintenance handle: namespace diagnostics, operator checkpoints, WAL flush,
+/// metadata reorganization and compaction, garbage collection, and retention.
+/// Each call runs in the caller's task; the handle starts no background work.
+/// Operations that mutate durable control state record the builder's `actor_id`.
 #[derive(Clone)]
-pub struct FsAdmin {
+pub struct FsMaintenance {
     pub(crate) core: ReadCore,
     pub(crate) actor: WriterIdentity,
     pub(crate) writer: Option<WriterParts>,
@@ -37,23 +33,23 @@ pub(crate) struct WriterParts {
     pub(crate) compactions: BackgroundCompactions,
 }
 
-impl FsAdmin {
-    /// Starts an admin builder that constructs its object-store client from
+impl FsMaintenance {
+    /// Starts a maintenance builder that constructs its object-store client from
     /// configuration inside this handle's runtime ownership domain.
-    pub fn builder(store_config: StoreConfig) -> FsAdminBuilder {
-        FsAdminBuilder::new(HandleBuilderCore::from_config(store_config))
+    pub fn builder(store_config: StoreConfig) -> FsMaintenanceBuilder {
+        FsMaintenanceBuilder::new(HandleBuilderCore::from_config(store_config))
     }
 
-    /// Starts an admin builder over a caller-supplied store.
+    /// Starts a maintenance builder over a caller-supplied store.
     ///
     /// For callers who know the store is safe in this handle's runtime
     /// ownership domain. Do not use it to share one provider client across
     /// unrelated runtimes; open another handle from [`StoreConfig`] instead.
-    pub fn builder_with_store(store: SharedObjectStore) -> FsAdminBuilder {
-        FsAdminBuilder::new(HandleBuilderCore::from_store(store))
+    pub fn builder_with_store(store: SharedObjectStore) -> FsMaintenanceBuilder {
+        FsMaintenanceBuilder::new(HandleBuilderCore::from_store(store))
     }
 
-    /// Builds an admin over a writer's own runtime: its read core, its
+    /// Builds a maintenance handle over a writer's own runtime: its read core, its
     /// identity, and its publication service. Writer-scheduled background
     /// maintenance uses this so it runs the same operations an operator
     /// runs — and so its invalidations reach the writer's caches and
@@ -102,15 +98,15 @@ impl FsAdmin {
     // Maintenance operations live in `fs/maintenance.rs`.
 }
 
-/// Builder for [`FsAdmin`].
+/// Builder for [`FsMaintenance`].
 #[must_use]
-pub struct FsAdminBuilder {
+pub struct FsMaintenanceBuilder {
     core: HandleBuilderCore,
     actor_id: Option<String>,
     writer: Option<WriterParts>,
 }
 
-impl FsAdminBuilder {
+impl FsMaintenanceBuilder {
     fn new(core: HandleBuilderCore) -> Self {
         Self {
             core,
@@ -119,7 +115,7 @@ impl FsAdminBuilder {
         }
     }
 
-    /// Sets the actor id recorded by admin operations that mutate durable
+    /// Sets the actor id recorded by maintenance operations that mutate durable
     /// control state. Required.
     pub fn actor_id(mut self, actor_id: impl Into<String>) -> Self {
         self.actor_id = Some(actor_id.into());
@@ -132,9 +128,9 @@ impl FsAdminBuilder {
         self
     }
 
-    /// Connects this admin to a writer from the same runtime.
+    /// Connects this maintenance handle to a writer from the same runtime.
     ///
-    /// The admin shares the writer's decoded-block cache, publisher, and
+    /// The maintenance handle shares the writer's decoded-block cache, publisher, and
     /// background compactions. The shared cache keeps the writer's byte
     /// budget; [`Self::runtime_cache`] still configures this handle's other
     /// caches.
@@ -174,7 +170,7 @@ impl FsAdminBuilder {
     }
 
     /// Installs the metrics recorder this handle reports its instruments to
-    /// (see [`crate::metrics`]). An admin registers the object-store and
+    /// (see [`crate::metrics`]). A maintenance handle registers the object-store and
     /// collection instruments; the explicit maintenance it drives reports
     /// through the writer that scheduled it.
     pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
@@ -182,14 +178,14 @@ impl FsAdminBuilder {
         self
     }
 
-    /// Opens the admin handle inside the Tokio runtime that will drive its
+    /// Opens the maintenance handle inside the Tokio runtime that will drive its
     /// one-shot maintenance calls.
-    pub async fn build(self) -> Result<FsAdmin> {
+    pub async fn build(self) -> Result<FsMaintenance> {
         let actor_id = self
             .actor_id
             .ok_or_else(|| RuntimeError::Config("actor_id is required".to_owned()))?;
         let actor = WriterIdentity::new(actor_id)?;
-        Ok(FsAdmin {
+        Ok(FsMaintenance {
             core: self.core.open_read_core()?,
             actor,
             writer: self.writer,

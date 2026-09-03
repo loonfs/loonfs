@@ -4,12 +4,12 @@
 //! These tests need a family group whose base run no bounded step can fold,
 //! with delta runs still arriving above it. The shipped row budget only
 //! reaches that state at a scale no test can write, so the budget is narrowed
-//! through [`FsAdmin::starve_reorganization_row_budget`]. Everything else —
+//! through [`FsMaintenance::starve_reorganization_row_budget`]. Everything else —
 //! planning, admission, the executor, the finalizer — is the shipped path.
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsWriter,
+    CreateCheckpointOptions, CreateNamespaceOptions, FsBackgroundWork, FsMaintenance, FsWriter,
     MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionOutcome, MoveOptions,
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore,
 };
@@ -33,16 +33,21 @@ use tempfile::tempdir;
 /// descriptors are per family, so its families are what they are filtered by.
 const BINDINGS: MetadataFamilyGroup = MetadataFamilyGroup::Bindings;
 
-/// A `ManualOnly` deployment: a writer that schedules nothing, and an admin
+/// A `ManualOnly` deployment: a writer that schedules nothing, and an maintenance
 /// handle with no background work behind it, over one store.
 ///
 /// This is the shape the explicit compaction path exists for. The second
-/// admin is the contrast — the same store, but attached to the writer's
+/// maintenance is the contrast — the same store, but attached to the writer's
 /// runner, so its steps plan under the amortizing policy a writer's own
 /// upkeep runs under.
 async fn manual_deployment(
     root: &std::path::Path,
-) -> (FsWriter, FsAdmin, FsAdmin, Arc<DefaultMetricsRecorder>) {
+) -> (
+    FsWriter,
+    FsMaintenance,
+    FsMaintenance,
+    Arc<DefaultMetricsRecorder>,
+) {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -52,18 +57,18 @@ async fn manual_deployment(
         .build()
         .await
         .expect("build the writer");
-    let standalone = FsAdmin::builder_with_store(Arc::clone(&store))
-        .actor_id("standalone-admin")
+    let standalone = FsMaintenance::builder_with_store(Arc::clone(&store))
+        .actor_id("standalone-maintenance")
         .metrics_recorder(recorder.clone())
         .build()
         .await
-        .expect("build the standalone admin");
-    let scheduled = FsAdmin::builder_with_store(store)
-        .actor_id("scheduled-admin")
+        .expect("build the standalone maintenance");
+    let scheduled = FsMaintenance::builder_with_store(store)
+        .actor_id("scheduled-maintenance")
         .over_writer(&writer)
         .build()
         .await
-        .expect("build the writer-backed admin");
+        .expect("build the writer-backed maintenance");
     (writer, standalone, scheduled, recorder)
 }
 
@@ -90,10 +95,10 @@ fn metadata_request() -> MaintenanceRunRequest {
 }
 
 #[tokio::test]
-async fn an_admin_gc_step_records_the_pass_counters_once() {
+async fn a_maintenance_gc_step_records_the_pass_counters_once() {
     let temp_dir = tempdir().expect("tempdir");
-    let (writer, admin, _scheduled, recorder) = manual_deployment(temp_dir.path()).await;
-    let namespace = namespace_id("admin-gc-metrics");
+    let (writer, maintenance, _scheduled, recorder) = manual_deployment(temp_dir.path()).await;
+    let namespace = namespace_id("maintenance-gc-metrics");
     writer
         .create_namespace(&namespace, CreateNamespaceOptions::default())
         .await
@@ -109,10 +114,10 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
         .expect("write a live GC candidate");
 
     assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
-    let response = admin
+    let response = maintenance
         .run_maintenance(&namespace, MaintenanceRunRequest::Gc(GcRequest::default()))
         .await
-        .expect("run the admin GC step");
+        .expect("run the maintenance GC step");
     let gc = match response {
         MaintenanceRunResponse::Gc(gc) => Some(gc),
         _ => None,
@@ -127,7 +132,7 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
     assert_eq!(
         counter(&snapshot, "loonfs.gc.retained", &[]),
         gc.retained_candidates,
-        "the admin pass records its retained count exactly once"
+        "the maintenance pass records its retained count exactly once"
     );
     for (category, reclaimed) in [
         ("deleted_wal_segments", gc.deleted.wal_segments),
@@ -153,7 +158,7 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
         assert_eq!(
             counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)],),
             reclaimed,
-            "the admin pass records `{category}` exactly once"
+            "the maintenance pass records `{category}` exactly once"
         );
     }
 }
@@ -161,7 +166,7 @@ async fn an_admin_gc_step_records_the_pass_counters_once() {
 /// Writes one file and folds the tail, so each call leaves one more delta run.
 async fn write_and_flush(
     writer: &FsWriter,
-    admin: &FsAdmin,
+    maintenance: &FsMaintenance,
     namespace_id: &NamespaceId,
     path: &str,
 ) {
@@ -174,7 +179,10 @@ async fn write_and_flush(
         )
         .await
         .expect("put a file");
-    admin.flush_wal(namespace_id).await.expect("fold the tail");
+    maintenance
+        .flush_wal(namespace_id)
+        .await
+        .expect("fold the tail");
 }
 
 /// Builds a namespace whose bindings group holds one base run of real size,
@@ -189,7 +197,7 @@ async fn write_and_flush(
 /// a compaction.
 async fn namespace_with_a_frozen_base(
     writer: &FsWriter,
-    admin: &FsAdmin,
+    maintenance: &FsMaintenance,
     namespace_id: &NamespaceId,
 ) {
     writer
@@ -199,7 +207,7 @@ async fn namespace_with_a_frozen_base(
     for index in 0..24 {
         write_and_flush(
             writer,
-            admin,
+            maintenance,
             namespace_id,
             &format!("/docs/file-{index}.txt"),
         )
@@ -218,12 +226,18 @@ async fn namespace_with_a_frozen_base(
             .await
             .expect("rename a file");
     }
-    admin.flush_wal(namespace_id).await.expect("fold the tail");
+    maintenance
+        .flush_wal(namespace_id)
+        .await
+        .expect("fold the tail");
 
     // Fold everything into one base run per group, under the shipped budgets
     // and with the floor still at the bottom, so the churn lands in the base.
     for _ in 0..64 {
-        let response = admin.flush_wal(namespace_id).await.expect("fold a unit");
+        let response = maintenance
+            .flush_wal(namespace_id)
+            .await
+            .expect("fold a unit");
         if response.reorganize == ReorganizeStepOutcome::NotNeeded {
             break;
         }
@@ -231,7 +245,7 @@ async fn namespace_with_a_frozen_base(
 
     // Now the floor moves past that churn, so the next bottom-anchored rebuild
     // is the one that may drop it.
-    admin
+    maintenance
         .create_checkpoint(
             namespace_id,
             CreateCheckpointOptions {
@@ -241,7 +255,7 @@ async fn namespace_with_a_frozen_base(
         )
         .await
         .expect("checkpoint the namespace");
-    admin
+    maintenance
         .advance_retention_floor(namespace_id)
         .await
         .expect("advance the retention floor past the churn");
@@ -250,14 +264,18 @@ async fn namespace_with_a_frozen_base(
 /// Keeps writing while the group's base is frozen, so a delta-only merge is
 /// always available above it.
 ///
-/// The admin here is the starved one, which is what makes these runs pile up:
+/// The maintenance here is the starved one, which is what makes these runs pile up:
 /// its steps can no longer fold the group they land in, so each write leaves
 /// one more delta run behind rather than being merged into the base.
-async fn sustained_writes(writer: &FsWriter, admin: &FsAdmin, namespace_id: &NamespaceId) {
+async fn sustained_writes(
+    writer: &FsWriter,
+    maintenance: &FsMaintenance,
+    namespace_id: &NamespaceId,
+) {
     for index in 0..10 {
         write_and_flush(
             writer,
-            admin,
+            maintenance,
             namespace_id,
             &format!("/arrivals/arrival-{index}.txt"),
         )
@@ -412,12 +430,12 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         .build()
         .await
         .expect("build a fresh writer");
-    let fresh_scheduled = FsAdmin::builder_with_store(fresh_store)
-        .actor_id("fresh-scheduled-admin")
+    let fresh_scheduled = FsMaintenance::builder_with_store(fresh_store)
+        .actor_id("fresh-scheduled-maintenance")
         .over_writer(&fresh_writer)
         .build()
         .await
-        .expect("build a fresh writer-backed admin")
+        .expect("build a fresh writer-backed maintenance")
         .starve_reorganization_row_budget(budget);
     let response = fresh_scheduled
         .run_maintenance(&automatic, metadata_request())

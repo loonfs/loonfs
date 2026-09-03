@@ -106,7 +106,7 @@ async fn compact_receipt_past_horizon(
             .expect("create checkpoint");
     }
     let advanced = runtime
-        .admin
+        .maintenance
         .advance_retention_floor(namespace_id)
         .await
         .expect("advance retention floor");
@@ -122,7 +122,7 @@ async fn compact_receipt_past_horizon(
     let mut folded = false;
     for _ in 0..32 {
         let step = runtime
-            .admin
+            .maintenance
             .maintain_metadata(namespace_id, MetadataMaintenanceOptions::default())
             .await
             .expect("upkeep step");
@@ -620,7 +620,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .await
         .expect("create checkpoint");
     let advanced = runtime
-        .admin
+        .maintenance
         .advance_retention_floor(&namespace_id)
         .await
         .expect("advance retention floor");
@@ -731,7 +731,7 @@ async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
     );
     assert_eq!(
         runtime
-            .admin
+            .maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("namespace diagnostics")

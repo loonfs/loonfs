@@ -30,7 +30,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
 
     let now_ms = loonfs::current_time_ms().expect("current time");
     let first_snapshot = runtime
-        .admin
+        .writer
         .create_snapshot(
             &namespace_id,
             CreateSnapshotOptions {
@@ -78,7 +78,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .await
         .expect("change current directory");
     let second_snapshot = runtime
-        .admin
+        .writer
         .create_snapshot(
             &namespace_id,
             CreateSnapshotOptions {
@@ -407,7 +407,7 @@ async fn a_released_checkpoint_refuses_a_pin_instead_of_reading_current_state() 
         .await
         .expect("create checkpoint");
     runtime
-        .admin
+        .maintenance
         .release_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("release checkpoint");
@@ -446,7 +446,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .expect("resolve captured file");
     let now_ms = loonfs::current_time_ms().expect("current time");
     let snapshot = runtime
-        .admin
+        .writer
         .create_snapshot(
             &namespace_id,
             CreateSnapshotOptions {
@@ -512,7 +512,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
     );
 
     runtime
-        .admin
+        .writer
         .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
         .await
         .expect("release snapshot");

@@ -13,7 +13,7 @@ use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
-    FsAdmin, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob, MaintenanceProbe,
+    FsMaintenance, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob, MaintenanceProbe,
     SharedObjectStore, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, TraceMode,
     TraceStoreKind,
 };
@@ -125,7 +125,7 @@ impl http_body::Body for DrainedBody {
 /// Request handles built over one shared store client.
 ///
 /// Read handlers use `reader`, mutations use `writer`, and maintenance uses
-/// `admin`. The host also shuts down `writer` after the listener drains.
+/// `maintenance`. The host also shuts down `writer` after the listener drains.
 /// `reader` is stored separately because most handlers require only read
 /// access.
 #[derive(Clone)]
@@ -134,7 +134,7 @@ pub struct AppState {
     /// Writer handle that owns publication and maintenance work.
     pub writer: FsWriter,
     pub(super) reader: FsReader,
-    pub(super) admin: FsAdmin,
+    pub(super) maintenance: FsMaintenance,
     /// The store itself, for the one endpoint whose subject is the store
     /// rather than a namespace: the contract probe. It is the same
     /// instrumented client the handles were built on, so a probe measures
@@ -270,7 +270,7 @@ pub async fn app(
     // the writer for its publications to reach the index: the job says on
     // the trait that publications concern it, and registering it is what
     // subscribes it.
-    let (writer, reader, admin) = build_handles(
+    let (writer, reader, maintenance) = build_handles(
         &config,
         store,
         &metrics,
@@ -292,7 +292,7 @@ pub async fn app(
             GrepWorker::with_block_cache(
                 writer.object_store(),
                 reader.clone(),
-                admin.clone(),
+                maintenance.clone(),
                 Arc::clone(&grep_block_cache),
             )
         });
@@ -337,7 +337,7 @@ pub async fn app(
         config,
         writer,
         reader,
-        admin,
+        maintenance,
         probe_store,
         direct_transfers,
         grep_worker,
@@ -379,14 +379,14 @@ async fn open_local_cache(
 ///
 /// An optional JSONL recorder receives the same object-store samples. The
 /// local block cache is installed once on the writer's shared runtime core,
-/// so the reader and admin use the same decoded cache hierarchy.
+/// so the reader and maintenance use the same decoded cache hierarchy.
 pub(super) async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
     metrics: &ServerMetrics,
     metrics_jsonl_path: Option<OsString>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
-) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
+) -> Result<(FsWriter, FsReader, FsMaintenance), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
     let runtime_error = |error: loonfs::RuntimeError| ServerConfigError::InvalidField {
@@ -415,9 +415,9 @@ pub(super) async fn build_handles(
     let writer = writer_builder.build().await.map_err(runtime_error)?;
     let reader = writer.reader();
 
-    let mut admin_builder = FsAdmin::builder_with_store(store)
-        .actor_id(format!("{}-admin", config.writer_id))
-        // The admin honors the configured cache sizing and shares the
+    let mut maintenance_builder = FsMaintenance::builder_with_store(store)
+        .actor_id(format!("{}-maintenance", config.writer_id))
+        // The maintenance honors the configured cache sizing and shares the
         // writer's decoded-block cache instance, so explicit maintenance
         // reuses blocks reader traffic already decoded instead of
         // populating a second, default-sized cache. It also shares the
@@ -429,11 +429,11 @@ pub(super) async fn build_handles(
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());
     if let Some(samples) = samples {
-        admin_builder = admin_builder.object_store_metrics_recorder(samples);
+        maintenance_builder = maintenance_builder.object_store_metrics_recorder(samples);
     }
-    let admin = admin_builder.build().await.map_err(runtime_error)?;
+    let maintenance = maintenance_builder.build().await.map_err(runtime_error)?;
 
-    Ok((writer, reader, admin))
+    Ok((writer, reader, maintenance))
 }
 
 fn object_store_metrics_recorder(

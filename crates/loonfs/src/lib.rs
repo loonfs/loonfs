@@ -1,6 +1,6 @@
 //! Embedded LoonFS runtime.
 //!
-//! Use [`FsWriter`] for mutations, [`FsReader`] for reads, and [`FsAdmin`] for
+//! Use [`FsWriter`] for mutations, [`FsReader`] for reads, and [`FsMaintenance`] for
 //! explicit maintenance. [`FsBackgroundWork`] controls whether a writer also
 //! schedules non-destructive maintenance.
 //!
@@ -53,7 +53,7 @@
 //! ```
 //!
 //! Writers schedule maintenance only for namespaces touched by or assigned to
-//! the process. [`FsWriter::shutdown`] drains that work. Readers and admins do
+//! the process. [`FsWriter::shutdown`] drains that work. Readers and maintenance handles do
 //! not start background tasks.
 #![warn(missing_docs)]
 
@@ -196,9 +196,11 @@ pub use cache::RuntimeCacheStats;
 pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
-    PathEntriesPager, TrashPager,
+    PathEntriesPager, SnapshotsPager, TrashPager,
 };
-pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
+pub use handle::{
+    FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
+};
 pub use maintenance_runner::{
     FsBackgroundWork, MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
     MaintenanceStepConclusion, MaintenanceStepReport, NamespacePublication,

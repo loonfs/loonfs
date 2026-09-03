@@ -8,11 +8,11 @@ use crate::render::write_stderr_warning;
 use loonfs::{
     ByteStream, CheckpointPageCursor, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, DeleteNamespaceResponse,
-    DeleteOptions, FsAdmin, FsReader, FsWriter, ListChangesOptions as RuntimeListChangesOptions,
-    ListChangesResponse, ListPathEntriesOptions, MaintenanceHandle, MaintenanceJob,
-    MaintenanceJobId, MaintenanceStepConclusion, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    DeleteOptions, FsMaintenance, FsReader, FsWriter,
+    ListChangesOptions as RuntimeListChangesOptions, ListChangesResponse, ListPathEntriesOptions,
+    MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenanceStepConclusion, MoveOptions,
+    PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions,
+    UndeleteOptions, UpdateAttributesOptions,
 };
 use loonfs_api::{
     v0::{
@@ -39,7 +39,7 @@ use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, 
 
 /// Purpose-specific handles over one shared store client: reads go through
 /// the reader, mutations through the writer, and maintenance through the
-/// admin handle. The embedded writer runs `FsBackgroundWork::Enabled` — the
+/// maintenance handle. The embedded writer runs `FsBackgroundWork::Enabled` — the
 /// same policy as the reference server — so a publish that crosses the WAL
 /// threshold schedules its own maintenance step, and every mutation settles
 /// scheduled work before the one-shot process exits. A publish gated on
@@ -50,7 +50,7 @@ use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, 
 pub(crate) struct EmbeddedBackend {
     pub(crate) writer: FsWriter,
     pub(crate) reader: FsReader,
-    pub(crate) admin: FsAdmin,
+    pub(crate) maintenance: FsMaintenance,
     /// Grep is composed here rather than by the runtime: this service owns
     /// the query side for the length of the command.
     pub(crate) grep: GrepService,
@@ -128,12 +128,12 @@ impl EmbeddedBackend {
 
     /// A grep worker over this backend's own handles: grep's keyspace rides
     /// the writer's store client, its filesystem reads the reader, and its
-    /// backfill checkpoints the admin handle.
+    /// backfill checkpoints the maintenance handle.
     pub(super) fn grep_worker(&self) -> GrepWorker<SharedObjectStore> {
         GrepWorker::with_block_cache(
             self.writer.object_store(),
             self.reader.clone(),
-            self.admin.clone(),
+            self.maintenance.clone(),
             Arc::clone(&self.grep_block_cache),
         )
     }
@@ -463,7 +463,7 @@ impl EmbeddedBackend {
     /// counts below a lie — and then walks the assignment, carrying each
     /// key's continuation from one step to the next exactly as the runner
     /// would have. Shutting the writer down does not disarm the steps: a
-    /// job compare-and-swaps the namespace head through `FsAdmin`, never
+    /// job compare-and-swaps the namespace head through `FsMaintenance`, never
     /// through the publication service the shutdown closed.
     pub(super) async fn drain_maintenance(
         &self,
@@ -738,7 +738,7 @@ impl EmbeddedBackend {
         let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
         let checkpoint = self
-            .admin
+            .writer
             .create_snapshot_with_quota(
                 namespace_id,
                 CreateSnapshotOptions {
@@ -776,7 +776,7 @@ impl EmbeddedBackend {
                     CliError::invalid_request(error.to_string()).with_param("cursor")
                 })?,
         };
-        self.admin
+        self.reader
             .list_snapshots_page(namespace_id, request)
             .await
             .scoped(namespace_id)
@@ -789,7 +789,7 @@ impl EmbeddedBackend {
         ttl_ms: u64,
     ) -> Result<SnapshotSummary, CliError> {
         let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
-        self.admin
+        self.writer
             .extend_snapshot(
                 namespace_id,
                 snapshot_id,
@@ -810,7 +810,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
     ) -> Result<Checkpoint, CliError> {
-        self.admin
+        self.maintenance
             .create_checkpoint(namespace_id, CreateCheckpointOptions::from_request(request))
             .await
             .scoped(namespace_id)
@@ -837,7 +837,7 @@ impl EmbeddedBackend {
                     CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
                 })?,
         };
-        self.admin
+        self.maintenance
             .list_checkpoints_page(namespace_id, request)
             .await
             .scoped(namespace_id)
@@ -848,7 +848,10 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         request: MaintenanceRunRequest,
     ) -> Result<MaintenanceRunResponse, CliError> {
-        let result = self.admin.run_maintenance(namespace_id, request).await;
+        let result = self
+            .maintenance
+            .run_maintenance(namespace_id, request)
+            .await;
         let invalid_threshold = matches!(&result, Err(RuntimeError::Config(_)));
         let result = result.scoped(namespace_id);
         if invalid_threshold {
@@ -1189,7 +1192,7 @@ mod tests {
         for namespace_id in [&indexed, &unindexed] {
             let status = target
                 .backend
-                .admin
+                .maintenance
                 .get_namespace_diagnostics(namespace_id)
                 .await
                 .expect("diagnostics after the drain");
@@ -1305,7 +1308,7 @@ mod tests {
         // host left rather than a race with it.
         let status = target
             .backend
-            .admin
+            .maintenance
             .get_namespace_diagnostics(&namespace)
             .await
             .expect("diagnostics after hosting");

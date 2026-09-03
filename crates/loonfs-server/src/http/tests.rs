@@ -14,7 +14,7 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use futures::stream::StreamExt;
 use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, MaintenanceJob,
+    CreateNamespaceOptions, DeleteOptions, FsMaintenance, FsReader, FsWriter, MaintenanceJob,
     MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepReport,
     PutFileOptions, StoredMetadataBlockCache, TraceMode, TraceStoreKind,
 };
@@ -624,7 +624,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     let metrics_path = metrics_dir.path().join("object-store.ndjson");
 
     {
-        let (writer, _reader, _admin) = build_handles(
+        let (writer, _reader, _maintenance) = build_handles(
             &config,
             store,
             &ServerMetrics::new(),
@@ -3363,12 +3363,12 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .build()
         .await
         .expect("build reader");
-    let admin = FsAdmin::builder_with_store(store.clone())
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
         .actor_id(actor)
         .build()
         .await
-        .expect("build admin");
-    GrepWorker::new(store.clone(), reader, admin)
+        .expect("build maintenance");
+    GrepWorker::new(store.clone(), reader, maintenance)
 }
 
 fn grep_error_request() -> GrepRequest {

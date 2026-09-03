@@ -7,8 +7,8 @@ use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, FsAdmin, FsReader, FsWriter, MetadataMaintenanceOptions, MoveOptions,
-    NamespaceId, PutFileOptions, SharedObjectStore,
+    DestinationBehavior, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
+    MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
 use loonfs_grep::root::load_grep_root;
@@ -184,7 +184,7 @@ struct PlanlessBoundaryFixture {
     store: SharedObjectStore,
     namespace_id: NamespaceId,
     writer: FsWriter,
-    admin: FsAdmin,
+    maintenance: FsMaintenance,
 }
 
 async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
@@ -198,11 +198,11 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("planless-boundary-admin")
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("planless-boundary-maintenance")
         .build()
         .await
-        .expect("build admin");
+        .expect("build maintenance");
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -215,7 +215,7 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         store,
         namespace_id,
         writer,
-        admin,
+        maintenance,
     }
 }
 
@@ -249,7 +249,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .expect("write materialized file");
     let materialized_head = control::head(&fixture.store, &fixture.namespace_id).await;
     fixture
-        .admin
+        .maintenance
         .maintain_metadata(
             &fixture.namespace_id,
             MetadataMaintenanceOptions {
@@ -327,7 +327,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .await
         .expect("write materialized revision");
     fixture
-        .admin
+        .maintenance
         .maintain_metadata(
             &fixture.namespace_id,
             MetadataMaintenanceOptions {

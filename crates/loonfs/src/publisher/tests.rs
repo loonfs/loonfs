@@ -11,7 +11,7 @@ use crate::maintenance_runner::MaintenanceRunner;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
-    CreateNamespaceOptions, ErrorCode, FsAdmin, RuntimeCacheConfig,
+    CreateNamespaceOptions, ErrorCode, FsMaintenance, RuntimeCacheConfig,
     SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
 };
 use async_trait::async_trait;
@@ -2191,7 +2191,7 @@ async fn retained_tail_projections_stay_within_the_namespace_count_cap() {
 }
 
 #[tokio::test]
-async fn admin_over_writer_invalidates_publisher_projection() {
+async fn maintenance_over_writer_invalidates_publisher_projection() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let writer = test_writer_with_interval(store.clone(), 0).await;
@@ -2210,13 +2210,13 @@ async fn admin_over_writer_invalidates_publisher_projection() {
         .expect("publish commit");
     assert_eq!(retained_projections(&writer.publisher()).projections, 1);
 
-    let admin = FsAdmin::builder_with_store(store)
-        .actor_id("admin")
+    let maintenance = FsMaintenance::builder_with_store(store)
+        .actor_id("maintenance")
         .over_writer(&writer)
         .build()
         .await
-        .expect("build admin");
-    admin.invalidate_namespace(&namespace_id);
+        .expect("build maintenance");
+    maintenance.invalidate_namespace(&namespace_id);
 
     assert_eq!(retained_projections(&writer.publisher()).projections, 0);
 }
