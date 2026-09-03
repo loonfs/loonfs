@@ -17,6 +17,7 @@ mod common;
 mod content_request_accounting;
 mod direct_put;
 mod handles;
+mod handoff;
 mod immutable_view_inputs;
 mod inode_reads;
 mod invalidation;
