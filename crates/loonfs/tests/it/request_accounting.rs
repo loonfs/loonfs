@@ -1,14 +1,10 @@
-//! Diagnostic (ignored): per-section request accounting for the warm-ops
-//! benchmark shape. Builds a bench-like namespace, then runs each warm
-//! phase on a fresh handle while classifying every store GET — by object
-//! class, and for metadata segments by section (index / filter / data),
-//! family, and run tier, using the live manifest's own descriptors.
+//! Request accounting for cached reads and the ignored warm-ops diagnostic.
 //!
 //! Run with:
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
+    CreateDirectoryOptions, CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
     MetadataMaintenanceOptions, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions,
     SharedObjectStore,
 };
@@ -17,7 +13,7 @@ use loonfs_api::AbsolutePath;
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, RunTier};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordedGet, RecordingStore};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -116,6 +112,132 @@ async fn publish_candidates(
     for outcome in futures::future::join_all(submissions).await {
         outcome.expect("publish batch member");
     }
+}
+
+#[tokio::test]
+async fn continuation_pages_reuse_the_cached_anchor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let log = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = log.clone();
+    let namespace_id = NamespaceId::parse("continuation-anchor").expect("valid namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("continuation-anchor-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for path in ["/b", "/c", "/d"] {
+        writer
+            .create_directory(
+                &namespace_id,
+                path,
+                CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create directory");
+    }
+    let reader = writer.reader();
+    let limit = PaginationPolicy::default()
+        .resolve_limit(Some(1))
+        .expect("valid limit");
+
+    log.reset();
+    let first = reader
+        .list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list first page");
+    assert_eq!(log.count(OperationClass::Head), 1);
+
+    log.reset();
+    let second_cursor: loonfs_api::DirectoryPageCursor = loonfs_api::decode_cursor(
+        first
+            .next_cursor
+            .as_deref()
+            .expect("first page has a cursor"),
+    )
+    .expect("decode second-page cursor");
+    let second = reader
+        .list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit,
+                cursor: Some(second_cursor),
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list second page");
+    let third_cursor: loonfs_api::DirectoryPageCursor = loonfs_api::decode_cursor(
+        second
+            .next_cursor
+            .as_deref()
+            .expect("second page has a cursor"),
+    )
+    .expect("decode third-page cursor");
+    reader
+        .list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit,
+                cursor: Some(third_cursor),
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list third page");
+    assert_eq!(log.count(OperationClass::Head), 0);
+
+    let second_writer = FsWriter::builder_with_store(store)
+        .writer_id("continuation-anchor-second-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build second writer");
+    second_writer
+        .create_directory(
+            &namespace_id,
+            "/a",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("advance head");
+    log.reset();
+    let fresh = reader
+        .list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list fresh first page");
+    assert_eq!(
+        (
+            log.count(OperationClass::Head),
+            fresh.entries.first().map(|entry| entry.path.as_str()),
+        ),
+        (1, Some("/a")),
+    );
 }
 
 #[allow(clippy::print_stdout)]

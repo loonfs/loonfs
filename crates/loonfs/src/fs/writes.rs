@@ -538,7 +538,9 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::control::VerifiedNamespaceCatalogEntry> {
-        self.core.load_namespace_catalog_cached(namespace_id).await
+        self.core
+            .load_namespace_catalog_cached(namespace_id, None)
+            .await
     }
 
     /// Creates a directory at an absolute path.

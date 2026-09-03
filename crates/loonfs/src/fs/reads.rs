@@ -247,7 +247,7 @@ impl FsReader {
     )]
     pub async fn pin_namespace(&self, namespace_id: &NamespaceId) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         Ok(self.read_snapshot(engine, context, None))
     }
 
@@ -356,7 +356,7 @@ impl FsReader {
         )?;
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let entry = engine
             .resolve_path(absolute_path, options, &read_context)
             .await?;
@@ -386,7 +386,7 @@ impl FsReader {
     ) -> Result<PathEntry> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let entry = engine.stat_inode(inode_id, options, &read_context).await?;
         tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_SEGMENTS);
         Ok(entry)
@@ -470,7 +470,13 @@ impl FsReader {
     ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self
+            .core
+            .pinned_metadata_read(
+                namespace_id,
+                request.cursor.as_ref().map(|cursor| cursor.head_seq),
+            )
+            .await?;
         let page = engine
             .list_path_page(listed_path.as_str(), request, options, &read_context)
             .await?;
@@ -544,7 +550,13 @@ impl FsReader {
     ) -> Result<ListInodeChildrenResponse> {
         reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self
+            .core
+            .pinned_metadata_read(
+                namespace_id,
+                request.cursor.as_ref().map(|cursor| cursor.head_seq),
+            )
+            .await?;
         let page = engine
             .list_inode_children_page(inode_id, request, options, &read_context)
             .await?;
@@ -579,7 +591,7 @@ impl FsReader {
         absolute_path: &str,
     ) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let read = engine
             .get_file(
                 absolute_path,
@@ -620,7 +632,7 @@ impl FsReader {
         options: ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let stream = engine
             .read_file_stream(
                 absolute_path,
@@ -660,7 +672,7 @@ impl FsReader {
         revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let target = engine
             .direct_download_target(absolute_path, revision_no, &read_context)
             .await?;
@@ -688,7 +700,7 @@ impl FsReader {
         revision_no: RevisionNo,
     ) -> Result<DirectDownloadByInodeTarget> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let target = engine
             .direct_download_target_by_inode(inode_id, revision_no, &read_context)
             .await?;
@@ -719,7 +731,7 @@ impl FsReader {
         request: PageRequest<CheckpointFilesPageCursor>,
     ) -> Result<CheckpointFilesPage> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id, None).await?;
         Ok(engine
             .list_checkpoint_files_page(checkpoint_id, request, &read_context)
             .await?)
@@ -751,7 +763,7 @@ impl FsReader {
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let states = engine
             .resolve_current_files(inode_ids, &read_context)
             .await?;
@@ -786,7 +798,7 @@ impl FsReader {
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id, None).await?;
         Ok(engine
             .read_content_ref(content_ref, max_bytes, &read_context)
             .await?)
@@ -814,7 +826,13 @@ impl FsReader {
         request: PageRequest<loonfs_api::TrashPageCursor>,
     ) -> Result<loonfs_api::ListTrashResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self
+            .core
+            .pinned_metadata_read(
+                namespace_id,
+                request.cursor.as_ref().map(|cursor| cursor.head_seq),
+            )
+            .await?;
         let page = engine.list_trash_page(request, &read_context).await?;
         let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
         Ok(loonfs_api::ListTrashResponse {
@@ -868,7 +886,13 @@ impl FsReader {
         self.core.record_trace_context(&tracing::Span::current());
         let absolute_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self
+            .core
+            .pinned_metadata_read(
+                namespace_id,
+                request.cursor.as_ref().map(|cursor| cursor.head_seq),
+            )
+            .await?;
         let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
         let page = engine
             .list_file_revisions_page(absolute_path.as_str(), request, &read_context)
@@ -929,7 +953,13 @@ impl FsReader {
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self
+            .core
+            .pinned_metadata_read(
+                namespace_id,
+                request.cursor.as_ref().map(|cursor| cursor.head_seq),
+            )
+            .await?;
         let page = engine
             .list_file_revisions_for_inode_page(inode_id, request, &read_context)
             .await?;
@@ -988,7 +1018,7 @@ impl FsReader {
         revision_no: RevisionNo,
     ) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let read = engine
             .get_file_revision(
                 absolute_path,
@@ -1021,7 +1051,7 @@ impl FsReader {
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id, None).await?;
         let bytes = engine
             .get_file_revision_for_inode(
                 inode_id,

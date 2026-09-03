@@ -1,13 +1,15 @@
 //! Runtime caches for control-object reads and WAL-tail projections.
 //! This module also defines the cache-management methods on [`ReadCore`].
 //!
-//! Every cache revalidates against durable state before its contents are
-//! used; nothing here weakens read-after-write consistency.
+//! Namespace anchors can satisfy cursor continuations without revalidation;
+//! other cached control reads revalidate against durable state.
 
 use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
-use crate::{CheckpointId, CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig};
+use crate::{
+    ChangeSeq, CheckpointId, CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig,
+};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
@@ -217,9 +219,12 @@ fn namespace_slot_is_live(
 }
 
 impl ReadCore {
+    /// Reuses the cached anchor when a cursor's head seq is at or below the cached head seq.
+    /// Revalidates every other cached anchor against the store.
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
+        min_head_seq: Option<ChangeSeq>,
     ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
         let cache_config = &self.inner.config.runtime_cache;
         if !self.control_cache_enabled() {
@@ -233,6 +238,9 @@ impl ReadCore {
             .control_cache()
             .cached_namespace_head(namespace_id);
         if let Some(head) = cached {
+            if min_head_seq.is_some_and(|min| head.head.state.seq >= min) {
+                return Ok(head);
+            }
             match self
                 .cached_control_identity_matches(&wal_head(namespace_id), &head.head.etag)
                 .await
@@ -274,8 +282,9 @@ impl ReadCore {
     pub(crate) async fn head_for_metadata_read(
         &self,
         namespace_id: &NamespaceId,
+        min_head_seq: Option<ChangeSeq>,
     ) -> Result<CachedNamespaceAnchor> {
-        self.load_namespace_head_cached(namespace_id)
+        self.load_namespace_head_cached(namespace_id, min_head_seq)
             .await
             .map_err(|error| {
                 RuntimeError::Core(CoreError::MetadataProjection(
@@ -342,11 +351,14 @@ impl ReadCore {
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
+        min_head_seq: Option<ChangeSeq>,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let anchor = self.head_for_metadata_read(namespace_id).await?;
+        let anchor = self
+            .head_for_metadata_read(namespace_id, min_head_seq)
+            .await?;
         let read_context = self.runtime_read_context(&anchor);
         Ok((self.reader_engine(namespace_id), read_context))
     }
@@ -360,7 +372,7 @@ impl ReadCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.head_for_metadata_read(namespace_id).await?;
+        let live = self.head_for_metadata_read(namespace_id, None).await?;
         let pinned = load_checkpoint_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -381,7 +393,7 @@ impl ReadCore {
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let live = self.head_for_metadata_read(namespace_id).await?;
+        let live = self.head_for_metadata_read(namespace_id, None).await?;
         let pinned = load_snapshot_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
@@ -415,11 +427,12 @@ impl ReadCore {
     pub(crate) async fn pinned_metadata_read(
         &self,
         namespace_id: &NamespaceId,
+        min_head_seq: Option<ChangeSeq>,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let pinned = self.pinned_read(namespace_id).await?;
+        let pinned = self.pinned_read(namespace_id, min_head_seq).await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(pinned)
     }
@@ -429,8 +442,11 @@ impl ReadCore {
     pub(crate) async fn load_namespace_catalog_cached(
         &self,
         namespace_id: &NamespaceId,
+        min_head_seq: Option<ChangeSeq>,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
-        let anchor = self.head_for_metadata_read(namespace_id).await?;
+        let anchor = self
+            .head_for_metadata_read(namespace_id, min_head_seq)
+            .await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(&anchor.head.state))
     }
 
@@ -446,10 +462,8 @@ impl ReadCore {
             .invalidate_namespace(namespace_id);
     }
 
-    /// Seeds the read caches with the state one landed publish produced:
-    /// the head anchor and the projected WAL tail. Safe by construction —
-    /// the anchor is etag-revalidated against the store on every read, so a
-    /// wrong seed degrades to today's reload instead of a wrong read.
+    /// Seeds the read caches with the head anchor and WAL-tail projection from
+    /// one landed publish.
     pub(crate) fn seed_namespace_read_cache(
         &self,
         namespace_id: &NamespaceId,
