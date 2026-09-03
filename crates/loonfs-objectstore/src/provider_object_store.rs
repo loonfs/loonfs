@@ -336,12 +336,70 @@ impl ProviderObjectStore {
             ..Default::default()
         };
         match self.inner.get_opts(path, options).await {
-            Ok(result) => match result.bytes().await {
-                Ok(bytes) => RangedGet::Bytes(bytes),
-                Err(err) => RangedGet::Refused(err),
-            },
+            Ok(result) => {
+                let metadata = self.metadata_from_meta(result.meta.clone());
+                match result.bytes().await {
+                    Ok(bytes) => RangedGet::Object(RangedObject { metadata, bytes }),
+                    Err(err) => RangedGet::Refused(err),
+                }
+            }
             Err(err) if provider_not_found(&err) => RangedGet::NotFound,
             Err(err) => RangedGet::Refused(err),
+        }
+    }
+
+    async fn get_range_object(&self, key: &str, range: ByteRange) -> Result<Option<RangedObject>> {
+        let path = self.to_path(key)?;
+        if range.end_exclusive < range.start_inclusive {
+            return Err(ObjectStoreError::InvalidRange {
+                object_key: key.to_owned(),
+            });
+        }
+        if range.end_exclusive == range.start_inclusive {
+            return match self.head(key).await? {
+                None => Ok(None),
+                Some(metadata) if range.start_inclusive > metadata.size_bytes => {
+                    Err(ObjectStoreError::InvalidRange {
+                        object_key: key.to_owned(),
+                    })
+                }
+                Some(metadata) => Ok(Some(RangedObject {
+                    metadata,
+                    bytes: Bytes::new(),
+                })),
+            };
+        }
+        match self
+            .ranged_get(&path, range.start_inclusive, range.end_exclusive)
+            .await
+        {
+            RangedGet::Object(object) => Ok(Some(object)),
+            RangedGet::NotFound => Ok(None),
+            RangedGet::Refused(err) => match self.head(key).await? {
+                None => Ok(None),
+                Some(metadata) if range.start_inclusive > metadata.size_bytes => {
+                    Err(ObjectStoreError::InvalidRange {
+                        object_key: key.to_owned(),
+                    })
+                }
+                Some(metadata) if range.start_inclusive == metadata.size_bytes => {
+                    Ok(Some(RangedObject {
+                        metadata,
+                        bytes: Bytes::new(),
+                    }))
+                }
+                Some(metadata) if range.end_exclusive > metadata.size_bytes => {
+                    match self
+                        .ranged_get(&path, range.start_inclusive, metadata.size_bytes)
+                        .await
+                    {
+                        RangedGet::Object(object) => Ok(Some(object)),
+                        RangedGet::NotFound => Ok(None),
+                        RangedGet::Refused(err) => Err(map_provider_error(key, err)),
+                    }
+                }
+                Some(_) => Err(map_provider_error(key, err)),
+            },
         }
     }
 
@@ -855,6 +913,20 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
+    async fn get_range_with_metadata(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>> {
+        Ok(self
+            .get_range_object(key, range)
+            .await?
+            .map(|object| ObjectBody {
+                metadata: object.metadata,
+                bytes: object.bytes.to_vec(),
+            }))
+    }
+
     /// Bounded reads issue the ranged GET directly — one round trip, not a
     /// sizing HEAD plus a GET — and pay a single HEAD only on the failure
     /// path, to decide whether the range or the transport was the problem.
@@ -864,8 +936,8 @@ impl ObjectStore for ProviderObjectStore {
     /// object clamps, `start == size` reads empty, and `start > size` is
     /// `InvalidRange`.
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
-        let path = self.to_path(key)?;
         let Some(range) = range else {
+            let path = self.to_path(key)?;
             return match self.inner.get(&path).await {
                 Ok(result) => result
                     .bytes()
@@ -876,59 +948,10 @@ impl ObjectStore for ProviderObjectStore {
                 Err(err) => Err(map_provider_error(key, err)),
             };
         };
-        if range.end_exclusive < range.start_inclusive {
-            return Err(ObjectStoreError::InvalidRange {
-                object_key: key.to_owned(),
-            });
-        }
-        if range.end_exclusive == range.start_inclusive {
-            // A zero-length request needs no bytes; existence and size
-            // alone answer it.
-            return match self.head(key).await? {
-                None => Ok(None),
-                Some(metadata) if range.start_inclusive > metadata.size_bytes => {
-                    Err(ObjectStoreError::InvalidRange {
-                        object_key: key.to_owned(),
-                    })
-                }
-                Some(_) => Ok(Some(Bytes::new())),
-            };
-        }
-        match self
-            .ranged_get(&path, range.start_inclusive, range.end_exclusive)
-            .await
-        {
-            RangedGet::Bytes(bytes) => Ok(Some(bytes)),
-            RangedGet::NotFound => Ok(None),
-            RangedGet::Refused(err) => {
-                // The provider refused; one HEAD decides whether the range
-                // was the problem, matching the reference semantics.
-                match self.head(key).await? {
-                    None => Ok(None),
-                    Some(metadata) if range.start_inclusive > metadata.size_bytes => {
-                        Err(ObjectStoreError::InvalidRange {
-                            object_key: key.to_owned(),
-                        })
-                    }
-                    Some(metadata) if range.start_inclusive == metadata.size_bytes => {
-                        Ok(Some(Bytes::new()))
-                    }
-                    Some(metadata) if range.end_exclusive > metadata.size_bytes => {
-                        // A strict provider rejected the over-long end
-                        // instead of clamping; clamp and retry once.
-                        match self
-                            .ranged_get(&path, range.start_inclusive, metadata.size_bytes)
-                            .await
-                        {
-                            RangedGet::Bytes(bytes) => Ok(Some(bytes)),
-                            RangedGet::NotFound => Ok(None),
-                            RangedGet::Refused(err) => Err(map_provider_error(key, err)),
-                        }
-                    }
-                    Some(_) => Err(map_provider_error(key, err)),
-                }
-            }
-        }
+        Ok(self
+            .get_range_object(key, range)
+            .await?
+            .map(|object| object.bytes))
     }
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
@@ -1123,9 +1146,14 @@ fn last_modified_ms(timestamp_millis: i64) -> Option<u64> {
 }
 
 enum RangedGet {
-    Bytes(Bytes),
+    Object(RangedObject),
     NotFound,
     Refused(provider_store::Error),
+}
+
+struct RangedObject {
+    metadata: ObjectMetadata,
+    bytes: Bytes,
 }
 
 fn provider_not_found(err: &provider_store::Error) -> bool {
@@ -1425,6 +1453,13 @@ mod tests {
             store.get(key, range(2, 6)).await.expect("bounded"),
             Some(Bytes::from_static(b"2345"))
         );
+        let body = store
+            .get_range_with_metadata(key, range(2, 6).expect("range"))
+            .await
+            .expect("bounded with metadata")
+            .expect("object exists");
+        assert_eq!(body.bytes, b"2345");
+        assert_eq!(body.metadata.size_bytes, 10);
         // An end past the object clamps.
         assert_eq!(
             store.get(key, range(6, 99)).await.expect("clamped"),
@@ -1456,6 +1491,13 @@ mod tests {
         let missing = "namespaces/demo/metadata/segments/seg_missing.sst.zst";
         assert_eq!(
             store.get(missing, range(0, 4)).await.expect("missing"),
+            None
+        );
+        assert_eq!(
+            store
+                .get_range_with_metadata(missing, range(0, 4).expect("range"))
+                .await
+                .expect("missing with metadata"),
             None
         );
         assert_eq!(

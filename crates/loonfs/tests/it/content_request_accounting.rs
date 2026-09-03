@@ -188,7 +188,7 @@ async fn bind_namespace_to_content_store(
         .expect("rebind the namespace head to the shared content store");
 }
 
-/// Full external preparation performs one content HEAD and one full GET.
+/// Full external preparation performs one full content GET.
 async fn prepare_content(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
@@ -265,7 +265,7 @@ async fn put_file_content_ref_validates_content_before_publication() {
         .await
         .expect("publish content ref");
 
-    assert_content_counts(harness.recording.snapshot(), 1, 1, 1, bytes.len());
+    assert_content_counts(harness.recording.snapshot(), 0, 1, 1, bytes.len());
 }
 
 #[tokio::test]
@@ -519,7 +519,7 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
         prepared.content_ref().checksum,
         loonfs_api::Checksum::sha256(&bytes)
     );
-    assert_content_counts(harness.recording.snapshot(), 1, 2, 1, bytes.len());
+    assert_content_counts(harness.recording.snapshot(), 0, 2, 1, bytes.len());
 }
 
 #[tokio::test]
@@ -542,7 +542,7 @@ async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing()
     );
     assert_eq!(prepared.content_ref().checksum, content_ref.checksum);
     assert_eq!(prepared.content_ref().size_bytes, content_ref.size_bytes);
-    assert_content_counts(harness.recording.snapshot(), 1, 1, 1, bytes.len());
+    assert_content_counts(harness.recording.snapshot(), 0, 1, 1, bytes.len());
     harness.recording.reset();
 
     harness

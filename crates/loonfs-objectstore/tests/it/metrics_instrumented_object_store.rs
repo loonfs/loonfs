@@ -178,6 +178,23 @@ async fn records_get_success_bytes_out() {
     assert_eq!(sample.bytes_out, Some(3));
     assert_eq!(sample.key_class, KeyClass::Content);
     assert_eq!(sample.range_class, Some(RangeClass::Bounded));
+
+    let body = store
+        .get_range_with_metadata(
+            "content-stores/cs_abc/objects/ab/cd/con_abcdef0123456789abcdef0123456789",
+            ByteRange {
+                start_inclusive: 2,
+                end_exclusive: 4,
+            },
+        )
+        .await
+        .expect("get object with metadata")
+        .expect("object exists");
+    assert_eq!(body.bytes, b"cd");
+    let sample = recorder.samples().pop().expect("ranged metadata sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::Get);
+    assert_eq!(sample.bytes_out, Some(2));
+    assert_eq!(sample.range_class, Some(RangeClass::Bounded));
 }
 
 #[tokio::test]

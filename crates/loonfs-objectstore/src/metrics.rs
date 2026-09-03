@@ -469,6 +469,18 @@ where
         result
     }
 
+    async fn get_range_with_metadata(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>> {
+        let start = sample_clock();
+        let (result, attempts) =
+            counting_attempts(self.inner.get_range_with_metadata(key, range.clone())).await;
+        self.record_range_with_metadata(key, &range, start.elapsed(), attempts, &result);
+        result
+    }
+
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         let start = sample_clock();
         let (result, attempts) = counting_attempts(self.inner.get_with_metadata(key)).await;
@@ -620,6 +632,30 @@ impl<S> InstrumentedObjectStore<S> {
             .ok()
             .and_then(|body| body.as_ref().map(|body| body.bytes.len() as u64));
         sample.range_class = Some(RangeClass::FullObject);
+        self.record(sample);
+    }
+
+    fn record_range_with_metadata(
+        &self,
+        key: &str,
+        range: &ByteRange,
+        elapsed: Duration,
+        attempts: u32,
+        result: &Result<Option<ObjectBody>>,
+    ) {
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::Get,
+            key,
+            elapsed,
+            attempts,
+            classify_optional_result(result),
+            self.store_kind.clone(),
+        );
+        sample.bytes_out = result
+            .as_ref()
+            .ok()
+            .and_then(|body| body.as_ref().map(|body| body.bytes.len() as u64));
+        sample.range_class = Some(classify_range(Some(range)));
         self.record(sample);
     }
 

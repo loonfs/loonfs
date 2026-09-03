@@ -109,7 +109,6 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-    validate_content_size(store, &object_key, content_ref).await?;
     let bytes = load_required_object(store, &object_key).await?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
 }
@@ -169,7 +168,7 @@ pub fn prepare_stored_content(
 /// Fully validates an existing durable content reference for publication.
 ///
 /// The verified catalog selects the store to validate. This performs one
-/// object HEAD followed by one full GET and checksum check.
+/// full GET and checksum check.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
@@ -301,6 +300,8 @@ pub struct FileContentStream<S> {
     chunk_bytes: NonZeroU64,
     /// Start offset of the next ranged read.
     next_offset: u64,
+    /// Whether the next ranged read must also validate the object's size.
+    first_fetch: bool,
     /// Offset where this stream started.
     resumed_from: u64,
     /// Number of bytes before `resumed_from` included in the checksum.
@@ -364,7 +365,6 @@ impl<S: ObjectStore> FileContentStream<S> {
         start_offset: u64,
     ) -> Result<Self, DurableContentValidationError> {
         let object_key = content_object_key_for_ref(content_store_id, &content_ref)?;
-        validate_content_size(&store, &object_key, &content_ref).await?;
         let expected = content_ref.checksum.clone();
         let digest = StreamingChecksum::for_algorithm(expected.algorithm);
         Ok(Self {
@@ -374,6 +374,7 @@ impl<S: ObjectStore> FileContentStream<S> {
             content_ref,
             chunk_bytes,
             next_offset: start_offset,
+            first_fetch: true,
             resumed_from: start_offset,
             prefix_folded: 0,
             digest,
@@ -447,35 +448,78 @@ impl<S: ObjectStore> FileContentStream<S> {
     async fn next_verified_chunk(
         &mut self,
     ) -> Result<Option<Bytes>, DurableContentValidationError> {
-        if self.next_offset == self.content_ref.size_bytes {
+        if let Some(Err(error)) = &self.completion {
+            return Err(error.clone());
+        }
+        if !self.first_fetch && self.next_offset == self.content_ref.size_bytes {
             return self.completion().map(|()| None);
         }
         let end_exclusive = self
             .next_offset
             .saturating_add(self.chunk_bytes.get())
             .min(self.content_ref.size_bytes);
-        let bytes = match self
-            .store
-            .get(
-                &self.object_key,
-                Some(ByteRange {
-                    start_inclusive: self.next_offset,
-                    end_exclusive,
-                }),
-            )
-            .await
-        {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                return Err(DurableContentValidationError::MissingContentObject {
+        let range = ByteRange {
+            start_inclusive: self.next_offset,
+            end_exclusive,
+        };
+        let bytes = if self.first_fetch {
+            self.first_fetch = false;
+            let body = match self
+                .store
+                .get_range_with_metadata(&self.object_key, range)
+                .await
+            {
+                Ok(Some(body)) => body,
+                Ok(None) => {
+                    let error = DurableContentValidationError::MissingContentObject {
+                        object_key: self.object_key.clone(),
+                    };
+                    self.completion = Some(Err(error.clone()));
+                    return Err(error);
+                }
+                Err(err) => {
+                    let error = DurableContentValidationError::Store {
+                        object_key: self.object_key.clone(),
+                        message: err.public_message().into_owned(),
+                    };
+                    self.completion = Some(Err(error.clone()));
+                    return Err(error);
+                }
+            };
+            if body.metadata.size_bytes != self.content_ref.size_bytes {
+                let error = DurableContentValidationError::ContentLengthMismatch {
                     object_key: self.object_key.clone(),
-                })
+                    expected: self.content_ref.size_bytes,
+                    actual: body.metadata.size_bytes,
+                };
+                self.completion = Some(Err(error.clone()));
+                return Err(error);
             }
-            Err(err) => {
-                return Err(DurableContentValidationError::Store {
-                    object_key: self.object_key.clone(),
-                    message: err.public_message().into_owned(),
-                })
+            Bytes::from(body.bytes)
+        } else {
+            match self
+                .store
+                .get(
+                    &self.object_key,
+                    Some(ByteRange {
+                        start_inclusive: self.next_offset,
+                        end_exclusive,
+                    }),
+                )
+                .await
+            {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => {
+                    return Err(DurableContentValidationError::MissingContentObject {
+                        object_key: self.object_key.clone(),
+                    });
+                }
+                Err(err) => {
+                    return Err(DurableContentValidationError::Store {
+                        object_key: self.object_key.clone(),
+                        message: err.public_message().into_owned(),
+                    });
+                }
             }
         };
         // A range ending past the object is truncated, so a short answer is
@@ -489,6 +533,9 @@ impl<S: ObjectStore> FileContentStream<S> {
         }
         self.digest.update(&bytes);
         self.next_offset += bytes.len() as u64;
+        if bytes.is_empty() {
+            return self.completion().map(|()| None);
+        }
         Ok(Some(bytes))
     }
 
@@ -500,8 +547,8 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// for past the declared size, so reaching this point *is* having folded
     /// exactly `size_bytes` — the resumed head start, which the first
     /// [`Self::next_chunk`] refuses to start without, plus everything
-    /// fetched from it to the end. The object's own length was checked
-    /// against the reference by the head request [`Self::open`] made.
+    /// fetched from it to the end. The first ranged read checked the object's
+    /// own length against the reference before returning bytes.
     fn completion(&mut self) -> Result<(), DurableContentValidationError> {
         let verdict = match self.completion.take() {
             Some(verdict) => verdict,
@@ -594,39 +641,6 @@ fn validate_loaded_content_bytes(
 
 fn describe_checksum(checksum: &Checksum) -> String {
     format!("{}:{}", checksum.algorithm, checksum.value)
-}
-
-/// Existence and size from one HEAD, used as cheap prevalidation before the
-/// authoritative read-and-hash: a wrong-sized object fails without being
-/// downloaded.
-async fn validate_content_size<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    content_ref: &ContentRef,
-) -> Result<(), DurableContentValidationError> {
-    let metadata = match store.head(object_key).await {
-        Ok(Some(metadata)) => metadata,
-        Ok(None) => {
-            return Err(DurableContentValidationError::MissingContentObject {
-                object_key: object_key.to_owned(),
-            })
-        }
-        Err(err) => {
-            return Err(DurableContentValidationError::Store {
-                object_key: object_key.to_owned(),
-                message: err.public_message().into_owned(),
-            })
-        }
-    };
-
-    if metadata.size_bytes != content_ref.size_bytes {
-        return Err(DurableContentValidationError::ContentLengthMismatch {
-            object_key: object_key.to_owned(),
-            expected: content_ref.size_bytes,
-            actual: metadata.size_bytes,
-        });
-    }
-    Ok(())
 }
 
 /// Plants durable content under a fresh identity, resolving the namespace's
@@ -1159,6 +1173,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_one_chunk_stream_read_uses_one_byte_read_and_no_head() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
+        let bytes = payload(TEST_CHUNK_BYTES as usize - 1);
+        let content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+
+        store.reset();
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        assert_eq!(
+            stream.next_chunk().await.expect("chunk"),
+            Some(Bytes::from(bytes.clone()))
+        );
+        assert!(stream.next_chunk().await.expect("verified end").is_none());
+
+        let counts = store.counts();
+        assert_eq!(counts.heads, 0);
+        assert_eq!(counts.gets, 1);
+        assert_eq!(counts.read_bytes, bytes.len() as u64);
+    }
+
+    #[tokio::test]
     async fn a_finished_stream_repeats_its_verdict() {
         let (_temp_dir, store, content_store_id) = test_store();
         let bytes = payload(TEST_CHUNK_BYTES as usize + 3);
@@ -1356,7 +1394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_streamed_read_of_an_empty_object_verifies_without_fetching() {
+    async fn an_empty_stream_read_checks_size_with_one_empty_range() {
         let (_temp_dir, inner, content_store_id) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let content_ref = content_ref(b"");
@@ -1367,11 +1405,10 @@ mod tests {
             .await
             .expect("open stream");
         assert!(stream.next_chunk().await.expect("verified end").is_none());
-        assert_eq!(
-            store.count(OperationClass::Read),
-            0,
-            "an empty object needs no ranged read"
-        );
+        let counts = store.counts();
+        assert_eq!(counts.heads, 0);
+        assert_eq!(counts.gets, 1);
+        assert_eq!(counts.read_bytes, 0);
     }
 
     #[tokio::test]
@@ -1526,11 +1563,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_streamed_read_reports_a_missing_object_when_it_opens() {
+    async fn a_streamed_read_reports_a_missing_object_when_first_fetched() {
         let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = content_ref(b"never stored");
 
-        let err = open_stream(&store, &content_store_id, &content_ref)
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        let err = stream
+            .next_verified_chunk()
             .await
             .expect_err("missing object");
         assert!(matches!(
@@ -1541,19 +1582,32 @@ mod tests {
 
     #[tokio::test]
     async fn a_streamed_read_rejects_an_object_of_the_wrong_length() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(TEST_CHUNK_BYTES as usize + 1);
         let mut content_ref = content_ref(&bytes);
         put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
         content_ref.size_bytes += 1;
 
-        let err = open_stream(&store, &content_store_id, &content_ref)
+        store.reset();
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        let err = stream
+            .next_verified_chunk()
             .await
             .expect_err("length mismatch");
         assert!(matches!(
             err,
             DurableContentValidationError::ContentLengthMismatch { .. }
         ));
+        assert!(matches!(
+            stream.next_verified_chunk().await,
+            Err(DurableContentValidationError::ContentLengthMismatch { .. })
+        ));
+        let counts = store.counts();
+        assert_eq!(counts.heads, 0);
+        assert_eq!(counts.gets, 1);
     }
 
     fn test_store() -> (tempfile::TempDir, LocalFsStore, ContentStoreId) {

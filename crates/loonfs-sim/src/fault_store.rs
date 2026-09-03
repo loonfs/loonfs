@@ -298,6 +298,71 @@ where
         }
     }
 
+    async fn get_range_with_metadata(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOperationKind::Get, key);
+        let scheduled = self.scheduled_fault(&op);
+        match scheduled.as_ref().map(|fault| &fault.fault) {
+            Some(ObjectStoreFault::GetReturnsStaleValue) => {
+                if let Some(mut body) = self.stale_value(key) {
+                    body.bytes = apply_range(key, body.bytes, Some(range))?.to_vec();
+                    self.push_trace(
+                        op,
+                        "get_range_with_metadata_stale_value",
+                        Some(ObjectStoreFault::GetReturnsStaleValue),
+                        SimEventResult::Ok,
+                    );
+                    return Ok(Some(body));
+                }
+                let result = self.inner.get_range_with_metadata(key, range).await;
+                self.push_trace(
+                    op,
+                    "get_range_with_metadata_stale_value_skipped",
+                    Some(ObjectStoreFault::GetReturnsStaleValue),
+                    SimEventResult::Skipped {
+                        reason: "no_stale_value_recorded".to_owned(),
+                    },
+                );
+                result
+            }
+            Some(ObjectStoreFault::CorruptObjectBytes) => {
+                let mut result = self.inner.get_range_with_metadata(key, range).await;
+                if let Ok(Some(body)) = &mut result {
+                    if let Some(first) = body.bytes.first_mut() {
+                        *first ^= 0x01;
+                    }
+                }
+                self.push_trace(
+                    op,
+                    "get_range_with_metadata_corrupt_bytes",
+                    Some(ObjectStoreFault::CorruptObjectBytes),
+                    result_class(&result),
+                );
+                result
+            }
+            Some(incompatible) => {
+                let result = self.inner.get_range_with_metadata(key, range).await;
+                self.push_trace(
+                    op,
+                    "get_range_with_metadata_fault_skipped",
+                    Some(incompatible.clone()),
+                    SimEventResult::Skipped {
+                        reason: "fault_not_applicable_to_operation".to_owned(),
+                    },
+                );
+                result
+            }
+            None => {
+                let result = self.inner.get_range_with_metadata(key, range).await;
+                self.push_trace(op, "get_range_with_metadata", None, result_class(&result));
+                result
+            }
+        }
+    }
+
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOperationKind::Get, key);
         let scheduled = self.scheduled_fault(&op);

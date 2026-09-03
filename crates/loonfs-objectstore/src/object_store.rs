@@ -20,7 +20,7 @@ pub type SharedObjectStore = Arc<dyn ObjectStore>;
 /// implementation cleans up whatever it had started.
 pub type ByteStream = BoxStream<'static, Result<Bytes>>;
 
-/// Metadata returned by a successful `head`, full-object `get`, or `put` call.
+/// Metadata returned by a successful metadata read, content read, or `put` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectMetadata {
     /// Opaque compare token for one object version.
@@ -82,12 +82,12 @@ pub enum MultipartCompletion {
     UnknownUpload,
 }
 
-/// Full object bytes returned with metadata from the same read operation.
+/// Object bytes returned with associated metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectBody {
-    /// Identity, size, and modification metadata observed with these exact bytes.
+    /// Identity, whole-object size, and modification metadata for the object.
     pub metadata: ObjectMetadata,
-    /// Complete object payload from the same read as `metadata`.
+    /// Complete or ranged object payload.
     pub bytes: Vec<u8>,
 }
 
@@ -442,6 +442,26 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// failures are returned as [`ObjectStoreError`].
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>>;
 
+    /// Reads one byte range together with the object's metadata.
+    ///
+    /// `metadata.size_bytes` is the whole object's size, not the range's.
+    async fn get_range_with_metadata(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>> {
+        let Some(metadata) = self.head(key).await? else {
+            return Ok(None);
+        };
+        let Some(bytes) = self.get(key, Some(range)).await? else {
+            return Ok(None);
+        };
+        Ok(Some(ObjectBody {
+            metadata,
+            bytes: bytes.to_vec(),
+        }))
+    }
+
     /// Reads a full object or one half-open byte range, returning `None` when absent.
     ///
     /// A range ending beyond the object is truncated; a descending range or
@@ -597,6 +617,14 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().get_with_metadata(key).await
     }
 
+    async fn get_range_with_metadata(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>> {
+        self.as_ref().get_range_with_metadata(key, range).await
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         self.as_ref().get(key, range).await
     }
@@ -691,6 +719,14 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         (*self).get_with_metadata(key).await
+    }
+
+    async fn get_range_with_metadata(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>> {
+        (*self).get_range_with_metadata(key, range).await
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {

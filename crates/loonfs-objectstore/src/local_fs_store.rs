@@ -361,6 +361,51 @@ impl LocalFsStore {
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
+    async fn get_range_with_metadata_object(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>> {
+        let path = self.resolve_key(key)?;
+        let invalid_range = || ObjectStoreError::InvalidRange {
+            object_key: key.to_owned(),
+        };
+        if range.end_exclusive < range.start_inclusive {
+            return Err(invalid_range());
+        }
+        let mut file = match File::open(&path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_error(key, err)),
+        };
+        let fs_metadata = file.metadata().await.map_err(|err| io_error(key, err))?;
+        if range.start_inclusive > fs_metadata.len() {
+            return Err(invalid_range());
+        }
+
+        let end_exclusive = range.end_exclusive.min(fs_metadata.len());
+        file.seek(SeekFrom::Start(range.start_inclusive))
+            .await
+            .map_err(|err| io_error(key, err))?;
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(end_exclusive - range.start_inclusive)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|err| io_error(key, err))?;
+
+        file.seek(SeekFrom::Start(0))
+            .await
+            .map_err(|err| io_error(key, err))?;
+        let mut content_bytes = Vec::new();
+        file.read_to_end(&mut content_bytes)
+            .await
+            .map_err(|err| io_error(key, err))?;
+        let content_digest = sha256_digest(&content_bytes);
+        let metadata = Self::metadata_from_fs_metadata(key, &fs_metadata, &content_digest, &path)?;
+        Ok(Some(ObjectBody { metadata, bytes }))
+    }
+
     /// Reads the whole object, or exactly one range of it.
     ///
     /// A ranged read seeks to its start and reads only its length, so it
@@ -506,6 +551,15 @@ impl ObjectStore for LocalFsStore {
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         self.get_with_metadata_object(&self.scoped(key)?).await
+    }
+
+    async fn get_range_with_metadata(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>> {
+        self.get_range_with_metadata_object(&self.scoped(key)?, range)
+            .await
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
@@ -935,6 +989,13 @@ mod tests {
             store.get(&key, range(4, 7)).await.expect("middle range"),
             Some(Bytes::from_static(b"456"))
         );
+        let body = store
+            .get_range_with_metadata(&key, range(4, 7).expect("range"))
+            .await
+            .expect("middle range with metadata")
+            .expect("object exists");
+        assert_eq!(body.bytes, b"456");
+        assert_eq!(body.metadata.size_bytes, payload.len() as u64);
         assert_eq!(
             store
                 .get(&key, range(7, 99))
@@ -966,6 +1027,16 @@ mod tests {
             )
             .await
             .expect("a ranged read of a missing object is absent, not an error")
+            .is_none());
+        assert!(store
+            .get_range_with_metadata(
+                &wal_head(
+                    &loonfs_api::NamespaceId::parse("ns-missing").expect("valid namespace id")
+                ),
+                range(0, 4).expect("range")
+            )
+            .await
+            .expect("a ranged metadata read of a missing object is absent, not an error")
             .is_none());
     }
 

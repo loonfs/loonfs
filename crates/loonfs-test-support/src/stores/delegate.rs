@@ -16,6 +16,7 @@ macro_rules! delegate_object_store {
             complete_multipart_upload,
             abort_multipart_upload,
             get_with_metadata,
+            get_range_with_metadata,
             get,
             put,
             put_streamed,
@@ -37,6 +38,7 @@ macro_rules! delegate_object_store {
             complete_multipart_upload,
             abort_multipart_upload,
             get_with_metadata,
+            get_range_with_metadata,
             put,
             put_streamed,
             put_overwrite,
@@ -57,6 +59,7 @@ macro_rules! delegate_object_store {
             complete_multipart_upload,
             abort_multipart_upload,
             get_with_metadata,
+            get_range_with_metadata,
             get,
             delete,
             list_prefix_stream,
@@ -71,6 +74,7 @@ macro_rules! delegate_object_store {
             complete_multipart_upload,
             abort_multipart_upload,
             get_with_metadata,
+            get_range_with_metadata,
             get,
             put,
             put_streamed,
@@ -235,6 +239,30 @@ macro_rules! __delegate_object_store_method {
             Self: 'future,
         {
             ::std::boxed::Box::pin(async move { $inner.get_with_metadata(key).await })
+        }
+    };
+    (get_range_with_metadata, $receiver:ident, $inner:expr) => {
+        fn get_range_with_metadata<'store, 'key, 'future>(
+            &'store $receiver,
+            key: &'key str,
+            range: ::loonfs_objectstore::ByteRange,
+        ) -> ::core::pin::Pin<::std::boxed::Box<
+            dyn ::core::future::Future<
+                    Output = Result<
+                        Option<::loonfs_objectstore::ObjectBody>,
+                        ::loonfs_objectstore::ObjectStoreError,
+                    >,
+                > + Send
+                + 'future,
+        >>
+        where
+            'store: 'future,
+            'key: 'future,
+            Self: 'future,
+        {
+            ::std::boxed::Box::pin(async move {
+                $inner.get_range_with_metadata(key, range).await
+            })
         }
     };
     (get, $receiver:ident, $inner:expr) => {

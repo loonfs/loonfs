@@ -180,6 +180,30 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         Self::finish(&self.interceptor, &context, intercept, result, outcome)
     }
 
+    async fn get_range_with_metadata(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        let context = OperationContext::new(
+            key,
+            OperationKind::Get {
+                range: Some(&range),
+            },
+        );
+        let intercept = match self.interceptor.before(&context).await {
+            Intercept::FailBefore(error) => return Err(error),
+            intercept => intercept,
+        };
+        let result = self.inner.get_range_with_metadata(key, range.clone()).await;
+        let outcome = match &result {
+            Ok(Some(body)) => Outcome::Bytes(body.bytes.len()),
+            Ok(None) => Outcome::Bytes(0),
+            Err(_) => Outcome::Failure,
+        };
+        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+    }
+
     async fn get(
         &self,
         key: &str,

@@ -268,8 +268,8 @@ The content model has six rules.
    comes from `ContentRef`, not from the checksum algorithm.
 6. **Every read verifies the checksum.** The reader computes the algorithm in
    `content_ref.checksum` over the complete file. If it cannot compute that
-   algorithm, the read fails. A HEAD request may check existence and size
-   before downloading the object.
+   algorithm, the read fails. The first ranged read checks the object's
+   existence and size before any bytes are verified.
 
 ##### Checksum format
 
