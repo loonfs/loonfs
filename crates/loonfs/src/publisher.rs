@@ -26,7 +26,7 @@ use loonfs_core::publish::{
     NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,6 +40,7 @@ use tracing::Instrument;
 
 type CommitResult = Result<ApiCommitResponse, RuntimeError>;
 type DeleteResult = Result<DeleteNamespaceResponse, RuntimeError>;
+type CloseCompletion = watch::Receiver<Option<CloseNamespaceReport>>;
 
 /// A report that one namespace's durable mutation history advanced.
 ///
@@ -141,9 +142,9 @@ pub struct PublisherRegistry {
 /// publisher instances, retained projections, and contained panic count.
 struct RegistryShared {
     state: Mutex<RegistryState>,
-    /// Publications and deletes whose panic a worker survived. Workers
-    /// contain panics to keep their namespace writable, so this — not a
-    /// task join error — is what a drain reports.
+    /// Publication, deletion, and namespace-close units whose panic a task
+    /// survived. Tasks contain panics to keep the registry usable, so this —
+    /// not a task join error — is what a drain reports.
     panicked_units: AtomicUsize,
 }
 
@@ -152,8 +153,17 @@ struct RegistryState {
     policy: NamespaceSessionPolicy,
     capacity: NonZeroUsize,
     publishers: HashMap<NamespaceId, NamespacePublisher>,
-    closing: HashSet<NamespaceId>,
+    closing: HashMap<NamespaceId, CloseCompletion>,
     projections: RetainedProjections,
+}
+
+impl RegistryState {
+    fn session_counts(&self) -> (usize, usize) {
+        (
+            self.publishers.len() - self.closing.len(),
+            self.closing.len(),
+        )
+    }
 }
 
 impl RegistryShared {
@@ -172,9 +182,12 @@ impl RegistryShared {
         instruments: &crate::metrics::RuntimeInstruments,
     ) -> RetainedProjectionTotals {
         let mut state = self.lock_state();
-        state.publishers.remove(namespace_id);
+        if !state.closing.contains_key(namespace_id) {
+            state.publishers.remove(namespace_id);
+        }
         state.projections.forget(namespace_id);
-        instruments.publisher_sessions(state.publishers.len(), state.closing.len());
+        let (open, closing) = state.session_counts();
+        instruments.publisher_sessions(open, closing);
         state.projections.totals()
     }
 
@@ -333,7 +346,7 @@ impl PublisherRegistry {
                     policy,
                     capacity,
                     publishers: HashMap::new(),
-                    closing: HashSet::new(),
+                    closing: HashMap::new(),
                     projections: RetainedProjections::default(),
                 }),
                 panicked_units: AtomicUsize::new(0),
@@ -423,7 +436,7 @@ impl PublisherRegistry {
         if state.closed {
             return Err(CoreError::ShuttingDown);
         }
-        if state.closing.contains(namespace_id) {
+        if state.closing.contains_key(namespace_id) {
             return Err(CoreError::WriterSessionClosed {
                 namespace_id: namespace_id.clone(),
             });
@@ -453,7 +466,8 @@ impl PublisherRegistry {
         state
             .publishers
             .insert(namespace_id.clone(), publisher.clone());
-        self.report_session_counts(state.publishers.len(), state.closing.len());
+        let (open, closing) = state.session_counts();
+        self.report_session_counts(open, closing);
         Ok(publisher)
     }
 
@@ -467,40 +481,51 @@ impl PublisherRegistry {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CloseNamespaceReport, CoreError> {
-        let taken = {
+        let (completion, close_in_progress) = {
             let mut state = self.shared.lock_state();
-            state.publishers.remove(namespace_id).map(|publisher| {
-                state.closing.insert(namespace_id.clone());
+            if state.closed {
+                return Err(CoreError::ShuttingDown);
+            }
+            let Some(publisher) = state.publishers.get(namespace_id).cloned() else {
+                return Ok(CloseNamespaceReport {
+                    was_open: false,
+                    drained_commits: 0,
+                    fenced: false,
+                });
+            };
+            if let Some(completion) = state.closing.get(namespace_id) {
+                (completion.clone(), true)
+            } else {
                 // Flipping admission while the registry lock is held is the close
                 // linearization point.
                 let drained_commits = publisher.close_session_admission();
-                self.report_session_counts(state.publishers.len(), state.closing.len());
-                (publisher, drained_commits)
-            })
+                let (sender, completion) = watch::channel(None);
+                state
+                    .closing
+                    .insert(namespace_id.clone(), completion.clone());
+                let (open, closing) = state.session_counts();
+                self.report_session_counts(open, closing);
+                let shared = Arc::clone(&self.shared);
+                let namespace_id = namespace_id.clone();
+                self.runtime.spawn(async move {
+                    finish_namespace_close(
+                        shared,
+                        publisher,
+                        namespace_id,
+                        drained_commits,
+                        sender,
+                    )
+                    .await;
+                });
+                (completion, false)
+            }
         };
-        let Some((publisher, drained_commits)) = taken else {
-            return Ok(CloseNamespaceReport {
-                was_open: false,
-                drained_commits: 0,
-                fenced: false,
-            });
-        };
-
-        publisher.wait_for_worker().await;
-        let fenced = publisher.session_is_fenced();
-        let totals = {
-            let mut state = self.shared.lock_state();
-            state.projections.forget(namespace_id);
-            state.closing.remove(namespace_id);
-            self.report_session_counts(state.publishers.len(), state.closing.len());
-            state.projections.totals()
-        };
-        publisher.report_retained_projections(totals);
-        Ok(CloseNamespaceReport {
-            was_open: true,
-            drained_commits,
-            fenced,
-        })
+        let mut report = wait_for_close(completion).await?;
+        if close_in_progress {
+            report.was_open = false;
+            report.drained_commits = 0;
+        }
+        Ok(report)
     }
 
     pub(crate) fn namespace_session_state(
@@ -509,7 +534,7 @@ impl PublisherRegistry {
     ) -> NamespaceSessionState {
         let publisher = {
             let state = self.shared.lock_state();
-            if state.closing.contains(namespace_id) {
+            if state.closing.contains_key(namespace_id) {
                 return NamespaceSessionState::Closing;
             }
             state.publishers.get(namespace_id).cloned()
@@ -524,16 +549,20 @@ impl PublisherRegistry {
     }
 
     pub(crate) fn writer_session_stats(&self) -> WriterSessionStats {
-        let (publishers, closing, capacity) = {
+        let (publishers, open, closing, capacity) = {
             let state = self.shared.lock_state();
-            (
-                state.publishers.values().cloned().collect::<Vec<_>>(),
-                state.closing.len(),
-                state.capacity.get(),
-            )
+            let publishers = state
+                .publishers
+                .iter()
+                .filter_map(|(namespace_id, publisher)| {
+                    (!state.closing.contains_key(namespace_id)).then_some(publisher.clone())
+                })
+                .collect::<Vec<_>>();
+            let (open, closing) = state.session_counts();
+            (publishers, open, closing, state.capacity.get())
         };
         WriterSessionStats {
-            open: publishers.len(),
+            open,
             closing,
             fenced: publishers
                 .iter()
@@ -591,6 +620,16 @@ impl PublisherRegistry {
         for publisher in publishers {
             publisher.wait_for_worker().await;
         }
+        let closes = self
+            .shared
+            .lock_state()
+            .closing
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for completion in closes {
+            let _ = wait_for_close(completion).await;
+        }
         let panicked = self.shared.panicked_units.load(Ordering::SeqCst);
         if panicked > 0 {
             return Err(RuntimeError::RuntimeTask(format!(
@@ -599,6 +638,61 @@ impl PublisherRegistry {
         }
         Ok(())
     }
+}
+
+async fn wait_for_close(
+    mut completion: CloseCompletion,
+) -> Result<CloseNamespaceReport, CoreError> {
+    loop {
+        if let Some(report) = *completion.borrow_and_update() {
+            return Ok(report);
+        }
+        // The sender drops without a report only when the runtime shut down
+        // under the close task.
+        if completion.changed().await.is_err() {
+            return Err(CoreError::ShuttingDown);
+        }
+    }
+}
+
+async fn finish_namespace_close(
+    shared: Arc<RegistryShared>,
+    publisher: NamespacePublisher,
+    namespace_id: NamespaceId,
+    drained_commits: usize,
+    sender: watch::Sender<Option<CloseNamespaceReport>>,
+) {
+    let fenced = match AssertUnwindSafe(async {
+        publisher.wait_for_worker().await;
+        publisher.session_is_fenced()
+    })
+    .catch_unwind()
+    .await
+    {
+        Ok(fenced) => fenced,
+        Err(_) => {
+            shared.panicked_units.fetch_add(1, Ordering::SeqCst);
+            publisher.session_is_fenced()
+        }
+    };
+    let totals = {
+        let mut state = shared.lock_state();
+        state.publishers.remove(&namespace_id);
+        state.projections.forget(&namespace_id);
+        state.closing.remove(&namespace_id);
+        let (open, closing) = state.session_counts();
+        publisher
+            .read_core
+            .instruments()
+            .publisher_sessions(open, closing);
+        state.projections.totals()
+    };
+    publisher.report_retained_projections(totals);
+    let _ = sender.send(Some(CloseNamespaceReport {
+        was_open: true,
+        drained_commits,
+        fenced,
+    }));
 }
 
 #[derive(Clone)]

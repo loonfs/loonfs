@@ -103,6 +103,7 @@ async fn close_refuses_late_work_and_drains_admitted_commits() {
         }
     });
     blocking.wait_until_blocked().await;
+    let open_before_close = writer.writer_session_stats().open;
 
     let mut second =
         Box::pin(writer.create_directory(&namespace_id, "/second", directory_options()));
@@ -113,6 +114,12 @@ async fn close_refuses_late_work_and_drains_admitted_commits() {
         writer.namespace_session_state(&namespace_id),
         NamespaceSessionState::Closing
     );
+    drop(close);
+    let joined_close = tokio::spawn({
+        let writer = writer.clone();
+        let namespace_id = namespace_id.clone();
+        async move { writer.close_namespace(&namespace_id).await }
+    });
 
     expect_code(
         writer
@@ -127,14 +134,88 @@ async fn close_refuses_late_work_and_drains_admitted_commits() {
         .expect("join first mutation")
         .expect("first mutation lands");
     second.await.expect("second mutation lands");
-    let report = close.await.expect("close namespace session");
-    assert!(report.was_open);
-    assert_eq!(report.drained_commits, 2);
+    let report = joined_close
+        .await
+        .expect("join close waiter")
+        .expect("wait for namespace close");
+    assert!(!report.was_open);
+    assert_eq!(report.drained_commits, 0);
     assert!(!report.fenced);
     assert_eq!(
         writer.namespace_session_state(&namespace_id),
         NamespaceSessionState::Closed
     );
+    writer
+        .create_directory(&namespace_id, "/after", directory_options())
+        .await
+        .expect("a later mutation opens a new session");
+    assert_eq!(writer.writer_session_stats().open, open_before_close);
+}
+
+#[tokio::test]
+async fn closing_session_holds_capacity_and_shutdown_waits_for_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let first = NamespaceId::parse("closing-capacity-one").expect("namespace id");
+    let second = NamespaceId::parse("closing-capacity-two").expect("namespace id");
+    let blocking = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create store"),
+        KeyPredicate::wal_head(&first),
+        OperationClass::CompareAndSwap,
+    ));
+    let store: SharedObjectStore = blocking.clone();
+    let setup = writer(store.clone(), "closing-capacity-setup").await;
+    create_namespace(&setup, &first).await;
+    create_namespace(&setup, &second).await;
+    setup.shutdown().await.expect("shut down setup writer");
+
+    let writer = FsWriter::builder_with_store(store)
+        .writer_id("closing-capacity")
+        .min_publish_interval_ms(0)
+        .max_open_namespaces(NonZeroUsize::new(1).expect("nonzero capacity"))
+        .build()
+        .await
+        .expect("build bounded writer");
+    blocking.block_next();
+    let mutation = tokio::spawn({
+        let writer = writer.clone();
+        let first = first.clone();
+        async move {
+            writer
+                .create_directory(&first, "/first", directory_options())
+                .await
+        }
+    });
+    blocking.wait_until_blocked().await;
+
+    let mut close = Box::pin(writer.close_namespace(&first));
+    assert!(futures::poll!(close.as_mut()).is_pending());
+    let stats = writer.writer_session_stats();
+    assert_eq!(stats.open, 0);
+    assert_eq!(stats.closing, 1);
+    expect_code(
+        writer.open_namespace(&second),
+        ErrorCode::WriterCapacityExceeded,
+    );
+
+    let shutdown = tokio::spawn({
+        let writer = writer.clone();
+        async move { writer.shutdown().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!shutdown.is_finished());
+
+    blocking.release();
+    mutation
+        .await
+        .expect("join mutation")
+        .expect("mutation lands");
+    let report = close.await.expect("close namespace session");
+    assert!(report.was_open);
+    assert_eq!(report.drained_commits, 1);
+    shutdown
+        .await
+        .expect("join shutdown")
+        .expect("shutdown waits for close");
 }
 
 #[tokio::test]
