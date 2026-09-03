@@ -7,7 +7,10 @@ use super::load::{
     load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter, SegmentKeyRangeBlocks,
     SessionBlockMemo,
 };
-use super::runs::{MetadataFamilySegments, MetadataRunManifest, CHECKPOINT_ROW_FAMILIES};
+use super::runs::{
+    MetadataFamilySegments, MetadataRunManifest, CHECKPOINT_ROW_FAMILIES,
+    MAX_MATERIALIZED_TABLE_LOADS,
+};
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use futures::future::try_join_all;
@@ -18,11 +21,6 @@ use loonfs_api::wire::sst_blocks::{key_range_may_intersect, string_prefix_upper_
 use loonfs_api::ChangeSeq;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
-
-/// Segment fetches issued per wave during a scan. Wide directories touch
-/// hundreds of segments per page; deeper waves amortize the per-wave await
-/// without unbounded fan-out.
-pub(super) const MAX_MATERIALIZED_TABLE_LOADS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Readahead {

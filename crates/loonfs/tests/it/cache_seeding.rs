@@ -744,7 +744,13 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
 
     let calls_before = stored_blocks.call_count();
     let reader = open_runtime_with(shared_store, "stored-block-reader", |builder| {
-        builder.stored_metadata_block_cache(stored_blocks.clone())
+        let mut runtime_cache = RuntimeCacheConfig::default();
+        runtime_cache
+            .metadata_segment_cache
+            .open_prefetch_max_stored_bytes = 0;
+        builder
+            .runtime_cache(runtime_cache)
+            .stored_metadata_block_cache(stored_blocks.clone())
     });
     let entries = reader
         .list_path_blocking(&namespace_id, "/docs")

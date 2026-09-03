@@ -4,8 +4,9 @@
 use super::current_files::resolve_visible_inode;
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
 use crate::checkpoint::{
-    head_from_manifest, load_basis_metadata_segments, MetadataSegmentCache,
-    VerifiedMetadataSegments, WalTailProjectionCache, WalTailProjectionCacheKey,
+    head_from_manifest, load_basis_metadata_segments, prefetch_verified_segment_tails,
+    MetadataSegmentCache, VerifiedMetadataSegments, WalTailProjectionCache,
+    WalTailProjectionCacheKey,
 };
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError, Result};
@@ -20,7 +21,8 @@ use crate::namespace::control_snapshot::load_head_and_metadata_basis;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
 use crate::wal::{
-    ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
+    ensure_replayed_head_matches, load_wal_chain, prefetch_hinted_wal_segments,
+    project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::control::HeadState;
@@ -183,14 +185,38 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         crate::namespace::control::ensure_namespace_live(&head)?;
         let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
         let manifest_no = basis.manifest_no();
-        let loaded_basis = load_basis_metadata_segments(
+        let basis_head_seq = basis
+            .manifest()
+            .map_or(ChangeSeq(0), |manifest| manifest.manifest_head_seq);
+        let tail_projection_cached = load_context.tail_cache.is_some_and(|cache| {
+            cache.contains_head(namespace_id, head.seq, load_context.head_etag)
+        });
+        let speculative_wal_prefetch = async {
+            if head.seq > basis_head_seq && !tail_projection_cached {
+                if let Some(tip) = head.visible_wal_tip.as_ref() {
+                    return prefetch_hinted_wal_segments(
+                        store,
+                        namespace_id,
+                        tip,
+                        &head.recent_segments,
+                        head.seq,
+                        None,
+                    )
+                    .await;
+                }
+            }
+            (HashMap::new(), 0)
+        };
+        let load_basis = load_basis_metadata_segments(
             store,
             load_context.segment_cache,
             namespace_id,
             basis,
             head.created_at_ms,
-        )
-        .await?;
+        );
+        let (loaded_basis, (prefetched, speculative_requests)) =
+            futures::join!(load_basis, speculative_wal_prefetch);
+        let loaded_basis = loaded_basis?;
         let segments = loaded_basis.segments;
         let manifest_head = head_from_manifest(&head, segments.manifest());
         let anchor = ReadAnchor {
@@ -207,6 +233,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
         if let Some(cache) = load_context.tail_cache {
             if let Some(wal_tail_rows) = cache.get(&cache_key) {
+                if let Some(segment_cache) = load_context
+                    .segment_cache
+                    .filter(|cache| cache.open_prefetch_max_stored_bytes() != 0)
+                {
+                    prefetch_verified_segment_tails(store, segment_cache, &segments).await;
+                }
                 return Ok(Self {
                     namespace_id: namespace_id.clone(),
                     content_store_id: catalog_entry.content_store_id().clone(),
@@ -217,7 +249,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 });
             }
         }
-        let wal_chain = load_wal_chain(
+        let tail_prefetch = async {
+            if let Some(segment_cache) = load_context
+                .segment_cache
+                .filter(|cache| cache.open_prefetch_max_stored_bytes() != 0)
+            {
+                prefetch_verified_segment_tails(store, segment_cache, &segments).await;
+            }
+        };
+        let wal_chain_load = load_wal_chain(
             store,
             WalChainLoadRequest {
                 namespace_id,
@@ -226,14 +266,17 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 visible_tip: head.visible_wal_tip.clone(),
                 stop_after_seq: None,
                 max_segment_fetches: None,
+                prefetched,
+                speculative_requests,
                 recent_segments: &head.recent_segments,
             },
-        )
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-        })?
-        .into_complete();
+        );
+        let ((), wal_chain) = futures::join!(tail_prefetch, wal_chain_load);
+        let wal_chain = wal_chain
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
+            })?
+            .into_complete();
         let replayed = {
             let _span =
                 tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();

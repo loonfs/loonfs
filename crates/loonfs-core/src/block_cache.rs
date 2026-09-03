@@ -228,6 +228,25 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
         Some(block)
     }
 
+    /// Whether the cache holds `key`. Unlike `get`, this records no hit or
+    /// miss and does not touch the entry's recency.
+    pub(crate) fn contains_key(&self, key: &K) -> bool {
+        self.inner
+            .lock()
+            .expect("decoded block cache lock should not be poisoned")
+            .entries
+            .contains_key(key)
+    }
+
+    pub(crate) fn contains_key_matching(&self, matches: impl Fn(&K) -> bool) -> bool {
+        self.inner
+            .lock()
+            .expect("decoded block cache lock should not be poisoned")
+            .entries
+            .keys()
+            .any(matches)
+    }
+
     pub fn insert(&self, key: K, block: V) {
         if self.disabled() {
             return;

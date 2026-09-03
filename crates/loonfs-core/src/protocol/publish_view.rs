@@ -230,6 +230,8 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: std::collections::HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &head.recent_segments,
         },
     )

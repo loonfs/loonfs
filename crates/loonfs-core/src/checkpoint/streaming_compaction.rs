@@ -281,6 +281,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
 ) -> Result<MetadataMergeResult> {
     let probe_cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
+        open_prefetch_max_stored_bytes: 0,
     });
     let merge = GroupMerge::new(
         store,
@@ -322,6 +323,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
 ) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
     let probe_cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
+        open_prefetch_max_stored_bytes: 0,
     });
     let merge = GroupMerge::new(
         segments.store,

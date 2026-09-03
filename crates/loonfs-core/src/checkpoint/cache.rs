@@ -22,16 +22,21 @@ use std::sync::Arc;
 /// Default decoded-byte budget for metadata segment blocks. A value of zero
 /// disables the cache.
 pub(crate) const DEFAULT_METADATA_SEGMENT_CACHE_DECODED_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_OPEN_PREFETCH_MAX_STORED_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataSegmentCacheConfig {
     pub max_decoded_bytes: usize,
+    /// Maximum stored bytes selected for the open-time segment-tail prefetch.
+    /// Zero disables the prefetch.
+    pub open_prefetch_max_stored_bytes: usize,
 }
 
 impl Default for MetadataSegmentCacheConfig {
     fn default() -> Self {
         Self {
             max_decoded_bytes: DEFAULT_METADATA_SEGMENT_CACHE_DECODED_BYTES,
+            open_prefetch_max_stored_bytes: DEFAULT_OPEN_PREFETCH_MAX_STORED_BYTES,
         }
     }
 }
@@ -63,6 +68,7 @@ pub(super) type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
 
 pub struct MetadataSegmentCache {
     blocks: DecodedBlockCache<MetadataSegmentCacheKey, DecodedMetadataSegmentBlock>,
+    open_prefetch_max_stored_bytes: usize,
     stats: MetadataSegmentFilterStatsInner,
     observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     /// Optional node-local cache for encoded blocks. Keeping it with the
@@ -75,6 +81,10 @@ impl std::fmt::Debug for MetadataSegmentCache {
         formatter
             .debug_struct("MetadataSegmentCache")
             .field("blocks", &self.blocks)
+            .field(
+                "open_prefetch_max_stored_bytes",
+                &self.open_prefetch_max_stored_bytes,
+            )
             .field("stats", &self.stats)
             .field("stored_block_cache", &self.stored_block_cache)
             .finish_non_exhaustive()
@@ -97,6 +107,7 @@ impl MetadataSegmentCache {
         stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
         observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     ) -> Self {
+        let open_prefetch_max_stored_bytes = config.open_prefetch_max_stored_bytes;
         Self {
             blocks: DecodedBlockCache::new(DecodedBlockCacheConfig {
                 max_decoded_bytes: config.max_decoded_bytes,
@@ -104,6 +115,7 @@ impl MetadataSegmentCache {
                 max_entries: None,
                 observer: observer.clone(),
             }),
+            open_prefetch_max_stored_bytes,
             stats: MetadataSegmentFilterStatsInner::default(),
             observer,
             stored_block_cache,
@@ -113,6 +125,11 @@ impl MetadataSegmentCache {
     /// Returns the node-local encoded-block cache, if one was configured.
     pub fn stored_block_cache(&self) -> Option<&Arc<dyn StoredMetadataBlockCache>> {
         self.stored_block_cache.as_ref()
+    }
+
+    /// Returns the stored-byte budget for open-time segment-tail prefetching.
+    pub fn open_prefetch_max_stored_bytes(&self) -> usize {
+        self.open_prefetch_max_stored_bytes
     }
 
     /// Resolves one block access through a single-flight cell.
@@ -158,6 +175,11 @@ impl MetadataSegmentCache {
 
     pub(super) fn get(&self, key: &MetadataSegmentCacheKey) -> Option<DecodedMetadataSegmentBlock> {
         self.blocks.get(key)
+    }
+
+    /// A probe that records no hit or miss, for deciding what to prefetch.
+    pub(super) fn contains(&self, key: &MetadataSegmentCacheKey) -> bool {
+        self.blocks.contains_key(key)
     }
 
     pub(super) fn insert(&self, key: MetadataSegmentCacheKey, block: DecodedMetadataSegmentBlock) {
@@ -283,6 +305,19 @@ impl WalTailProjectionCache {
         self.blocks.get(key)
     }
 
+    pub(crate) fn contains_head(
+        &self,
+        namespace_id: &NamespaceId,
+        head_seq: ChangeSeq,
+        head_etag: &str,
+    ) -> bool {
+        self.blocks.contains_key_matching(|key| {
+            &key.namespace_id == namespace_id
+                && key.head_seq == head_seq
+                && key.head_etag == head_etag
+        })
+    }
+
     pub fn insert(&self, key: WalTailProjectionCacheKey, rows: Arc<MetadataState>) {
         if self.config.max_entries == 0 {
             return;
@@ -400,6 +435,7 @@ mod tests {
     fn byte_budget_evicts_the_oldest_block() {
         let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
             max_decoded_bytes: 1000,
+            ..MetadataSegmentCacheConfig::default()
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));
@@ -415,6 +451,7 @@ mod tests {
     fn replacing_a_block_reaccounts_its_decoded_bytes() {
         let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
             max_decoded_bytes: 1000,
+            ..MetadataSegmentCacheConfig::default()
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("a"), block(100));

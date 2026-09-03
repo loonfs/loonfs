@@ -65,6 +65,23 @@ fn hints_in_gap(
         .collect()
 }
 
+pub(crate) async fn prefetch_hinted_wal_segments<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    tip: &WalSegmentPointer,
+    hints: &[WalSegmentPointer],
+    head_seq: ChangeSeq,
+    max_segment_fetches: Option<usize>,
+) -> (HashMap<String, Bytes>, usize) {
+    let in_gap = hints_in_gap(namespace_id, tip, hints, ChangeSeq(0), head_seq);
+    let request_count = max_segment_fetches
+        .unwrap_or(RECENT_SEGMENT_PREFETCH_CONCURRENCY)
+        .min(RECENT_SEGMENT_PREFETCH_CONCURRENCY)
+        .min(in_gap.len());
+    let prefetched = prefetch_recent_segments(store, namespace_id, &in_gap[..request_count]).await;
+    (prefetched, request_count)
+}
+
 /// Concurrently fetches hinted WAL segments in the replay range.
 ///
 /// A miss or failed prefetch does not fail the load; the normal chain walk
@@ -157,9 +174,9 @@ impl WalChainLoad {
 )]
 pub(crate) async fn load_wal_chain<S: ObjectStore + ?Sized>(
     store: &S,
-    request: WalChainLoadRequest<'_>,
+    mut request: WalChainLoadRequest<'_>,
 ) -> Result<WalChainLoad, WalChainLoadError> {
-    let walked = walk_chain(store, &request).await?;
+    let walked = walk_chain(store, &mut request).await?;
     if walked.limit_reached {
         Ok(WalChainLoad::LimitReached {
             requests_issued: walked.fetches,
@@ -176,12 +193,13 @@ pub(crate) async fn load_wal_chain<S: ObjectStore + ?Sized>(
 /// limiting requests for segment bodies.
 async fn walk_chain<S: ObjectStore + ?Sized>(
     store: &S,
-    request: &WalChainLoadRequest<'_>,
+    request: &mut WalChainLoadRequest<'_>,
 ) -> Result<WalkedChain, WalChainLoadError> {
+    let mut fetches = request.speculative_requests;
     let Some((mut pointer, stop_after_seq)) = request.tip_and_stop()? else {
         return Ok(WalkedChain {
             segments: Vec::new(),
-            fetches: 0,
+            fetches,
             limit_reached: false,
         });
     };
@@ -192,19 +210,33 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
         stop_after_seq,
         request.head_seq,
     );
-    // `fetches` counts every segment-body request, including prefetches, and
-    // never exceeds `max_segment_fetches`. Prefetch consumes its share first;
-    // the chain walk uses the remaining budget. Because hints are ordered from
-    // newest to oldest, a limited prefetch covers the segments nearest the tip.
-    let prefetched_hints = request
-        .max_segment_fetches
-        .map_or(in_gap.len(), |limit| in_gap.len().min(limit));
-    let mut fetches = prefetched_hints;
-    let mut prefetched = if prefetched_hints == 0 {
-        HashMap::new()
-    } else {
-        prefetch_recent_segments(store, request.namespace_id, &in_gap[..prefetched_hints]).await
-    };
+    let in_gap_set = in_gap.iter().collect::<HashSet<_>>();
+    let mut prefetched = std::mem::take(&mut request.prefetched);
+    prefetched.retain(|object_key, _| in_gap_set.contains(object_key));
+    let missing_hints = in_gap
+        .iter()
+        .filter(|object_key| !prefetched.contains_key(*object_key))
+        .collect::<Vec<_>>();
+    // `fetches` counts every segment-body request, including speculative and
+    // local prefetches, and never exceeds `max_segment_fetches`. Prefetch
+    // consumes its share first; the chain walk uses the remaining budget.
+    // Because hints are ordered from newest to oldest, a limited prefetch
+    // covers the segments nearest the tip.
+    let remaining_fetches = request.max_segment_fetches.map_or(usize::MAX, |limit| {
+        limit
+            .checked_sub(fetches)
+            .expect("speculative WAL requests should fit the caller's fetch limit")
+    });
+    let prefetched_hints = missing_hints.len().min(remaining_fetches);
+    fetches += prefetched_hints;
+    if prefetched_hints != 0 {
+        let object_keys = missing_hints[..prefetched_hints]
+            .iter()
+            .map(|object_key| (*object_key).clone())
+            .collect::<Vec<_>>();
+        prefetched
+            .extend(prefetch_recent_segments(store, request.namespace_id, &object_keys).await);
+    }
     let mut reversed = Vec::new();
     loop {
         if pointer.end_seq <= stop_after_seq {

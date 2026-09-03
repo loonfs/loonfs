@@ -13,12 +13,15 @@ use super::cache::{
 };
 use super::data_block_load::decoded_data_cache_block;
 use super::error::ManifestLoadError;
+use super::runs::{MetadataRunManifest, MAX_MATERIALIZED_TABLE_LOADS, OPEN_PREFETCH_ROW_FAMILIES};
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 use bytes::Bytes;
+use futures::StreamExt;
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::manifest::MetadataSegmentRef;
+use loonfs_api::wire::manifest::RunTier;
 use loonfs_api::wire::sst_blocks::{
     decode_data_block, decode_filter_block, decode_index_block, BlockHandle, SegmentFilter,
     SegmentIndexEntry, SstBlockCodecError,
@@ -26,6 +29,106 @@ use loonfs_api::wire::sst_blocks::{
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::sync::Arc;
+
+#[derive(Clone)]
+struct SegmentTailPrefetch {
+    descriptor: MetadataSegmentRef,
+    want: MetadataSegmentBlockKind,
+}
+
+fn select_segment_tail_prefetches(
+    segment_cache: &MetadataSegmentCache,
+    memo: &SessionBlockMemo,
+    runs: &[MetadataRunManifest],
+) -> Vec<SegmentTailPrefetch> {
+    let max_stored_bytes = u64::try_from(segment_cache.open_prefetch_max_stored_bytes())
+        .expect("a usize stored-byte budget should fit in u64");
+    let mut selected = Vec::new();
+    let mut selected_stored_bytes = 0_u64;
+    for family in OPEN_PREFETCH_ROW_FAMILIES {
+        for tier in [RunTier::Base, RunTier::Delta] {
+            for run in runs.iter().filter(|run| run.tier == tier) {
+                let Some(family_segments) = run
+                    .segments
+                    .iter()
+                    .find(|segments| segments.family == family)
+                else {
+                    continue;
+                };
+                for descriptor in &family_segments.segments {
+                    let (want, handle, stored_bytes) = if descriptor.filter_inline.is_some() {
+                        (
+                            MetadataSegmentBlockKind::Index,
+                            descriptor.index_block,
+                            u64::from(descriptor.index_block.stored_len),
+                        )
+                    } else {
+                        (
+                            MetadataSegmentBlockKind::Filter,
+                            descriptor.filter_block,
+                            u64::from(descriptor.filter_block.stored_len)
+                                + u64::from(descriptor.index_block.stored_len),
+                        )
+                    };
+                    let cache_key = segment_block_cache_key(descriptor, want, handle.offset);
+                    if memo.get(&cache_key).is_some() || segment_cache.contains(&cache_key) {
+                        continue;
+                    }
+                    let next_stored_bytes = selected_stored_bytes
+                        .checked_add(stored_bytes)
+                        .expect("selected segment tail bytes should fit in u64");
+                    if next_stored_bytes > max_stored_bytes {
+                        return selected;
+                    }
+                    selected_stored_bytes = next_stored_bytes;
+                    selected.push(SegmentTailPrefetch {
+                        descriptor: descriptor.clone(),
+                        want,
+                    });
+                }
+            }
+        }
+    }
+    selected
+}
+
+pub(super) async fn prefetch_segment_tails<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: &MetadataSegmentCache,
+    memo: &SessionBlockMemo,
+    runs: &[MetadataRunManifest],
+) {
+    let selected = select_segment_tail_prefetches(segment_cache, memo, runs);
+    let mut failed_requests = 0_usize;
+    let mut first_error = None;
+    let results = futures::stream::iter(selected)
+        .map(|selected| async move {
+            load_and_publish_segment_sections(
+                store,
+                Some(segment_cache),
+                memo,
+                &selected.descriptor,
+                selected.want,
+            )
+            .await
+        })
+        .buffer_unordered(MAX_MATERIALIZED_TABLE_LOADS)
+        .collect::<Vec<_>>()
+        .await;
+    for result in results {
+        if let Err(error) = result {
+            failed_requests += 1;
+            first_error.get_or_insert_with(|| error.to_string());
+        }
+    }
+    if let Some(first_error) = first_error {
+        tracing::debug!(
+            failed_requests,
+            %first_error,
+            "metadata segment tail prefetch requests failed"
+        );
+    }
+}
 
 pub(super) fn segment_block_cache_key(
     descriptor: &MetadataSegmentRef,
@@ -512,4 +615,119 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
     };
     memo.record(&cache_key, &block);
     block.into_filter(&metadata_segment_object_key(descriptor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::cache::MetadataSegmentCacheConfig;
+    use crate::checkpoint::runs::MetadataFamilySegments;
+    use loonfs_api::wire::manifest::MetadataRowFamily;
+    use loonfs_api::{ChangeSeq, MetadataSegmentId, NamespaceId, RunNo};
+
+    fn descriptor(
+        id: u32,
+        family: MetadataRowFamily,
+        filter_stored_len: u32,
+        index_stored_len: u32,
+    ) -> MetadataSegmentRef {
+        MetadataSegmentRef {
+            owner_namespace_id: NamespaceId::parse("prefetch").expect("namespace id"),
+            segment_id: MetadataSegmentId::parse(format!("seg_{id:032x}")).expect("segment id"),
+            compaction_job_id: None,
+            family,
+            segment_index: 0,
+            row_count: 1,
+            min_row_key: "a".to_owned(),
+            max_row_key: "z".to_owned(),
+            index_block: BlockHandle {
+                offset: u64::from(filter_stored_len),
+                stored_len: index_stored_len,
+                decoded_len: index_stored_len,
+                crc32c: 0,
+            },
+            filter_block: BlockHandle {
+                offset: 0,
+                stored_len: filter_stored_len,
+                decoded_len: filter_stored_len,
+                crc32c: 0,
+            },
+            filter_inline: Some(String::new()),
+            object_checksum: format!("checksum-{id}"),
+        }
+    }
+
+    fn run(
+        run_no: u64,
+        tier: RunTier,
+        descriptors: Vec<MetadataSegmentRef>,
+    ) -> MetadataRunManifest {
+        let mut segments = Vec::new();
+        for descriptor in descriptors {
+            let family = descriptor.family;
+            segments.push(MetadataFamilySegments {
+                family,
+                segments: vec![descriptor],
+            });
+        }
+        MetadataRunManifest {
+            run_no: RunNo(run_no),
+            run_seq: ChangeSeq(run_no),
+            tier,
+            segments,
+        }
+    }
+
+    #[test]
+    fn segment_tail_selection_honors_priority_budget_and_memo_hits() {
+        let delta_bind = descriptor(1, MetadataRowFamily::DirentryBinds, 1, 4);
+        let base_bind = descriptor(2, MetadataRowFamily::DirentryBinds, 1, 3);
+        let inode = descriptor(3, MetadataRowFamily::Inodes, 1, 3);
+        let revision = descriptor(4, MetadataRowFamily::Revisions, 1, 1);
+        let runs = vec![
+            run(1, RunTier::Delta, vec![delta_bind]),
+            run(2, RunTier::Base, vec![base_bind.clone(), inode, revision]),
+        ];
+        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
+            open_prefetch_max_stored_bytes: 7,
+            ..MetadataSegmentCacheConfig::default()
+        });
+        let memo = SessionBlockMemo::default();
+
+        let selected = select_segment_tail_prefetches(&cache, &memo, &runs);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|selected| selected.descriptor.segment_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "seg_00000000000000000000000000000002",
+                "seg_00000000000000000000000000000001",
+            ]
+        );
+
+        let base_bind_key = segment_block_cache_key(
+            &base_bind,
+            MetadataSegmentBlockKind::Index,
+            base_bind.index_block.offset,
+        );
+        memo.record(
+            &base_bind_key,
+            &DecodedMetadataSegmentBlock::Index {
+                entries: Arc::new(Vec::new()),
+                decoded_bytes: 0,
+            },
+        );
+        let selected = select_segment_tail_prefetches(&cache, &memo, &runs);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|selected| selected.descriptor.segment_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "seg_00000000000000000000000000000001",
+                "seg_00000000000000000000000000000003",
+            ]
+        );
+    }
 }

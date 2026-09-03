@@ -16,9 +16,26 @@ pub(super) use loonfs_api::wire::sst_blocks::{
 
 pub(super) const MAX_MAINTENANCE_SEGMENT_IO: usize = 8;
 
+/// Segment tail and row-block fetches issued in one bounded wave.
+pub(super) const MAX_MATERIALIZED_TABLE_LOADS: usize = 16;
+
 pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 10] = [
     MetadataRowFamily::Inodes,
     MetadataRowFamily::DirentryBinds,
+    MetadataRowFamily::DirentryChildBinds,
+    MetadataRowFamily::DirentryUnbinds,
+    MetadataRowFamily::Revisions,
+    MetadataRowFamily::RevisionsByInodeDesc,
+    MetadataRowFamily::Tombstones,
+    MetadataRowFamily::ActiveDeletions,
+    MetadataRowFamily::CommitReceipts,
+    MetadataRowFamily::Attributes,
+];
+
+/// Path resolution families come first so open prefetching serves point lookups first.
+pub(super) const OPEN_PREFETCH_ROW_FAMILIES: [MetadataRowFamily; 10] = [
+    MetadataRowFamily::DirentryBinds,
+    MetadataRowFamily::Inodes,
     MetadataRowFamily::DirentryChildBinds,
     MetadataRowFamily::DirentryUnbinds,
     MetadataRowFamily::Revisions,

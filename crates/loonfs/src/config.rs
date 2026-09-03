@@ -74,6 +74,7 @@ impl RuntimeCacheConfig {
             max_cached_wal_tail_projection_decoded_bytes: 0,
             metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
+                open_prefetch_max_stored_bytes: 0,
             },
         }
     }

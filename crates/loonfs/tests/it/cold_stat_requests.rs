@@ -11,7 +11,7 @@
 
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenancePlan,
-    MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
+    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeCacheConfig,
 };
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_api::AbsolutePath;
@@ -205,7 +205,12 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .collect();
 
     // The measured operation: first stat on a fresh handle, nothing warm.
+    let mut runtime_cache = RuntimeCacheConfig::default();
+    runtime_cache
+        .metadata_segment_cache
+        .open_prefetch_max_stored_bytes = 0;
     let reader = FsReader::builder_with_store(store.clone())
+        .runtime_cache(runtime_cache)
         .build()
         .await
         .expect("build reader");

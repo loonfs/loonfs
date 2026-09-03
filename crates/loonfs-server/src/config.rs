@@ -241,6 +241,7 @@ pub struct RuntimeCacheConfigOverrides {
     pub max_cached_wal_tail_projection_rows: Option<usize>,
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
     pub metadata_segment_cache_max_decoded_bytes: Option<usize>,
+    pub metadata_segment_cache_open_prefetch_max_stored_bytes: Option<usize>,
 }
 
 /// Controls whether this server schedules maintenance automatically.
@@ -403,6 +404,12 @@ impl ServerConfig {
         }
         if let Some(value) = self.runtime_cache.metadata_segment_cache_max_decoded_bytes {
             config.metadata_segment_cache.max_decoded_bytes = value;
+        }
+        if let Some(value) = self
+            .runtime_cache
+            .metadata_segment_cache_open_prefetch_max_stored_bytes
+        {
+            config.metadata_segment_cache.open_prefetch_max_stored_bytes = value;
         }
         config
     }
@@ -1562,6 +1569,7 @@ writer_id = "loonfs-server"
 max_cached_namespaces = 2
 max_cached_wal_tail_projection_rows = 10
 max_cached_wal_tail_projection_decoded_bytes = 4096
+metadata_segment_cache_open_prefetch_max_stored_bytes = 8192
 
 [store]
 kind = "local-fs"
@@ -1575,6 +1583,10 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.max_cached_namespaces, 2);
         assert_eq!(config.max_cached_wal_tail_projection_rows, 10);
         assert_eq!(config.max_cached_wal_tail_projection_decoded_bytes, 4096);
+        assert_eq!(
+            config.metadata_segment_cache.open_prefetch_max_stored_bytes,
+            8192
+        );
     }
 
     #[test]
@@ -1590,6 +1602,7 @@ max_cached_namespaces = 0
 max_cached_wal_tail_projection_rows = 0
 max_cached_wal_tail_projection_decoded_bytes = 0
 metadata_segment_cache_max_decoded_bytes = 0
+metadata_segment_cache_open_prefetch_max_stored_bytes = 0
 
 [store]
 kind = "local-fs"

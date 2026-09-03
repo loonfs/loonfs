@@ -54,6 +54,8 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: Some(after_seq),
             max_segment_fetches: None,
+            prefetched: std::collections::HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &head.recent_segments,
         },
     )

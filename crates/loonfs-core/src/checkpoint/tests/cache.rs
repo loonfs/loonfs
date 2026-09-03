@@ -126,6 +126,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
 
     let degenerate = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: 1,
+        ..MetadataSegmentCacheConfig::default()
     });
     let degenerate_segments = super::load_verified_manifest_segments(
         &store,

@@ -86,6 +86,20 @@ pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
 pub(crate) use self::snapshot::{extend_snapshot_expiry, release_snapshot};
 pub(crate) use self::streaming_compaction::run_metadata_compaction_job;
 
+pub(crate) async fn prefetch_verified_segment_tails<S: loonfs_objectstore::ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: &MetadataSegmentCache,
+    segments: &VerifiedMetadataSegments<'_, S>,
+) {
+    block_fetch::prefetch_segment_tails(
+        store,
+        segment_cache,
+        &segments.block_memo,
+        &segments.scan_runs,
+    )
+    .await;
+}
+
 fn checkpoint_summary(
     record: loonfs_api::wire::control::CheckpointRecordState,
 ) -> loonfs_api::Checkpoint {

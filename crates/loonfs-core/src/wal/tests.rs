@@ -19,6 +19,7 @@ use loonfs_test_support::stores::{
     ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::borrow::Cow;
+use std::collections::HashMap;
 use tempfile::tempdir;
 
 async fn load_complete_wal_chain<S: ObjectStore + ?Sized>(
@@ -154,6 +155,8 @@ async fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
             visible_tip: Some(segment.envelope.pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &[],
         },
     )
@@ -317,6 +320,8 @@ async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
             visible_tip: Some(second.envelope.pointer()),
             stop_after_seq: Some(ChangeSeq(1)),
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &[],
         },
     )
@@ -352,6 +357,8 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
             visible_tip: Some(segment.envelope.pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &[],
         },
     )
@@ -495,6 +502,8 @@ async fn assert_wal_chain_corruption_rejected(
             visible_tip: Some(pointer),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &[],
         },
     )
@@ -536,6 +545,8 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
             visible_tip: Some(second.envelope.pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &[],
         },
     )
@@ -553,6 +564,8 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
             visible_tip: Some(second.envelope.pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &accurate,
         },
     )
@@ -584,6 +597,8 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
             visible_tip: Some(second.envelope.pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &garbage,
         },
     )
@@ -638,6 +653,8 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
             visible_tip: Some(tip.clone()),
             stop_after_seq: None,
             max_segment_fetches: Some(2),
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &[],
         },
     )
@@ -669,6 +686,8 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
             visible_tip: Some(tip.clone()),
             stop_after_seq: None,
             max_segment_fetches: Some(2),
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &newest_first[1..],
         },
     )
@@ -683,6 +702,45 @@ async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
         2,
         "the prefetch issued the requests the limit allows, not none and not five"
     );
+}
+
+#[tokio::test]
+async fn speculative_requests_count_against_the_chain_fetch_limit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let pointers = write_linked_chain(&inner, &namespace_id, 3).await;
+    let tip = pointers.last().expect("a chain was written").clone();
+    let tip_key = wal_segment(&namespace_id, &tip.segment_id);
+    let tip_bytes = inner
+        .get(&tip_key, None)
+        .await
+        .expect("read speculative body")
+        .expect("speculative body exists");
+    let store = RecordingStore::new(inner, KeyPredicate::any());
+
+    let loaded = load_wal_chain(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(tip),
+            stop_after_seq: None,
+            max_segment_fetches: Some(2),
+            prefetched: HashMap::from([(tip_key, tip_bytes)]),
+            speculative_requests: 2,
+            recent_segments: &[],
+        },
+    )
+    .await
+    .expect("bounded chain load");
+
+    match loaded {
+        WalChainLoad::Complete { .. } => panic!("two requests do not cover three segments"),
+        WalChainLoad::LimitReached { requests_issued } => assert_eq!(requests_issued, 2),
+    }
+    assert_eq!(store.count(OperationClass::Get), 0);
 }
 
 #[tokio::test]
@@ -702,6 +760,8 @@ async fn a_limit_that_covers_the_chain_loads_all_of_it() {
         visible_tip: Some(tip.clone()),
         stop_after_seq: None,
         max_segment_fetches,
+        prefetched: HashMap::new(),
+        speculative_requests: 0,
         recent_segments: recent,
     };
     let unbounded = load_complete_wal_chain(&store, request(&[], None))
@@ -758,6 +818,8 @@ async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() 
             visible_tip: Some(tip),
             stop_after_seq: None,
             max_segment_fetches: Some(16),
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &newest_first[1..],
         },
     )
@@ -814,6 +876,8 @@ async fn failed_prefetch_requests_count_against_the_limit() {
             visible_tip: Some(tip),
             stop_after_seq: None,
             max_segment_fetches: Some(3),
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &newest_first[1..],
         },
     )
@@ -945,6 +1009,8 @@ fn tail_count_request<'a>(
         visible_tip: hints.first().cloned(),
         stop_after_seq: None,
         max_segment_fetches: None,
+        prefetched: HashMap::new(),
+        speculative_requests: 0,
         recent_segments: hints.get(1..).unwrap_or_default(),
     }
 }
@@ -997,6 +1063,8 @@ fn tail_count_at_genesis_is_zero_without_tip_or_hints() {
         visible_tip: None,
         stop_after_seq: None,
         max_segment_fetches: None,
+        prefetched: HashMap::new(),
+        speculative_requests: 0,
         recent_segments: &[],
     })
     .expect("count genesis tail");
@@ -1098,6 +1166,8 @@ async fn chain_load_walks_predecessor_links_past_the_hinted_window() {
             visible_tip: Some(pointers[0].clone()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &short_window[1..],
         },
     )
@@ -1135,6 +1205,8 @@ async fn boundary_length_replay_fetches_every_segment_once_in_bounded_waves() {
             visible_tip: Some(hints[0].clone()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &hints[1..],
         },
     )
@@ -1172,6 +1244,8 @@ async fn prefetch_fetches_only_the_segments_the_gap_intersects() {
             visible_tip: Some(hints[0].clone()),
             stop_after_seq: Some(ChangeSeq(3)),
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &hints[1..],
         },
     )
@@ -1221,6 +1295,8 @@ async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
             visible_tip: Some(hints[0].clone()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &hints[1..],
         },
     )
@@ -1235,6 +1311,8 @@ async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
             visible_tip: Some(hints[0].clone()),
             stop_after_seq: None,
             max_segment_fetches: None,
+            prefetched: HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &[],
         },
     )

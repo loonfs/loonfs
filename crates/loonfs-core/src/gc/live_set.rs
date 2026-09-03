@@ -538,6 +538,8 @@ async fn collect_retained_wal<S: ObjectStore + ?Sized>(
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
             max_segment_fetches: Some(usize::try_from(remaining).unwrap_or(usize::MAX)),
+            prefetched: std::collections::HashMap::new(),
+            speculative_requests: 0,
             recent_segments: &head.recent_segments,
         },
     )

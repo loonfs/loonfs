@@ -4,7 +4,7 @@ use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, scrape, series, start_graceful_server};
 use loonfs_api::CreateCheckpointRequest;
 use loonfs_client::NamespacePath;
-use loonfs_server::{LocalCacheConfig, MaintenanceMode, ServerConfig};
+use loonfs_server::{LocalCacheConfig, MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig};
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
 use tempfile::tempdir;
@@ -35,6 +35,10 @@ fn test_config_with_local_cache(
 ) -> ServerConfig {
     ServerConfig {
         maintenance: MaintenanceMode::Manual,
+        runtime_cache: RuntimeCacheConfigOverrides {
+            metadata_segment_cache_open_prefetch_max_stored_bytes: Some(0),
+            ..RuntimeCacheConfigOverrides::default()
+        },
         local_cache: Some(LocalCacheConfig {
             path: cache_root.display().to_string(),
             memory_bytes: 4 * 1024 * 1024,

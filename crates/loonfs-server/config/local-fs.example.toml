@@ -72,6 +72,8 @@ writer_id = "loonfs-server-local"
 #max_cached_wal_tail_projection_decoded_bytes = 268435456
 # Decoded-byte budget for the metadata segment cache; unlimited by default.
 #metadata_segment_cache_max_decoded_bytes = 268435456
+# Stored-byte budget for fetching metadata segment tails when a view opens.
+#metadata_segment_cache_open_prefetch_max_stored_bytes = 16777216
 
 # Optional node-local cache of encoded metadata blocks, on this machine's own
 # disk. Omit the table and there is none: every metadata block the decoded

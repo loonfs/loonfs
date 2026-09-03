@@ -1,11 +1,13 @@
 //! WAL segment and chain framing types, shared by the writer, reader, and
 //! replay paths.
 
+use bytes::Bytes;
 use loonfs_api::wire::control::{HeadState, WalSegmentPointer};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +65,9 @@ pub(crate) struct WalChainLoadRequest<'a> {
     pub(crate) visible_tip: Option<WalSegmentPointer>,
     pub(crate) stop_after_seq: Option<ChangeSeq>,
     pub(crate) max_segment_fetches: Option<usize>,
+    /// These bodies were fetched speculatively by the caller and already cost its fetch budget.
+    pub(crate) prefetched: HashMap<String, Bytes>,
+    pub(crate) speculative_requests: usize,
     /// The head's `recent_segments` accelerator, used only to prefetch the
     /// replay gap concurrently. Chain links stay the sole history
     /// authority: wrong or missing hints cost a fallback fetch, never

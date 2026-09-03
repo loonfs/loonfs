@@ -98,6 +98,8 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
         visible_tip: loaded.head.visible_wal_tip.clone(),
         stop_after_seq: None,
         max_segment_fetches: None,
+        prefetched: std::collections::HashMap::new(),
+        speculative_requests: 0,
         recent_segments: &loaded.head.recent_segments,
     })
     .map_err(|error| {
