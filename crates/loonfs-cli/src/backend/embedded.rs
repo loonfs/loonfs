@@ -22,8 +22,8 @@ use loonfs_api::{
     },
     AbsolutePath, ChangeSeq, Checkpoint, CheckpointId, CommitResponse, CreateCheckpointRequest,
     EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceRunRequest,
-    MaintenanceRunResponse, Namespace, NamespaceId, PaginationPolicy, PathEntry, RevisionNo,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceId,
+    PaginationPolicy, PathEntry, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse,
 };
 use loonfs_client::{NamespacePath, ReadFileOptions};
 use loonfs_grep::{
@@ -76,10 +76,7 @@ impl EmbeddedBackend {
     /// exits (tearing down the runtime) while a step is mid-flight. A settle
     /// failure after a committed mutation is reported as a warning on
     /// stderr, never as the mutation's outcome — the commit landed.
-    async fn settle_background_work_after<T>(
-        &self,
-        result: Result<T, CliError>,
-    ) -> Result<T, CliError> {
+    async fn drain_runner_after<T>(&self, result: Result<T, CliError>) -> Result<T, CliError> {
         match (result, self.runner.drain().await) {
             (result, Ok(())) => result,
             (Ok(value), Err(error)) => {
@@ -123,7 +120,7 @@ impl EmbeddedBackend {
             result = attempt().await;
         }
         let result = result.scoped(namespace_id);
-        self.settle_background_work_after(result).await
+        self.drain_runner_after(result).await
     }
 
     /// A grep worker over this backend's own handles: grep's keyspace rides
@@ -147,7 +144,7 @@ impl EmbeddedBackend {
             .create_namespace(namespace_id, CreateNamespaceOptions::default())
             .await
             .map_err(map_runtime_error);
-        self.settle_background_work_after(result).await
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn delete_namespace(
@@ -161,7 +158,7 @@ impl EmbeddedBackend {
             .delete_namespace(namespace_id, options)
             .await
             .scoped(namespace_id);
-        self.settle_background_work_after(result).await
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn fork_namespace(
@@ -174,7 +171,7 @@ impl EmbeddedBackend {
             .fork_namespace(source_namespace_id, new_namespace_id)
             .await
             .scoped(source_namespace_id);
-        self.settle_background_work_after(result).await
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn list_path_entries_page(
@@ -349,7 +346,7 @@ impl EmbeddedBackend {
         })
     }
 
-    /// Runs the grep-index job's bounded steps until the index has built
+    /// Runs the grep index job's bounded steps until the index has built
     /// through `target_seq`, or until the budget runs out.
     ///
     /// A one-shot command hosts no maintenance runner, so it runs the job
@@ -596,7 +593,7 @@ impl EmbeddedBackend {
             )
             .await
             .scoped(spec.namespace());
-        self.settle_background_work_after(result).await
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn delete_path(
@@ -832,8 +829,8 @@ impl EmbeddedBackend {
     pub(super) async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceRunRequest,
-    ) -> Result<MaintenanceRunResponse, CliError> {
+        request: RunMaintenanceRequest,
+    ) -> Result<RunMaintenanceResponse, CliError> {
         let result = self
             .maintenance
             .run_maintenance(namespace_id, request)
@@ -1070,7 +1067,7 @@ mod tests {
             .get()
     }
 
-    /// Jobs selected when `maintenance run` omits `--job`.
+    /// Jobs selected when `maintenance loop` omits `--job`.
     fn every_job() -> [MaintenanceJobId; 5] {
         [
             MaintenanceJobId::METADATA,
@@ -1485,7 +1482,7 @@ mod tests {
         // More publishes than the WAL backpressure cap: the Enabled policy
         // must keep stepping the tail down so no write ever stalls on
         // `maintenance_required` (each stall used to require a manual
-        // `loonfs maintenance step`).
+        // `loonfs maintenance metadata`).
         for index in 0..140 {
             target
                 .backend

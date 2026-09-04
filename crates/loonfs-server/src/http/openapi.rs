@@ -18,11 +18,11 @@ use loonfs_api::{
     CheckpointOwnerSummary, CommitRequest, ContentRef, CreateCheckpointRequest,
     CreateNamespaceRequest, CreateSnapshotRequest, DeletedObjectCounts, ExtendSnapshotRequest,
     FilesystemOperation, ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListSnapshotsResponse, ListTrashResponse, MaintenanceRunRequest,
-    MaintenanceRunResponse, MetadataCompactionOutcome, MetadataCompactionRequest,
-    MetadataCompactionResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    ReleaseCheckpointResponse, ReleaseSnapshotResponse, ReleasedCheckpointCounts,
-    ReorganizeStepOutcome, RetainedCandidates, RevisionNo, SnapshotSummary, TrashEntry,
+    ListFileRevisionsResponse, ListSnapshotsResponse, ListTrashResponse, MetadataCompactionOutcome,
+    MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, ReleaseCheckpointResponse, ReleaseSnapshotResponse,
+    ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates, RevisionNo,
+    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, TrashEntry,
     WalFlushStepOutcome,
 };
 
@@ -112,7 +112,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         SnapshotSummary,
         ListSnapshotsResponse,
         ReleaseSnapshotResponse,
-        MaintenanceRunRequest,
+        RunMaintenanceRequest,
         MetadataMaintenanceRequest,
         MetadataCompactionRequest,
         AdvanceRetentionRequest,
@@ -122,7 +122,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         MetadataCompactionResponse,
         MetadataCompactionOutcome,
         AdvanceRetentionResponse,
-        MaintenanceRunResponse,
+        RunMaintenanceResponse,
         GcRequest,
         GcResponse,
         DeletedObjectCounts,
@@ -196,7 +196,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         (name = "filesystem", description = "Path-oriented filesystem APIs"),
         (name = "inodes", description = "Identity-oriented inode read APIs"),
         (name = "uploads", description = "Upload session APIs"),
-        (name = "maintenance", description = "Maintenance API group"),
+        (name = "maintenance", description = "Maintenance APIs"),
         (name = "query", description = "Derived-index query APIs")
     )
 )]
@@ -205,7 +205,7 @@ struct LoonfsOpenApi;
 /// OpenAPI definition for the 503 response every operation can return.
 #[derive(utoipa::ToResponse)]
 #[response(
-    description = "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, required maintenance, or invalid storage credentials. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
+    description = "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, writer-session admission, required maintenance, or invalid storage credentials. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
 )]
 #[expect(
     dead_code,

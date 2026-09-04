@@ -131,7 +131,7 @@ pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome) -> String {
     }
 }
 
-/// Formats the current grep-index state.
+/// Formats the current grep index state.
 pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
     match state {
         GrepIndexLifecycle::Disabled => "disabled".to_owned(),

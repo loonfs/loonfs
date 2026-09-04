@@ -18,10 +18,10 @@ use loonfs::{
 use loonfs_api::ErrorCode;
 use loonfs_objectstore::ObjectStore;
 
-/// Identity of the grep-index job wherever it is registered.
-pub const GREP_INDEX_JOB: MaintenanceJobId = MaintenanceJobId::new("grep-index");
+/// Identity of the grep index job wherever it is registered.
+pub const GREP_INDEX_JOB: MaintenanceJobId = MaintenanceJobId::new("grep_index");
 /// Identity of the grep-collection job wherever it is registered.
-pub const GREP_GC_JOB: MaintenanceJobId = MaintenanceJobId::new("grep-gc");
+pub const GREP_GC_JOB: MaintenanceJobId = MaintenanceJobId::new("grep_gc");
 
 /// One change is all a probe needs to see to know there is work.
 const PROBE_CHANGE_LIMIT: usize = 1;

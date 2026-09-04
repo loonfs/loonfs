@@ -315,7 +315,7 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         "snapshot-separation",
         "snapshot-separation",
     );
-    config.maintenance = MaintenanceMode::Manual;
+    config.maintenance = MaintenanceMode::ServeOnly;
     let harness = start_server(config).await;
     let namespace = namespace_id("separation");
     harness

@@ -2204,7 +2204,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .await
         .expect("write orphan");
     let non_grep_key =
-        format!("namespaces/{live_namespace}/metadata/segments/grep-gc-sentinel.sst.zst");
+        format!("namespaces/{live_namespace}/metadata/segments/grep_gc_sentinel.sst.zst");
     store
         .put(
             &non_grep_key,

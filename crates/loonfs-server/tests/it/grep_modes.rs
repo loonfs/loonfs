@@ -622,12 +622,12 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
 }
 
 #[tokio::test]
-async fn manual_maintenance_registers_the_index_job_without_scheduling_it() {
+async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
     let (router, server) = app(
         ServerConfig {
-            maintenance: MaintenanceMode::Manual,
+            maintenance: MaintenanceMode::ServeOnly,
             ..test_config(temp_dir.path(), GrepMode::ServeAndMaintain)
         },
         AppOptions::default(),
@@ -636,9 +636,9 @@ async fn manual_maintenance_registers_the_index_job_without_scheduling_it() {
     .expect("build app");
     assert!(
         maintains_grep_index(&server),
-        "a manual deployment still exposes the configured index job"
+        "a serve-only deployment still exposes the configured index job"
     );
-    assert!(server.runner.is_none(), "manual mode builds no runner");
+    assert!(server.runner.is_none(), "serve-only mode builds no runner");
 
     writer
         .put_file_bytes(
@@ -649,7 +649,7 @@ async fn manual_maintenance_registers_the_index_job_without_scheduling_it() {
         )
         .await
         .expect("write file");
-    // Every index route still answers: manual maintenance withdraws the
+    // Every index route still answers: serve-only maintenance withdraws the
     // scheduler, not the operator's reach.
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     assert!(
@@ -706,15 +706,15 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: format!("grep-mode-{mode:?}"),
-        max_open_namespaces: None,
+        max_writer_sessions: loonfs::DEFAULT_MAX_WRITER_SESSIONS,
+        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: GrepConfig {
             mode,
             ..GrepConfig::default()
         },
-        maintenance: MaintenanceMode::Automatic,
-        serve_maintenance: true,
+        maintenance: MaintenanceMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,
@@ -736,7 +736,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
     }
 }
 
-/// Waits for every maintenance step this deployment admitted to settle, so
+/// Waits for every maintenance pass this deployment admitted to settle, so
 /// the durable state read next is the state those steps left.
 ///
 /// A drain, not a per-namespace wait: the runner admits work per

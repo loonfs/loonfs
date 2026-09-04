@@ -1,5 +1,5 @@
 //! What a writer built with a metrics recorder actually reports: the
-//! object-store bridge, the publication instruments, and a maintenance step
+//! object-store bridge, the publication instruments, and a maintenance pass
 //! that settled through the runner.
 
 #![allow(clippy::panic)]

@@ -16,7 +16,7 @@ mod snapshot;
 
 pub(crate) use self::output::{
     CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus, ListingHeadDrift,
-    MaintenanceKeyReport, TrashListing, TreeTransferFailure,
+    MaintenanceKeyReport, MaintenanceRan, TrashListing, TreeTransferFailure,
 };
 
 use crate::args::{Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior};

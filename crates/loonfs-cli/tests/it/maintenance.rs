@@ -21,12 +21,12 @@ fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     // so this pins reachability, not byte counts.)
     let gc = harness.run(&["--json", "maintenance", "gc"]);
     assert_success(&gc);
-    assert_eq!(json_data(&gc)["kind"], "garbage_collected");
+    assert_eq!(json_data(&gc)["kind"], "gc");
 
     // Everything that is not the GC-only step still reports the deletion.
-    let step = harness.run(&["--json", "maintenance", "step"]);
-    assert_failure(&step);
-    assert_eq!(json_error(&step)["code"], "namespace_deleted");
+    let metadata = harness.run(&["--json", "maintenance", "metadata"]);
+    assert_failure(&metadata);
+    assert_eq!(json_error(&metadata)["code"], "namespace_deleted");
     let recreate = harness.run(&["--json", "namespace", "create", "demo"]);
     assert_failure(&recreate);
     assert_eq!(json_error(&recreate)["code"], "namespace_deleted");
@@ -500,7 +500,7 @@ fn index_gc_loops_its_cursor_and_accumulates() {
 }
 
 #[test]
-fn maintenance_run_drains_an_assignment_and_leaves_the_work_done() {
+fn maintenance_loop_drains_an_assignment_and_leaves_the_work_done() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     for namespace in ["alpha", "beta"] {
@@ -529,7 +529,7 @@ fn maintenance_run_drains_an_assignment_and_leaves_the_work_done() {
     let drained = harness.run(&[
         "--json",
         "maintenance",
-        "run",
+        "loop",
         "--namespaces",
         "alpha",
         "--namespaces",
@@ -542,14 +542,20 @@ fn maintenance_run_drains_an_assignment_and_leaves_the_work_done() {
     assert!(data.get("drained").is_none());
     assert_eq!(data["budget_exhausted"], false);
     let keys = data["keys"].as_array().expect("json array");
-    assert_eq!(keys.len(), 8, "four jobs over two namespaces: {data}");
+    assert_eq!(keys.len(), 10, "five jobs over two namespaces: {data}");
     assert!(
         keys.iter().all(|key| key["settled"] == true),
         "an unbudgeted drain settles every key: {data}"
     );
     assert_eq!(
         data["jobs"],
-        serde_json::json!(["metadata", "gc", "grep-index", "grep-gc"])
+        serde_json::json!([
+            "metadata",
+            "metadata_compaction",
+            "gc",
+            "grep_index",
+            "grep_gc"
+        ])
     );
 
     for namespace in ["alpha", "beta"] {
@@ -571,7 +577,7 @@ fn maintenance_run_drains_an_assignment_and_leaves_the_work_done() {
 }
 
 #[test]
-fn maintenance_run_budgets_exit_nonzero_and_report_per_key_progress() {
+fn maintenance_loop_budgets_exit_nonzero_and_report_per_key_progress() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "alpha"]));
@@ -579,7 +585,7 @@ fn maintenance_run_budgets_exit_nonzero_and_report_per_key_progress() {
     let unstarted = harness.run(&[
         "--json",
         "maintenance",
-        "run",
+        "loop",
         "--namespaces",
         "alpha",
         "--drain",
@@ -600,7 +606,7 @@ fn maintenance_run_budgets_exit_nonzero_and_report_per_key_progress() {
     // no other, which is exactly what the report has to say.
     let partial = harness.run(&[
         "maintenance",
-        "run",
+        "loop",
         "--namespaces",
         "alpha",
         "--drain",
@@ -616,11 +622,11 @@ fn maintenance_run_budgets_exit_nonzero_and_report_per_key_progress() {
 }
 
 #[test]
-fn maintenance_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
+fn maintenance_loop_requires_an_assignment_and_names_the_jobs_it_hosts() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
 
-    let unassigned = harness.run(&["maintenance", "run"]);
+    let unassigned = harness.run(&["maintenance", "loop"]);
     assert_failure(&unassigned);
     assert!(
         stderr_string(&unassigned).contains("--namespaces"),
@@ -630,7 +636,7 @@ fn maintenance_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
 
     let unknown_job = harness.run(&[
         "maintenance",
-        "run",
+        "loop",
         "--namespaces",
         "alpha",
         "--job",
@@ -638,7 +644,13 @@ fn maintenance_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
     ]);
     assert_failure(&unknown_job);
     let message = stderr_string(&unknown_job);
-    for job in ["metadata", "core-gc", "grep-index", "grep-gc"] {
+    for job in [
+        "metadata",
+        "metadata-compaction",
+        "gc",
+        "grep-index",
+        "grep-gc",
+    ] {
         assert!(
             message.contains(job),
             "the valid set must be listed: {message}"
@@ -647,7 +659,7 @@ fn maintenance_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
 }
 
 #[test]
-fn maintenance_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
+fn maintenance_loop_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     for namespace in ["alpha", "beta"] {
@@ -656,7 +668,7 @@ fn maintenance_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
 
     let too_fast = harness.run(&[
         "maintenance",
-        "run",
+        "loop",
         "--namespaces",
         "alpha",
         "--poll-interval-ms",
@@ -676,7 +688,7 @@ fn maintenance_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     let plain = harness.run(&[
         "--json",
         "maintenance",
-        "run",
+        "loop",
         "--namespaces",
         "alpha",
         "--drain",
@@ -685,7 +697,7 @@ fn maintenance_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     let paced = harness.run(&[
         "--json",
         "maintenance",
-        "run",
+        "loop",
         "--namespaces",
         "beta",
         "--drain",
@@ -751,7 +763,7 @@ fn maintenance_store_probe_renders_the_profile_stores_report() {
 }
 
 #[test]
-fn maintenance_run_refuses_a_remote_profile() {
+fn maintenance_loop_refuses_a_remote_profile() {
     let harness = Harness::new();
     assert_success(&harness.run(&[
         "--json",
@@ -768,7 +780,7 @@ fn maintenance_run_refuses_a_remote_profile() {
     let refused = harness.run(&[
         "--json",
         "maintenance",
-        "run",
+        "loop",
         "--namespaces",
         "demo",
         "--drain",
@@ -1079,6 +1091,12 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_success(&release_again);
         assert_eq!(json_data(&release_again), release_data);
 
+        let advanced_retention =
+            harness.run(&["maintenance", "retention", "advance", "--profile", profile]);
+        assert_success(&advanced_retention);
+        assert!(stdout_string(&advanced_retention)
+            .contains("retention for demo: floor advanced to seq 2"));
+
         let retention = harness.run(&[
             "--json",
             "maintenance",
@@ -1090,28 +1108,45 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_success(&retention);
         let retention_data = json_data(&retention);
         assert_eq!(retention_data["kind"], "retention");
+        assert_eq!(retention_data["namespace_id"], "demo");
         assert_eq!(retention_data["retention_floor_seq"], 2);
 
-        // The checkpoint above already covers the head, so a step reports
+        let unchanged_retention =
+            harness.run(&["maintenance", "retention", "advance", "--profile", profile]);
+        assert_success(&unchanged_retention);
+        assert!(stdout_string(&unchanged_retention)
+            .contains("retention for demo: floor unchanged at seq 2"));
+
+        // The checkpoint above already covers the head, so the metadata job reports
         // not-needed identically in both modes.
-        let step = harness.run(&["--json", "maintenance", "step", "--profile", profile]);
-        assert_success(&step);
-        let step_data = json_data(&step);
-        assert_eq!(step_data["kind"], "metadata");
-        assert_eq!(step_data["wal_flush"]["outcome"], "not_needed");
-        assert_eq!(step_data["reorganize"]["outcome"], "not_needed");
+        let metadata = harness.run(&["--json", "maintenance", "metadata", "--profile", profile]);
+        assert_success(&metadata);
+        let metadata_data = json_data(&metadata);
+        assert_eq!(metadata_data["kind"], "metadata");
+        assert_eq!(metadata_data["namespace_id"], "demo");
+        assert_eq!(metadata_data["wal_flush"]["outcome"], "not_needed");
+        assert_eq!(metadata_data["reorganize"]["outcome"], "not_needed");
+
+        let metadata_human = harness.run(&["maintenance", "metadata", "--profile", profile]);
+        assert_success(&metadata_human);
+        assert!(stdout_string(&metadata_human).starts_with("metadata maintenance for demo:"));
 
         let compact = harness.run(&["--json", "maintenance", "compact", "--profile", profile]);
         assert_success(&compact);
         let compact_data = json_data(&compact);
         assert_eq!(compact_data["kind"], "metadata_compaction");
-        assert_eq!(compact_data["outcome"]["outcome"], "not_needed");
+        assert_eq!(compact_data["namespace_id"], "demo");
+        assert_eq!(compact_data["compaction"]["outcome"], "not_needed");
+
+        let compact_human = harness.run(&["maintenance", "compact", "--profile", profile]);
+        assert_success(&compact_human);
+        assert!(stdout_string(&compact_human).starts_with("metadata compaction for demo:"));
 
         // A fresh namespace has nothing eligible to sweep.
         let gc = harness.run(&["--json", "maintenance", "gc", "--profile", profile]);
         assert_success(&gc);
         let gc_data = json_data(&gc);
-        assert_eq!(gc_data["kind"], "garbage_collected");
+        assert_eq!(gc_data["kind"], "gc");
         assert_eq!(gc_data["namespace_id"], "demo");
         assert_eq!(gc_data["deleted"]["wal_segments"], 0);
         assert_eq!(gc_data["deleted"]["manifests"], 0);
@@ -1137,6 +1172,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         // standard output is the whole report.
         let quiet_gc = harness.run(&["maintenance", "gc", "--profile", profile]);
         assert_success(&quiet_gc);
+        assert!(stdout_string(&quiet_gc).starts_with("gc for demo:"));
         assert!(!stderr_string(&quiet_gc).contains("pass 1:"));
 
         // The budget covers marking too, so one object buys the head and
@@ -1244,7 +1280,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             sorted_object_keys(&changes_data),
             sorted_object_keys(&checkpoint_data),
             sorted_object_keys(&retention_data),
-            sorted_object_keys(&step_data),
+            sorted_object_keys(&metadata_data),
             sorted_object_keys(&gc_data),
             sorted_object_keys(&probe_data),
         ));

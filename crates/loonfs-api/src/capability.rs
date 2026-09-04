@@ -43,11 +43,11 @@ pub const FEATURE_UPLOADS_DIRECT_MULTIPART: &str = "filesystem.uploads.direct_mu
 /// being able to hand it back.
 pub const FEATURE_DOWNLOADS_DIRECT_GET: &str = "filesystem.downloads.direct_get";
 
-/// Gates grep-index content search: the serving half of the capability;
+/// Gates grep index content search: the serving half of the capability;
 /// the namespace's verified active grep root is the data half.
 pub const FEATURE_QUERY_GREP: &str = "query.grep";
 
-/// Gates grep-index maintenance: enabling a namespace's grep root,
+/// Gates grep index maintenance: enabling a namespace's grep root,
 /// disabling it, collecting its garbage, and reading its lifecycle.
 ///
 /// The maintenance half of the same capability, and independent of

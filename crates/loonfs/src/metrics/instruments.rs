@@ -688,13 +688,13 @@ impl MaintenanceJobInstruments {
             steps: LabeledCounters::register(
                 recorder,
                 "loonfs.maintenance.steps",
-                "Maintenance steps by job and conclusion",
+                "Maintenance passes by job and conclusion",
                 "conclusion",
                 &common_labels,
             ),
             failures: recorder.register_counter(
                 "loonfs.maintenance.step_failures",
-                "Maintenance steps that failed before concluding",
+                "Maintenance passes that failed before concluding",
                 &[("job", job)],
             ),
             probe_failures: recorder.register_counter(
@@ -704,13 +704,13 @@ impl MaintenanceJobInstruments {
             ),
             step_seconds: recorder.register_histogram(
                 "loonfs.maintenance.step_seconds",
-                "Maintenance step duration in seconds",
+                "Maintenance pass duration in seconds",
                 &[("job", job)],
                 LATENCY_SECONDS_BOUNDARIES,
             ),
             queue_wait_seconds: recorder.register_histogram(
                 "loonfs.maintenance.queue_wait_seconds",
-                "Seconds a maintenance step waited for a permit",
+                "Seconds a maintenance pass waited for a permit",
                 &[("job", job)],
                 LATENCY_SECONDS_BOUNDARIES,
             ),

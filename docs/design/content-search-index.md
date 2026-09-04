@@ -183,7 +183,7 @@ server does not register the maintenance job and rejects index mutations.
 
 Embedded CLI profiles run a local maintenance scheduler and settle admitted
 work after each mutation. The `loonfs maintenance index enable` command
-captures a target sequence and runs bounded maintenance steps until the index
+captures a target sequence and runs bounded maintenance passes until the index
 reaches it. Later writes do not move that target, so the command can finish on
 an active namespace.
 `--no-wait` returns after enabling the index. `--max-steps` and
@@ -193,7 +193,7 @@ fallen behind. Queries scan a bounded unindexed tail between runs.
 
 Automatic maintenance covers namespaces used by the current process. To
 maintain an inactive namespace, assign it with
-`loonfs maintenance run --namespaces <id>`. Use `--job grep-index` to
+`loonfs maintenance loop --namespaces <id>`. Use `--job grep-index` to
 run only index maintenance. Use `--drain` to complete the current assignment
 and exit. `--max-steps` and `--deadline-ms` limit a drain. A namespace without
 a grep index returns `not_enabled` after one read. No separate grep daemon is

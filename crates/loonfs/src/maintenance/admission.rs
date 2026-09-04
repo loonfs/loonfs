@@ -42,7 +42,7 @@ impl MaintenanceKey {
     }
 }
 
-/// A claimed maintenance step and the scheduling data needed to run it.
+/// A claimed maintenance pass and the scheduling data needed to run it.
 ///
 /// This value is captured while holding the admission lock. The executor
 /// does not read the key's mutable scheduling state again.

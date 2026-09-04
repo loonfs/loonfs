@@ -12,7 +12,7 @@ impl MaintenanceJobId {
     /// Bounded metadata maintenance.
     pub const METADATA: Self = Self("metadata");
     /// Streaming metadata compaction.
-    pub const METADATA_COMPACTION: Self = Self("metadata-compaction");
+    pub const METADATA_COMPACTION: Self = Self("metadata_compaction");
     /// Garbage collection.
     pub const GC: Self = Self("gc");
 

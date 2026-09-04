@@ -7,7 +7,14 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
-#max_open_namespaces = 10000 # Maximum writer sessions held by this server.
+# Maximum writer sessions held by this server. Requests needing another
+# session answer `writer_capacity_exceeded`. Defaults to 10000.
+#max_writer_sessions = 10000
+
+# Maximum WAL folds this server runs at once. A sustained
+# `loonfs.publisher.wal_folds_waiting` gauge means the cap is too low.
+# Defaults to 2.
+#max_concurrent_folds = 2
 
 # Terminating TLS in this process. Uncomment the [tls] table at the bottom of
 # this file to turn it on. A non-loopback bind refuses to load without it,
@@ -16,15 +23,13 @@ writer_id = "loonfs-server-local"
 # front of LoonFS — a load balancer, an ingress controller, a sidecar.
 #allow_remote_without_tls = true
 
-# Whether this server maintains the namespaces it touches by itself:
-# "automatic" (the default) registers the metadata, collection, and — when
-# the grep mode below maintains — index jobs, and lets the writer schedule
-# them; "manual" registers none of them and schedules nothing, leaving every
-# `loonfs maintenance` operation working exactly as before. Set "manual" on a
-# write-serving node when a dedicated maintenance process owns these
-# namespaces, and assign them to it with `loonfs maintenance run --namespaces ...`.
-#maintenance = "automatic"
-#serve_maintenance = true # Set false to hide the /v0/maintenance/ routes.
+# Whether this server serves the maintenance API group, schedules maintenance,
+# both, or neither. `serve_and_maintain` is the default. The other values are
+# `serve_only`, `maintain_only`, and `disabled`. A mode that does not serve the
+# group answers its routes with `not_supported`; a mode that does not maintain
+# leaves scheduled work to another process. Assign dedicated maintenance work
+# with `loonfs maintenance loop --namespaces ...`.
+#maintenance = "serve_and_maintain"
 
 # Largest request body accepted for service-proxied upload content, in
 # bytes. The server never holds the body whole. It forwards one transfer
@@ -106,7 +111,7 @@ writer_id = "loonfs-server-local"
 #[grep]
 #mode = "serve_and_maintain"
 # Bounded build/fold budgets; every value must be greater than zero. How many
-# maintenance steps run at once — grep's included — is `max_concurrent_maintenance`.
+# maintenance passes run at once — grep's included — is `max_concurrent_maintenance`.
 #max_files_per_step = 256
 #max_content_bytes_per_step = 67108864
 #max_rows_per_segment = 65536

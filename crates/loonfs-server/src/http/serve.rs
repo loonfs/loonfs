@@ -154,10 +154,8 @@ pub struct AppState {
     /// grep's own segments, held here because grep is a composed extension
     /// rather than part of the runtime the handles come from.
     pub(super) grep_service: Option<Arc<GrepService>>,
-    /// Present when this deployment maintains the index automatically: how a
-    /// request tells the runner a namespace may have indexing to do. Absent
-    /// under `maintenance = "manual"`, where the mutating index routes still
-    /// work and nothing schedules itself behind them.
+    /// Present when this deployment maintains the index: how a request tells
+    /// the runner a namespace may have indexing to do.
     pub(super) grep_maintenance: Option<GrepMaintenance>,
     /// Bounds concurrently streamed proxied-upload bodies; bodies forward to
     /// the store incrementally, so worst-case upload memory is this times one
@@ -260,12 +258,12 @@ pub async fn app(
         }
     };
     let metrics = ServerMetrics::new();
-    // Two switches decide automatic grep indexing and nothing else does:
-    // whether this server maintains anything automatically, and whether its
+    // Two switches decide scheduled grep indexing and nothing else does:
+    // whether this server maintains anything, and whether its
     // grep mode maintains the index.
-    let automatic = config.maintenance.runs_automatically();
+    let maintains = config.maintenance.maintains();
     let maintains_grep_index = config.grep.mode.maintains_index();
-    let (maintenance_hint_observer, maintenance_hint_receiver) = if automatic {
+    let (maintenance_hint_observer, maintenance_hint_receiver) = if maintains {
         let (observer, receiver) =
             maintenance_hint_relay(NonZeroUsize::new(4096).expect("relay capacity is nonzero"));
         (Some(observer), Some(receiver))
@@ -337,7 +335,7 @@ pub async fn app(
     } else {
         None
     };
-    let runner = if automatic {
+    let runner = if maintains {
         let runner = MaintenanceRunner::builder(jobs.clone())
             .max_concurrent(
                 NonZeroUsize::new(config.max_concurrent_maintenance)
@@ -347,7 +345,7 @@ pub async fn app(
             .build()
             .map_err(maintenance_config_error)?;
         runner.attach_hints(
-            maintenance_hint_receiver.expect("automatic maintenance has a hint relay"),
+            maintenance_hint_receiver.expect("maintained mode should have a hint relay"),
         );
         Some(runner)
     } else {
@@ -441,6 +439,14 @@ pub(super) async fn build_handles(
     let mut writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .min_publish_interval_ms(config.min_publish_interval_ms)
+        .max_writer_sessions(
+            std::num::NonZeroUsize::new(config.max_writer_sessions)
+                .expect("validated maximum writer sessions should be nonzero"),
+        )
+        .max_concurrent_folds(
+            std::num::NonZeroUsize::new(config.max_concurrent_folds)
+                .expect("validated maximum concurrent folds should be nonzero"),
+        )
         // The reader below shares this core, so the read cap covers every
         // proxied content read the server serves.
         .max_read_content_bytes(config.max_download_bytes)
@@ -448,9 +454,6 @@ pub(super) async fn build_handles(
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());
-    if let Some(limit) = config.max_open_namespaces {
-        writer_builder = writer_builder.max_open_namespaces(limit);
-    }
     if let Some(observer) = maintenance_hint_observer {
         writer_builder = writer_builder.maintenance_hint_observer(move |hint| observer(hint));
     }

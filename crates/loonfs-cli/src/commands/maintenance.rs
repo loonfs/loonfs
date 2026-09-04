@@ -2,14 +2,17 @@
 //! change feed.
 
 use super::context::{parse_public_ordinal_arg, resolve_command_context, resolve_profile_context};
-use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
+use super::output::{
+    CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport, MaintenanceRan,
+};
 use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
 use crate::args::{
     ChangesArgs, CommandKind, MaintenanceCheckpointArgs, MaintenanceCheckpointCommand,
     MaintenanceCheckpointListArgs, MaintenanceCheckpointReleaseArgs, MaintenanceCommand,
     MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs, MaintenanceIndexGcArgs,
-    MaintenanceJobArg, MaintenanceNamespaceArgs, MaintenanceRetentionCommand, MaintenanceRunArgs,
-    MaintenanceStepArgs, MaintenanceStoreCommand, MaintenanceStoreProbeArgs, RuntimeBehavior,
+    MaintenanceJobArg, MaintenanceLoopArgs, MaintenanceMetadataArgs, MaintenanceNamespaceArgs,
+    MaintenanceRetentionCommand, MaintenanceStoreCommand, MaintenanceStoreProbeArgs,
+    RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::render::{gc_pass_line, write_stderr_progress};
@@ -19,8 +22,8 @@ use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
     AdvanceRetentionRequest, ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode,
-    GcRequest, MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionRequest,
-    MetadataMaintenanceRequest,
+    GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest, RunMaintenanceRequest,
+    RunMaintenanceResponse,
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
@@ -36,8 +39,10 @@ pub(crate) async fn run_maintenance_command(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        MaintenanceCommand::Run(args) => run_maintenance_run(kind, config_path, args).await,
-        MaintenanceCommand::Step(args) => run_maintenance_step(kind, config_path, args).await,
+        MaintenanceCommand::Loop(args) => run_maintenance_loop(kind, config_path, args).await,
+        MaintenanceCommand::Metadata(args) => {
+            run_maintenance_metadata(kind, config_path, args).await
+        }
         MaintenanceCommand::Flush(args) => run_maintenance_flush(kind, config_path, args).await,
         MaintenanceCommand::Compact(args) => run_maintenance_compact(kind, config_path, args).await,
         MaintenanceCommand::Checkpoint { command } => match command {
@@ -79,13 +84,13 @@ pub(crate) async fn run_maintenance_command(
     }
 }
 
-async fn run_maintenance_step(
+async fn run_maintenance_metadata(
     kind: CommandKind,
     config_path: &Path,
-    args: MaintenanceStepArgs,
+    args: MaintenanceMetadataArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let request = MaintenanceRunRequest::Metadata(MetadataMaintenanceRequest {
+    let request = RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
         max_wal_tail_segments: args.max_wal_tail_segments,
     });
     let response = context
@@ -94,7 +99,10 @@ async fn run_maintenance_step(
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::MaintenanceRan(response)))
+    Ok(context.output(
+        kind,
+        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
+    ))
 }
 
 /// Runs garbage collection until it finishes unless `--max-objects` requests
@@ -119,7 +127,7 @@ async fn run_maintenance_gc(
                 .target
                 .run_maintenance(
                     context.namespace(),
-                    MaintenanceRunRequest::Gc(GcRequest {
+                    RunMaintenanceRequest::Gc(GcRequest {
                         grace_window_ms: args.grace_window_ms,
                         max_objects,
                         cursor,
@@ -127,7 +135,7 @@ async fn run_maintenance_gc(
                 )
                 .await?;
             match response {
-                MaintenanceRunResponse::Gc(gc) => Ok(gc),
+                RunMaintenanceResponse::Gc(gc) => Ok(gc),
                 _ => Err(crate::error::CliError::new(
                     ErrorCode::ServerError.as_str(),
                     "maintenance GC returned a non-GC response",
@@ -141,7 +149,10 @@ async fn run_maintenance_gc(
     .await
     .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::GarbageCollected(response)))
+    Ok(context.output(
+        kind,
+        CommandData::MaintenanceRan(MaintenanceRan::new(RunMaintenanceResponse::Gc(response))),
+    ))
 }
 
 /// Holds the passes of a cursor loop until there are at least two of them.
@@ -325,14 +336,17 @@ async fn run_maintenance_flush(
         .target
         .run_maintenance(
             context.namespace(),
-            MaintenanceRunRequest::Metadata(MetadataMaintenanceRequest {
+            RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
                 max_wal_tail_segments: Some(1),
             }),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::MaintenanceRan(response)))
+    Ok(context.output(
+        kind,
+        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
+    ))
 }
 
 async fn run_maintenance_compact(
@@ -345,12 +359,15 @@ async fn run_maintenance_compact(
         .target
         .run_maintenance(
             context.namespace(),
-            MaintenanceRunRequest::MetadataCompaction(MetadataCompactionRequest {}),
+            RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::MaintenanceRan(response)))
+    Ok(context.output(
+        kind,
+        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
+    ))
 }
 
 async fn run_maintenance_retention_advance(
@@ -359,24 +376,36 @@ async fn run_maintenance_retention_advance(
     args: MaintenanceNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let retention_floor_before = context
+        .target
+        .get_namespace(context.namespace())
+        .await
+        .map_err(|error| context.fail(kind, error))?
+        .retention_floor_seq;
     let response = context
         .target
         .run_maintenance(
             context.namespace(),
-            MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
+            RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::MaintenanceRan(response)))
+    Ok(context.output(
+        kind,
+        CommandData::MaintenanceRan(MaintenanceRan::after_retention(
+            response,
+            retention_floor_before,
+        )),
+    ))
 }
 
 /// Runs maintenance for explicitly assigned namespaces. The command runs
 /// until stopped, or completes the current assignments once with `--drain`.
-async fn run_maintenance_run(
+async fn run_maintenance_loop(
     kind: CommandKind,
     config_path: &Path,
-    args: MaintenanceRunArgs,
+    args: MaintenanceLoopArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
     let context =
@@ -459,7 +488,8 @@ fn selected_jobs(requested: &[MaintenanceJobArg]) -> Vec<MaintenanceJobId> {
 fn job_id(job: MaintenanceJobArg) -> MaintenanceJobId {
     match job {
         MaintenanceJobArg::Metadata => MaintenanceJobId::METADATA,
-        MaintenanceJobArg::CoreGc => MaintenanceJobId::GC,
+        MaintenanceJobArg::MetadataCompaction => MaintenanceJobId::METADATA_COMPACTION,
+        MaintenanceJobArg::Gc => MaintenanceJobId::GC,
         MaintenanceJobArg::GrepIndex => GREP_INDEX_JOB,
         MaintenanceJobArg::GrepGc => GREP_GC_JOB,
     }

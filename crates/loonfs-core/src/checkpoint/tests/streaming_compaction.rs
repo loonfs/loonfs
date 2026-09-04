@@ -1,5 +1,5 @@
 //! Rebuilding a family group in one background job: the plan split, the
-//! oracle that says the job's orchestration and a maintenance step's reach the
+//! oracle that says the job's orchestration and a maintenance pass's reach the
 //! same place, restart equivalence, and the resource bounds that make a merge
 //! independent of the size of what it merges.
 
@@ -829,7 +829,7 @@ async fn staged_object_keys<S: ObjectStore + ?Sized>(
         .await
 }
 
-/// Merges the group inside one maintenance step with the budgets raised, which
+/// Merges the group inside one maintenance pass with the budgets raised, which
 /// is the other way of running the same engine.
 async fn fold_group_whole<S: ObjectStore + ?Sized>(
     store: &S,
@@ -1101,7 +1101,7 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
             FrozenBasePolicy::Amortized,
         )
         .await
-        .expect("maintenance step");
+        .expect("maintenance pass");
         match report.outcome {
             MetadataReorganizeOutcome::CompactionPlanned {
                 group: planned_group,
@@ -1162,7 +1162,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             FrozenBasePolicy::default(),
         )
         .await
-        .expect("maintenance step");
+        .expect("maintenance pass");
         match report.outcome {
             MetadataReorganizeOutcome::UnitPublished {
                 group: folded,
@@ -1209,7 +1209,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             FrozenBasePolicy::default(),
         )
         .await
-        .expect("maintenance step");
+        .expect("maintenance pass");
         match report.outcome {
             MetadataReorganizeOutcome::UnitPublished { .. } => {}
             MetadataReorganizeOutcome::NotNeeded { .. } => break,
@@ -2651,7 +2651,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         result.peak_operator_rows
     );
 
-    // The same bounds hold for the same engine run inside a maintenance step.
+    // The same bounds hold for the same engine run inside a maintenance pass.
     // The step's input budgets cap what a window may hold, but they say nothing
     // about what merging it costs, and the old path read every row of the
     // window into vectors.
@@ -2815,7 +2815,7 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
         );
     }
     // The same durable bytes, rebuilt the other way: synchronous merges inside
-    // maintenance steps, with the budgets raised so each group folds whole.
+    // maintenance passes, with the budgets raised so each group folds whole.
     drain_reorganization(
         &fold_store,
         &namespace_id,
@@ -2988,7 +2988,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             FrozenBasePolicy::default(),
         )
         .await
-        .expect("maintenance step");
+        .expect("maintenance pass");
         match report.outcome {
             MetadataReorganizeOutcome::UnitPublished { group: folded, .. } => {
                 if active.is_some() {
@@ -3145,7 +3145,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
             FrozenBasePolicy::default(),
         )
         .await
-        .expect("maintenance step");
+        .expect("maintenance pass");
         match report.outcome {
             MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => return spec,
             MetadataReorganizeOutcome::UnitPublished { .. } => {}

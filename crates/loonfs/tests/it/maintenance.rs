@@ -1,4 +1,4 @@
-//! Namespace status, maintenance steps, checkpointing, and retention hooks.
+//! Namespace status, maintenance passes, checkpointing, and retention hooks.
 
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
@@ -7,9 +7,9 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CheckpointOwnerSummary, CommitId, CreateCheckpointOptions, CreateNamespaceOptions,
-    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, MaintenanceRunRequest,
-    MaintenanceRunResponse, ManifestNo, MetadataCompactionOutcome, NamespaceId, PutFileOptions,
-    ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
+    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, ManifestNo,
+    MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
+    RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectEnvelope, ControlObjectKind,
@@ -256,7 +256,7 @@ fn namespace_diagnostics_and_step_reject_missing_namespace() {
     assert_core_error_kind(
         fs.maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenanceRunRequest::Gc(GcRequest::default()),
+            RunMaintenanceRequest::Gc(GcRequest::default()),
         ),
         ErrorCode::NamespaceNotFound,
     );
@@ -285,7 +285,7 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_head_is_gone() {
     assert_core_error_kind(
         fs.maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenanceRunRequest::Gc(GcRequest::default()),
+            RunMaintenanceRequest::Gc(GcRequest::default()),
         ),
         ErrorCode::NamespaceNotFound,
     );
@@ -301,10 +301,10 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_head_is_gone() {
     let response = fs
         .maintenance_run_namespace_blocking(
             &deleted_namespace,
-            MaintenanceRunRequest::Gc(GcRequest::default()),
+            RunMaintenanceRequest::Gc(GcRequest::default()),
         )
         .expect("GC accepts a deleted namespace");
-    assert!(matches!(response, MaintenanceRunResponse::Gc(_)));
+    assert!(matches!(response, RunMaintenanceResponse::Gc(_)));
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn maintenance_step_below_threshold_is_not_needed() {
 
     let response = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
-        .expect("maintenance step");
+        .expect("maintenance pass");
     assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
 }
 
@@ -347,7 +347,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
 
     let response = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
-        .expect("maintenance step");
+        .expect("maintenance pass");
     assert_eq!(
         upkeep(&response).wal_flush,
         WalFlushStepOutcome::Flushed {
@@ -370,7 +370,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     .expect("list checkpoint records");
     assert!(
         records.is_empty(),
-        "maintenance step created checkpoint records: {records:?}"
+        "maintenance pass created checkpoint records: {records:?}"
     );
 }
 
@@ -409,10 +409,10 @@ fn metadata_run_does_not_advance_retention() {
     let response = fs
         .maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
+            RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
         )
         .expect("step with retention");
-    let MaintenanceRunResponse::Retention(retention) = response else {
+    let RunMaintenanceResponse::Retention(retention) = response else {
         panic!("retention request returned a different response")
     };
     assert_eq!(retention.retention_floor_seq, ChangeSeq(1));
@@ -430,10 +430,10 @@ fn metadata_run_does_not_advance_retention() {
     let response = fs
         .maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
+            RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
         )
         .expect("retention-only step");
-    let MaintenanceRunResponse::Retention(retention) = response else {
+    let RunMaintenanceResponse::Retention(retention) = response else {
         panic!("retention request returned a different response")
     };
     assert_eq!(retention.retention_floor_seq, ChangeSeq(2));
@@ -505,10 +505,10 @@ fn the_typed_wrappers_are_single_action_steps() {
     let retention = fs
         .maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenanceRunRequest::Retention(AdvanceRetentionRequest {}),
+            RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
         )
         .expect("retention-only step");
-    let MaintenanceRunResponse::Retention(retention) = retention else {
+    let RunMaintenanceResponse::Retention(retention) = retention else {
         panic!("retention request returned a different response")
     };
     assert_eq!(retention.retention_floor_seq, advanced.retention_floor_seq);
@@ -516,20 +516,20 @@ fn the_typed_wrappers_are_single_action_steps() {
     let gc = fs
         .maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenanceRunRequest::Gc(GcRequest::default()),
+            RunMaintenanceRequest::Gc(GcRequest::default()),
         )
         .expect("GC run");
-    assert!(matches!(gc, MaintenanceRunResponse::Gc(_)));
+    assert!(matches!(gc, RunMaintenanceResponse::Gc(_)));
 
     let compaction = fs
         .maintenance_run_namespace_blocking(
             &namespace_id,
-            MaintenanceRunRequest::MetadataCompaction(MetadataCompactionRequest {}),
+            RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
         )
         .expect("metadata compaction run");
     assert!(matches!(
         compaction,
-        MaintenanceRunResponse::MetadataCompaction(_)
+        RunMaintenanceResponse::MetadataCompaction(_)
     ));
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
@@ -555,7 +555,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     )
     .expect("put first file");
     fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
-        .expect("first maintenance step");
+        .expect("first maintenance pass");
 
     fs.put_file_bytes_blocking(
         &namespace_id,
@@ -566,7 +566,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     .expect("put second file");
     let step = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
-        .expect("second maintenance step");
+        .expect("second maintenance pass");
     assert_eq!(
         upkeep(&step).wal_flush,
         WalFlushStepOutcome::Flushed {
@@ -617,7 +617,7 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
     assert_eq!(
         block_on(fs.maintenance.compact_metadata(&namespace_id))
             .expect("compact an empty namespace")
-            .outcome,
+            .compaction,
         MetadataCompactionOutcome::NotNeeded
     );
 
@@ -641,11 +641,11 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
 
     // Nothing here has outgrown a bounded step, so the plan is a merge and
     // this call reports exactly that: it published the unit the planner
-    // chose, as the next maintenance step would have, and ran no job.
+    // chose, as the next maintenance pass would have, and ran no job.
     assert_eq!(
         block_on(fs.maintenance.compact_metadata(&namespace_id))
             .expect("plan a compaction")
-            .outcome,
+            .compaction,
         MetadataCompactionOutcome::BoundedMergePublished
     );
     assert_ne!(
@@ -653,7 +653,7 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
             .expect("status after the call")
             .current_manifest_no,
         manifest_before,
-        "the call must run the same planner a maintenance step runs, and publish what it chose"
+        "the call must run the same planner a maintenance pass runs, and publish what it chose"
     );
 }
 
@@ -694,7 +694,7 @@ fn maintenance_step_counts_segments_not_commits() {
 
     let response = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
-        .expect("maintenance step");
+        .expect("maintenance pass");
     assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
 
     fs.mutate_blocking(&namespace_id, create_directory_request("create-c", "/c"))
@@ -702,7 +702,7 @@ fn maintenance_step_counts_segments_not_commits() {
 
     let response = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
-        .expect("maintenance step at segment threshold");
+        .expect("maintenance pass at segment threshold");
     assert_eq!(
         upkeep(&response).wal_flush,
         WalFlushStepOutcome::Flushed {
@@ -732,7 +732,7 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
     raw_store.fail_root_cas();
     let step = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
-        .expect("maintenance step should not fail on metadata root publish race");
+        .expect("maintenance pass should not fail on metadata root publish race");
 
     assert_eq!(
         upkeep(&step).wal_flush,

@@ -4,7 +4,7 @@
 //! writes bounded output segments. It buffers only input blocks, retention
 //! state, and one segment builder per family.
 //!
-//! [`merge_group_in_step`] runs within a bounded maintenance step.
+//! [`merge_group_in_step`] runs within a bounded maintenance pass.
 //! [`run_metadata_compaction_job`] handles full background compactions using a
 //! staging prefix and lease. Only base merges may remove rows below the
 //! retention floor; delta merges preserve every row.
@@ -236,7 +236,7 @@ pub(super) struct MetadataMergeResult {
     pub(super) peak_operator_rows: usize,
 }
 
-/// Merges one window of complete runs inside the maintenance step that
+/// Merges one window of complete runs inside the maintenance pass that
 /// selected it.
 ///
 /// The engine is the job's engine. What this leaves out is everything the job
@@ -1052,7 +1052,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// A job has no bound on how long it runs, and it publishes nothing until
     /// it is finished, so without this an operator watching a big namespace
     /// sees one line at the start and nothing until it lands. A merge that runs
-    /// inside a maintenance step reports nothing: its input is capped by the
+    /// inside a maintenance pass reports nothing: its input is capped by the
     /// step's budgets and the step publishes it. The counters are the merge's
     /// own; nothing is measured for this.
     fn report_progress(&mut self) {

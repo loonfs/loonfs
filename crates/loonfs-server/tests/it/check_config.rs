@@ -174,8 +174,7 @@ fn check_config_accepts_a_valid_config_and_names_what_it_validated() {
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance automatic, \
-         serve_maintenance true"
+        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance serve_and_maintain"
     );
     // The documented caveat: constructing a local-fs store creates its root.
     assert!(store_root.is_dir(), "local-fs check creates the store root");
@@ -210,8 +209,7 @@ root = "{}"
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance automatic, \
-         serve_maintenance true"
+        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance serve_and_maintain"
     );
     assert!(!stdout.contains("inline-config-token"), "{stdout}");
     assert!(!stdout.contains("inline-content-secret"), "{stdout}");
@@ -356,8 +354,7 @@ fn check_config_opens_the_local_cache_and_leaves_it_openable() {
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance automatic, \
-         serve_maintenance true"
+        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance serve_and_maintain"
     );
     assert!(
         cache_root.is_dir(),
@@ -390,10 +387,7 @@ fn check_config_does_not_bind_the_port() {
     );
     assert_eq!(
         stdout.trim(),
-        format!(
-            "config ok: bind {bind}, store local-fs, maintenance automatic, \
-             serve_maintenance true"
-        )
+        format!("config ok: bind {bind}, store local-fs, maintenance serve_and_maintain")
     );
     drop(listener);
 }

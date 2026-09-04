@@ -332,8 +332,7 @@ fn json_covers_command_lines_the_parser_rejects() {
         vec![
             "--json",
             "maintenance",
-            "maintenance",
-            "run",
+            "loop",
             "--namespaces",
             "demo",
             "--drain",
@@ -502,14 +501,14 @@ fn help_lists_the_context_commands() {
         .expect("run help");
     assert_success(&output);
     let stdout = stdout_string(&output);
-    for heading in [
-        "Filesystem:",
-        "Context and configuration:",
-        "Inspection:",
-        "Maintenance:",
-    ] {
+    for heading in ["Filesystem:", "Context and configuration:", "Inspection:"] {
         assert!(stdout.contains(heading), "{stdout}");
     }
+    assert!(!stdout.contains("Maintenance:"), "{stdout}");
+    assert!(
+        stdout.contains("  maintenance   Run maintenance operations"),
+        "{stdout}"
+    );
     assert!(stdout.contains("current"));
     assert!(stdout.contains("use"));
 }

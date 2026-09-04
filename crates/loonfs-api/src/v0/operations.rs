@@ -65,6 +65,9 @@ pub struct ErrorDetails {
     /// The Unix-millisecond time when the current writer acquired its epoch, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_acquired_at_ms: Option<u64>,
+    /// Maximum writer sessions admitted by the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_writer_sessions: Option<usize>,
     /// Inode the failed precondition or operation targeted.
     #[serde(
         default,
@@ -1109,6 +1112,8 @@ pub struct AdvanceRetentionRequest {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AdvanceRetentionResponse {
+    /// Namespace whose retention floor was advanced.
+    pub namespace_id: NamespaceId,
     /// New minimum sequence for incremental replay.
     pub retention_floor_seq: ChangeSeq,
 }
@@ -1116,8 +1121,8 @@ pub struct AdvanceRetentionResponse {
 /// One maintenance job for one namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MaintenanceRunRequest {
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunMaintenanceRequest {
     /// Runs WAL flushing and one bounded metadata reorganization step.
     Metadata(MetadataMaintenanceRequest),
     /// Runs one full metadata compaction.
@@ -1144,7 +1149,7 @@ pub struct MetadataMaintenanceRequest {
 #[serde(deny_unknown_fields)]
 pub struct MetadataCompactionRequest {}
 
-/// What the WAL-flush part of a maintenance step did.
+/// What the WAL-flush part of a maintenance pass did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -1170,7 +1175,7 @@ pub enum WalFlushStepOutcome {
     },
 }
 
-/// The outcome of the metadata-reorganization part of a maintenance step.
+/// The outcome of the metadata-reorganization part of a maintenance pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -1189,7 +1194,7 @@ pub enum ReorganizeStepOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MaintenanceRunResponse {
+pub enum RunMaintenanceResponse {
     /// Result of WAL flushing and one bounded metadata reorganization step.
     Metadata(MetadataMaintenanceResponse),
     /// Result of one full metadata compaction.
@@ -1204,6 +1209,8 @@ pub enum MaintenanceRunResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataMaintenanceResponse {
+    /// Namespace maintained by this run.
+    pub namespace_id: NamespaceId,
     /// What the WAL flush did.
     pub wal_flush: WalFlushStepOutcome,
     /// What the reorganization unit did.
@@ -1214,8 +1221,10 @@ pub struct MetadataMaintenanceResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataCompactionResponse {
+    /// Namespace compacted by this run.
+    pub namespace_id: NamespaceId,
     /// The compaction outcome.
-    pub outcome: MetadataCompactionOutcome,
+    pub compaction: MetadataCompactionOutcome,
 }
 
 /// The outcome of one metadata compaction run.
@@ -2011,7 +2020,7 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_step_outcomes_use_the_outcome_tag() {
+    fn maintenance_outcomes_use_the_outcome_tag() {
         assert_eq!(
             serde_json::to_value(WalFlushStepOutcome::Flushed {
                 manifest_head_seq: ChangeSeq(9),
@@ -2024,20 +2033,49 @@ mod tests {
                 .expect("serialize reorganize outcome"),
             serde_json::json!({"outcome": "unit_published"})
         );
+        assert_eq!(
+            serde_json::to_value(RunMaintenanceResponse::MetadataCompaction(
+                MetadataCompactionResponse {
+                    namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                    compaction: MetadataCompactionOutcome::Published {
+                        manifest_no: ManifestNo(7),
+                        rows_read: 11,
+                        rows_written: 9,
+                        input_bytes: 120,
+                        output_bytes: 80,
+                        output_segments: 2,
+                    },
+                },
+            ))
+            .expect("serialize metadata compaction response"),
+            serde_json::json!({
+                "kind": "metadata_compaction",
+                "namespace_id": "demo",
+                "compaction": {
+                    "outcome": "published",
+                    "manifest_no": 7,
+                    "rows_read": 11,
+                    "rows_written": 9,
+                    "input_bytes": 120,
+                    "output_bytes": 80,
+                    "output_segments": 2
+                }
+            })
+        );
     }
 
     #[test]
-    fn maintenance_run_requests_are_strict_and_round_trip() {
+    fn run_maintenance_requests_are_strict_and_round_trip() {
         let cases = [
             (
                 serde_json::json!({"kind": "metadata"}),
-                Some(MaintenanceRunRequest::Metadata(
+                Some(RunMaintenanceRequest::Metadata(
                     MetadataMaintenanceRequest::default(),
                 )),
             ),
             (
                 serde_json::json!({"kind": "metadata", "max_wal_tail_segments": 4}),
-                Some(MaintenanceRunRequest::Metadata(
+                Some(RunMaintenanceRequest::Metadata(
                     MetadataMaintenanceRequest {
                         max_wal_tail_segments: Some(4),
                     },
@@ -2045,13 +2083,13 @@ mod tests {
             ),
             (
                 serde_json::json!({"kind": "metadata_compaction"}),
-                Some(MaintenanceRunRequest::MetadataCompaction(
+                Some(RunMaintenanceRequest::MetadataCompaction(
                     MetadataCompactionRequest {},
                 )),
             ),
             (
                 serde_json::json!({"kind": "gc"}),
-                Some(MaintenanceRunRequest::Gc(GcRequest::default())),
+                Some(RunMaintenanceRequest::Gc(GcRequest::default())),
             ),
             (
                 serde_json::json!({
@@ -2060,7 +2098,7 @@ mod tests {
                     "grace_window_ms": 600_000,
                     "cursor": "..."
                 }),
-                Some(MaintenanceRunRequest::Gc(GcRequest {
+                Some(RunMaintenanceRequest::Gc(GcRequest {
                     grace_window_ms: Some(600_000),
                     max_objects: Some(10_000),
                     cursor: Some("...".to_owned()),
@@ -2068,7 +2106,7 @@ mod tests {
             ),
             (
                 serde_json::json!({"kind": "retention"}),
-                Some(MaintenanceRunRequest::Retention(AdvanceRetentionRequest {})),
+                Some(RunMaintenanceRequest::Retention(AdvanceRetentionRequest {})),
             ),
             (serde_json::json!({}), None),
             (serde_json::json!({"kind": "nope"}), None),
@@ -2081,7 +2119,7 @@ mod tests {
         ];
 
         for (body, expected) in cases {
-            let decoded = serde_json::from_value::<MaintenanceRunRequest>(body.clone());
+            let decoded = serde_json::from_value::<RunMaintenanceRequest>(body.clone());
             match expected {
                 Some(expected) => {
                     let decoded = decoded.expect("valid maintenance request should decode");

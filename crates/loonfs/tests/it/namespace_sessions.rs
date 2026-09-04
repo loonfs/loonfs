@@ -154,7 +154,7 @@ async fn closing_session_holds_capacity_and_shutdown_waits_for_it() {
     let writer = FsWriter::builder_with_store(store)
         .writer_id("closing-capacity")
         .min_publish_interval_ms(0)
-        .max_open_namespaces(NonZeroUsize::new(1).expect("nonzero capacity"))
+        .max_writer_sessions(NonZeroUsize::new(1).expect("nonzero capacity"))
         .build()
         .await
         .expect("build bounded writer");
@@ -307,7 +307,7 @@ async fn capacity_refuses_without_eviction_and_close_releases_it() {
     let writer = FsWriter::builder_with_store(store)
         .writer_id("bounded")
         .min_publish_interval_ms(0)
-        .max_open_namespaces(NonZeroUsize::new(2).expect("nonzero capacity"))
+        .max_writer_sessions(NonZeroUsize::new(2).expect("nonzero capacity"))
         .build()
         .await
         .expect("build bounded writer");

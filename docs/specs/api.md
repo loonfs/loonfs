@@ -24,7 +24,7 @@ within an API group is expressed as **named features** (section 2).
 | API group | Ops | Status |
 | --- | --- | --- |
 | `filesystem/v0` | Path and inode reads, path mutations, uploads, the change feed, namespace state, capability discovery, and standard errors. Namespace lifecycle, snapshots, attributes, inode child listing, and direct transfers are features. | **Mandatory** for any conforming deployment |
-| `maintenance/v0` | Namespace diagnostics, checkpoints, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep-index maintenance as a feature. | Optional |
+| `maintenance/v0` | Namespace diagnostics, checkpoints, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep index maintenance as a feature. | Optional |
 | `query/v0` | Content search over derived indexes as the `query.grep` feature. | Optional |
 
 API groups are client contracts. They do not describe node roles or deployment topology.
@@ -35,8 +35,10 @@ Notes:
   `maintenance/v0` (maintenance is manually triggerable). A minimal server that
   wraps the embedded engine over HTTP advertises the same two API groups and is
   fully conformant.
-- A hosted LoonFS server may set `serve_maintenance = false` to hide
-  `maintenance/v0`; both serving choices are fully conformant.
+- A hosted LoonFS server serves `maintenance/v0` when `maintenance` is
+  `serve_and_maintain` or `serve_only`. In `maintain_only` or `disabled` mode,
+  every route under `/v0/maintenance/` answers `not_supported` with `feature`
+  set to `maintenance/v0`; all four choices are fully conformant.
 - API groups version independently (`filesystem/v0` could coexist with a future
   `maintenance/v1`). The group name — the segment before the slash — is the stable
   identity that feature keys reference.
@@ -237,6 +239,7 @@ The codes that populate it:
 | Code | Detail fields |
 | --- | --- |
 | `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
+| `writer_capacity_exceeded` | `max_writer_sessions` |
 | `path_conflict` | `expected_inode_id`, `actual_inode_id` when an inode guard found a different inode at the path |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision) |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` |
@@ -291,7 +294,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `writer_session_closed` | 503 | This node holds no open writer session for the namespace. The request was not admitted; retry on the node the namespace is assigned to. |
-| `writer_capacity_exceeded` | 503 | This node holds its maximum number of writer sessions. The request was not admitted. |
+| `writer_capacity_exceeded` | 503 | This node holds its maximum number of writer sessions. The request was not admitted; retry on another node, or wait for a session to close in a single-node deployment. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
@@ -306,6 +309,8 @@ The full registry (`ErrorCode` in `loonfs-api`):
 Automated retry is narrower than the HTTP status. Raw transport failures may
 be retried. Of the registered error codes, only `commit_queue_full`,
 `server_busy`, and `shutting_down` can clear without caller or operator action.
+`writer_session_closed` and `writer_capacity_exceeded` are resolved by routing
+the request to another node, not by waiting, and carry no `Retry-After` header.
 `checkpoint_unavailable`, `maintenance_required`, and `index_lagging` require
 maintenance. `storage_permission_denied` requires the operator to fix the
 storage credentials or bucket policy. `commit_outcome_unknown` and
@@ -647,7 +652,7 @@ commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
 read the definitive answer from the response.
 
-The blocking Rust client retries operations labeled `idempotent` or `replayable`. It makes one attempt for operations labeled `not_idempotent`: namespace create, fork, and delete; upload-session begin; checkpoint create; maintenance; grep-index collection; and store probe. Presigned direct PUT also receives one attempt.
+The blocking Rust client retries operations labeled `idempotent` or `replayable`. It makes one attempt for operations labeled `not_idempotent`: namespace create, fork, and delete; upload-session begin; checkpoint create; maintenance; grep index collection; and store probe. Presigned direct PUT also receives one attempt.
 
 Commits record a durable receipt binding the `commit_id` to its
 `committed_seq`; replay reads that receipt, and a reuse conflict reports the
@@ -672,8 +677,10 @@ operator can tell a planned failover from two writers misconfigured against
 one namespace.
 
 A node closes a session to hand a namespace off. Closing writes nothing durable.
-The next node's first publish acquires the next writer epoch. A node holds a
-bounded number of sessions and refuses to open one beyond that limit.
+The next node's first publish acquires the next writer epoch. A request sent to
+a node without the namespace's open session fails with `writer_session_closed`.
+A node holds a bounded number of sessions and refuses to open one beyond that
+limit with `writer_capacity_exceeded`.
 
 The standard mutation operations are defined in `format.md` ("Standard
 mutation operations"). `POST /commits` (section 6.8) exposes those operations
@@ -783,7 +790,7 @@ The table below lists the retry class for every v0 operation.
 | Test object storage | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe` with body `{}` |
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
-The status, enable, and disable routes all return one flat grep-index object:
+The status, enable, and disable routes all return one flat grep index object:
 `namespace_id`, lifecycle fields tagged by `status`, `next_run_no`, and
 `reorganize_pending`. Lifecycle statuses never share a sequence field:
 
@@ -815,11 +822,12 @@ A maintenance run body names exactly one job with `kind`:
 | `kind` | Fields | Result |
 | --- | --- | --- |
 | `metadata` | Optional `max_wal_tail_segments` | `wal_flush` and `reorganize` outcomes |
-| `metadata_compaction` | None | Compaction `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
+| `metadata_compaction` | None | `compaction`, tagged by `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
 | `gc` | Optional `grace_window_ms`, `max_objects`, and `cursor` | The collection result |
 | `retention` | None | `retention_floor_seq` |
 
-The response carries the same `kind` and that job's result. None of the jobs creates a checkpoint record.
+The response carries the same `kind`, the addressed `namespace_id`, and that
+job's result. None of the jobs creates a checkpoint record.
 
 ```json
 {"kind":"gc","max_objects":1024}
@@ -837,9 +845,18 @@ or retain.
 `reorganize.outcome` has four values. `not_needed` means no bounded merge is
 due. `unit_published` means this run published one bounded merge.
 `compaction_required` means a family group needs streaming compaction; run the
-`metadata-compaction` job. `root_advanced` means another publisher updated the
+`metadata_compaction` job. `root_advanced` means another publisher updated the
 metadata root first. A manifest this run wrote remains unreferenced, and a
 later GC pass can delete it.
+
+`compaction.outcome` has seven values. `not_needed` means no family group has
+outgrown a bounded reorganization pass. `bounded_merge_published` means the
+planner selected and published a bounded merge instead of a full compaction.
+`published` means the rebuilt family group replaced its snapshot in a published
+manifest. `cancelled` means cancellation stopped the run before publication.
+`abandoned` means an input run changed before publication. `fenced` means the
+run lost its compaction lease. `superseded` means every publication attempt lost
+the metadata-root race.
 
 For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the run uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window, `max_objects` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
 `max_objects` bounds the whole pass, from its first read to its last, and
@@ -1063,7 +1080,7 @@ The runtime schedules another garbage-collection pass at
 Active namespaces do not need a separate cron job for this cleanup.
 
 LoonFS does not enumerate namespaces for maintenance. Use
-`loonfs maintenance run --namespaces <id>` to maintain inactive
+`loonfs maintenance loop --namespaces <id>` to maintain inactive
 namespaces explicitly. The command runs until stopped, or performs one
 bounded pass with `--drain`. An inactive namespace receives no maintenance
 unless a process is assigned to it.
@@ -2551,7 +2568,7 @@ client does, and an unauthorized one answers `401 unauthorized` inside the
 standard error envelope.
 
 Metric names are `loonfs_<subsystem>_<metric>`, covering the object-store
-calls the process made, the maintenance steps it settled, the publications
+calls the process made, the maintenance passes it settled, the publications
 it batched, what garbage collection reclaimed, and the requests this
 server served. Label values come from closed vocabularies only: a request
 is labeled by the route template it matched (`/v0/namespaces/{namespace_id}`),

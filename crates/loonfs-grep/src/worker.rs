@@ -1,4 +1,4 @@
-//! Explicit grep-index backfill, incremental building, reorganization, and
+//! Explicit grep index backfill, incremental building, reorganization, and
 //! garbage collection.
 //!
 //! Reorganization publishes bounded merges like metadata reorganization.

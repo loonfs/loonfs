@@ -60,12 +60,12 @@ pub use loonfs_api::{
     DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileBytes, FileRevision,
     FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcResponse, InodeId, InodeKind,
     ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListSnapshotsResponse, MaintenanceRunRequest, MaintenanceRunResponse,
-    ManifestNo, MetadataCompactionOutcome, MetadataCompactionRequest, MetadataCompactionResponse,
-    MetadataMaintenanceResponse, NameKey, Namespace, NamespaceDiagnostics, NamespaceId, Page,
-    PageRequest, PaginationPolicy, PathEntry, PathEntryKind, ReleaseCheckpointResponse,
-    ReleaseSnapshotResponse, ReleasedCheckpointCounts, ReorganizeStepOutcome, RetainedCandidates,
-    RetainedReason, RevisionNo, SnapshotSummary, TrashEntry, UploadId, WalFlushStepOutcome,
+    ListPathEntriesResponse, ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome,
+    MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceResponse, NameKey,
+    Namespace, NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry,
+    PathEntryKind, ReleaseCheckpointResponse, ReleaseSnapshotResponse, ReleasedCheckpointCounts,
+    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo, RunMaintenanceRequest,
+    RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId, WalFlushStepOutcome,
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_ATTRIBUTES,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
@@ -97,8 +97,8 @@ pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 pub mod wire {
     pub use loonfs_api::{
         AdvanceRetentionRequest, CreateCheckpointRequest, CreateSnapshotRequest,
-        ExtendSnapshotRequest, GcRequest, MaintenanceRunRequest, MetadataCompactionRequest,
-        MetadataMaintenanceRequest,
+        ExtendSnapshotRequest, GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest,
+        RunMaintenanceRequest,
     };
 }
 
@@ -172,7 +172,7 @@ pub use loonfs_objectstore::{
 pub use cache::RuntimeCacheStats;
 pub use config::{
     RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS,
-    DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_OPEN_NAMESPACES,
+    DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_WRITER_SESSIONS,
 };
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,

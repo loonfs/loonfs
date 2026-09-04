@@ -18,6 +18,7 @@ mod maintenance;
 mod mutations;
 mod namespace_path;
 mod payload;
+mod query;
 mod reads;
 mod transport;
 mod uploads;
@@ -40,9 +41,9 @@ use loonfs_api::{
     CreateCheckpointRequest, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
     FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
     ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListTrashResponse, MaintenanceRunRequest, MaintenanceRunResponse,
-    Namespace, NamespaceDiagnostics, NamespaceId, PathEntry, PutRetryAttempt,
-    PutRetryErrorClassification, PutRetryReceipt, ReleaseCheckpointResponse, RevisionNo,
+    ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceDiagnostics, NamespaceId,
+    PathEntry, PutRetryAttempt, PutRetryErrorClassification, PutRetryReceipt,
+    ReleaseCheckpointResponse, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse,
     SecretString, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
@@ -53,11 +54,11 @@ use std::time::Duration;
 
 pub use config::ClientConfig;
 pub use error::ClientError;
-pub use maintenance::{CheckpointsPager, SnapshotsPager};
+pub use maintenance::CheckpointsPager;
 pub use payload::{PayloadSource, PayloadStream};
 pub use reads::{
     ChangesPager, FileRevisionsPager, InodeChildrenPager, ListChangesOptions, PathEntriesPager,
-    ReadFileOptions, TrashPager,
+    ReadFileOptions, SnapshotsPager, TrashPager,
 };
 use transport::{
     SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT,

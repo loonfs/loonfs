@@ -776,7 +776,7 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
                 // for a permit, and how long it then took.
                 queued_ms,
                 elapsed_ms,
-                "maintenance step settled"
+                "maintenance pass settled"
             );
             if let Some(follow_up) = result.follow_up {
                 inner.instruments.follow_up(follow_up);
@@ -795,7 +795,7 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
                 error = %error,
                 queued_ms,
                 backoff_scheduled = RunnerCounters::bump(&inner.counters.backoff_scheduled),
-                "maintenance step failed; backing off"
+                "maintenance pass failed; backing off"
             );
             StepOutcome::Failed
         }

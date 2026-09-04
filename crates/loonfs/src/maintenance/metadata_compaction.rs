@@ -61,7 +61,7 @@ impl MaintenanceJob for MetadataCompactionJob {
             .maintenance
             .compact_metadata_with(namespace_id, cancellation)
             .await?;
-        let (conclusion, follow_up) = match response.outcome {
+        let (conclusion, follow_up) = match response.compaction {
             MetadataCompactionOutcome::Published { .. }
             | MetadataCompactionOutcome::BoundedMergePublished => (
                 MaintenanceConclusion::Progressed,

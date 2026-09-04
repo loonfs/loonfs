@@ -5,8 +5,8 @@ use super::{
     MaintenanceProbe, MaintenanceRunReport,
 };
 use crate::{
-    ErrorCode, FsMaintenance, GcConfig, GcResponse, MaintenanceRunRequest, MaintenanceRunResponse,
-    NamespaceId, Result, RuntimeError,
+    ErrorCode, FsMaintenance, GcConfig, GcResponse, NamespaceId, Result, RunMaintenanceRequest,
+    RunMaintenanceResponse, RuntimeError,
 };
 use async_trait::async_trait;
 use loonfs_api::GcRequest;
@@ -55,7 +55,7 @@ impl MaintenanceJob for GarbageCollectionJob {
             .maintenance
             .run_maintenance(
                 namespace_id,
-                MaintenanceRunRequest::Gc(GcRequest {
+                RunMaintenanceRequest::Gc(GcRequest {
                     cursor: continuation.map(str::to_owned),
                     ..GcRequest::default()
                 }),
@@ -80,7 +80,7 @@ impl MaintenanceJob for GarbageCollectionJob {
             }
             Err(error) => return Err(error),
         };
-        let MaintenanceRunResponse::Gc(gc) = response else {
+        let RunMaintenanceResponse::Gc(gc) = response else {
             return Err(RuntimeError::Core(loonfs_core::Error::Internal(
                 "maintenance GC returned a non-GC response".to_owned(),
             )));

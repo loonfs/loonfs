@@ -15,9 +15,9 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     decode_namespace_cursor, CapabilityDocument, Checkpoint, CheckpointId, CreateCheckpointRequest,
     CreateNamespaceRequest, CreateSnapshotRequest, ErrorCode, ExtendSnapshotRequest,
-    ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, MaintenanceRunRequest,
-    MaintenanceRunResponse, PageRequest, PaginationPolicy, ReleaseCheckpointResponse,
-    ReleaseSnapshotResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, PageRequest,
+    PaginationPolicy, ReleaseCheckpointResponse, ReleaseSnapshotResponse, RunMaintenanceRequest,
+    RunMaintenanceResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
     API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
     FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
@@ -145,7 +145,7 @@ pub(super) async fn get_capabilities(
     // the routes this router mounts. Serving searches and maintaining their
     // index remain separately deployable.
     capabilities.api_groups = vec![API_GROUP_FILESYSTEM_V0.to_owned()];
-    if state.config.serve_maintenance {
+    if state.config.maintenance.serves() {
         capabilities
             .api_groups
             .push(API_GROUP_MAINTENANCE_V0.to_owned());
@@ -153,7 +153,7 @@ pub(super) async fn get_capabilities(
     set_feature(
         &mut capabilities,
         FEATURE_MAINTENANCE_GREP_INDEX,
-        state.config.serve_maintenance && state.config.grep.mode.maintains_index(),
+        state.config.maintenance.serves() && state.config.grep.mode.maintains_index(),
     );
     if state.config.grep.mode.serves_grep() {
         let pagination = PaginationPolicy::default();
@@ -770,9 +770,9 @@ fn decode_checkpoint_cursor(
         summary = "Run one maintenance job",
         description = "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` run inspects up to 1024 objects unless `max_objects` says otherwise, and returns a cursor when more remain.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
-        request_body(content = MaintenanceRunRequest, description = "The maintenance job to run"),
+        request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
-            (status = 200, description = "Maintenance job completed", body = MaintenanceRunResponse),
+            (status = 200, description = "Maintenance job completed", body = RunMaintenanceResponse),
             (status = 400, description = "Invalid namespace id or options", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -785,8 +785,8 @@ pub(super) async fn run_maintenance(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    AppJson(request): AppJson<MaintenanceRunRequest>,
-) -> Result<Json<MaintenanceRunResponse>, ApiResponseError> {
+    AppJson(request): AppJson<RunMaintenanceRequest>,
+) -> Result<Json<RunMaintenanceResponse>, ApiResponseError> {
     let result = state
         .maintenance
         .run_maintenance(&namespace_id, request)

@@ -63,12 +63,12 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put, MethodRouter};
+use axum::routing::{any, get, post, put, MethodRouter};
 use axum::Router;
 use loonfs::ErrorCode;
 #[cfg(test)]
 use loonfs::SharedObjectStore;
-use loonfs_api::ErrorKind;
+use loonfs_api::{ErrorKind, API_GROUP_MAINTENANCE_V0};
 
 /// Response header carrying the request's correlation id.
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -369,7 +369,7 @@ fn router(state: AppState) -> Router {
             get(get_upload),
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes));
-    if state.config.serve_maintenance {
+    if state.config.maintenance.serves() {
         authenticated = authenticated
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
@@ -425,6 +425,8 @@ fn router(state: AppState) -> Router {
                 "/v0/maintenance/store/probe",
                 post(handlers_store::probe_store),
             );
+    } else {
+        authenticated = authenticated.route("/v0/maintenance/{*path}", any(maintenance_not_served));
     }
     let authenticated = authenticated
         .route_layer(middleware::from_fn(move |request: Request, next: Next| {
@@ -457,6 +459,14 @@ async fn route_not_found() -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::RouteNotFound,
         "no v0 route matches this path; see the API spec for the served surface",
+    )
+}
+
+async fn maintenance_not_served() -> ApiResponseError {
+    ApiResponseError::not_supported(
+        API_GROUP_MAINTENANCE_V0,
+        "this deployment does not serve the maintenance API group; set `maintenance` to \
+         `serve_only` or `serve_and_maintain`",
     )
 }
 

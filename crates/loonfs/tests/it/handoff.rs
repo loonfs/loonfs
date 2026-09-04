@@ -4,9 +4,9 @@
 
 use crate::common::{collect_path_entries, directory_options, expect_code, writer};
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, MaintenanceRunRequest,
-    MaintenanceRunResponse, ManifestNo, MetadataMaintenanceOptions, NamespaceId,
-    NamespaceSessionPolicy, NamespaceSessionState, PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, ManifestNo,
+    MetadataMaintenanceOptions, NamespaceId, NamespaceSessionPolicy, NamespaceSessionState,
+    PutFileOptions, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
     WalFlushStepOutcome, GC_MIN_GRACE_WINDOW_MS,
 };
 use loonfs_api::{GcRequest, WriterId};
@@ -332,14 +332,14 @@ async fn an_orphan_wal_object_is_harmless() {
         .expect("build GC handle")
         .run_maintenance(
             &namespace_id,
-            MaintenanceRunRequest::Gc(GcRequest {
+            RunMaintenanceRequest::Gc(GcRequest {
                 grace_window_ms: Some(GC_MIN_GRACE_WINDOW_MS),
                 ..GcRequest::default()
             }),
         )
         .await
         .expect("run GC");
-    let MaintenanceRunResponse::Gc(report) = gc else {
+    let RunMaintenanceResponse::Gc(report) = gc else {
         panic!("GC request returned a different response")
     };
     assert!(report.deleted.wal_segments >= 1);

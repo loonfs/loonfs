@@ -137,8 +137,8 @@ pub enum CoreError {
     CommitQueueFull,
     #[error("writer session for namespace `{namespace_id}` is closed; new work is not admitted")]
     WriterSessionClosed { namespace_id: NamespaceId },
-    #[error("writer session capacity is {max_open_namespaces}; new work is not admitted")]
-    WriterCapacityExceeded { max_open_namespaces: usize },
+    #[error("writer session capacity is {max_writer_sessions}; new work is not admitted")]
+    WriterCapacityExceeded { max_writer_sessions: usize },
     /// The service is shutting down. New requests are rejected, while requests
     /// accepted earlier may finish.
     #[error("shutting down; new work is not admitted")]
@@ -586,6 +586,12 @@ impl CoreError {
                 committed_fingerprint: committed_fingerprint.clone(),
                 ..ErrorDetails::default()
             }),
+            CoreError::WriterCapacityExceeded {
+                max_writer_sessions,
+            } => Some(ErrorDetails {
+                max_writer_sessions: Some(*max_writer_sessions),
+                ..ErrorDetails::default()
+            }),
             CoreError::RebootstrapRequired {
                 after_seq,
                 retention_floor_seq,
@@ -853,6 +859,17 @@ mod tests {
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(details.active_writer, None);
         assert_eq!(details.active_acquired_at_ms, None);
+
+        let capacity = CoreError::WriterCapacityExceeded {
+            max_writer_sessions: 12,
+        };
+        assert_eq!(
+            capacity
+                .details()
+                .expect("writer capacity details")
+                .max_writer_sessions,
+            Some(12)
+        );
 
         // A conflict decided against a durable receipt names where the
         // commit id landed and what landed there, which is what a retry

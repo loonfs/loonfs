@@ -34,7 +34,6 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         CommandData::CheckpointsListed(response) => human_checkpoints_listed(response),
         CommandData::CheckpointReleased(response) => human_checkpoint_released(response),
         CommandData::MaintenanceRan(response) => human_maintenance_ran(response),
-        CommandData::GarbageCollected(response) => human_garbage_collected(response),
         CommandData::Changes(response) => human_changes(response),
         CommandData::Trash(listing) => human_trash(listing),
         CommandData::PathEntries {

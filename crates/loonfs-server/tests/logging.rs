@@ -215,7 +215,7 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
         "logging-missing-path",
         "logging-missing-path",
     );
-    config.maintenance = MaintenanceMode::Manual;
+    config.maintenance = MaintenanceMode::ServeOnly;
     let (router, state) = app(config, AppOptions::default()).await.expect("build app");
     let writer = state.writer;
     writer
@@ -258,7 +258,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         "logging-expected-errors",
         "logging-expected-errors",
     );
-    config.maintenance = MaintenanceMode::Manual;
+    config.maintenance = MaintenanceMode::ServeOnly;
     config.max_concurrent_uploads = 1;
     let (router, state) = app(config, AppOptions::default()).await.expect("build app");
     let writer = state.writer;
@@ -370,7 +370,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
     let store_root = temp_dir.path().join("store");
     let key_prefix = "logging-store-fault";
     let mut config = test_config(store_root.clone(), "logging-store-fault", key_prefix);
-    config.maintenance = MaintenanceMode::Manual;
+    config.maintenance = MaintenanceMode::ServeOnly;
 
     let failing = Arc::new(FailStore::new(
         LocalFsStore::with_key_prefix(&store_root, Some(key_prefix)).expect("build local store"),
