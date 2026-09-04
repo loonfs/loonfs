@@ -303,15 +303,15 @@ pub(crate) fn test_config(
         auth_token: Some(auth_token.into()),
         content_token_secret: content_token_secret.into(),
         writer_id: writer_id.to_owned(),
-        max_open_namespaces: None,
+        max_writer_sessions: loonfs::DEFAULT_MAX_WRITER_SESSIONS,
+        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: GrepConfig {
             mode: GrepMode::ServeAndMaintain,
             ..GrepConfig::default()
         },
-        maintenance: MaintenanceMode::Automatic,
-        serve_maintenance: true,
+        maintenance: MaintenanceMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,

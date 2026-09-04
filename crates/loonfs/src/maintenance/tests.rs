@@ -228,7 +228,7 @@ impl MaintenanceJob for TestJob {
                 follow_up: None,
             }),
             ScriptedStep::Fail => Err(RuntimeError::Config("scripted step failure".to_owned())),
-            ScriptedStep::Panic => panic!("injected maintenance step panic"),
+            ScriptedStep::Panic => panic!("injected maintenance pass panic"),
         }
     }
 

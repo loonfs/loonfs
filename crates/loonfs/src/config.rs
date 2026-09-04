@@ -18,7 +18,7 @@ pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// Default maximum writer sessions held at once.
-pub const DEFAULT_MAX_OPEN_NAMESPACES: usize = 10_000;
+pub const DEFAULT_MAX_WRITER_SESSIONS: usize = 10_000;
 /// Default maximum WAL-tail folds one writer runs concurrently.
 pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
 /// Default maximum streaming metadata compactions one job runs concurrently.

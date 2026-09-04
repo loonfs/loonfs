@@ -18,8 +18,8 @@ use loonfs_api::{
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, CommitResponse,
     ContentRef, CreateCheckpointRequest, DeleteNamespaceResponse, GrepRequest, GrepResponse,
     InodeId, ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
-    ListTrashResponse, MaintenanceRunRequest, MaintenanceRunResponse, Namespace, NamespaceId,
-    PathEntry, ReleaseCheckpointResponse, RevisionNo, UploadId,
+    ListTrashResponse, Namespace, NamespaceId, PathEntry, ReleaseCheckpointResponse, RevisionNo,
+    RunMaintenanceRequest, RunMaintenanceResponse, UploadId,
 };
 use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, DownloadOptions,
@@ -44,8 +44,8 @@ fn upload_sessions_need_a_remote_profile() -> CliError {
 fn maintenance_host_needs_an_embedded_profile() -> CliError {
     CliError::new(
         loonfs_api::ErrorCode::NotSupported.as_str(),
-        "`maintenance run` requires an embedded profile because remote servers run their \
-         own maintenance; use `loonfs maintenance step` for one pass or `loonfs maintenance \
+        "`maintenance loop` requires an embedded profile because remote servers run their \
+         own maintenance; use `loonfs maintenance metadata` for one pass or `loonfs maintenance \
          index status` to inspect the index",
     )
 }
@@ -388,7 +388,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Reads the namespace's grep-index lifecycle (maintenance API group).
+    /// Reads the namespace's grep index lifecycle (maintenance API group).
     pub(crate) async fn get_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -404,7 +404,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Runs one bounded grep-index garbage-collection pass (maintenance API group).
+    /// Runs one bounded grep index garbage-collection pass (maintenance API group).
     pub(crate) async fn gc_grep_index(
         &self,
         namespace_id: &NamespaceId,
@@ -827,8 +827,8 @@ impl ResolvedTarget {
     pub(crate) async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceRunRequest,
-    ) -> Result<MaintenanceRunResponse, CliError> {
+        request: RunMaintenanceRequest,
+    ) -> Result<RunMaintenanceResponse, CliError> {
         match self {
             Self::Embedded(target) => target.backend.run_maintenance(namespace_id, request).await,
             Self::Remote(target) => Ok(target

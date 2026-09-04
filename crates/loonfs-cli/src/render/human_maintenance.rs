@@ -1,13 +1,13 @@
 use super::summaries::*;
-use crate::commands::MaintenanceKeyReport;
+use crate::commands::{MaintenanceKeyReport, MaintenanceRan};
 use loonfs_api::v0::{
     GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, ReleaseSnapshotResponse,
     SnapshotSummary, StoreProbeResponse,
 };
 use loonfs_api::{
-    ChangeSeq, Checkpoint, DeleteNamespaceResponse, GcResponse, ListCheckpointsResponse,
-    MaintenanceRunResponse, MetadataCompactionOutcome, Namespace, NamespaceId,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    ChangeSeq, Checkpoint, DeleteNamespaceResponse, ListCheckpointsResponse,
+    MetadataCompactionOutcome, Namespace, NamespaceId, ReleaseCheckpointResponse,
+    ReorganizeStepOutcome, RunMaintenanceResponse,
 };
 
 pub(super) fn human_default_namespace(profile: &str, namespace: &str) -> String {
@@ -133,53 +133,67 @@ pub(super) fn human_checkpoint_released(response: &ReleaseCheckpointResponse) ->
     )
 }
 
-pub(super) fn human_maintenance_ran(response: &MaintenanceRunResponse) -> String {
-    match response {
-        MaintenanceRunResponse::Metadata(metadata) => format!(
-            "metadata maintenance: {}; {}",
+pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
+    match &ran.response {
+        RunMaintenanceResponse::Metadata(metadata) => format!(
+            "metadata maintenance for {}: {}; {}",
+            metadata.namespace_id,
             wal_flush_summary(&metadata.wal_flush),
             match metadata.reorganize {
                 ReorganizeStepOutcome::NotNeeded => "reorganize not needed",
                 ReorganizeStepOutcome::UnitPublished => "reorganized one family group",
                 ReorganizeStepOutcome::CompactionRequired => {
-                    "one family group needs the metadata-compaction job"
+                    "one family group needs the metadata_compaction job"
                 }
                 ReorganizeStepOutcome::RootAdvanced => {
                     "another publisher moved the metadata root, so the reorganize published nothing"
                 }
             }
         ),
-        MaintenanceRunResponse::MetadataCompaction(response) => match &response.outcome {
-            MetadataCompactionOutcome::NotNeeded => "metadata compaction not needed".to_owned(),
-            MetadataCompactionOutcome::BoundedMergePublished => {
-                "metadata compaction published one bounded merge".to_owned()
-            }
-            MetadataCompactionOutcome::Published {
-                manifest_no,
-                rows_read,
-                rows_written,
-                output_segments,
-                ..
-            } => format!(
-                "metadata compaction published manifest {manifest_no}: {rows_read} rows read, \
+        RunMaintenanceResponse::MetadataCompaction(response) => {
+            let summary = match &response.compaction {
+                MetadataCompactionOutcome::NotNeeded => "not needed".to_owned(),
+                MetadataCompactionOutcome::BoundedMergePublished => {
+                    "published one bounded merge".to_owned()
+                }
+                MetadataCompactionOutcome::Published {
+                    manifest_no,
+                    rows_read,
+                    rows_written,
+                    output_segments,
+                    ..
+                } => format!(
+                    "published manifest {manifest_no}: {rows_read} rows read, \
                  {rows_written} rows written, {output_segments} output segments"
-            ),
-            MetadataCompactionOutcome::Cancelled => "metadata compaction cancelled".to_owned(),
-            MetadataCompactionOutcome::Abandoned => "metadata compaction abandoned".to_owned(),
-            MetadataCompactionOutcome::Fenced => "metadata compaction fenced".to_owned(),
-            MetadataCompactionOutcome::Superseded => "metadata compaction superseded".to_owned(),
-        },
-        MaintenanceRunResponse::Gc(gc) => {
+                ),
+                MetadataCompactionOutcome::Cancelled => "cancelled".to_owned(),
+                MetadataCompactionOutcome::Abandoned => "abandoned".to_owned(),
+                MetadataCompactionOutcome::Fenced => "fenced".to_owned(),
+                MetadataCompactionOutcome::Superseded => "superseded".to_owned(),
+            };
+            format!(
+                "metadata compaction for {}: {summary}",
+                response.namespace_id
+            )
+        }
+        RunMaintenanceResponse::Gc(gc) => {
             format!("gc for {}: {}", gc.namespace_id, gc_summary(gc))
         }
-        MaintenanceRunResponse::Retention(retention) => {
-            format!("retention floor at seq {}", retention.retention_floor_seq.0)
+        RunMaintenanceResponse::Retention(retention) => {
+            let state = if ran
+                .retention_floor_before
+                .is_some_and(|before| retention.retention_floor_seq > before)
+            {
+                "advanced to"
+            } else {
+                "unchanged at"
+            };
+            format!(
+                "retention for {}: floor {state} seq {}",
+                retention.namespace_id, retention.retention_floor_seq.0
+            )
         }
     }
-}
-
-pub(super) fn human_garbage_collected(response: &GcResponse) -> String {
-    format!("gc for {}: {}", response.namespace_id, gc_summary(response))
 }
 
 pub(super) fn human_changes(response: &ListChangesResponse) -> String {

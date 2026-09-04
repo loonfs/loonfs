@@ -154,7 +154,7 @@ fn no_schema_a_response_reaches_admits_null() {
     for schema_name in [
         "ErrorResponse",
         "ErrorDetails",
-        "MaintenanceRunResponseGc",
+        "RunMaintenanceResponseGc",
         "GrepMatch",
     ] {
         assert!(
@@ -172,11 +172,11 @@ fn no_schema_a_response_reaches_admits_null() {
 const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("DeletedObjectCounts", "content_objects"),
     ("DeletedObjectCounts", "upload_sessions"),
-    ("MaintenanceRunResponseGc", "budget_exhausted"),
-    ("MaintenanceRunResponseGc", "content_reclamation_deferred"),
-    ("MaintenanceRunResponseGc", "deleted"),
-    ("MaintenanceRunResponseGc", "released_checkpoints"),
-    ("MaintenanceRunResponseGc", "retained"),
+    ("RunMaintenanceResponseGc", "budget_exhausted"),
+    ("RunMaintenanceResponseGc", "content_reclamation_deferred"),
+    ("RunMaintenanceResponseGc", "deleted"),
+    ("RunMaintenanceResponseGc", "released_checkpoints"),
+    ("RunMaintenanceResponseGc", "retained"),
     ("GrepMatch", "line_truncated"),
     ("ReleasedCheckpointCounts", "expired"),
     ("ReleasedCheckpointCounts", "missing_basis"),

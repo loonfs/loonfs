@@ -318,15 +318,16 @@ Inspection and diagnostics
     and exits nonzero if a check fails
 
 Maintenance
-  loonfs maintenance run --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]
+  loonfs maintenance loop --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]
     Run maintenance for explicitly named namespaces in embedded mode. The
     command runs until stopped. With --drain, it finishes the current
-    assignments and exits. --job selects metadata, core-gc, grep-index, or
-    grep-gc; omitting it selects all four. --max-steps and --deadline-ms
-    bound a drain.
+    assignments and exits. --job selects metadata, metadata-compaction, gc,
+    grep-index, or grep-gc; these map to the metadata, metadata_compaction,
+    gc, grep_index, and grep_gc job ids. Omitting it selects all five.
+    --max-steps and --deadline-ms bound a drain.
 
-  loonfs maintenance step [--max-wal-tail-segments <n>]
-    Run one metadata maintenance step: flush the WAL tail when it reaches
+  loonfs maintenance metadata [--max-wal-tail-segments <n>]
+    Run the metadata job once: flush the WAL tail when it reaches
     the threshold, then merge one reorganization unit.
     --max-wal-tail-segments overrides the default flush threshold.
 
@@ -643,8 +644,8 @@ Behavior notes
   read, and advances a whole file at a time over the small ones
 
   Embedded profiles do not run continuous maintenance. Run
-  `loonfs maintenance run --namespaces <ns>` for ongoing maintenance,
-  or `loonfs maintenance step` for one step. Live writers fold their own WAL
+  `loonfs maintenance loop --namespaces <ns>` for ongoing maintenance,
+  or `loonfs maintenance metadata` for one pass. Live writers fold their own WAL
   tails; explicit maintenance handles inactive namespaces and the other jobs.
   Servers maintain the namespaces they use automatically by default.
 ```

@@ -451,7 +451,7 @@ impl PublisherRegistry {
         }
         if state.publishers.len() >= state.capacity.get() {
             return Err(CoreError::WriterCapacityExceeded {
-                max_open_namespaces: state.capacity.get(),
+                max_writer_sessions: state.capacity.get(),
             });
         }
         let publisher = NamespacePublisher::new(

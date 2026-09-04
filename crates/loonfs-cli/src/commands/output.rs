@@ -11,8 +11,8 @@ use loonfs_api::v0::{
 };
 use loonfs_api::{
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteNamespaceResponse,
-    FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse, MaintenanceRunResponse,
-    Namespace, NamespaceId, PathEntry, ReleaseCheckpointResponse,
+    FileRevision, GrepMatch, InodeId, ListCheckpointsResponse, Namespace, NamespaceId, PathEntry,
+    ReleaseCheckpointResponse, RunMaintenanceResponse,
 };
 use serde::Serialize;
 
@@ -139,6 +139,40 @@ pub(crate) struct CommandFailure {
     pub error: Box<CliError>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaintenanceRan {
+    pub response: RunMaintenanceResponse,
+    pub retention_floor_before: Option<ChangeSeq>,
+}
+
+impl MaintenanceRan {
+    pub(crate) fn new(response: RunMaintenanceResponse) -> Self {
+        Self {
+            response,
+            retention_floor_before: None,
+        }
+    }
+
+    pub(crate) fn after_retention(
+        response: RunMaintenanceResponse,
+        retention_floor_before: ChangeSeq,
+    ) -> Self {
+        Self {
+            response,
+            retention_floor_before: Some(retention_floor_before),
+        }
+    }
+}
+
+impl Serialize for MaintenanceRan {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.response.serialize(serializer)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CommandData {
@@ -172,7 +206,6 @@ pub(crate) enum CommandData {
     CheckpointCreated(Checkpoint),
     CheckpointsListed(ListCheckpointsResponse),
     CheckpointReleased(ReleaseCheckpointResponse),
-    GarbageCollected(GcResponse),
     GrepIndexEnabled {
         /// The lifecycle and bookkeeping last observed: what enable read
         /// with `--no-wait`, otherwise the status after waiting stopped.
@@ -330,7 +363,7 @@ pub(crate) enum CommandData {
     /// end without holding all of it.
     StreamedToStdout,
     #[serde(untagged)]
-    MaintenanceRan(MaintenanceRunResponse),
+    MaintenanceRan(MaintenanceRan),
 }
 
 impl CommandData {

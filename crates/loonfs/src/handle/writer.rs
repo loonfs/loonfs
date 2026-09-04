@@ -244,7 +244,7 @@ pub struct FsWriterBuilder {
     writer_id: Option<String>,
     min_publish_interval_ms: u64,
     namespace_session_policy: NamespaceSessionPolicy,
-    max_open_namespaces: NonZeroUsize,
+    max_writer_sessions: NonZeroUsize,
     max_concurrent_folds: NonZeroUsize,
     namespace_advance_observer: Option<NamespaceAdvanceObserver>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
@@ -257,8 +257,8 @@ impl FsWriterBuilder {
             writer_id: None,
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             namespace_session_policy: NamespaceSessionPolicy::OpenOnFirstWrite,
-            max_open_namespaces: NonZeroUsize::new(crate::config::DEFAULT_MAX_OPEN_NAMESPACES)
-                .expect("default maximum open namespaces should be nonzero"),
+            max_writer_sessions: NonZeroUsize::new(crate::config::DEFAULT_MAX_WRITER_SESSIONS)
+                .expect("default maximum writer sessions should be nonzero"),
             max_concurrent_folds: NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS)
                 .expect("default maximum concurrent folds should be nonzero"),
             namespace_advance_observer: None,
@@ -305,9 +305,9 @@ impl FsWriterBuilder {
     /// Sets the maximum number of writer sessions held at once.
     ///
     /// Opening past the limit fails with `writer_capacity_exceeded`. The
-    /// default is [`crate::DEFAULT_MAX_OPEN_NAMESPACES`].
-    pub fn max_open_namespaces(mut self, limit: NonZeroUsize) -> Self {
-        self.max_open_namespaces = limit;
+    /// default is [`crate::DEFAULT_MAX_WRITER_SESSIONS`].
+    pub fn max_writer_sessions(mut self, limit: NonZeroUsize) -> Self {
+        self.max_writer_sessions = limit;
         self
     }
 
@@ -432,7 +432,7 @@ impl FsWriterBuilder {
             runtime,
             std::time::Duration::from_millis(self.min_publish_interval_ms),
             self.namespace_session_policy,
-            self.max_open_namespaces,
+            self.max_writer_sessions,
         );
         Ok(FsWriter {
             core,

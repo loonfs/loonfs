@@ -11,7 +11,6 @@ use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use thiserror::Error;
 
@@ -43,9 +42,14 @@ pub struct ServerConfig {
     #[serde(default)]
     pub content_token_secret: SecretString,
     pub writer_id: String,
-    /// Maximum writer sessions held by this server.
-    #[serde(default)]
-    pub max_open_namespaces: Option<NonZeroUsize>,
+    /// Maximum writer sessions held by this server. Requests that need a new
+    /// session past the cap answer `writer_capacity_exceeded`.
+    #[serde(default = "default_max_writer_sessions")]
+    pub max_writer_sessions: usize,
+    /// Maximum WAL folds this server runs concurrently. A sustained
+    /// `loonfs.publisher.wal_folds_waiting` gauge means this cap is too low.
+    #[serde(default = "default_max_concurrent_folds")]
+    pub max_concurrent_folds: usize,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
     /// The node-local cache of encoded metadata blocks, if this deployment
@@ -59,16 +63,10 @@ pub struct ServerConfig {
     /// composes no grep at all; a present table must name its `mode`.
     #[serde(default)]
     pub grep: GrepConfig,
-    /// Whether this server maintains the namespaces it touches by itself.
-    /// Automatic by default; see [`MaintenanceMode`].
+    /// Whether this server serves maintenance requests, schedules maintenance,
+    /// both, or neither.
     #[serde(default)]
     pub maintenance: MaintenanceMode,
-    /// Whether this server mounts the maintenance API group: the routes under
-    /// `/v0/maintenance/`. Default true. A serving node behind a control plane
-    /// that runs maintenance elsewhere sets it false; the node still maintains
-    /// what it touches when `maintenance = "automatic"`.
-    #[serde(default = "default_true")]
-    pub serve_maintenance: bool,
     /// Minimum interval between publication starts per namespace, in
     /// milliseconds. A cold namespace publishes immediately; the interval
     /// paces follow-up batches so hot namespaces amortize into fewer,
@@ -206,16 +204,20 @@ fn default_max_concurrent_uploads() -> usize {
     8
 }
 
+fn default_max_writer_sessions() -> usize {
+    loonfs::DEFAULT_MAX_WRITER_SESSIONS
+}
+
+fn default_max_concurrent_folds() -> usize {
+    loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
+}
+
 fn default_max_concurrent_downloads() -> usize {
     16
 }
 
 fn default_max_concurrent_maintenance() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// The server's `[local_cache]` table: where the node-local cache of encoded
@@ -257,28 +259,31 @@ pub struct RuntimeCacheConfigOverrides {
     pub metadata_segment_cache_max_decoded_bytes: Option<usize>,
 }
 
-/// Controls whether this server schedules maintenance automatically.
-///
-/// `automatic` runs a local scheduler for metadata, garbage collection, and
-/// enabled grep index jobs. `manual` creates no scheduler; use it when another
-/// server or `loonfs maintenance run` maintains those namespaces. Explicit
-/// maintenance operations remain available in both modes. Retention is never
-/// advanced automatically.
+/// What this server does about maintenance: serve the API group, run the
+/// scheduler, both, or neither.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceMode {
-    /// The server runs metadata and collection jobs, and the grep index job
-    /// when the grep mode maintains.
+    /// Neither serve the maintenance API group nor run the scheduler.
+    Disabled,
+    /// Serve explicit maintenance requests without running the scheduler.
+    ServeOnly,
+    /// Run the scheduler without serving the maintenance API group.
+    MaintainOnly,
+    /// Serve explicit maintenance requests and run the scheduler.
     #[default]
-    Automatic,
-    /// No local scheduler runs. Explicit maintenance operations remain available.
-    Manual,
+    ServeAndMaintain,
 }
 
 impl MaintenanceMode {
-    /// Whether this server runs its maintenance registry locally.
-    pub fn runs_automatically(self) -> bool {
-        matches!(self, Self::Automatic)
+    /// Whether this server serves the maintenance API group.
+    pub fn serves(self) -> bool {
+        matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
+    }
+
+    /// Whether this server runs the maintenance runner.
+    pub fn maintains(self) -> bool {
+        matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
     }
 }
 
@@ -427,15 +432,16 @@ impl ServerConfig {
     /// It names the address, provider, and maintenance settings.
     pub fn check_summary(&self) -> String {
         let maintenance = match self.maintenance {
-            MaintenanceMode::Automatic => "automatic",
-            MaintenanceMode::Manual => "manual",
+            MaintenanceMode::Disabled => "disabled",
+            MaintenanceMode::ServeOnly => "serve_only",
+            MaintenanceMode::MaintainOnly => "maintain_only",
+            MaintenanceMode::ServeAndMaintain => "serve_and_maintain",
         };
         format!(
-            "config ok: bind {}, store {}, maintenance {}, serve_maintenance {}",
+            "config ok: bind {}, store {}, maintenance {}",
             self.bind.trim(),
             self.store.kind().as_str(),
-            maintenance,
-            self.serve_maintenance
+            maintenance
         )
     }
 
@@ -493,6 +499,8 @@ impl ServerConfig {
                 "snapshot_max_live_per_namespace",
                 self.snapshot_max_live_per_namespace as u64,
             ),
+            ("max_writer_sessions", self.max_writer_sessions as u64),
+            ("max_concurrent_folds", self.max_concurrent_folds as u64),
             ("max_concurrent_uploads", self.max_concurrent_uploads as u64),
             (
                 "max_concurrent_downloads",
@@ -510,7 +518,7 @@ impl ServerConfig {
         require_positive(
             "max_concurrent_maintenance",
             self.max_concurrent_maintenance as u64,
-            Some("set `maintenance = \"manual\"` to disable scheduling"),
+            Some("set `maintenance = \"serve_only\"` to disable scheduling"),
         )?;
         if let Some(local_cache) = &self.local_cache {
             require_non_empty("local_cache.path", &local_cache.path)?;
@@ -677,7 +685,7 @@ kind = "ambient"
     }
 
     #[test]
-    fn maintenance_defaults_to_automatic_and_accepts_manual() {
+    fn every_maintenance_mode_names_its_serving_and_scheduling_behavior() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -690,37 +698,49 @@ root = "/tmp/loonfs-server"
 "#,
         );
         let config = load_server_config(&path).expect("valid config");
-        assert_eq!(config.maintenance, super::MaintenanceMode::Automatic);
-        assert!(config.maintenance.runs_automatically());
-        assert!(config.serve_maintenance);
+        assert_eq!(config.maintenance, super::MaintenanceMode::ServeAndMaintain);
+        assert!(config.maintenance.serves());
+        assert!(config.maintenance.maintains());
 
-        let path = write_config(
-            r#"
+        for (spelling, mode, serves, maintains) in [
+            ("disabled", super::MaintenanceMode::Disabled, false, false),
+            ("serve_only", super::MaintenanceMode::ServeOnly, true, false),
+            (
+                "maintain_only",
+                super::MaintenanceMode::MaintainOnly,
+                false,
+                true,
+            ),
+            (
+                "serve_and_maintain",
+                super::MaintenanceMode::ServeAndMaintain,
+                true,
+                true,
+            ),
+        ] {
+            let path = write_config(&format!(
+                r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-maintenance = "manual"
-serve_maintenance = false
+maintenance = "{spelling}"
 
 [store]
 kind = "local-fs"
 root = "/tmp/loonfs-server"
-"#,
-        );
-        let config = load_server_config(&path).expect("valid config");
-        assert_eq!(
-            config.maintenance,
-            super::MaintenanceMode::Manual,
-            "write-serving nodes can hand maintenance to a dedicated process"
-        );
-        assert!(!config.maintenance.runs_automatically());
-        assert!(!config.serve_maintenance);
+"#
+            ));
+            let config = load_server_config(&path).expect("valid config");
+            assert_eq!(config.maintenance, mode);
+            assert_eq!(config.maintenance.serves(), serves);
+            assert_eq!(config.maintenance.maintains(), maintains);
+        }
     }
 
     #[test]
     fn the_retired_background_maintenance_key_is_no_longer_a_key() {
-        // One word decides automatic maintenance now, and `maintenance` is
-        // the word. The boolean it replaced fails through strict decoding
+        // One field decides maintenance behavior now. The boolean it
+        // replaced fails through strict decoding
         // like any other unknown key.
         let path = write_config(
             r#"
@@ -760,8 +780,10 @@ root = "/tmp/loonfs-server"
         let error = load_server_config(&path).expect_err("unknown mode must not load");
         match error {
             ServerConfigError::Decode(message) => {
-                assert!(message.contains("automatic"), "{message}");
-                assert!(message.contains("manual"), "{message}");
+                assert!(message.contains("serve_and_maintain"), "{message}");
+                assert!(message.contains("serve_only"), "{message}");
+                assert!(message.contains("maintain_only"), "{message}");
+                assert!(message.contains("disabled"), "{message}");
             }
             other => panic!("expected decode error naming the modes, got {other:?}"),
         }
@@ -1250,6 +1272,14 @@ root = "/tmp/loonfs-server"
         );
         let config = load_server_config(&path).expect("valid config");
         assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
+        assert_eq!(
+            config.max_writer_sessions,
+            loonfs::DEFAULT_MAX_WRITER_SESSIONS
+        );
+        assert_eq!(
+            config.max_concurrent_folds,
+            loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
+        );
         assert_eq!(config.max_concurrent_uploads, 8);
         assert_eq!(config.max_concurrent_downloads, 16);
         assert_eq!(
@@ -1259,6 +1289,8 @@ root = "/tmp/loonfs-server"
 
         for field in [
             "max_download_bytes",
+            "max_writer_sessions",
+            "max_concurrent_folds",
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",

@@ -12,7 +12,7 @@ This design adds a background streaming compaction for oversized metadata family
 
 Metadata reorganization works on family groups because some families must remain consistent with related indexes. For example, bindings must be processed with the child-binding index, and revisions must be processed with the revisions-by-inode index.
 
-Each maintenance step limits the number of runs, decoded rows, and decoded bytes that it may process. The decoded-row limit is currently 131,072 rows. A bottom-anchored merge cannot run when its selected family group exceeds these limits.
+Each maintenance pass limits the number of runs, decoded rows, and decoded bytes that it may process. The decoded-row limit is currently 131,072 rows. A bottom-anchored merge cannot run when its selected family group exceeds these limits.
 
 Merges above the base can continue reducing delta-run count, but they cannot apply retention safely. Retention decisions may depend on rows stored in the base, so rows can only be removed by a bottom-anchored merge, meaning a merge whose selected input begins with the oldest run in the group. Without another compaction path, the base remains unchanged and obsolete history continues to accumulate.
 
@@ -35,11 +35,11 @@ Merges above the base can continue reducing delta-run count, but they cannot app
 - More than one active metadata compaction per family group.
 - A fixed wall-clock limit for the complete job.
 - Changes to the metadata segment format.
-- Configurable process-wide concurrency. The `metadata-compaction` job uses a fixed limit of two concurrent runs.
+- Configurable process-wide concurrency. The `metadata_compaction` job uses a fixed limit of two concurrent runs.
 
 ## One engine, two orchestrations
 
-Both reorganization paths merge with the same code. A maintenance step runs it synchronously over the window its budgets selected, and a background job runs it over every run a group holds. The merge itself does not know which one is driving it: it reads sorted iterators, applies the retention operators, writes segments, and reports what it wrote. Rows are dropped when, and only when, the merge placement is base-tier, which is the same rule that decides the output level.
+Both reorganization paths merge with the same code. A maintenance pass runs it synchronously over the window its budgets selected, and a background job runs it over every run a group holds. The merge itself does not know which one is driving it: it reads sorted iterators, applies the retention operators, writes segments, and reports what it wrote. Rows are dropped when, and only when, the merge placement is base-tier, which is the same rule that decides the output level.
 
 The two orchestrations exist because the work has two shapes. A step-contained merge is the frequent small case. It is bounded by the step's input budgets, it publishes inside the step that ran it, and paying for a lease, a staging prefix, a registry entry, and an admission permit on every one of them would be pure overhead. One call does one unit of work and either publishes it or reports that there was nothing to do.
 
@@ -49,7 +49,7 @@ One thing inside the merge follows the same split, and only one: how a reverse b
 
 ## Compaction flow
 
-Normal bounded merges remain the preferred path. Streaming compaction is selected when a family group has repeatedly required work while its bottom-anchored merge cannot fit within one maintenance step.
+Normal bounded merges remain the preferred path. Streaming compaction is selected when a family group has repeatedly required work while its bottom-anchored merge cannot fit within one maintenance pass.
 
 The complete operation has five stages:
 
@@ -94,7 +94,7 @@ The count is stored in the namespace manifest for each `MetadataFamilyGroup`. It
 
 Callers provide a `FrozenBasePolicy` when planning. The `metadata` job uses `Amortized`, which reads the manifest's per-group count. `FsMaintenance::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction.
 
-The bounded step reports `compaction_required`; the `metadata-compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order and reads each selected group's lease by key, skipping an `active` unexpired or `reaping` lease while unrelated groups remain available. Runner shutdown cancels running jobs.
+The bounded pass reports `compaction_required`; the `metadata_compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order and reads each selected group's lease by key, skipping an `active` unexpired or `reaping` lease while unrelated groups remain available. Runner shutdown cancels running jobs.
 
 Runs published after the snapshot was captured are not part of the compaction input. Final publication preserves those runs.
 
@@ -137,7 +137,7 @@ A reverse child-binding row is keyed by child while the unbind that retires its 
 
 A background job reads the unbinds of one binding out of its snapshot, one bloom-filtered point lookup per reverse row at or below the floor, behind a bounded decoded-block cache. A job has no bound on the group it rebuilds, so it must not hold a set that grows with that group.
 
-A merge inside a maintenance step collects the below-floor unbound generations while the forward binding cluster streams the unbind family, and the reverse cluster consults that set. The set holds one generation identity per below-floor unbind row in the window, so it is capped by the same row and decoded-byte budgets that capped the window, and it costs no reads at all.
+A merge inside a maintenance pass collects the below-floor unbound generations while the forward binding cluster streams the unbind family, and the reverse cluster consults that set. The set holds one generation identity per below-floor unbind row in the window, so it is capped by the same row and decoded-byte budgets that capped the window, and it costs no reads at all.
 
 The step does not use point lookups because their cost is not bounded by those budgets. The lookups are one per reverse row, and each becomes a separate round trip once the cache can no longer hold the window's unbind family. The step's row budget admits about 43,000 unbind rows in a bindings window, so that family reaches the 16 MiB cache at roughly 380 bytes a row, which is an ordinary name length; the decoded-byte budget is four times the cache and allows more still.
 
@@ -177,7 +177,7 @@ Cancellation and lease fencing never publish a partial result. A process restart
 
 ## Maintenance results and observability
 
-The maintenance API reports `compaction_required` when a bounded step plans a streaming compaction and publishes nothing for that group. The `metadata-compaction` job performs the work.
+The maintenance API reports `compaction_required` when a bounded pass plans a streaming compaction and publishes nothing for that group. The `metadata_compaction` job performs the work.
 
 An explicit `FsMaintenance::compact_metadata` call reports whether no work was needed, a bounded merge published, a streaming compaction published, or the attempt was superseded, abandoned, cancelled, or fenced.
 
@@ -187,7 +187,7 @@ Lifecycle logging covers job selection, start, progress, publication, cancellati
 
 The implementation is validated with the following tests:
 
-- Compare a background job's output with a synchronous merge in a maintenance step over the same snapshot. Both run the same engine, so this test guards the orchestration split rather than two merge implementations.
+- Compare a background job's output with a synchronous merge in a maintenance pass over the same snapshot. Both run the same engine, so this test guards the orchestration split rather than two merge implementations.
 - Confirm that a step-contained merge holds the same bounded input blocks, fetch width, and retention state the background job holds.
 - Confirm that a step-contained merge reads each selected segment's index once and its data once, and makes no reverse-index lookup, while a background job over the same window makes one lookup per reverse row the floor covers.
 - Reject a row key repeated in both families of a secondary-index pair, on both paths, without publishing.

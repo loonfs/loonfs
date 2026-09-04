@@ -1,104 +1,12 @@
-//! Snapshots, checkpoints, maintenance, store probes, and grep maintenance.
+//! Checkpoints, maintenance, store probes, and grep maintenance.
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
 
 /// A pager over active checkpoints.
 pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, ClientError>;
-/// A pager over live snapshots.
-pub type SnapshotsPager = loonfs_api::Pager<ListSnapshotsResponse, ClientError>;
 
 impl Client {
-    /// Saves the namespace's current state for a limited time.
-    /// Retrying this request starts a distinct attempt.
-    pub async fn create_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        name: &str,
-        ttl_ms: u64,
-    ) -> Result<SnapshotSummary> {
-        let url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
-        self.request_json(
-            self.post(&url),
-            Some(&CreateSnapshotRequest {
-                name: name.to_owned(),
-                ttl_ms,
-            }),
-            SendPolicy::Once,
-        )
-        .await
-    }
-
-    /// Creates a snapshot pager beginning at `cursor`.
-    pub fn list_snapshots_pager(
-        &self,
-        namespace_id: &NamespaceId,
-        page_size: Option<u32>,
-        cursor: Option<String>,
-    ) -> SnapshotsPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            async move {
-                client
-                    .list_snapshots_page(&namespace_id, page_size, cursor.as_deref())
-                    .await
-            }
-        })
-    }
-
-    /// Lists one bounded page of available snapshots.
-    pub async fn list_snapshots_page(
-        &self,
-        namespace_id: &NamespaceId,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<ListSnapshotsResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/snapshots",
-            self.base_url
-        ));
-        query.pagination(limit, cursor);
-        let url = query.finish();
-        self.request_json::<(), ListSnapshotsResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
-    }
-
-    /// Extends a snapshot's lifetime. Repeating the same request is safe.
-    pub async fn extend_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
-        ttl_ms: u64,
-    ) -> Result<SnapshotSummary> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
-            self.base_url
-        );
-        self.request_json(
-            self.post(&url),
-            Some(&ExtendSnapshotRequest { ttl_ms }),
-            SendPolicy::Retry,
-        )
-        .await
-    }
-
-    /// Releases a snapshot. Releasing it again succeeds.
-    pub async fn release_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
-    ) -> Result<ReleaseSnapshotResponse> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
-            self.base_url
-        );
-        self.request_json::<(), ReleaseSnapshotResponse>(self.post(&url), None, SendPolicy::Retry)
-            .await
-    }
-
     /// Returns namespace state and storage details used by maintenance.
     pub async fn get_namespace_diagnostics(
         &self,
@@ -188,8 +96,8 @@ impl Client {
     pub async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        request: &MaintenanceRunRequest,
-    ) -> Result<MaintenanceRunResponse> {
+        request: &RunMaintenanceRequest,
+    ) -> Result<RunMaintenanceResponse> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/runs",
             self.base_url
@@ -209,33 +117,6 @@ impl Client {
     pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
         let url = format!("{}/v0/maintenance/store/probe", self.base_url);
         self.request_json(self.post(&url), Some(request), SendPolicy::Once)
-            .await
-    }
-
-    /// Content search over the namespace's grep index (query API group).
-    /// Gate on the `query.grep` capability before calling against unknown
-    /// deployments; the namespace must also have a materialized active
-    /// grep root or the server answers `not_supported`.
-    pub async fn grep(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &GrepRequest,
-        limit: Option<u32>,
-    ) -> Result<GrepResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/grep",
-            self.base_url
-        ));
-        query.push("pattern", &request.pattern);
-        query.push("case_insensitive", request.case_insensitive);
-        if let Some(path_prefix) = &request.path_prefix {
-            query.push("path_prefix", path_prefix.as_str());
-        }
-        query.push("allow_scan", request.allow_scan);
-        query.push("allow_stale", request.allow_stale);
-        query.pagination(limit, request.cursor.as_deref());
-        let url = query.finish();
-        self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -272,7 +153,7 @@ impl Client {
             .await
     }
 
-    /// Runs one explicit grep-index garbage-collection pass for a namespace.
+    /// Runs one explicit grep index garbage-collection pass for a namespace.
     ///
     /// `max_objects` bounds the reads the pass spends; when keys remain the
     /// response carries a `next_cursor` to resume from.

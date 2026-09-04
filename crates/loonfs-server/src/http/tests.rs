@@ -65,6 +65,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "bearer_auth",
     "binding_generation",
     "budget_exhausted",
+    "bounded_merge_published",
     "built_through_seq",
     "checkpoint_id",
     "checkpoint_not_releasable",
@@ -120,6 +121,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "include_attributes",
     "inode_id",
     "inode_kind",
+    "maintain_only",
     "manifest_no",
     "max_objects",
     "max_wal_tail_segments",
@@ -169,6 +171,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "root_advanced",
     "run_id",
     "service_proxied",
+    "serve_and_maintain",
+    "serve_only",
     "size_bytes",
     "snapshot_id",
     "checksum",
@@ -369,6 +373,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         actual_deletion_seq: Some(ChangeSeq::from(5)),
         expected_head_seq: Some(ChangeSeq::from(6)),
         actual_head_seq: Some(ChangeSeq::from(7)),
+        max_writer_sessions: Some(10_000),
     };
     let serialized = serde_json::to_value(populated).expect("serialize populated error details");
     let registered = serialized
@@ -1256,7 +1261,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     assert_eq!(
         steps.load(Ordering::SeqCst),
         admitted_while_serving,
-        "no maintenance step may be admitted once the shutdown has begun"
+        "no maintenance pass may be admitted once the shutdown has begun"
     );
     // And the runner stays shut rather than reopening behind the drain.
     runner.handle().nudge(job, &namespace_id);
@@ -2693,7 +2698,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let mut config = test_config(temp_dir.path(), "hidden-maintenance-writer");
-    config.serve_maintenance = false;
+    config.maintenance = crate::config::MaintenanceMode::MaintainOnly;
     let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
@@ -2749,6 +2754,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let diagnostics_error: serde_json::Value =
         serde_json::from_slice(&diagnostics_body).expect("diagnostics error");
     assert_eq!(diagnostics_error["code"], "route_not_found");
+    assert!(diagnostics_error.get("feature").is_none());
 
     let namespace_id = namespace_id("hidden");
     state
@@ -3502,7 +3508,7 @@ async fn write_grep_pointer(
 
 /// A deployment that answers searches over an index it does not maintain:
 /// exactly the query error surface these tests are about, with no
-/// maintenance step racing the fault they injected.
+/// maintenance pass racing the fault they injected.
 async fn start_grep_error_server(
     store: SharedObjectStore,
     root: &Path,
@@ -3614,15 +3620,15 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: writer_id.to_owned(),
-        max_open_namespaces: None,
+        max_writer_sessions: loonfs::DEFAULT_MAX_WRITER_SESSIONS,
+        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {
             mode: crate::config::GrepMode::ServeAndMaintain,
             ..crate::config::GrepConfig::default()
         },
-        maintenance: crate::config::MaintenanceMode::Automatic,
-        serve_maintenance: true,
+        maintenance: crate::config::MaintenanceMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,

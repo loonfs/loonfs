@@ -9,19 +9,19 @@ A server can run the job with its other maintenance work. A separate process
 can maintain namespaces named on the command line:
 
 ```console
-loonfs maintenance run --namespaces docs --namespaces source --job grep-index
-loonfs maintenance run --namespaces docs --job grep-index --drain
-loonfs maintenance run --namespaces docs --job grep-gc --drain
+loonfs maintenance loop --namespaces docs --namespaces source --job grep-index
+loonfs maintenance loop --namespaces docs --job grep-index --drain
+loonfs maintenance loop --namespaces docs --job grep-gc --drain
 loonfs maintenance index gc --namespace docs
 ```
 
 Without `--drain`, the command runs until it receives a stop signal and
 periodically refreshes its assignments. With `--drain`, it brings each
 assigned namespace up to date and exits. `--max-steps` and `--deadline-ms`
-limit that work. Omitting `--job` also runs metadata and core garbage
-collection.
+limit that work. Omitting `--job` also runs metadata, metadata compaction,
+and core garbage collection.
 
-The `grep-gc` job resumes bounded collection passes where the previous pass
+The `grep_gc` job resumes bounded collection passes where the previous pass
 stopped. `loonfs maintenance index gc` runs those passes directly for one namespace,
 including an absent or deleted namespace whose old index data remains.
 

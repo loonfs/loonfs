@@ -25,7 +25,7 @@ fn inserts(kind: &str) -> String {
 /// A server holding its cache in `cache_root` and its objects in
 /// `store_root`.
 ///
-/// Maintenance is manual so the two servers read the same manifest: an
+/// Maintenance is serve-only so the two servers read the same manifest: an
 /// automatic flush between them would publish segments the first server
 /// never saw, and a miss on those would say nothing about the cache.
 fn test_config_with_local_cache(
@@ -34,7 +34,7 @@ fn test_config_with_local_cache(
     writer_id: &str,
 ) -> ServerConfig {
     ServerConfig {
-        maintenance: MaintenanceMode::Manual,
+        maintenance: MaintenanceMode::ServeOnly,
         local_cache: Some(LocalCacheConfig {
             path: cache_root.display().to_string(),
             memory_bytes: 4 * 1024 * 1024,

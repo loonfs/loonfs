@@ -11,8 +11,8 @@ use loonfs::{
     CommitResponse, ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes,
     FsMaintenance, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, ListChangesResponse,
-    MaintenanceRunRequest, MaintenanceRunResponse, MetadataMaintenanceResponse, MoveOptions,
-    NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry, PutFileOptions,
+    MetadataMaintenanceResponse, MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest,
+    PaginationPolicy, PathEntry, PutFileOptions, RunMaintenanceRequest, RunMaintenanceResponse,
     RuntimeError, SharedObjectStore, UploadContentResponse, UploadId, UploadSession,
 };
 use loonfs_api::MetadataMaintenanceRequest;
@@ -100,16 +100,16 @@ pub(crate) async fn collect_checkpoints(
 }
 
 /// The upkeep report returned by a metadata maintenance request.
-pub(crate) fn upkeep(response: &MaintenanceRunResponse) -> &MetadataMaintenanceResponse {
-    let MaintenanceRunResponse::Metadata(metadata) = response else {
+pub(crate) fn upkeep(response: &RunMaintenanceResponse) -> &MetadataMaintenanceResponse {
+    let RunMaintenanceResponse::Metadata(metadata) = response else {
         panic!("metadata request returned a different response")
     };
     metadata
 }
 
 /// A metadata request with an explicit flush threshold.
-pub(crate) fn metadata_request(max_wal_tail_segments: u64) -> MaintenanceRunRequest {
-    MaintenanceRunRequest::Metadata(MetadataMaintenanceRequest {
+pub(crate) fn metadata_request(max_wal_tail_segments: u64) -> RunMaintenanceRequest {
+    RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
         max_wal_tail_segments: Some(max_wal_tail_segments),
     })
 }
@@ -334,8 +334,8 @@ pub(crate) trait RuntimeTestExt {
     fn maintenance_run_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceRunRequest,
-    ) -> loonfs::Result<MaintenanceRunResponse>;
+        request: RunMaintenanceRequest,
+    ) -> loonfs::Result<RunMaintenanceResponse>;
     fn flush_wal_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -452,8 +452,8 @@ impl RuntimeTestExt for TestRuntime {
     fn maintenance_run_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceRunRequest,
-    ) -> loonfs::Result<MaintenanceRunResponse> {
+        request: RunMaintenanceRequest,
+    ) -> loonfs::Result<RunMaintenanceResponse> {
         block_on(self.maintenance.run_maintenance(namespace_id, request))
     }
 

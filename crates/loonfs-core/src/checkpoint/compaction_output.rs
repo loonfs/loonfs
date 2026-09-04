@@ -6,7 +6,7 @@
 //! than the size of the family group.
 //!
 //! Background jobs write segments under a leased staging prefix before
-//! publishing them. A merge completed within one maintenance step writes to
+//! publishing them. A merge completed within one maintenance pass writes to
 //! `metadata/segments/` because it publishes those segments in the same step.
 
 use super::build::{write_manifest_segment_with_encoded_rows, MetadataSegmentDestination};

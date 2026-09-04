@@ -789,11 +789,11 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         let calls_before = stored_blocks.call_count();
         let step = fs
             .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
-            .expect("maintenance step");
+            .expect("maintenance pass");
         assert_eq!(
             stored_blocks.call_count(),
             calls_before,
-            "a maintenance step carries no segment cache, so it reaches neither cache tier"
+            "a maintenance pass carries no segment cache, so it reaches neither cache tier"
         );
         if upkeep(&step).reorganize == ReorganizeStepOutcome::UnitPublished {
             reorganized = true;

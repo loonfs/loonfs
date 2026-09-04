@@ -310,6 +310,15 @@ The defaults allow 8 concurrent uploads, 16 concurrent downloads, and
 256 MiB per download. Set a memory limit comfortably above the calculated
 minimum.
 
+`max_writer_sessions` defaults to 10,000. A request that needs another writer
+session answers `writer_capacity_exceeded`; raise the limit if the deployment
+must keep more namespaces writable at once.
+
+`max_concurrent_folds` defaults to 2. A sustained
+`loonfs.publisher.wal_folds_waiting` gauge means WAL folds are waiting at the
+cap; raise it only after accounting for the additional object-store and CPU
+work.
+
 ## Optional local cache
 
 The local cache stores replaceable copies of metadata blocks. It is not
@@ -366,11 +375,16 @@ helm rollback loonfs-server --namespace loonfs
 
 ## Background maintenance
 
-The server runs metadata maintenance and garbage collection automatically by
-default. Long metadata compactions can log progress for an extended period.
-No action is required unless failures repeat.
+`maintenance` defaults to `serve_and_maintain`, which serves the maintenance
+API group and schedules metadata maintenance and garbage collection. Use
+`serve_only` to serve explicit requests without scheduling work,
+`maintain_only` to schedule work without serving the group, or `disabled` to
+do neither. A mode that does not serve the group answers every route under
+`/v0/maintenance/` with `route_not_found`; a mode that does not maintain leaves
+scheduled work to another process. Long metadata compactions can log progress
+for an extended period. No action is required unless failures repeat.
 
-`compaction_required` asks the registered `metadata-compaction` job to run.
+`compaction_required` asks the registered `metadata_compaction` job to run.
 The self-hosted server schedules that follow-up automatically.
 
 ## Current limitations

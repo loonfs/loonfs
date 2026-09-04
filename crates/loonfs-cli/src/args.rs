@@ -42,13 +42,11 @@ Inspection:
   revisions   List a file's revision history
   trash       List recoverable deletions
   changes     List committed changes
+  maintenance   Run maintenance operations
   capabilities  Show the selected deployment's protocol capabilities
   doctor      Check the selected deployment without writing to it
   completion  Print a shell completion script
   version     Print version and build metadata
-
-Maintenance:
-  maintenance  Run maintenance operations
 
 Options:
 {options}{after-help}\
@@ -200,7 +198,7 @@ pub(crate) enum Command {
     Capabilities(CapabilitiesArgs),
     /// Check the selected deployment without writing to it.
     Doctor(DoctorArgs),
-    /// Maintenance operations: checkpoints, steps, retention, GC, indexes.
+    /// Maintenance operations: metadata, checkpoints, retention, GC, indexes, and the local loop.
     Maintenance {
         #[command(subcommand)]
         command: MaintenanceCommand,
@@ -253,7 +251,7 @@ impl Command {
                 | Self::Maintenance {
                     command: MaintenanceCommand::Checkpoint { .. }
                         | MaintenanceCommand::Index { .. }
-                        | MaintenanceCommand::Step(_)
+                        | MaintenanceCommand::Metadata(_)
                         | MaintenanceCommand::Flush(_)
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Compact(_)
@@ -1210,10 +1208,10 @@ pub(crate) struct SnapshotReleaseArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceCommand {
-    /// Run maintenance for selected namespaces. Requires an embedded profile.
-    Run(MaintenanceRunArgs),
-    /// Run one metadata maintenance step.
-    Step(MaintenanceStepArgs),
+    /// Run the local scheduler loop for selected namespaces. Requires an embedded profile.
+    Loop(MaintenanceLoopArgs),
+    /// Run the metadata job once.
+    Metadata(MaintenanceMetadataArgs),
     /// Flush the WAL tail into a durable segment.
     Flush(MaintenanceNamespaceArgs),
     /// Run one full metadata compaction.
@@ -1284,7 +1282,7 @@ pub(crate) enum MaintenanceStoreCommand {
 const MIN_POLL_INTERVAL_MS: u64 = 100;
 
 #[derive(Debug, Args)]
-pub(crate) struct MaintenanceRunArgs {
+pub(crate) struct MaintenanceLoopArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
@@ -1293,8 +1291,7 @@ pub(crate) struct MaintenanceRunArgs {
     #[arg(long = "namespaces", required = true, value_hint = ValueHint::Other)]
     pub namespaces: Vec<String>,
     /// Maintenance job to run. Repeat the flag to select more than one.
-    /// Omitting it selects all four jobs. `core-gc` selects the job reported
-    /// internally as `gc`.
+    /// Omitting it selects all five jobs.
     #[arg(long = "job")]
     pub jobs: Vec<MaintenanceJobArg>,
     /// Interval between checks for assigned namespaces, in milliseconds.
@@ -1312,14 +1309,16 @@ pub(crate) struct MaintenanceRunArgs {
     pub deadline_ms: Option<u64>,
 }
 
-/// Jobs accepted by `maintenance run --job`.
+/// Jobs accepted by `maintenance loop --job`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum MaintenanceJobArg {
     /// Flush the WAL tail past its threshold and fold one reorganization
     /// unit per step.
     Metadata,
+    /// Run one full metadata compaction.
+    MetadataCompaction,
     /// Run one bounded mark-and-sweep collection pass per step.
-    CoreGc,
+    Gc,
     /// Build and fold the gram content index.
     GrepIndex,
     /// Reclaim one namespace's unreferenced grep objects per step.
@@ -1395,7 +1394,7 @@ pub(crate) struct MaintenanceCheckpointReleaseArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct MaintenanceStepArgs {
+pub(crate) struct MaintenanceMetadataArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Flush the visible WAL tail into metadata segments when it reaches this many
@@ -1535,8 +1534,8 @@ command_kinds! {
     MaintenanceCheckpointRelease => "maintenance_checkpoint_release",
     MaintenanceFlush => "maintenance_flush",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
-    MaintenanceRun => "maintenance_run",
-    MaintenanceStep => "maintenance_step",
+    MaintenanceLoop => "maintenance_loop",
+    MaintenanceMetadata => "maintenance_metadata",
     MaintenanceCompact => "maintenance_compact",
     MaintenanceGc => "maintenance_gc",
     MaintenanceStoreProbe => "maintenance_store_probe",
@@ -1601,8 +1600,8 @@ impl Cli {
             Command::Capabilities(_) => CommandKind::Capabilities,
             Command::Doctor(_) => CommandKind::Doctor,
             Command::Maintenance { command } => match command {
-                MaintenanceCommand::Run(_) => CommandKind::MaintenanceRun,
-                MaintenanceCommand::Step(_) => CommandKind::MaintenanceStep,
+                MaintenanceCommand::Loop(_) => CommandKind::MaintenanceLoop,
+                MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
                 MaintenanceCommand::Flush(_) => CommandKind::MaintenanceFlush,
                 MaintenanceCommand::Compact(_) => CommandKind::MaintenanceCompact,
                 MaintenanceCommand::Checkpoint { command } => match command {
@@ -1976,8 +1975,8 @@ mod tests {
         assert_subcommands(
             maintenance,
             &[
-                "run",
-                "step",
+                "loop",
+                "metadata",
                 "flush",
                 "compact",
                 "checkpoint",

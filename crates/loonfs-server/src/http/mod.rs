@@ -63,7 +63,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put, MethodRouter};
+use axum::routing::{any, get, post, put, MethodRouter};
 use axum::Router;
 use loonfs::ErrorCode;
 #[cfg(test)]
@@ -369,7 +369,7 @@ fn router(state: AppState) -> Router {
             get(get_upload),
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes));
-    if state.config.serve_maintenance {
+    if state.config.maintenance.serves() {
         authenticated = authenticated
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
@@ -425,6 +425,8 @@ fn router(state: AppState) -> Router {
                 "/v0/maintenance/store/probe",
                 post(handlers_store::probe_store),
             );
+    } else {
+        authenticated = authenticated.route("/v0/maintenance/{*path}", any(maintenance_not_served));
     }
     let authenticated = authenticated
         .route_layer(middleware::from_fn(move |request: Request, next: Next| {
@@ -457,6 +459,17 @@ async fn route_not_found() -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::RouteNotFound,
         "no v0 route matches this path; see the API spec for the served surface",
+    )
+}
+
+/// 404 for the maintenance routes on a deployment that does not serve that
+/// API group. The group is a capability-document `api_groups` entry, not a
+/// feature key, so `not_supported` and its `feature` field do not apply.
+async fn maintenance_not_served() -> ApiResponseError {
+    ApiResponseError::new(
+        ErrorCode::RouteNotFound,
+        "this deployment does not serve the maintenance API group; set `maintenance` to \
+         `serve_only` or `serve_and_maintain`",
     )
 }
 

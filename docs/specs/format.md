@@ -2263,7 +2263,7 @@ an undelete give back the map the inode had. A rewrite refuses to compact
 when two rows for one inode share a revision number at or below the floor,
 because that makes "the newest at the floor" arbitrary and the drop unsafe.
 
-A rebuild that cannot fit within one maintenance step runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
+A rebuild that cannot fit within one bounded maintenance pass runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
 
 The separate prefix prevents GC from treating unfinished output as abandoned metadata. Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json`, and an `active` unexpired or `reaping` lease excludes every other job for that group. A job acquires a missing lease with create-if-absent before its first output object, or takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and expiry fields. Garbage collection changes an expired `active` lease to terminal `reaping` with compare-and-swap before reclaiming output belonging to the job id the lease names. A group lease never protects objects written by another job id. Collection passes are shorter than `METADATA_COMPACTION_LEASE_EXPIRY_MS`, so a pass does not mistake a lease that it observed as live for one that expired during the pass. A published manifest references the segments in place, so publication does not move them. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
 
@@ -2303,8 +2303,7 @@ retained in full.
 A retention floor may advance only when the system has enough verified
 material to support readers from the new floor forward, and it never
 advances implicitly: the default posture retains everything, and the floor
-moves only when an operator opts in (an explicit retention advance, or a
-maintenance step that requested it).
+moves only when an operator requests an explicit retention advance.
 
 ### 6.4 Garbage collection
 

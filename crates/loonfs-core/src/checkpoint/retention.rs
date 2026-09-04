@@ -97,6 +97,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?
     else {
         return Ok(AdvanceRetentionResponse {
+            namespace_id: namespace_id.clone(),
             retention_floor_seq: resolve_retention_floor_seq(store, &head)
                 .await
                 .map_err(CoreError::ControlObjectLoad)?,
@@ -129,6 +130,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     if current_floor >= target_floor {
         // Already advanced, so the idempotent re-invocation writes nothing.
         return Ok(AdvanceRetentionResponse {
+            namespace_id: namespace_id.clone(),
             retention_floor_seq: current_floor,
         });
     }
@@ -203,6 +205,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         )
         .await?;
     Ok(AdvanceRetentionResponse {
+        namespace_id: namespace_id.clone(),
         retention_floor_seq: advanced?,
     })
 }

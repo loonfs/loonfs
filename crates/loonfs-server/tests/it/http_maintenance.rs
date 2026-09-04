@@ -44,16 +44,16 @@ fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_api::GcRespons
 }
 
 fn upkeep(
-    response: &loonfs_api::MaintenanceRunResponse,
+    response: &loonfs_api::RunMaintenanceResponse,
 ) -> &loonfs_api::MetadataMaintenanceResponse {
-    let loonfs_api::MaintenanceRunResponse::Metadata(metadata) = response else {
+    let loonfs_api::RunMaintenanceResponse::Metadata(metadata) = response else {
         panic!("metadata request returned a different response")
     };
     metadata
 }
 
-fn retention_floor(response: loonfs_api::MaintenanceRunResponse) -> ChangeSeq {
-    let loonfs_api::MaintenanceRunResponse::Retention(retention) = response else {
+fn retention_floor(response: loonfs_api::RunMaintenanceResponse) -> ChangeSeq {
+    let loonfs_api::RunMaintenanceResponse::Retention(retention) = response else {
         panic!("retention request returned a different response")
     };
     retention.retention_floor_seq
@@ -69,23 +69,23 @@ fn post_gc_with(
         .as_object_mut()
         .expect("GC options are an object")
         .insert("kind".to_owned(), serde_json::json!("gc"));
-    let response: ApiResult<loonfs_api::MaintenanceRunResponse> = post_maintenance_json_body(
+    let response: ApiResult<loonfs_api::RunMaintenanceResponse> = post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
         request,
     );
     response.map(|response| {
-        let loonfs_api::MaintenanceRunResponse::Gc(gc) = response else {
+        let loonfs_api::RunMaintenanceResponse::Gc(gc) = response else {
             panic!("GC request returned a different response")
         };
         gc
     })
 }
 
-fn post_maintenance_step(
+fn post_metadata_run(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::MaintenanceRunResponse> {
+) -> ApiResult<loonfs_api::RunMaintenanceResponse> {
     post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
@@ -96,7 +96,7 @@ fn post_maintenance_step(
 fn post_missing_maintenance_body(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::MaintenanceRunResponse> {
+) -> ApiResult<loonfs_api::RunMaintenanceResponse> {
     post_maintenance_json(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
@@ -106,7 +106,7 @@ fn post_missing_maintenance_body(
 fn post_retention_advance(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::MaintenanceRunResponse> {
+) -> ApiResult<loonfs_api::RunMaintenanceResponse> {
     post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
@@ -369,7 +369,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_maintenance_step_reports_outcomes_not_errors() {
+async fn http_metadata_run_reports_outcomes_not_errors() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -395,7 +395,7 @@ async fn http_maintenance_step_reports_outcomes_not_errors() {
         .expect_err("a missing body is refused");
     assert_eq!(empty.code, "invalid_request");
 
-    let idle = post_maintenance_step(&server_url, namespace.as_str()).expect("idle step");
+    let idle = post_metadata_run(&server_url, namespace.as_str()).expect("idle step");
     assert_eq!(
         upkeep(&idle).wal_flush,
         loonfs_api::WalFlushStepOutcome::NotNeeded
@@ -404,7 +404,7 @@ async fn http_maintenance_step_reports_outcomes_not_errors() {
     let forced = client
         .run_maintenance(
             &namespace,
-            &loonfs_api::MaintenanceRunRequest::Metadata(loonfs_api::MetadataMaintenanceRequest {
+            &loonfs_api::RunMaintenanceRequest::Metadata(loonfs_api::MetadataMaintenanceRequest {
                 max_wal_tail_segments: Some(1),
             }),
         )
@@ -423,7 +423,7 @@ async fn http_maintenance_step_reports_outcomes_not_errors() {
     let retention = client
         .run_maintenance(
             &namespace,
-            &loonfs_api::MaintenanceRunRequest::Retention(loonfs_api::AdvanceRetentionRequest {}),
+            &loonfs_api::RunMaintenanceRequest::Retention(loonfs_api::AdvanceRetentionRequest {}),
         )
         .await
         .expect("advance retention");
@@ -476,7 +476,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         "loonfs-server-maintenance-corrupt",
         "http-maintenance-corrupt",
     );
-    warm_config.maintenance = loonfs_server::MaintenanceMode::Manual;
+    warm_config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
     let harness = start_server(warm_config).await;
     // A new server must read the corrupted manifest; the first server has a valid cached snapshot.
     let mut cold_config = test_config(
@@ -484,7 +484,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         "loonfs-server-cold-reader",
         "http-maintenance-corrupt",
     );
-    cold_config.maintenance = loonfs_server::MaintenanceMode::Manual;
+    cold_config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
     let cold = start_server(cold_config).await;
     let client = harness.client.clone();
     let cold_client = cold.client.clone();

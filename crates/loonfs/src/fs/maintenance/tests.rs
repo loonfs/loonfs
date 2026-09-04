@@ -10,8 +10,8 @@
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
     CreateCheckpointOptions, CreateNamespaceOptions, FrozenBasePolicy, FsMaintenance, FsWriter,
-    MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionOutcome, MoveOptions,
-    NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore,
+    MetadataCompactionOutcome, MoveOptions, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
+    RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
@@ -81,8 +81,8 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
     value
 }
 
-fn metadata_request() -> MaintenanceRunRequest {
-    MaintenanceRunRequest::Metadata(MetadataMaintenanceRequest {
+fn metadata_request() -> RunMaintenanceRequest {
+    RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
         max_wal_tail_segments: Some(1),
     })
 }
@@ -108,11 +108,11 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
 
     assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
     let response = maintenance
-        .run_maintenance(&namespace, MaintenanceRunRequest::Gc(GcRequest::default()))
+        .run_maintenance(&namespace, RunMaintenanceRequest::Gc(GcRequest::default()))
         .await
         .expect("run the maintenance GC step");
     let gc = match response {
-        MaintenanceRunResponse::Gc(gc) => Some(gc),
+        RunMaintenanceResponse::Gc(gc) => Some(gc),
         _ => None,
     }
     .expect("a GC request should return a GC response");
@@ -385,7 +385,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         .await
         .expect("run an amortized step");
     let metadata = match response {
-        MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
+        RunMaintenanceResponse::Metadata(metadata) => Some(metadata),
         _ => None,
     }
     .expect("a metadata request should return a metadata response");
@@ -399,7 +399,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         .await
         .expect("run the second amortized step");
     let metadata = match response {
-        MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
+        RunMaintenanceResponse::Metadata(metadata) => Some(metadata),
         _ => None,
     }
     .expect("a metadata request should return a metadata response");
@@ -430,7 +430,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         .await
         .expect("run the third step through the fresh handle");
     let metadata = match response {
-        MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
+        RunMaintenanceResponse::Metadata(metadata) => Some(metadata),
         _ => None,
     }
     .expect("a metadata request should return a metadata response");
@@ -455,7 +455,10 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         .await
         .expect("run the explicit compaction");
     assert!(
-        matches!(outcome.outcome, MetadataCompactionOutcome::Published { .. }),
+        matches!(
+            outcome.compaction,
+            MetadataCompactionOutcome::Published { .. }
+        ),
         "the explicit call must run and publish the job rather than a delta merge, got {outcome:?}"
     );
 
@@ -530,7 +533,10 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
         .await
         .expect("run the explicit compaction");
     assert!(
-        matches!(outcome.outcome, MetadataCompactionOutcome::Published { .. }),
+        matches!(
+            outcome.compaction,
+            MetadataCompactionOutcome::Published { .. }
+        ),
         "and the explicit call runs it, got {outcome:?}"
     );
 }

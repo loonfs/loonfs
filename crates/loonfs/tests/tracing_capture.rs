@@ -128,11 +128,11 @@ fn background_step_conclusions_emit_debug_events() {
     // Two records, one per layer: what the executor did, and what the runner
     // made of it. Fields are matched with their `=` so a span carrying the
     // same word cannot satisfy the assertion.
-    let step = find_event(&log, "metadata maintenance step concluded");
+    let step = find_event(&log, "metadata maintenance pass concluded");
     for field in ["wal_flush=", "reorganize=", "wal_tail_segments_before="] {
         assert!(step.contains(field), "missing `{field}` in: {step}");
     }
-    let admission = find_event(&log, "maintenance step settled");
+    let admission = find_event(&log, "maintenance pass settled");
     // What the step cost, in both halves: waiting for a permit, then running.
     for field in [
         "job=",

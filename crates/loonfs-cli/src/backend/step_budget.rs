@@ -78,7 +78,7 @@ impl MaintenanceDrainProgress {
 /// Result of waiting for a grep index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepWaitProgress {
-    /// Number of polling intervals or maintenance steps completed.
+    /// Number of polling intervals or maintenance passes completed.
     pub steps: u64,
     /// True when the index reached the target sequence.
     pub reached: bool,

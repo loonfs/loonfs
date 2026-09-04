@@ -40,7 +40,7 @@
             }
           }
         },
-        "description": "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, required maintenance, or invalid storage credentials. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
+        "description": "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, writer-session admission, required maintenance, or invalid storage credentials. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
       }
     },
     "schemas": {
@@ -872,6 +872,11 @@
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
             "description": "Inode the failed precondition or operation targeted."
+          },
+          "max_writer_sessions": {
+            "description": "Maximum writer sessions admitted by the node.",
+            "minimum": 0,
+            "type": "integer"
           },
           "operation_index": {
             "description": "The index of the failed operation in the request.",

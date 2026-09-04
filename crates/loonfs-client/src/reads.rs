@@ -31,8 +31,100 @@ pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, Clien
 pub type TrashPager = loonfs_api::Pager<ListTrashResponse, ClientError>;
 /// A pager over committed changes.
 pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, ClientError>;
+/// A pager over live snapshots.
+pub type SnapshotsPager = loonfs_api::Pager<ListSnapshotsResponse, ClientError>;
 
 impl Client {
+    /// Saves the namespace's current state for a limited time.
+    /// Retrying this request starts a distinct attempt.
+    pub async fn create_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        name: &str,
+        ttl_ms: u64,
+    ) -> Result<SnapshotSummary> {
+        let url = format!("{}/v0/namespaces/{namespace_id}/snapshots", self.base_url);
+        self.request_json(
+            self.post(&url),
+            Some(&CreateSnapshotRequest {
+                name: name.to_owned(),
+                ttl_ms,
+            }),
+            SendPolicy::Once,
+        )
+        .await
+    }
+
+    /// Creates a snapshot pager beginning at `cursor`.
+    pub fn list_snapshots_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        page_size: Option<u32>,
+        cursor: Option<String>,
+    ) -> SnapshotsPager {
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                client
+                    .list_snapshots_page(&namespace_id, page_size, cursor.as_deref())
+                    .await
+            }
+        })
+    }
+
+    /// Lists one bounded page of available snapshots.
+    pub async fn list_snapshots_page(
+        &self,
+        namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListSnapshotsResponse> {
+        let mut query = QueryBuilder::new(format!(
+            "{}/v0/namespaces/{namespace_id}/snapshots",
+            self.base_url
+        ));
+        query.pagination(limit, cursor);
+        let url = query.finish();
+        self.request_json::<(), ListSnapshotsResponse>(self.get(&url), None, SendPolicy::Retry)
+            .await
+    }
+
+    /// Extends a snapshot's lifetime. Repeating the same request is safe.
+    pub async fn extend_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+        ttl_ms: u64,
+    ) -> Result<SnapshotSummary> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
+            self.base_url
+        );
+        self.request_json(
+            self.post(&url),
+            Some(&ExtendSnapshotRequest { ttl_ms }),
+            SendPolicy::Retry,
+        )
+        .await
+    }
+
+    /// Releases a snapshot. Releasing it again succeeds.
+    pub async fn release_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &CheckpointId,
+    ) -> Result<ReleaseSnapshotResponse> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
+            self.base_url
+        );
+        self.request_json::<(), ReleaseSnapshotResponse>(self.post(&url), None, SendPolicy::Retry)
+            .await
+    }
+
     /// Creates an empty namespace with the given ID and returns its genesis state.
     pub async fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
         let url = format!("{}/v0/namespaces", self.base_url);

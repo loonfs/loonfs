@@ -11,10 +11,10 @@ use crate::NamespaceDiagnostics;
 use crate::{
     AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions, ErrorCode,
     FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenanceCancellation,
-    MaintenanceProbe, MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionOutcome,
-    MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
-    NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore,
-    WalFlushStepOutcome,
+    MaintenanceProbe, MetadataCompactionOutcome, MetadataCompactionResponse,
+    MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RunMaintenanceRequest,
+    RunMaintenanceResponse, SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
@@ -39,9 +39,10 @@ enum ReorganizationStep {
 pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, RuntimeError>;
 
 fn metadata_compaction_response(
+    namespace_id: &NamespaceId,
     outcome: loonfs_core::MetadataCompactionJobOutcome,
 ) -> MetadataCompactionResponse {
-    let outcome = match outcome {
+    let compaction = match outcome {
         loonfs_core::MetadataCompactionJobOutcome::Published {
             manifest_no,
             rows_read,
@@ -68,7 +69,10 @@ fn metadata_compaction_response(
             MetadataCompactionOutcome::Superseded
         }
     };
-    MetadataCompactionResponse { outcome }
+    MetadataCompactionResponse {
+        namespace_id: namespace_id.clone(),
+        compaction,
+    }
 }
 
 impl FsMaintenance {
@@ -225,29 +229,29 @@ impl FsMaintenance {
     pub async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceRunRequest,
-    ) -> Result<MaintenanceRunResponse> {
+        request: RunMaintenanceRequest,
+    ) -> Result<RunMaintenanceResponse> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let kind = match &request {
-            MaintenanceRunRequest::Metadata(_) => "metadata",
-            MaintenanceRunRequest::MetadataCompaction(_) => "metadata_compaction",
-            MaintenanceRunRequest::Gc(_) => "gc",
-            MaintenanceRunRequest::Retention(_) => "retention",
+            RunMaintenanceRequest::Metadata(_) => "metadata",
+            RunMaintenanceRequest::MetadataCompaction(_) => "metadata_compaction",
+            RunMaintenanceRequest::Gc(_) => "gc",
+            RunMaintenanceRequest::Retention(_) => "retention",
         };
         span.record("kind", kind);
         match request {
-            MaintenanceRunRequest::Metadata(request) => {
+            RunMaintenanceRequest::Metadata(request) => {
                 let options = MetadataMaintenanceOptions::from_request(request)?;
                 self.maintain_metadata(namespace_id, options)
                     .await
-                    .map(MaintenanceRunResponse::Metadata)
+                    .map(RunMaintenanceResponse::Metadata)
             }
-            MaintenanceRunRequest::MetadataCompaction(_) => self
+            RunMaintenanceRequest::MetadataCompaction(_) => self
                 .compact_metadata(namespace_id)
                 .await
-                .map(MaintenanceRunResponse::MetadataCompaction),
-            MaintenanceRunRequest::Gc(request) => {
+                .map(RunMaintenanceResponse::MetadataCompaction),
+            RunMaintenanceRequest::Gc(request) => {
                 self.load_maintenance_status(namespace_id, true).await?;
                 let mut config = crate::options::gc_config_from_request(request);
                 config
@@ -255,13 +259,13 @@ impl FsMaintenance {
                     .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
                 self.gc_namespace(namespace_id, &config)
                     .await
-                    .map(MaintenanceRunResponse::Gc)
+                    .map(RunMaintenanceResponse::Gc)
             }
-            MaintenanceRunRequest::Retention(_) => {
+            RunMaintenanceRequest::Retention(_) => {
                 self.load_maintenance_status(namespace_id, false).await?;
                 self.run_retention(namespace_id)
                     .await
-                    .map(MaintenanceRunResponse::Retention)
+                    .map(RunMaintenanceResponse::Retention)
             }
         }
     }
@@ -282,7 +286,7 @@ impl FsMaintenance {
             wal_tail_segments_before = status.wal_tail_segments,
             wal_flush = ?response.wal_flush,
             reorganize = ?response.reorganize,
-            "metadata maintenance step concluded"
+            "metadata maintenance pass concluded"
         );
         Ok(response)
     }
@@ -344,6 +348,7 @@ impl FsMaintenance {
         };
         let reorganize = self.run_reorganization(namespace_id, frozen_base).await?;
         Ok(MetadataMaintenanceResponse {
+            namespace_id: namespace_id.clone(),
             wal_flush,
             reorganize,
         })
@@ -464,19 +469,21 @@ impl FsMaintenance {
             ReorganizationStep::CompactionPlanned(spec) => spec,
             ReorganizationStep::Concluded(ReorganizeStepOutcome::UnitPublished) => {
                 return Ok(MetadataCompactionResponse {
-                    outcome: MetadataCompactionOutcome::BoundedMergePublished,
+                    namespace_id: namespace_id.clone(),
+                    compaction: MetadataCompactionOutcome::BoundedMergePublished,
                 })
             }
             ReorganizationStep::Concluded(_) => {
                 return Ok(MetadataCompactionResponse {
-                    outcome: MetadataCompactionOutcome::NotNeeded,
+                    namespace_id: namespace_id.clone(),
+                    compaction: MetadataCompactionOutcome::NotNeeded,
                 })
             }
         };
         let outcome = self
             .run_streaming_compaction(namespace_id, &spec, cancellation.metadata_compaction())
             .await;
-        outcome.map(metadata_compaction_response)
+        outcome.map(|outcome| metadata_compaction_response(namespace_id, outcome))
     }
 
     /// Runs one streaming compaction to its end and says what that end was.
@@ -723,7 +730,7 @@ impl FsMaintenance {
 
     /// Flushes any visible WAL tail, then runs one reorganization step.
     ///
-    /// This is equivalent to a metadata maintenance step with a one-segment
+    /// This is equivalent to a metadata maintenance pass with a one-segment
     /// flush threshold. It reports both the flush and reorganization outcomes.
     /// An empty WAL tail reports [`WalFlushStepOutcome::NotNeeded`].
     ///
