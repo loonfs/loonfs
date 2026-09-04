@@ -13,6 +13,7 @@ pub(super) use loonfs_api::wire::sst_blocks::{
     DEFAULT_MAX_REORGANIZATION_INPUT_RUNS,
     DEFAULT_MAX_ROWS_PER_SEGMENT as DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT,
 };
+pub use loonfs_api::MetadataFamilyGroup;
 
 pub(super) const MAX_MAINTENANCE_SEGMENT_IO: usize = 8;
 
@@ -28,62 +29,6 @@ pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 10] = [
     MetadataRowFamily::CommitReceipts,
     MetadataRowFamily::Attributes,
 ];
-
-/// Metadata families merged together as one consistency unit.
-///
-/// Families whose retention rules depend on each other are grouped, and each
-/// secondary index is grouped with its canonical family. The closed enum lets
-/// planning and validation use the group identity directly. Manifest loading
-/// also enforces the layout rule that each group has at most one base-tier
-/// run.
-///
-/// Declaration order determines which group is selected when multiple groups
-/// have the same amount of pending work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MetadataFamilyGroup {
-    /// A directory binding, the reverse index that finds it by child, and the
-    /// unbind that retires it.
-    Bindings,
-    /// File revision history and its newest-first index.
-    Revisions,
-    Inodes,
-    Tombstones,
-    /// Active deletions fold alone: a removal marker is cancelled by the
-    /// listed row it names, and both live in this family.
-    ActiveDeletions,
-    CommitReceipts,
-    /// Attributes fold alone too: a revision supersedes the revisions of the
-    /// same inode, and they all live in this family. The family has no
-    /// secondary index to travel with.
-    Attributes,
-}
-
-impl MetadataFamilyGroup {
-    /// The families this group merges together, in the order a run writes
-    /// them. What a caller reports; never what it keys a group by.
-    pub const fn families(self) -> &'static [MetadataRowFamily] {
-        match self {
-            Self::Bindings => &[
-                MetadataRowFamily::DirentryBinds,
-                MetadataRowFamily::DirentryChildBinds,
-                MetadataRowFamily::DirentryUnbinds,
-            ],
-            Self::Revisions => &[
-                MetadataRowFamily::Revisions,
-                MetadataRowFamily::RevisionsByInodeDesc,
-            ],
-            Self::Inodes => &[MetadataRowFamily::Inodes],
-            Self::Tombstones => &[MetadataRowFamily::Tombstones],
-            Self::ActiveDeletions => &[MetadataRowFamily::ActiveDeletions],
-            Self::CommitReceipts => &[MetadataRowFamily::CommitReceipts],
-            Self::Attributes => &[MetadataRowFamily::Attributes],
-        }
-    }
-
-    pub(super) fn contains(self, family: MetadataRowFamily) -> bool {
-        self.families().contains(&family)
-    }
-}
 
 pub(super) const REORGANIZE_FAMILY_GROUPS: [MetadataFamilyGroup; 7] = [
     MetadataFamilyGroup::Bindings,

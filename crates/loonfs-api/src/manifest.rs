@@ -11,10 +11,11 @@ use crate::{
     NamespaceId, RevisionNo, RunNo,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-/// Version 1: an uncompressed JSON envelope document carrying the payload as
+/// Version 2: an uncompressed JSON envelope document carrying the payload as
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
-pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
+pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 2;
 
 /// Identifies the durable payload family carried by a namespace-manifest envelope.
 ///
@@ -65,6 +66,48 @@ pub enum MetadataRowFamily {
     /// Attributes are read only in this order, so the family has no secondary
     /// index and requires no cross-family parity check.
     Attributes,
+}
+
+/// Metadata families merged together as one consistency unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataFamilyGroup {
+    /// Directory bindings, their child index, and unbinds.
+    Bindings,
+    /// File revisions and their newest-first index.
+    Revisions,
+    /// Inodes.
+    Inodes,
+    /// Tombstones.
+    Tombstones,
+    /// Active deletions.
+    ActiveDeletions,
+    /// Commit receipts.
+    CommitReceipts,
+    /// Attributes.
+    Attributes,
+}
+
+impl MetadataFamilyGroup {
+    /// Returns the families this group merges together.
+    pub const fn families(self) -> &'static [MetadataRowFamily] {
+        match self {
+            Self::Bindings => &[
+                MetadataRowFamily::DirentryBinds,
+                MetadataRowFamily::DirentryChildBinds,
+                MetadataRowFamily::DirentryUnbinds,
+            ],
+            Self::Revisions => &[
+                MetadataRowFamily::Revisions,
+                MetadataRowFamily::RevisionsByInodeDesc,
+            ],
+            Self::Inodes => &[MetadataRowFamily::Inodes],
+            Self::Tombstones => &[MetadataRowFamily::Tombstones],
+            Self::ActiveDeletions => &[MetadataRowFamily::ActiveDeletions],
+            Self::CommitReceipts => &[MetadataRowFamily::CommitReceipts],
+            Self::Attributes => &[MetadataRowFamily::Attributes],
+        }
+    }
 }
 
 /// Identifies the compaction tier that holds a metadata run.
@@ -922,6 +965,10 @@ pub struct NamespaceManifestPayload {
     pub next_inode_id: InodeId,
     /// Run number the next producer allocates. Every run's `run_no` is below it.
     pub next_run_no: RunNo,
+    /// Delta merges each family group has published above a frozen base since
+    /// that base was last rebuilt. A group with no entry has published none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frozen_base_delta_merges: BTreeMap<MetadataFamilyGroup, u32>,
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
     /// Complete set of metadata runs required to reconstruct the snapshot.
@@ -1084,6 +1131,7 @@ mod tests {
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
             next_run_no: RunNo(1),
+            frozen_base_delta_merges: Default::default(),
             retention_floor_seq: ChangeSeq(0),
             runs: vec![metadata_run_ref(
                 "demo",
@@ -1120,6 +1168,7 @@ mod tests {
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
             next_run_no: RunNo(2),
+            frozen_base_delta_merges: Default::default(),
             retention_floor_seq: ChangeSeq(0),
             runs: vec![
                 metadata_run_ref(
@@ -1174,6 +1223,7 @@ mod tests {
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
             next_run_no: RunNo(2),
+            frozen_base_delta_merges: Default::default(),
             retention_floor_seq: ChangeSeq(0),
             runs: vec![
                 MetadataRunRef {

@@ -27,7 +27,9 @@ use super::frozen_floor::{
 };
 use super::load::load_verified_manifest_segments;
 use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
-use super::reorganize::{group_run_descriptors, write_replacement_manifest, MergePlacement};
+use super::reorganize::{
+    group_run_descriptors, write_replacement_manifest, MergePlacement, ReplacementOutput,
+};
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
 use super::scan::{Readahead, VerifiedMetadataSegments};
 use crate::context::MutationContext;
@@ -76,8 +78,6 @@ const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 /// the same durable state produces the same rows, which is what makes a
 /// cancelled attempt free to throw away.
 ///
-/// The runtime holds one per running job so maintenance steps skip the group
-/// being rebuilt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataCompactionSpec {
     /// This job's identity, and the prefix its output and its lease live
@@ -116,8 +116,7 @@ impl MetadataCompactionSpec {
         }
     }
 
-    /// The family group this job rebuilds, which is what a runtime keys its
-    /// per-group bookkeeping by.
+    /// The family group this job rebuilds.
     pub fn group(&self) -> MetadataFamilyGroup {
         self.group
     }
@@ -156,25 +155,6 @@ impl MetadataCompactionSpec {
             frozen_floor_seq,
             ..self.clone()
         }
-    }
-
-    /// A plan over no runs at all, for tests that drive how a runtime admits
-    /// jobs rather than what a job reads.
-    ///
-    /// Running one rebuilds nothing, which is the point: the tests that build
-    /// these assert on slots, permits, and cancellation, and a plan naming
-    /// runs would make them seed a namespace to say so.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn planned_over_no_runs() -> Self {
-        Self::new(
-            MetadataFamilyGroup::Bindings,
-            Vec::new(),
-            0,
-            MergePlacement::Base {
-                output_seq: ChangeSeq(0),
-            },
-            ChangeSeq(0),
-        )
     }
 }
 
@@ -411,7 +391,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     let mut lease = CompactionLease::create(
         store,
         namespace_id,
-        spec.job_id(),
+        spec,
         context.writer_id.as_str(),
         context.now_ms,
         &timer,
@@ -585,8 +565,11 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             namespace_id,
             previous,
             surviving,
-            result.output_segments.clone(),
-            spec.placement,
+            ReplacementOutput {
+                group: spec.group(),
+                segments: result.output_segments.clone(),
+                placement: spec.placement,
+            },
             spec.frozen_floor_seq(),
         )
         .await?;

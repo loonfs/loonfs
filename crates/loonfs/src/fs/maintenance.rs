@@ -347,7 +347,7 @@ impl FsAdmin {
         // merges. Manual-only handles report that compaction is required
         // instead of starting work they cannot finish in the background.
         let frozen_base = match &self.writer {
-            Some(writer) => writer.compactions.amortization(namespace_id),
+            Some(_) => loonfs_core::FrozenBasePolicy::Amortized,
             None => loonfs_core::FrozenBasePolicy::CompactImmediately,
         };
         Ok(
@@ -365,9 +365,8 @@ impl FsAdmin {
     ///
     /// A step starts the planned job as background work; an explicit
     /// [`Self::compact_metadata`] runs it here. Everything before that point
-    /// is the same call, so the bookkeeping a published unit leaves behind —
-    /// the cache invalidation, the published-merge count — happens once,
-    /// whichever path asked.
+    /// is the same call, so cache invalidation happens once, whichever path
+    /// asked.
     ///
     /// `frozen_base` is what the caller wants done about a group whose base
     /// no bounded window can reach. It is the one thing the two paths
@@ -378,19 +377,9 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
         frozen_base: loonfs_core::FrozenBasePolicy,
     ) -> Result<ReorganizationStep> {
-        // A handle with no runner has no jobs, which reads to the planner
-        // exactly as a namespace nothing is running for. It could not start
-        // one either way.
-        let active = self
-            .writer
-            .as_ref()
-            .and_then(|writer| writer.compactions.active_spec(namespace_id));
         let report = self
             .engine(namespace_id)
-            .reorganize_metadata(loonfs_core::MetadataCompactionView {
-                active: active.as_ref(),
-                frozen_base,
-            })
+            .reorganize_metadata(frozen_base)
             .await
             .map_err(RuntimeError::Core)?;
         Ok(ReorganizationStep::Concluded(match report.outcome {
@@ -407,15 +396,6 @@ impl FsAdmin {
                 ..
             } => {
                 self.invalidate_namespace(namespace_id);
-                // Track delta-only merges across steps so the runner knows
-                // when to schedule a full compaction.
-                if let Some(writer) = &self.writer {
-                    writer.compactions.record_merge(
-                        namespace_id,
-                        group,
-                        bottom_anchored_merge_blocked,
-                    );
-                }
                 tracing::info!(
                     families = ?group.families(),
                     merged_delta_rows,
@@ -544,7 +524,7 @@ impl FsAdmin {
                 .await;
             return outcome.map(metadata_compaction_response);
         };
-        let Some(mut claim) = writer.compactions.claim(namespace_id, &spec) else {
+        let Some(mut claim) = writer.compactions.claim(namespace_id) else {
             return Ok(MetadataCompactionResponse {
                 outcome: MetadataCompactionOutcome::AlreadyRunning,
             });
@@ -601,13 +581,6 @@ impl FsAdmin {
             }) => {
                 // Compaction changed the manifest, so cached views are stale.
                 self.invalidate_namespace(namespace_id);
-                // A full compaction includes the base run, so reset the count
-                // of delta-only merges.
-                if let Some(writer) = &self.writer {
-                    writer
-                        .compactions
-                        .clear_published_delta_merges(namespace_id, spec.group());
-                }
                 tracing::info!(
                     namespace_id = %namespace_id,
                     families = ?spec.families(),

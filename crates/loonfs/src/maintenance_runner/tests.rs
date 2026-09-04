@@ -974,12 +974,6 @@ async fn the_runtime_registers_its_metadata_and_gc_jobs() {
     );
 }
 
-/// A plan for a job these tests never let read anything: what they assert on
-/// is the slot, the permit, and the token.
-fn compaction_plan() -> loonfs_core::MetadataCompactionSpec {
-    loonfs_core::MetadataCompactionSpec::planned_over_no_runs()
-}
-
 fn claim_all(
     compactions: &BackgroundCompactions,
     count: usize,
@@ -987,7 +981,7 @@ fn claim_all(
     (0..count)
         .map(|index| {
             compactions
-                .claim(&namespace_id(&format!("job-{index}")), &compaction_plan())
+                .claim(&namespace_id(&format!("job-{index}")))
                 .expect("each namespace claims its own slot")
         })
         .collect()
@@ -1049,31 +1043,24 @@ async fn at_most_the_process_limit_of_compactions_run_however_many_namespaces_pl
 }
 
 #[tokio::test]
-async fn a_queued_job_still_holds_its_namespace_and_still_excludes_its_group() {
+async fn a_queued_job_still_holds_its_namespace() {
     let runner = enabled_runner(TestJob::idle());
     let compactions = runner.compactions();
     let _running = claim_all(&compactions, compaction::MAX_CONCURRENT_COMPACTIONS);
 
     let queued_namespace = namespace_id("queued");
     let queued = compactions
-        .claim(&queued_namespace, &compaction_plan())
+        .claim(&queued_namespace)
         .expect("a namespace with no job claims its slot");
     assert!(queued.is_queued(), "every permit is held");
     assert!(
-        compactions
-            .claim(&queued_namespace, &compaction_plan())
-            .is_none(),
+        compactions.claim(&queued_namespace).is_none(),
         "a second job for one namespace is refused while the first waits"
-    );
-
-    assert!(
-        compactions.active_spec(&queued_namespace).is_some(),
-        "a queued job's group is left alone exactly as a running job's is"
     );
 
     drop(queued);
     assert!(
-        compactions.active_spec(&queued_namespace).is_none(),
+        compactions.claim(&queued_namespace).is_some(),
         "and the slot goes back when the claim does"
     );
 }
@@ -1084,7 +1071,7 @@ async fn cancellation_reaches_a_job_that_is_still_waiting_for_a_permit() {
     let compactions = runner.compactions();
     let _running = claim_all(&compactions, compaction::MAX_CONCURRENT_COMPACTIONS);
     let mut queued = compactions
-        .claim(&namespace_id("queued"), &compaction_plan())
+        .claim(&namespace_id("queued"))
         .expect("a namespace with no job claims its slot");
     assert!(queued.is_queued());
 
@@ -1136,7 +1123,7 @@ async fn a_job_that_ends_frees_its_slot_and_requeues_its_namespace() {
 
     let published = namespace_id("published");
     compactions
-        .claim(&published, &compaction_plan())
+        .claim(&published)
         .expect("the namespace claims its slot")
         .finished(true);
     assert!(
@@ -1149,13 +1136,13 @@ async fn a_job_that_ends_frees_its_slot_and_requeues_its_namespace() {
         "and it waits for nothing"
     );
     assert!(
-        compactions.active_spec(&published).is_none(),
+        compactions.claim(&published).is_some(),
         "the slot is back before the nudge, so the step it wakes may fold the rebuilt group"
     );
 
     let abandoned = namespace_id("abandoned");
     compactions
-        .claim(&abandoned, &compaction_plan())
+        .claim(&abandoned)
         .expect("the namespace claims its slot")
         .finished(false);
     assert_eq!(

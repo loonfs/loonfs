@@ -15,7 +15,7 @@ use crate::checkpoint::tests::{
     create_checkpoint, load_current_projection, mutation_context, write_test_file,
     ManifestMetadataSource,
 };
-use crate::checkpoint::MetadataCompactionView;
+use crate::checkpoint::FrozenBasePolicy;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
@@ -2050,7 +2050,7 @@ async fn fold_metadata<S: ObjectStore + ?Sized>(
             namespace_id,
             context,
             fold_policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("reorganize step");
@@ -2194,7 +2194,7 @@ async fn an_old_unpublished_manifest_cannot_replace_the_published_grace_anchor()
             max_delta_runs: NonZeroUsize::MIN,
             ..Default::default()
         },
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("publish one replacement manifest");
@@ -2292,6 +2292,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
         loonfs_api::wire::control::MetadataCompactionLeaseState {
             job_id: metadata_compaction_id.clone(),
             namespace_id: namespace_id.clone(),
+            group: loonfs_api::MetadataFamilyGroup::Bindings,
             writer_id: "writer".to_owned(),
             status,
             started_at_ms: 1_000,
@@ -3255,7 +3256,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
             &namespace_id,
             &setup,
             fold_policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("reorganize step");

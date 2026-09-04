@@ -114,6 +114,7 @@ pub use ids::{
     WriterEpoch, WriterId, WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES,
     MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
 };
+pub use manifest::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;
 pub use options::AttributeInclusion;
 pub use pagination::{

@@ -253,7 +253,7 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
             namespace_id,
             context,
             policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("reorganization step");
@@ -1294,7 +1294,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
             &namespace_id,
             &context,
             policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("reorganization step");
@@ -1377,7 +1377,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         &namespace_id,
         &context,
         tiny_byte_policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("budgeted step");
@@ -1408,7 +1408,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         &namespace_id,
         &context,
         policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("bounded step");
@@ -1479,7 +1479,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         &namespace_id,
         &context,
         bounded_policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("first bounded step");
@@ -1557,7 +1557,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         &namespace_id,
         &context,
         bounded_policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("below-trigger step");
@@ -1790,7 +1790,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
         &namespace_id,
         &context,
         policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("first unit");
@@ -1813,7 +1813,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
             &namespace_id,
             &context,
             policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("resumed unit");
@@ -1974,7 +1974,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         &context,
         fold_everything,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
         &overrun,
     )
     .await
@@ -1995,7 +1995,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         &context,
         fold_everything,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("in-budget retry folds the unit");
@@ -2019,8 +2019,9 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     let segments = load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
         .await
         .expect("load manifest segments");
-    let group = super::reorganize::select_family_group(&segments.manifest().payload, None)
-        .expect("a family group with delta rows to fold");
+    let group =
+        super::reorganize::select_family_group(&segments.manifest().payload, &BTreeSet::new())
+            .expect("a family group with delta rows to fold");
     let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
     let selection = super::reorganize::select_reorganization_input(
         &segments,
@@ -2169,7 +2170,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
             &namespace_id,
             &context,
             policy,
-            MetadataCompactionView::default(),
+            FrozenBasePolicy::default(),
         )
         .await
         .expect("reorganization step");
@@ -2334,7 +2335,9 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let (group, _) =
         select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
     assert!(
-        group.contains(ApiMetadataRowFamily::DirentryUnbinds),
+        group
+            .families()
+            .contains(&ApiMetadataRowFamily::DirentryUnbinds),
         "this test is about the binding families, got {group:?}"
     );
     let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
@@ -2363,7 +2366,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         &namespace_id,
         &context,
         policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("reorganization step");
@@ -2511,7 +2514,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         &namespace_id,
         &context,
         policy,
-        MetadataCompactionView::default(),
+        FrozenBasePolicy::default(),
     )
     .await
     .expect("reorganization step");
@@ -2592,7 +2595,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 &namespace_id,
                 &context,
                 policy,
-                MetadataCompactionView::default(),
+                FrozenBasePolicy::default(),
             )
             .await
             .expect("reorganization step");

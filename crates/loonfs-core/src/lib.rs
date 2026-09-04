@@ -158,9 +158,8 @@ pub use checkpoint::{
     ensure_metadata_publication_budget, next_run_no_after, refill_iterators, select_next_iterator,
     write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
     CheckpointPageCursor, FrozenBasePolicy, MetadataCompactionCancellation,
-    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataCompactionView,
-    MetadataFamilyGroup, MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader,
-    SegmentRowIterator,
+    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataFamilyGroup,
+    MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;

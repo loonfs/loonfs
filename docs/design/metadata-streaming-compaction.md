@@ -88,13 +88,13 @@ Planning produces either a bounded merge or a `MetadataCompactionSpec`. The comp
 
 A group with an oversized base may still have delta runs that fit within a bounded merge. Always choosing that merge can prevent full compaction when writes continuously create more delta runs. Starting full compaction as soon as the base exceeds the budget would cause the opposite problem: the complete base would be reread for every small batch of delta runs.
 
-The maintenance runner balances these cases by recording how many delta merges it has published above each frozen base. It may publish two bounded delta merges for a group. After the second merge, planning selects full compaction even when another delta merge is available.
+The planner balances these cases with the manifest's record of how many delta merges have published above each frozen base. It may publish two bounded delta merges for a group. After the second merge, planning selects full compaction even when another delta merge is available.
 
-The count is stored in process memory for each namespace and `MetadataFamilyGroup`. It is cleared after successful full compaction or after a bottom-anchored merge becomes possible. A restart loses the count, so at most two more delta merges are published before full compaction is selected again.
+The count is stored in the namespace manifest for each `MetadataFamilyGroup`. It is cleared after successful full compaction or after a bottom-anchored merge becomes possible.
 
-Callers provide a `FrozenBasePolicy` when planning. Writer-owned background maintenance uses `Amortized` with the per-group counters. `FsAdmin::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction. A bounded maintenance step without a background runner also uses `CompactImmediately`, allowing it to report that compaction is required instead of repeatedly publishing delta merges that cannot rebuild the base.
+Callers provide a `FrozenBasePolicy` when planning. Background maintenance uses `Amortized`, which reads the manifest's per-group count. `FsAdmin::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction. A bounded maintenance step without a background runner also uses `CompactImmediately`, allowing it to report that compaction is required instead of repeatedly publishing delta merges that cannot rebuild the base.
 
-The maintenance runner keeps one active compaction slot per namespace and allows at most two compaction jobs to run in the process. A job reserves its namespace before waiting for a process permit, so bounded maintenance excludes the selected family group while the job is queued or running. Maintenance may continue processing unrelated groups in the same namespace. Shutdown cancels both queued and running jobs.
+The planner excludes every family group whose compaction lease is active and unexpired. A process keeps one compaction claim per namespace so it does not start two jobs itself, and allows at most two compaction jobs to run. Maintenance may continue processing unrelated groups in the same namespace. Shutdown cancels both queued and running jobs.
 
 Runs published after the snapshot was captured are not part of the compaction input. Final publication preserves those runs.
 
