@@ -10,17 +10,15 @@ use crate::checkpoint::{
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::CompactionLeaseStatus;
 use loonfs_api::{MetadataCompactionId, MetadataFamilyGroup, NamespaceId};
-use loonfs_objectstore::keys::{
-    metadata_compaction_job_id_from_key, metadata_compaction_lease_group_from_key,
-};
+use loonfs_objectstore::keys::metadata_compaction_job_id_from_key;
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeMap;
 
-/// What the lease-key sweep should do with one recognized lease.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the loaded-lease sweep should do with one lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum GroupLeaseSweep {
     Retain,
-    Delete,
+    Delete { object_key: String },
 }
 
 /// Tracks the seven group leases and any claim awaiting prefix completion.
@@ -58,7 +56,7 @@ impl CompactionLeases {
                 .insert(loaded.state.job_id.clone(), loaded)
                 .is_some()
             {
-                return Err(CoreError::Internal(
+                return Err(CoreError::NamespaceCorrupt(
                     "two metadata family-group leases name the same compaction job".to_owned(),
                 ));
             }
@@ -118,39 +116,39 @@ impl CompactionLeases {
         self.staging_complete = true;
     }
 
-    /// Decides one lease object after the staging prefix has been walked.
+    pub(super) fn contains_group(&self, group: MetadataFamilyGroup) -> bool {
+        self.by_job_id
+            .values()
+            .any(|loaded| loaded.state.group == group)
+    }
+
+    /// Decides one loaded lease after the staging prefix has been walked.
     pub(super) async fn sweep_group_lease<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         namespace_id: &NamespaceId,
-        key: &str,
+        group: MetadataFamilyGroup,
         now_ms: u64,
     ) -> Result<Option<GroupLeaseSweep>> {
-        let Some(group) = metadata_compaction_lease_group_from_key(key) else {
-            return Ok(None);
-        };
         let Some(loaded) = self
             .by_job_id
             .values()
             .find(|loaded| loaded.state.group == group)
             .cloned()
         else {
-            return Ok(Some(GroupLeaseSweep::Retain));
+            return Ok(None);
         };
         if !self.staging_complete
             || (loaded.state.status == (CompactionLeaseStatus::Active {})
-                && now_ms
-                    <= loaded
-                        .state
-                        .heartbeat_at_ms
-                        .saturating_add(crate::limits::METADATA_COMPACTION_LEASE_EXPIRY_MS))
+                && now_ms <= loaded.state.expires_at_ms)
         {
             return Ok(Some(GroupLeaseSweep::Retain));
         }
         let job_id = loaded.state.job_id.clone();
+        let object_key = loaded.object_key.clone();
         let owner = claim_loaded_group_lease(store, namespace_id, &job_id, loaded, now_ms).await?;
         Ok(Some(match owner {
-            CompactionPrefixOwner::ThisCollector => GroupLeaseSweep::Delete,
+            CompactionPrefixOwner::ThisCollector => GroupLeaseSweep::Delete { object_key },
             CompactionPrefixOwner::LiveJob | CompactionPrefixOwner::NoOne => {
                 GroupLeaseSweep::Retain
             }
@@ -166,6 +164,8 @@ impl CompactionLeases {
         let Some(object_key) = self.claimed_lease.take() else {
             return Ok(());
         };
+        self.by_job_id
+            .retain(|_, loaded| loaded.object_key != object_key);
         store
             .delete(&object_key)
             .await

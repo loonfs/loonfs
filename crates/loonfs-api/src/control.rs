@@ -146,8 +146,8 @@ pub struct MetadataRootState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompactionLeaseStatus {
-    /// The job owns its output prefix. `heartbeat_at_ms` determines whether
-    /// the lease has expired.
+    /// The job owns its output prefix. `expires_at_ms` determines whether the
+    /// lease has expired.
     ///
     /// The braces make serde reject a stray field; a unit variant would
     /// silently accept and discard one.
@@ -181,17 +181,18 @@ pub struct MetadataCompactionLeaseState {
     pub namespace_id: NamespaceId,
     /// Family group the job is rebuilding.
     pub group: MetadataFamilyGroup,
-    /// Writer identity the job runs under, for an operator reading the
-    /// object. This is the same label the namespace head records.
-    pub writer_id: String,
+    /// Writer id of the process running the job (`MutationContext::writer_id`):
+    /// the server's in an embedded deployment, the maintenance node's in a
+    /// standalone one.
+    pub writer_id: WriterId,
     /// Who owns the prefix: the job that wrote the lease, or the collector
     /// that claimed it.
     pub status: CompactionLeaseStatus,
     /// Unix-millisecond stamp of the job's first lease write.
     pub started_at_ms: u64,
-    /// Unix-millisecond stamp of the most recent lease write, and the only
-    /// input to whether an `active` lease has expired.
-    pub heartbeat_at_ms: u64,
+    /// Unix-millisecond expiry written when the job creates or refreshes the
+    /// lease, and the only input to whether an `active` lease has expired.
+    pub expires_at_ms: u64,
 }
 
 /// Monotonic status of a durable checkpoint record.

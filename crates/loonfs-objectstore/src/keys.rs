@@ -109,11 +109,6 @@ pub fn metadata_compaction_lease(namespace_id: &NamespaceId, group: MetadataFami
     format!("namespaces/{namespace_id}/metadata/compaction_leases/{group}.json")
 }
 
-/// Builds the listing prefix containing every metadata family-group lease.
-pub fn metadata_compaction_lease_prefix(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/metadata/compaction_leases/")
-}
-
 /// Extracts the family group from a current-format compaction lease key.
 pub fn metadata_compaction_lease_group_from_key(key: &str) -> Option<MetadataFamilyGroup> {
     parse_metadata_compaction_lease_group(key)
@@ -161,11 +156,10 @@ pub fn content_blob(content_store_id: &ContentStoreId, content_id: &ContentId) -
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, metadata_compaction_lease,
-        metadata_compaction_lease_prefix, metadata_compaction_prefix, metadata_compaction_segment,
-        metadata_manifest_object, metadata_root, metadata_segment, metadata_segment_object_key,
-        upload_session, wal_floor, wal_head, wal_segment, wal_segment_id_from_key,
-        wal_segment_prefix,
+        checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_prefix,
+        metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
+        metadata_segment_object_key, upload_session, wal_floor, wal_head, wal_segment,
+        wal_segment_id_from_key, wal_segment_prefix,
     };
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
@@ -358,10 +352,6 @@ mod tests {
         assert_eq!(
             metadata_compaction_prefix(&namespace_id()),
             "namespaces/ns-1/metadata/compactions/"
-        );
-        assert_eq!(
-            metadata_compaction_lease_prefix(&namespace_id()),
-            "namespaces/ns-1/metadata/compaction_leases/"
         );
     }
 

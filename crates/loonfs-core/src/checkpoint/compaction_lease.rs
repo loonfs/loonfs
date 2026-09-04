@@ -2,7 +2,7 @@
 //!
 //! A job creates and refreshes an `Active` lease with compare-and-swap.
 //! Garbage collection may claim an expired lease by changing it to `Reaping`.
-//! A failed heartbeat then prevents the job from publishing.
+//! A failed refresh then prevents the job from publishing.
 //!
 //! Completed jobs leave the lease in place so a collection pass that started
 //! before publication cannot mistake old output for garbage. Malformed leases
@@ -14,23 +14,23 @@ use crate::control_object::{
 };
 use crate::error::{CoreError, Result};
 use crate::limits::{
-    METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS, METADATA_COMPACTION_LEASE_EXPIRY_MS,
+    METADATA_COMPACTION_LEASE_EXPIRY_MS, METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS,
 };
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, CompactionLeaseStatus, ControlObjectKind, MetadataCompactionLeaseState,
 };
-use loonfs_api::{MetadataCompactionId, MetadataFamilyGroup, NamespaceId};
+use loonfs_api::{MetadataCompactionId, MetadataFamilyGroup, NamespaceId, WriterId};
 use loonfs_objectstore::keys::metadata_compaction_lease;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 /// Who owns the objects under one job's prefix, as a collector reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompactionPrefixOwner {
-    /// A job owns it: its lease is `Active` and was refreshed within
-    /// [`METADATA_COMPACTION_LEASE_EXPIRY_MS`], or it heartbeated out from
-    /// under this pass's claim. Nothing about the objects' age matters.
+    /// A job owns it: its lease is `Active` and unexpired, or it refreshed
+    /// out from under this pass's claim. Nothing about the objects' age
+    /// matters.
     LiveJob,
     /// This pass claimed the prefix, or found a claim someone else won. The
     /// job that wrote the objects is fenced, so they are orphans — and the
@@ -124,7 +124,7 @@ pub(crate) async fn claim_loaded_group_lease<S: ObjectStore + ?Sized>(
                 object_key = object_key.as_str(),
                 job_id = metadata_compaction_id.as_str(),
                 writer_id = reaping.writer_id.as_str(),
-                heartbeat_at_ms = reaping.heartbeat_at_ms,
+                expires_at_ms = reaping.expires_at_ms,
                 "a streaming metadata compaction lease expired; garbage collection claimed the \
                  group lease and the job that wrote it can no longer publish"
             );
@@ -173,11 +173,7 @@ pub(super) async fn group_lease_state<S: ObjectStore + ?Sized>(
 }
 
 fn active_lease_is_unexpired(state: &MetadataCompactionLeaseState, now_ms: u64) -> bool {
-    state.status == (CompactionLeaseStatus::Active {})
-        && now_ms
-            <= state
-                .heartbeat_at_ms
-                .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS)
+    state.status == (CompactionLeaseStatus::Active {}) && now_ms <= state.expires_at_ms
 }
 
 /// What one lease write found.
@@ -201,9 +197,9 @@ pub(super) enum LeaseAcquire<'a> {
 
 /// One running job's claim on its own prefix.
 ///
-/// The wall clock is read once, when the job starts; every later heartbeat
-/// stamps that instant plus local monotonic elapsed time, so nothing here
-/// depends on a clock that can move. That is the same posture every
+/// The wall clock is read once, when the job starts; every later refresh
+/// derives a new expiry from that instant plus local monotonic elapsed time,
+/// so nothing here depends on a clock that can move. That is the same posture every
 /// self-enforced budget in the system takes.
 pub(super) struct CompactionLease<'a> {
     object_key: String,
@@ -211,7 +207,7 @@ pub(super) struct CompactionLease<'a> {
     etag: String,
     timer: &'a dyn MonotonicTimer,
     started_monotonic_ms: u64,
-    next_heartbeat_monotonic_ms: u64,
+    next_refresh_monotonic_ms: u64,
 }
 
 impl<'a> CompactionLease<'a> {
@@ -220,7 +216,7 @@ impl<'a> CompactionLease<'a> {
         store: &S,
         namespace_id: &NamespaceId,
         spec: &MetadataCompactionSpec,
-        writer_id: &str,
+        writer_id: &WriterId,
         started_at_ms: u64,
         timer: &'a dyn MonotonicTimer,
     ) -> Result<LeaseAcquire<'a>> {
@@ -289,7 +285,7 @@ impl<'a> CompactionLease<'a> {
             etag,
             timer,
             started_monotonic_ms,
-            next_heartbeat_monotonic_ms: started_monotonic_ms,
+            next_refresh_monotonic_ms: started_monotonic_ms,
         }))
     }
 
@@ -307,7 +303,7 @@ impl<'a> CompactionLease<'a> {
         {
             return Ok(LeaseAcquire::Held);
         }
-        // Replacing the complete expired lease in one CAS fences the previous job's next heartbeat.
+        // Replacing the complete expired lease in one CAS fences the previous job's next refresh.
         let etag = match store
             .compare_and_swap(&object_key, &loaded.etag, encoded)
             .await
@@ -335,11 +331,11 @@ impl<'a> CompactionLease<'a> {
             etag,
             timer,
             started_monotonic_ms,
-            next_heartbeat_monotonic_ms: started_monotonic_ms,
+            next_refresh_monotonic_ms: started_monotonic_ms,
         }))
     }
 
-    /// The clock the job paces itself by. One clock for the job's heartbeat
+    /// The clock the job paces itself by. One clock for the job's refresh
     /// and its publication budget, because they measure the same span.
     pub(super) fn timer(&self) -> &'a dyn MonotonicTimer {
         self.timer
@@ -348,24 +344,24 @@ impl<'a> CompactionLease<'a> {
     /// Refreshes the lease when the interval has passed since the last write.
     ///
     /// Called where cancellation is checked, so the cost is one small
-    /// compare-and-swap every [`METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS`]
+    /// compare-and-swap every [`METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS`]
     /// however many rows the job reads in between.
-    pub(super) async fn heartbeat_if_due<S: ObjectStore + ?Sized>(
+    pub(super) async fn refresh_if_due<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
     ) -> Result<LeaseHold> {
-        if self.timer.monotonic_now_ms() < self.next_heartbeat_monotonic_ms {
+        if self.timer.monotonic_now_ms() < self.next_refresh_monotonic_ms {
             return Ok(LeaseHold::Held);
         }
-        self.heartbeat(store).await
+        self.refresh(store).await
     }
 
     /// Refreshes the lease now, whatever the interval says.
     ///
-    /// Finalization uses this: the span from a heartbeat to the root
+    /// Finalization uses this: the span from a refresh to the root
     /// compare-and-swap that makes the output referenced is what the lease has
     /// to cover, and that span opens at the top of every attempt.
-    pub(super) async fn heartbeat<S: ObjectStore + ?Sized>(
+    pub(super) async fn refresh<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
     ) -> Result<LeaseHold> {
@@ -374,7 +370,11 @@ impl<'a> CompactionLease<'a> {
             .timer
             .monotonic_now_ms()
             .saturating_sub(self.started_monotonic_ms);
-        self.state.heartbeat_at_ms = self.state.started_at_ms.saturating_add(elapsed_ms);
+        self.state.expires_at_ms = self
+            .state
+            .started_at_ms
+            .saturating_add(elapsed_ms)
+            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
         let encoded = encode_lease(&self.state)?;
         match store
             .compare_and_swap(&self.object_key, &expected_etag, encoded)
@@ -382,10 +382,10 @@ impl<'a> CompactionLease<'a> {
         {
             Ok(metadata) => {
                 self.etag = required_etag(&self.object_key, metadata.etag)?;
-                self.next_heartbeat_monotonic_ms = self
+                self.next_refresh_monotonic_ms = self
                     .timer
                     .monotonic_now_ms()
-                    .saturating_add(METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS);
+                    .saturating_add(METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS);
                 Ok(LeaseHold::Held)
             }
             // Garbage collection claimed the group lease, or the object is gone.
@@ -402,7 +402,7 @@ impl<'a> CompactionLease<'a> {
                 );
                 Ok(LeaseHold::Fenced)
             }
-            // An unconfirmed heartbeat has no etag for the next fenced write,
+            // An unconfirmed refresh has no etag for the next fenced write,
             // so the job ends here.
             Err(error) => Err(CoreError::store(&self.object_key, &error)),
         }
@@ -419,7 +419,7 @@ impl<'a> CompactionLease<'a> {
         store: &S,
         namespace_id: &NamespaceId,
         spec: &MetadataCompactionSpec,
-        writer_id: &str,
+        writer_id: &WriterId,
         started_at_ms: u64,
         timer: &'a dyn MonotonicTimer,
     ) -> Result<Self> {
@@ -447,7 +447,7 @@ impl<'a> CompactionLease<'a> {
             etag: loaded.etag,
             timer,
             started_monotonic_ms,
-            next_heartbeat_monotonic_ms: started_monotonic_ms,
+            next_refresh_monotonic_ms: started_monotonic_ms,
         })
     }
 }
@@ -455,17 +455,17 @@ impl<'a> CompactionLease<'a> {
 fn initial_lease_state(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    writer_id: &str,
+    writer_id: &WriterId,
     started_at_ms: u64,
 ) -> MetadataCompactionLeaseState {
     MetadataCompactionLeaseState {
         job_id: spec.job_id().clone(),
         namespace_id: namespace_id.clone(),
         group: spec.group(),
-        writer_id: writer_id.to_owned(),
+        writer_id: writer_id.clone(),
         status: CompactionLeaseStatus::Active {},
         started_at_ms,
-        heartbeat_at_ms: started_at_ms,
+        expires_at_ms: started_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
     }
 }
 

@@ -21,7 +21,9 @@ use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
 use crate::namespace::control_snapshot::load_control_snapshot;
 use futures::StreamExt;
-use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
+use loonfs_api::{
+    DeletedObjectCounts, GcResponse, MetadataFamilyGroup, NamespaceId, RetainedReason,
+};
 use loonfs_objectstore::layout::{manifest_object_id_of, upload_id_of};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -36,7 +38,7 @@ fn is_live(live: &LiveSet, family: CandidateFamily, key: &str) -> bool {
             .and_then(std::result::Result::ok)
             .is_some_and(|manifest_object_id| live.manifests.contains(&manifest_object_id)),
         CandidateFamily::Checkpoints => live.checkpoint_keys.contains(key),
-        CandidateFamily::CompactionLeases | CandidateFamily::UploadSessions => false,
+        CandidateFamily::UploadSessions => false,
     }
 }
 
@@ -164,6 +166,9 @@ enum PassEnd {
     BudgetExhausted,
 }
 
+/// Budget units the compaction lease stage costs: one read per family group.
+pub(super) const COMPACTION_LEASE_STAGE_UNITS: u64 = MetadataFamilyGroup::ALL.len() as u64;
+
 impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
     /// Runs and settles the pass. Lease cleanup deliberately happens before
     /// the walk result is propagated, so no error or budget return can bypass
@@ -176,6 +181,14 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
     }
 
     async fn walk_candidates(&mut self) -> Result<PassEnd> {
+        // The compaction lease stage reads one lease per family group and
+        // settles them after the walk. Every pass pays for those reads here,
+        // whether or not it reaches the stage, so the budget bounds the pass
+        // and a pass that cannot cover the stage decides nothing.
+        if self.budget.remaining() < COMPACTION_LEASE_STAGE_UNITS {
+            return Ok(PassEnd::BudgetExhausted);
+        }
+        self.budget.charge_block(COMPACTION_LEASE_STAGE_UNITS);
         let resume_family = self.policy.resume.keyspace().family;
         let resume_last_key = self.policy.resume.last_key().map(str::to_owned);
 
@@ -183,10 +196,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         // therefore leave data protected for an extra pass, never a readable
         // record whose basis was removed underneath it.
         for &family in &CandidateFamily::ALL[resume_family.index()..] {
-            if matches!(
-                family,
-                CandidateFamily::CompactionStaging | CandidateFamily::CompactionLeases
-            ) {
+            if family == CandidateFamily::CompactionStaging {
                 self.leases.load_once(self.store, self.namespace_id).await?;
             }
             let prefix = family.prefix(self.namespace_id);
@@ -222,6 +232,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             if family == CandidateFamily::CompactionStaging {
                 self.leases.staging_finished();
                 self.leases.finish(self.store).await?;
+                self.sweep_compaction_leases().await?;
             }
         }
         Ok(PassEnd::Complete)
@@ -247,7 +258,6 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             CandidateFamily::WalSegments
             | CandidateFamily::MetadataSegments
             | CandidateFamily::CompactionStaging
-            | CandidateFamily::CompactionLeases
             | CandidateFamily::Manifests
             | CandidateFamily::Checkpoints => {}
         };
@@ -287,7 +297,6 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                     .await?
             }
             CandidateFamily::CompactionStaging => self.process_compaction_staging(key).await?,
-            CandidateFamily::CompactionLeases => self.process_compaction_lease(key).await?,
             CandidateFamily::Checkpoints => self.process_checkpoint(key).await?,
             CandidateFamily::UploadSessions => self.process_upload_session(key).await?,
         }
@@ -354,21 +363,27 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         Ok(())
     }
 
-    async fn process_compaction_lease(&mut self, key: &str) -> Result<()> {
-        if self.sweep.degraded {
-            self.report.retain(RetainedReason::DegradedRoots);
-            return Ok(());
-        }
-        match self
-            .leases
-            .sweep_group_lease(self.store, self.namespace_id, key, self.mutation.now_ms)
-            .await?
-        {
-            Some(GroupLeaseSweep::Delete) => self.delete_key(key).await?,
-            Some(GroupLeaseSweep::Retain) => {
-                self.report.retain(RetainedReason::WithinGraceWindow);
+    async fn sweep_compaction_leases(&mut self) -> Result<()> {
+        for group in MetadataFamilyGroup::ALL {
+            if self.sweep.degraded {
+                if self.leases.contains_group(group) {
+                    self.report.retain(RetainedReason::DegradedRoots);
+                }
+                continue;
             }
-            None => self.report.retain(RetainedReason::UnrecognizedKey),
+            match self
+                .leases
+                .sweep_group_lease(self.store, self.namespace_id, group, self.mutation.now_ms)
+                .await?
+            {
+                Some(GroupLeaseSweep::Delete { object_key }) => {
+                    self.delete_key(&object_key).await?
+                }
+                Some(GroupLeaseSweep::Retain) => {
+                    self.report.retain(RetainedReason::WithinGraceWindow);
+                }
+                None => {}
+            }
         }
         Ok(())
     }

@@ -349,8 +349,8 @@ pub enum MetadataCompactionJobOutcome {
     /// published and the staged segments are orphans; a later step plans the
     /// group again from what the manifest now holds.
     Abandoned,
-    /// The job lost its lease: it stopped heartbeating for longer than the
-    /// lease expiry and garbage collection claimed its group's lease.
+    /// The job lost its lease after its expiry passed and garbage collection
+    /// claimed its group's lease.
     /// Ownership does not come back, so the job publishes nothing and the
     /// collector reclaims what it wrote. A later step plans the group again.
     Fenced,
@@ -392,7 +392,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         spec,
-        context.writer_id.as_str(),
+        &context.writer_id,
         context.now_ms,
         &timer,
     )
@@ -522,7 +522,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         }
         // Refresh the lease before publishing. Its expiry exceeds the
         // publication budget, so GC cannot claim the group lease before the CAS.
-        if lease.heartbeat(store).await? == LeaseHold::Fenced {
+        if lease.refresh(store).await? == LeaseHold::Fenced {
             return Ok(MetadataCompactionJobOutcome::Fenced);
         }
         let publication_started_ms = timer.monotonic_now_ms();
@@ -791,14 +791,14 @@ impl MergeControl<'_, '_> {
             .then_some(MetadataCompactionJobOutcome::Cancelled)
     }
 
-    async fn heartbeat<S: ObjectStore + ?Sized>(
+    async fn refresh_lease<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
     ) -> Result<Option<MetadataCompactionJobOutcome>> {
         let Some(lease) = &mut self.lease else {
             return Ok(None);
         };
-        Ok((lease.heartbeat_if_due(store).await? == LeaseHold::Fenced)
+        Ok((lease.refresh_if_due(store).await? == LeaseHold::Fenced)
             .then_some(MetadataCompactionJobOutcome::Fenced))
     }
 }
@@ -969,7 +969,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             // to reach however long a merge runs. Losing it is one more way the
             // merge has to stop: the segments it has written belong to the
             // collector now.
-            if let Some(stop) = control.heartbeat(self.store).await? {
+            if let Some(stop) = control.refresh_lease(self.store).await? {
                 return Ok(Some(stop));
             }
             self.refill(&mut iterators).await?;

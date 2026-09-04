@@ -991,7 +991,6 @@ pub struct NamespaceManifestPayload {
     pub next_run_no: RunNo,
     /// Delta merges each family group has published above a frozen base since
     /// that base was last rebuilt. A group with no entry has published none.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub frozen_base_delta_merges: BTreeMap<MetadataFamilyGroup, u32>,
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
@@ -1168,6 +1167,12 @@ mod tests {
         .expect("manifest");
 
         let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
+        let document: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("decode manifest document");
+        assert_eq!(
+            document["payload"]["frozen_base_delta_merges"],
+            serde_json::json!({})
+        );
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);

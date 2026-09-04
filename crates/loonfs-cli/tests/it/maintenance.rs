@@ -1157,15 +1157,16 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(starved_data["budget_exhausted"], true);
         assert!(starved_data.get("next_cursor").is_none());
 
-        // Supplying a budget with room for the roots and some candidates
-        // requests exactly one pass and exposes the opaque cursor instead
-        // of the CLI's default completion loop.
+        // Supplying a budget with room for the roots, the seven-unit
+        // compaction lease stage, and some candidates requests exactly one
+        // pass and exposes the opaque cursor instead of the CLI's default
+        // completion loop.
         let bounded_gc = harness.run(&[
             "--json",
             "maintenance",
             "gc",
             "--max-objects",
-            "8",
+            "15",
             "--profile",
             profile,
         ]);
@@ -1184,7 +1185,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "maintenance",
             "gc",
             "--max-objects",
-            "8",
+            "15",
             "--cursor",
             &cursor,
             "--profile",

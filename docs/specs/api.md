@@ -849,9 +849,12 @@ checkpoint record, each live manifest, each manifest the pass ages to find
 its reference manifest, and each retained WAL segment, read
 once, while marking. A WAL segment request the store fails is charged like
 one it serves, so a flaky store spends the budget faster than the retained
-chain is long. Deciding whether a completed session's content is still
-referenced then spends it again on each live manifest and the revision rows
-inside it. A pass that runs out partway through that scan skips
+chain is long. Every pass then charges the compaction lease stage, one unit
+per metadata family group, before it decides any candidate and whether or
+not it reaches that stage; a budget that cannot cover it stops there.
+Deciding whether a completed session's content
+is still referenced then spends it again on each live manifest and the
+revision rows inside it. A pass that runs out partway through that scan skips
 completed-content reclamation for the rest of the invocation: the session is
 retained, `content_reclamation_deferred` is set, and the sweep goes on
 through every other candidate under the usual budget. Deletion only ever

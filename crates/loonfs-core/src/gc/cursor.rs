@@ -6,8 +6,8 @@ use loonfs_api::{
     PageCursor,
 };
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_compaction_lease_prefix, metadata_compaction_prefix,
-    metadata_manifest_prefix, metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
+    checkpoint_prefix, metadata_compaction_prefix, metadata_manifest_prefix,
+    metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::layout::manifest_object_id_of;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -27,19 +27,16 @@ pub(super) enum CandidateFamily {
     MetadataSegments,
     /// Segments written under streaming compaction job prefixes.
     CompactionStaging,
-    /// Family-group leases that protect staged compaction segments.
-    CompactionLeases,
     Manifests,
     Checkpoints,
     UploadSessions,
 }
 
 impl CandidateFamily {
-    pub(super) const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::WalSegments,
         Self::MetadataSegments,
         Self::CompactionStaging,
-        Self::CompactionLeases,
         Self::Manifests,
         Self::Checkpoints,
         Self::UploadSessions,
@@ -51,10 +48,9 @@ impl CandidateFamily {
             Self::WalSegments => 0,
             Self::MetadataSegments => 1,
             Self::CompactionStaging => 2,
-            Self::CompactionLeases => 3,
-            Self::Manifests => 4,
-            Self::Checkpoints => 5,
-            Self::UploadSessions => 6,
+            Self::Manifests => 3,
+            Self::Checkpoints => 4,
+            Self::UploadSessions => 5,
         }
     }
 
@@ -67,7 +63,6 @@ impl CandidateFamily {
             Self::WalSegments => family == DurableObjectFamily::WalSegment,
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
             Self::CompactionStaging => family == DurableObjectFamily::MetadataCompactionStaging,
-            Self::CompactionLeases => family == DurableObjectFamily::MetadataCompactionLease,
             Self::Manifests => matches!(manifest_object_id_of(key), Some(Ok(_))),
             Self::Checkpoints => family == DurableObjectFamily::CheckpointRecord,
             Self::UploadSessions => family == DurableObjectFamily::UploadSession,
@@ -79,7 +74,6 @@ impl CandidateFamily {
             Self::WalSegments => wal_segment_prefix(namespace_id),
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
             Self::CompactionStaging => metadata_compaction_prefix(namespace_id),
-            Self::CompactionLeases => metadata_compaction_lease_prefix(namespace_id),
             Self::Manifests => metadata_manifest_prefix(namespace_id),
             Self::Checkpoints => checkpoint_prefix(namespace_id),
             Self::UploadSessions => upload_session_prefix(namespace_id),
@@ -255,6 +249,15 @@ mod tests {
             "last_key": "namespaces/demo/checkpoints/checkpoint.json"
         }));
         assert!(GcCursor::decode(&wrong_family_prefix, &namespace_id).is_err());
+
+        let removed_lease_family = token_over(&serde_json::json!({
+            "format_version": 1,
+            "kind": "core_gc",
+            "namespace_id": "demo",
+            "family": "compaction_leases",
+            "last_key": "namespaces/demo/metadata/compaction_leases/bindings.json"
+        }));
+        assert!(GcCursor::decode(&removed_lease_family, &namespace_id).is_err());
     }
 
     #[test]

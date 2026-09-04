@@ -151,15 +151,15 @@ Step budgets therefore price the selected logical input, and a step-contained me
 
 Each family group has one lease at `metadata/compaction_leases/{group}.json`, and its payload names the job whose output under `metadata/compactions/{job_id}/segments/` it protects. An `active` unexpired or `reaping` group lease excludes every other job for that group.
 
-The lease records the job ID, namespace ID, owner ID, status, start time, and most recent heartbeat. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
+The lease records the job ID, namespace ID, writer ID, status, start time, and absolute expiry. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
 
-The job creates a missing lease with `active` status and create-if-absent semantics before writing the first output segment. It takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and heartbeat fields; a held unexpired or `reaping` lease supersedes the new job. Every refresh uses compare-and-swap with the ETag returned by the preceding lease write. Refreshes occur every five minutes while the job runs and at the start of every finalization attempt. An active lease remains valid for 25 minutes after its last heartbeat, which covers missed heartbeats and the complete manifest-publication budget.
+The job creates a missing lease with `active` status and create-if-absent semantics before writing the first output segment. It takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and expiry fields; a held unexpired or `reaping` lease supersedes the new job. Every refresh uses compare-and-swap with the ETag returned by the preceding lease write and stores the current time plus the 25-minute lease lifetime in `expires_at_ms`. Refreshes occur every five minutes while the job runs and at the start of every finalization attempt. Readers compare their current time directly with `expires_at_ms`; the lifetime constant is only the writer's policy.
 
-Garbage collection reads the seven group lease keys once per namespace per pass and maps each named job to its lease. A fresh active lease keeps only that job's objects regardless of age. For an expired active lease, the collector uses compare-and-swap to change the status to `reaping`. If a concurrent heartbeat wins, the collector retains the job's objects. If the collector wins, the job's next heartbeat fails, the job returns a fenced outcome without publishing, and its unreferenced objects become eligible for collection. The `reaping` status is terminal, so a later pass can continue an interrupted cleanup without repeating the ownership decision.
+Garbage collection reads the seven group lease keys once per namespace per pass and maps each named job to its lease. A fresh active lease keeps only that job's objects regardless of age. For an expired active lease, the collector uses compare-and-swap to change the status to `reaping`. If a concurrent refresh wins, the collector retains the job's objects. If the collector wins, the job's next refresh fails, the job returns a fenced outcome without publishing, and its unreferenced objects become eligible for collection. The `reaping` status is terminal, so a later pass can continue an interrupted cleanup without repeating the ownership decision.
 
 A missing lease or a lease naming another job provides no ownership claim. An invalid lease fails the pass. Unreferenced objects in that prefix become eligible after a staging grace period derived from the lease expiry and the normal publication grace. Unrecognized keys under the compaction prefix are retained because ownership cannot be established safely.
 
-After publication, the job stops heartbeating but leaves its final active lease in place. This protects the output from a collection pass that captured its live references before the manifest update. After the lease expires, a later pass reads the updated manifest, retains the referenced output segments, claims the lease, and deletes it after processing the named job's prefix. Failed, cancelled, abandoned, superseded, and fenced jobs leave unreferenced output that is eventually collected.
+After publication, the job stops refreshing but leaves its final active lease in place. This protects the output from a collection pass that captured its live references before the manifest update. After the lease expires, a later pass reads the updated manifest, retains the referenced output segments, claims the lease, and deletes it after processing the named job's prefix. Failed, cancelled, abandoned, superseded, and fenced jobs leave unreferenced output that is eventually collected.
 
 ## Finalization
 
@@ -196,7 +196,7 @@ The implementation is validated with the following tests:
 - Exercise compare-and-swap retries after unrelated manifest updates.
 - Cancel jobs during reading, retention, writing, and finalization and verify that readers continue using the original manifest.
 - Keep all objects under a fresh job lease live beyond the normal garbage-collection grace period.
-- Race a job heartbeat against garbage collection's expired-lease claim and verify that exactly one side owns the prefix.
+- Race a job refresh against garbage collection's expired-lease claim and verify that exactly one side owns the prefix.
 - Fence a job after garbage collection claims its prefix and verify that the job publishes nothing.
 - Leave the final lease after publication and verify that an older collection pass cannot remove the published output.
 - Reclaim staged output after a lease expires, is already marked `reaping`, or is missing.
