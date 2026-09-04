@@ -572,7 +572,9 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-    let publisher = registry.publisher_for(&namespace_id).expect("publisher");
+    let publisher = registry
+        .test_publisher_for(&namespace_id)
+        .expect("publisher");
     let request = create_directory_request("ready-primary", "ready-primary");
 
     let primary = try_admit_candidate(
@@ -613,7 +615,9 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-    let publisher = registry.publisher_for(&namespace_id).expect("publisher");
+    let publisher = registry
+        .test_publisher_for(&namespace_id)
+        .expect("publisher");
     let request = create_directory_request("rejected-primary", "rejected-primary");
 
     let primary = try_admit_candidate(
@@ -1528,7 +1532,9 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
                 .await
         })
     };
-    let publisher = registry.publisher_for(&namespace_id).expect("publisher");
+    let publisher = registry
+        .test_publisher_for(&namespace_id)
+        .expect("publisher");
     wait_for_queued_candidates(&publisher, 2).await;
 
     store.release();
@@ -1676,7 +1682,9 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
                 .await
         })
     };
-    let publisher = registry.publisher_for(&namespace_id).expect("publisher");
+    let publisher = registry
+        .test_publisher_for(&namespace_id)
+        .expect("publisher");
     wait_for_queued_candidates(&publisher, 2).await;
 
     store.release();

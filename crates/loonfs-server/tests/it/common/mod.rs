@@ -303,6 +303,7 @@ pub(crate) fn test_config(
         auth_token: Some(auth_token.into()),
         content_token_secret: content_token_secret.into(),
         writer_id: writer_id.to_owned(),
+        max_open_namespaces: None,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: GrepConfig {

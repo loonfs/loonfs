@@ -170,13 +170,16 @@ pub use loonfs_objectstore::{
 };
 
 pub use cache::RuntimeCacheStats;
-pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
+pub use config::{
+    RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_OPEN_NAMESPACES,
+};
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
     PathEntriesPager, SnapshotsPager, TrashPager,
 };
 pub use handle::{
     FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
+    NamespaceSessionPolicy,
 };
 pub use maintenance::{
     GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation, MaintenanceConclusion,
@@ -193,6 +196,7 @@ pub use options::{
     ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
     UpdateAttributesOptions,
 };
+pub use publisher::{CloseNamespaceReport, NamespaceSessionState, WriterSessionStats};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 
 /// Result type used by the embedded runtime.

@@ -13,6 +13,6 @@ mod writer;
 
 pub use maintenance::{FsMaintenance, FsMaintenanceBuilder};
 pub use reader::{FsReader, FsReaderBuilder};
-pub use writer::{FsWriter, FsWriterBuilder};
+pub use writer::{FsWriter, FsWriterBuilder, NamespaceSessionPolicy};
 
 use builder_core::{owning_runtime, HandleBuilderCore};

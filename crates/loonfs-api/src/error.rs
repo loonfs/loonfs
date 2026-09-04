@@ -136,6 +136,8 @@ error_codes! {
     CommitIdReuseConflict => "commit_id_reuse_conflict",
     CommitOutcomeUnknown => "commit_outcome_unknown",
     CommitQueueFull => "commit_queue_full",
+    WriterSessionClosed => "writer_session_closed",
+    WriterCapacityExceeded => "writer_capacity_exceeded",
     ServerBusy => "server_busy",
     ShuttingDown => "shutting_down",
     DeadlineExceeded => "deadline_exceeded",
@@ -181,6 +183,8 @@ impl ErrorCode {
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
             ErrorCode::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             ErrorCode::CommitQueueFull
+            | ErrorCode::WriterSessionClosed
+            | ErrorCode::WriterCapacityExceeded
             | ErrorCode::ServerBusy
             | ErrorCode::ShuttingDown
             | ErrorCode::CheckpointUnavailable
@@ -254,6 +258,8 @@ impl ErrorCode {
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict
             | ErrorCode::CommitOutcomeUnknown
+            | ErrorCode::WriterSessionClosed
+            | ErrorCode::WriterCapacityExceeded
             | ErrorCode::DeadlineExceeded
             | ErrorCode::CheckpointUnavailable
             | ErrorCode::MaintenanceRequired

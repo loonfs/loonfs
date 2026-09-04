@@ -291,6 +291,8 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
+| `writer_session_closed` | 503 | This node holds no open writer session for the namespace. The request was not admitted; retry on the node the namespace is assigned to. |
+| `writer_capacity_exceeded` | 503 | This node holds its maximum number of writer sessions. The request was not admitted. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
@@ -669,6 +671,10 @@ its next publish fails with `writer_fenced`, terminally for that session.
 The error's `details` name the epoch and writer that displaced it, so an
 operator can tell a planned failover from two writers misconfigured against
 one namespace.
+
+A node closes a session to hand a namespace off. Closing writes nothing durable.
+The next node's first publish acquires the next writer epoch. A node holds a
+bounded number of sessions and refuses to open one beyond that limit.
 
 The standard mutation operations are defined in `format.md` ("Standard
 mutation operations"). `POST /commits` (section 6.8) exposes those operations
