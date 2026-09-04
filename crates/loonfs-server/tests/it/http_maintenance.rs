@@ -332,18 +332,20 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
         .expect("write file");
     post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
-    // Resume a bounded pass with its returned cursor.
+    // Resume a bounded pass with its returned cursor. Every pass pays for
+    // marking and the seven-unit compaction lease stage first; the rest of
+    // this budget buys a few candidates.
     let bounded = post_gc_with(
         &server_url,
         namespace.as_str(),
-        serde_json::json!({ "max_objects": 7 }),
+        serde_json::json!({ "max_objects": 14 }),
     )
     .expect("bounded gc pass");
     let cursor = bounded.next_cursor.expect("more candidate families remain");
     let resumed = post_gc_with(
         &server_url,
         namespace.as_str(),
-        serde_json::json!({ "max_objects": 7, "cursor": cursor }),
+        serde_json::json!({ "max_objects": 14, "cursor": cursor }),
     )
     .expect("resumed gc pass");
     assert!(resumed.next_cursor.is_some());

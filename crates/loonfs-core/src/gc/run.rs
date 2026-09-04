@@ -166,6 +166,9 @@ enum PassEnd {
     BudgetExhausted,
 }
 
+/// Budget units the compaction lease stage costs: one read per family group.
+pub(super) const COMPACTION_LEASE_STAGE_UNITS: u64 = MetadataFamilyGroup::ALL.len() as u64;
+
 impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
     /// Runs and settles the pass. Lease cleanup deliberately happens before
     /// the walk result is propagated, so no error or budget return can bypass
@@ -178,6 +181,14 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
     }
 
     async fn walk_candidates(&mut self) -> Result<PassEnd> {
+        // The compaction lease stage reads one lease per family group and
+        // settles them after the walk. Every pass pays for those reads here,
+        // whether or not it reaches the stage, so the budget bounds the pass
+        // and a pass that cannot cover the stage decides nothing.
+        if self.budget.remaining() < COMPACTION_LEASE_STAGE_UNITS {
+            return Ok(PassEnd::BudgetExhausted);
+        }
+        self.budget.charge_block(COMPACTION_LEASE_STAGE_UNITS);
         let resume_family = self.policy.resume.keyspace().family;
         let resume_last_key = self.policy.resume.last_key().map(str::to_owned);
 

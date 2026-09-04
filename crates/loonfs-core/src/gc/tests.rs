@@ -6,7 +6,7 @@ use super::budget::PassBudget;
 use super::config::GcConfig;
 use super::cursor::{cursor_after, CandidateFamily};
 use super::live_set::{recollect_live_set, select_reference_anchor, LiveSet, ReferenceAnchor};
-use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
+use super::run::{gc_namespace, gc_namespace_with_reverify_chunk, COMPACTION_LEASE_STAGE_UNITS};
 use super::uploads::{collect_referenced_content, CollectedReferences};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
@@ -1433,13 +1433,14 @@ async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
         !live.manifests.is_empty() && !live.wal_segments.is_empty(),
         "the fixture must give the scan more than one object to read"
     );
-
-    // One candidate a pass: the sweep advances a key at a time until it
-    // reaches the session, and nothing is left over for the scan behind
-    // that session. The walk has to get past it anyway.
+    // The smallest budget that gets through every stage: marking, the lease
+    // stage's reads, and one candidate. The sweep advances a key at a time
+    // until it reaches the session, and nothing is left over for the scan
+    // behind that session. The walk has to get past it anyway.
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let mut tiny = config();
-    tiny.max_objects = Some(marking_units(&store, &namespace_id, &past).await + 1);
+    tiny.max_objects =
+        Some(marking_units(&store, &namespace_id, &past).await + COMPACTION_LEASE_STAGE_UNITS + 1);
     let mut cursor: Option<String> = None;
     let mut deferred = false;
     let mut passes = 0;
@@ -1715,9 +1716,10 @@ async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
         "this pass did finish marking, so it has a root set and a reference set"
     );
 
-    // One additional unit lets the pass decide a candidate and advance.
+    // One unit past the roots and the lease stage lets the pass decide a
+    // candidate and advance.
     let mut one_more = config();
-    one_more.max_objects = Some(marking + 1);
+    one_more.max_objects = Some(marking + COMPACTION_LEASE_STAGE_UNITS + 1);
     let walked = gc_namespace(&store, &namespace_id, &one_more, &aged)
         .await
         .expect("pass with one candidate of room");
@@ -1739,7 +1741,7 @@ async fn a_pass_that_decides_nothing_echoes_its_cursor_verbatim() {
     let marking = marking_units(&store, &namespace_id, &aged).await;
 
     let mut walking = config();
-    walking.max_objects = Some(marking + 2);
+    walking.max_objects = Some(marking + COMPACTION_LEASE_STAGE_UNITS + 2);
     let first = gc_namespace(&store, &namespace_id, &walking, &aged)
         .await
         .expect("pass with two candidates of room");
@@ -1903,8 +1905,10 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
     let mut some_budget_reached_the_verdict = false;
     let mut some_budget_deferred_instead = false;
 
+    // Every budget here covers marking and the compaction lease stage; the
+    // candidates on top are what the scan has to fit inside.
     for candidates in 1..=16 {
-        let max_objects = marking + candidates;
+        let max_objects = marking + COMPACTION_LEASE_STAGE_UNITS + candidates;
         let trial_root = temp_dir.path().join(format!("trial-{candidates}"));
         copy_tree(&seed_root, &trial_root);
         let store = LocalFsStore::new(&trial_root).expect("trial store");
@@ -2589,10 +2593,11 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
     let reclaimable = context(expires_at_ms.saturating_add(1));
     let marking = marking_units(&store, &namespace_id, &reclaimable).await;
 
-    // Resume immediately before compaction staging and buy exactly its staged
-    // segment. The manifest family is the lookahead that stops the pass.
+    // Resume immediately before compaction staging and buy exactly the lease
+    // stage and its staged segment. The manifest family is the lookahead that
+    // stops the pass.
     let mut bounded = config();
-    bounded.max_objects = Some(marking + 1);
+    bounded.max_objects = Some(marking + COMPACTION_LEASE_STAGE_UNITS + 1);
     bounded.cursor = Some(
         cursor_after(
             &namespace_id,
@@ -2624,6 +2629,68 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
             .is_some(),
         "the claimed job's young segment remains for a later pass"
     );
+}
+
+#[tokio::test]
+async fn a_budget_short_of_the_lease_stage_reads_no_lease() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let (store, _staged_key, lease_key) =
+        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
+            .await;
+
+    let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
+    let expires_at_ms = died_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
+    write_compaction_lease(
+        &store,
+        &namespace_id,
+        &test_metadata_compaction_id(),
+        expires_at_ms,
+    )
+    .await;
+    let reclaimable = context(expires_at_ms.saturating_add(1));
+    let marking = marking_units(&store, &namespace_id, &reclaimable).await;
+    let store = RecordingStore::new(store, KeyPredicate::exact(lease_key.clone()));
+
+    // Resume immediately before compaction staging with one unit short of
+    // the lease stage. The stage is refused before its first read.
+    let mut short = config();
+    short.max_objects = Some(marking + COMPACTION_LEASE_STAGE_UNITS - 1);
+    short.cursor = Some(
+        cursor_after(
+            &namespace_id,
+            CandidateFamily::MetadataSegments,
+            format!("{}~", metadata_segment_prefix(&namespace_id)),
+        )
+        .encode()
+        .expect("encode cursor"),
+    );
+    let report = gc_namespace(&store, &namespace_id, &short, &reclaimable)
+        .await
+        .expect("refused pass");
+
+    assert!(report.budget_exhausted);
+    assert_eq!(
+        store.count(OperationClass::Read),
+        0,
+        "the lease is not read on a budget that cannot pay for the stage"
+    );
+    assert!(store
+        .head(&lease_key)
+        .await
+        .expect("head the lease")
+        .is_some());
+
+    // Unbounded, the same pass claims the expired lease and settles it.
+    gc_namespace(&store, &namespace_id, &config(), &reclaimable)
+        .await
+        .expect("unbounded rerun");
+    assert!(store.count(OperationClass::Read) > 0);
+    assert!(store
+        .head(&lease_key)
+        .await
+        .expect("head the lease")
+        .is_none());
 }
 
 #[tokio::test]
@@ -4786,9 +4853,13 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     .await;
     let mut bounded_config = config();
     // Three candidates a pass, on top of what marking this namespace's
-    // roots costs every time the pass rebuilds them.
-    bounded_config.max_objects =
-        Some(marking_units(&bounded_store, &namespace_id, &context(bounded_now)).await + 3);
+    // roots and the compaction lease stage cost every time the pass
+    // rebuilds them.
+    bounded_config.max_objects = Some(
+        marking_units(&bounded_store, &namespace_id, &context(bounded_now)).await
+            + COMPACTION_LEASE_STAGE_UNITS
+            + 3,
+    );
     let mut bounded_report = GcResponse::empty(namespace_id.clone());
     let mut passes = 0;
     loop {
@@ -4865,7 +4936,8 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     );
     let mut bounded = config();
     // Two candidates a pass, plus the roots the pass marks before it walks.
-    bounded.max_objects = Some(marking_units(&store, &namespace_id, &aged).await + 2);
+    bounded.max_objects =
+        Some(marking_units(&store, &namespace_id, &aged).await + COMPACTION_LEASE_STAGE_UNITS + 2);
     store.reset();
 
     let first = gc_namespace(&store, &namespace_id, &bounded, &aged)
@@ -4949,8 +5021,13 @@ async fn stale_cursor_rebuilds_roots_before_resuming() {
     }
     let first_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
     let mut bounded = config();
-    // One candidate a pass, on top of the roots the pass marks first.
-    bounded.max_objects = Some(marking_units(&store, &namespace_id, &context(first_now)).await + 1);
+    // One candidate a pass, on top of the roots the pass marks first and the
+    // lease stage it pays for.
+    bounded.max_objects = Some(
+        marking_units(&store, &namespace_id, &context(first_now)).await
+            + COMPACTION_LEASE_STAGE_UNITS
+            + 1,
+    );
     let first = gc_namespace(&store, &namespace_id, &bounded, &context(first_now))
         .await
         .expect("first bounded pass");

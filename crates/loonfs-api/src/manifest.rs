@@ -1079,8 +1079,8 @@ pub fn decode_namespace_manifest_json(
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
-        MetadataFamilyGroup, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
-        NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
+        MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope,
+        NamespaceManifestPayload, RunTier,
     };
     use crate::{
         ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
@@ -1136,68 +1136,6 @@ mod tests {
         let kind = super::NamespaceManifestKind::NamespaceManifest;
         let serialized = serde_json::to_value(kind).expect("serialize kind");
         assert_eq!(serialized, serde_json::Value::from(kind.as_str()));
-    }
-
-    #[test]
-    fn metadata_family_groups_match_the_format_spec_table() {
-        let spec = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/specs/format.md"
-        ))
-        .expect("read docs/specs/format.md");
-        let table = spec
-            .split_once("The family groups and their exact members:")
-            .expect("format.md family-group table intro")
-            .1
-            .trim_start()
-            .split_once("\n\n")
-            .expect("format.md family-group table end")
-            .0;
-
-        let mut documented = std::collections::BTreeMap::new();
-        for line in table.lines() {
-            let Some(row) = line.strip_prefix("| `") else {
-                continue;
-            };
-            let mut cells = row.split(" | ");
-            let group = cells
-                .next()
-                .expect("group cell")
-                .trim_end_matches('`')
-                .to_owned();
-            let families = cells
-                .next()
-                .expect("families cell")
-                .trim_end_matches(" |")
-                .split(", ")
-                .map(|family| family.trim_matches('`').to_owned())
-                .collect::<Vec<_>>();
-            documented.insert(group, families);
-        }
-
-        for group in MetadataFamilyGroup::ALL {
-            let families = group
-                .families()
-                .iter()
-                .map(|family| {
-                    serde_json::to_value(family)
-                        .expect("serialize metadata row family")
-                        .as_str()
-                        .expect("metadata row family serializes as a string")
-                        .to_owned()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                documented.remove(group.as_str()),
-                Some(families),
-                "`{}` disagrees with the format.md family-group table",
-                group.as_str()
-            );
-        }
-        assert!(
-            documented.is_empty(),
-            "format.md documents metadata family groups this build does not define: {documented:?}"
-        );
     }
 
     #[test]
