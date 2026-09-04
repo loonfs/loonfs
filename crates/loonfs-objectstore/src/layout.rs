@@ -207,10 +207,9 @@ fn parsed<'a>(
 mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        checkpoint_record, content_blob, metadata_compaction_lease,
-        metadata_compaction_lease_prefix, metadata_compaction_segment, metadata_manifest_object,
-        metadata_root, metadata_segment, metadata_segment_prefix, upload_session, wal_floor,
-        wal_head, wal_segment, wal_segment_prefix,
+        checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_segment,
+        metadata_manifest_object, metadata_root, metadata_segment, metadata_segment_prefix,
+        upload_session, wal_floor, wal_head, wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
@@ -311,10 +310,6 @@ mod tests {
         let staged = metadata_compaction_segment(&namespace_id, &job, &segment_id);
 
         assert!(!staged.starts_with(&metadata_segment_prefix(&namespace_id)));
-        assert!(
-            metadata_compaction_lease(&namespace_id, MetadataFamilyGroup::Bindings)
-                .starts_with(&metadata_compaction_lease_prefix(&namespace_id))
-        );
         let wal_segments = wal_segment_prefix(&namespace_id);
         assert!(!wal_head(&namespace_id).starts_with(&wal_segments));
         assert!(!wal_floor(&namespace_id).starts_with(&wal_segments));

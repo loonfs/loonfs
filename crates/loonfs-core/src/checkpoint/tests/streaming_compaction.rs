@@ -608,7 +608,7 @@ async fn test_lease<'a, S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         spec,
-        context.writer_id.as_str(),
+        &context.writer_id,
         context.now_ms,
         timer,
     )
@@ -643,7 +643,7 @@ async fn write_lease_in_state<S: ObjectStore + ?Sized>(
         job_id: spec.job_id().clone(),
         namespace_id: namespace_id.clone(),
         group: spec.group(),
-        writer_id: "test-writer".to_owned(),
+        writer_id: loonfs_api::WriterId::parse("test-writer").expect("writer id"),
         status,
         started_at_ms: heartbeat_at_ms,
         heartbeat_at_ms,

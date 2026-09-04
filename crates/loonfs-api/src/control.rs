@@ -181,9 +181,10 @@ pub struct MetadataCompactionLeaseState {
     pub namespace_id: NamespaceId,
     /// Family group the job is rebuilding.
     pub group: MetadataFamilyGroup,
-    /// Writer identity the job runs under, for an operator reading the
-    /// object. This is the same label the namespace head records.
-    pub writer_id: String,
+    /// Writer id of the process running the job (`MutationContext::writer_id`):
+    /// the server's in an embedded deployment, the maintenance node's in a
+    /// standalone one.
+    pub writer_id: WriterId,
     /// Who owns the prefix: the job that wrote the lease, or the collector
     /// that claimed it.
     pub status: CompactionLeaseStatus,

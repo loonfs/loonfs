@@ -21,7 +21,7 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, CompactionLeaseStatus, ControlObjectKind, MetadataCompactionLeaseState,
 };
-use loonfs_api::{MetadataCompactionId, MetadataFamilyGroup, NamespaceId};
+use loonfs_api::{MetadataCompactionId, MetadataFamilyGroup, NamespaceId, WriterId};
 use loonfs_objectstore::keys::metadata_compaction_lease;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -220,7 +220,7 @@ impl<'a> CompactionLease<'a> {
         store: &S,
         namespace_id: &NamespaceId,
         spec: &MetadataCompactionSpec,
-        writer_id: &str,
+        writer_id: &WriterId,
         started_at_ms: u64,
         timer: &'a dyn MonotonicTimer,
     ) -> Result<LeaseAcquire<'a>> {
@@ -419,7 +419,7 @@ impl<'a> CompactionLease<'a> {
         store: &S,
         namespace_id: &NamespaceId,
         spec: &MetadataCompactionSpec,
-        writer_id: &str,
+        writer_id: &WriterId,
         started_at_ms: u64,
         timer: &'a dyn MonotonicTimer,
     ) -> Result<Self> {
@@ -455,14 +455,14 @@ impl<'a> CompactionLease<'a> {
 fn initial_lease_state(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    writer_id: &str,
+    writer_id: &WriterId,
     started_at_ms: u64,
 ) -> MetadataCompactionLeaseState {
     MetadataCompactionLeaseState {
         job_id: spec.job_id().clone(),
         namespace_id: namespace_id.clone(),
         group: spec.group(),
-        writer_id: writer_id.to_owned(),
+        writer_id: writer_id.clone(),
         status: CompactionLeaseStatus::Active {},
         started_at_ms,
         heartbeat_at_ms: started_at_ms,

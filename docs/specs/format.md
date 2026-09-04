@@ -172,6 +172,8 @@ The namespace tree's lifecycle can be read off its grammar:
   validate namespace id, object id, family, checksum, and sequence fields;
   the same fact is never encoded twice (the row family lives in the manifest
   and the segment envelope, not the path).
+  The compaction lease is the exception: its key embeds the family group so
+  all seven lease keys can be computed and read without listing.
 - **`wal/head.json` is the namespace.** The head exists, or the namespace does
   not. It is the existence marker, and after deletion it is kept forever as
   the tombstone that retires the namespace id.
@@ -1591,7 +1593,7 @@ checkpoint instead of replaying from an obsolete cursor.
 
 Durable attribution fields describe the recorded event. Inode rows use `created_by`; file revisions, commit receipts, and WAL commits use `committed_by`; tombstones and active deletions use `deleted_by`; and attribute revisions use `updated_by`.
 
-Streaming compaction leases record the maintenance actor as `writer_id`, independently of the namespace head's writer. No other maintenance job stores this value.
+A streaming compaction lease's `writer_id` is the writer id of the process running the job (`MutationContext::writer_id`): the server's in an embedded deployment, the maintenance node's in a standalone one. No other maintenance job stores this value.
 
 The commit fingerprint preimage in section 3.3.1 describes the commit request rather than a durable record. It uses `actor_kind` and `actor_id`, matching `CommitRequest.actor`.
 
@@ -1898,7 +1900,7 @@ the run it writes for one family group. So `run_no` and `family` together name
 one family's segment list inside one run, and `segment_index` numbers that
 list from zero, once each, in the order the segments were written.
 
-The manifest also records, per family group, how many delta merges have published above a frozen base since that base was last rebuilt.
+The manifest's required `frozen_base_delta_merges` map records, per family group, how many delta merges have published above a frozen base since that base was last rebuilt. It is written as `{}` when no group has published such a merge.
 
 A run also carries `run_seq`, the namespace sequence it materialized through,
 and `tier`, which is either `delta` or `base`. A WAL flush writes a delta run,
@@ -1941,6 +1943,18 @@ The ten families and their exact grammar:
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` | the row key |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` | `commit-receipt-{commit_id_hex}` |
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` | `attribute-{inode_id:020}` |
+
+The family groups and their exact members:
+
+| Group | Row families |
+| --- | --- |
+| `bindings` | `direntry_binds`, `direntry_child_binds`, `direntry_unbinds` |
+| `revisions` | `revisions`, `revisions_by_inode_desc` |
+| `inodes` | `inodes` |
+| `tombstones` | `tombstones` |
+| `active_deletions` | `active_deletions` |
+| `commit_receipts` | `commit_receipts` |
+| `attributes` | `attributes` |
 
 `direntry_binds` and `direntry_child_binds` store the same `direntry_bind` rows under different keys. The two revision families do the same for `file_revision` rows. A row key therefore depends on both the row and its family.
 
@@ -2299,9 +2313,9 @@ A pass reads the namespace head first. An absent head means the namespace
 does not exist, so there is nothing to collect and nothing to ignore.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
-`wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/segments/`, `metadata/compactions/`, `metadata/compaction_leases/`,
-`checkpoints/`, and `wal/segments/` collections. A live manifest roots every object key its
+`wal/floor.json`, `metadata/root.json`, the seven point-read compaction lease
+keys, and the `metadata/manifests/`, `metadata/segments/`,
+`metadata/compactions/`, `checkpoints/`, and `wal/segments/` collections. A live manifest roots every object key its
 `runs` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
 halves are split at the completed line and described in rule 11.
@@ -2485,7 +2499,7 @@ publishing CAS) — under these rules:
    `namespaces/{namespace_id}/metadata/compactions/{job_id}/` and writes its
    output under `segments/` inside it, while its family group has one lease at
    `namespaces/{namespace_id}/metadata/compaction_leases/{group}.json`. The
-   lease carries ownership only — job, namespace, group, owner, the tagged
+   lease carries ownership only — job, namespace, group, `writer_id`, the tagged
    `status`, `started_at_ms`, `heartbeat_at_ms` — and never a cursor, an output
    descriptor, an offset, or resumable progress. The job creates a missing
    lease `active` with create-if-absent before its first output object, takes

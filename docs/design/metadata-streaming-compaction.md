@@ -151,7 +151,7 @@ Step budgets therefore price the selected logical input, and a step-contained me
 
 Each family group has one lease at `metadata/compaction_leases/{group}.json`, and its payload names the job whose output under `metadata/compactions/{job_id}/segments/` it protects. An `active` unexpired or `reaping` group lease excludes every other job for that group.
 
-The lease records the job ID, namespace ID, owner ID, status, start time, and most recent heartbeat. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
+The lease records the job ID, namespace ID, writer ID, status, start time, and most recent heartbeat. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
 
 The job creates a missing lease with `active` status and create-if-absent semantics before writing the first output segment. It takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and heartbeat fields; a held unexpired or `reaping` lease supersedes the new job. Every refresh uses compare-and-swap with the ETag returned by the preceding lease write. Refreshes occur every five minutes while the job runs and at the start of every finalization attempt. An active lease remains valid for 25 minutes after its last heartbeat, which covers missed heartbeats and the complete manifest-publication budget.
 

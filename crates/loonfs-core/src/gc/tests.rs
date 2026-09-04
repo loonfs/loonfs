@@ -2274,6 +2274,7 @@ async fn write_compaction_lease<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         metadata_compaction_id,
+        loonfs_api::MetadataFamilyGroup::Bindings,
         heartbeat_at_ms,
         loonfs_api::wire::control::CompactionLeaseStatus::Active {},
     )
@@ -2285,6 +2286,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     metadata_compaction_id: &loonfs_api::MetadataCompactionId,
+    group: loonfs_api::MetadataFamilyGroup,
     heartbeat_at_ms: u64,
     status: loonfs_api::wire::control::CompactionLeaseStatus,
 ) {
@@ -2293,8 +2295,8 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
         loonfs_api::wire::control::MetadataCompactionLeaseState {
             job_id: metadata_compaction_id.clone(),
             namespace_id: namespace_id.clone(),
-            group: loonfs_api::MetadataFamilyGroup::Bindings,
-            writer_id: "writer".to_owned(),
+            group,
+            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
             status,
             started_at_ms: 1_000,
             heartbeat_at_ms,
@@ -2305,7 +2307,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
         loonfs_api::wire::control::encode_control_object(&envelope).expect("encode a lease");
     store
         .put(
-            &metadata_compaction_lease(namespace_id, loonfs_api::MetadataFamilyGroup::Bindings),
+            &metadata_compaction_lease(namespace_id, group),
             Bytes::from(bytes),
             PutMode::Overwrite,
         )
@@ -2475,6 +2477,40 @@ async fn a_lease_that_does_not_decode_fails_the_pass() {
 }
 
 #[tokio::test]
+async fn two_group_leases_naming_the_same_job_are_namespace_corruption() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let metadata_compaction_id = test_metadata_compaction_id();
+    let (store, staged_key, _) =
+        namespace_with_staged_output(&temp_dir, &namespace_id, &metadata_compaction_id).await;
+    let now_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
+    for group in [
+        loonfs_api::MetadataFamilyGroup::Bindings,
+        loonfs_api::MetadataFamilyGroup::Revisions,
+    ] {
+        write_compaction_lease_in_state(
+            &store,
+            &namespace_id,
+            &metadata_compaction_id,
+            group,
+            now_ms,
+            loonfs_api::wire::control::CompactionLeaseStatus::Active {},
+        )
+        .await;
+    }
+
+    let error = gc_namespace(&store, &namespace_id, &config(), &context(now_ms))
+        .await
+        .expect_err("one job id cannot own two group leases");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
+    assert!(store
+        .head(&staged_key)
+        .await
+        .expect("head the staged segment")
+        .is_some());
+}
+
+#[tokio::test]
 async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -2551,7 +2587,7 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
     let marking = marking_units(&store, &namespace_id, &reclaimable).await;
 
     // Resume immediately before compaction staging and buy exactly its staged
-    // segment. The lease family is the lookahead that stops the pass.
+    // segment. The manifest family is the lookahead that stops the pass.
     let mut bounded = config();
     bounded.max_objects = Some(marking + 1);
     bounded.cursor = Some(

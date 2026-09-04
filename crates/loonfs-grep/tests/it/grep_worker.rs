@@ -27,9 +27,8 @@ use loonfs_grep::{
     GrepReorganizeOutcome, GrepService, GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, checkpoint_record, metadata_compaction_lease_prefix,
-    metadata_compaction_prefix, metadata_manifest_object, metadata_manifest_prefix,
-    metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
+    checkpoint_prefix, checkpoint_record, metadata_compaction_prefix, metadata_manifest_object,
+    metadata_manifest_prefix, metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -2361,7 +2360,6 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
             wal_segment_prefix(&live_namespace),
             metadata_segment_prefix(&live_namespace),
             metadata_compaction_prefix(&live_namespace),
-            metadata_compaction_lease_prefix(&live_namespace),
             metadata_manifest_prefix(&live_namespace),
             checkpoint_prefix(&live_namespace),
             upload_session_prefix(&live_namespace),

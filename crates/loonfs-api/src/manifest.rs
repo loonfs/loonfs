@@ -991,7 +991,6 @@ pub struct NamespaceManifestPayload {
     pub next_run_no: RunNo,
     /// Delta merges each family group has published above a frozen base since
     /// that base was last rebuilt. A group with no entry has published none.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub frozen_base_delta_merges: BTreeMap<MetadataFamilyGroup, u32>,
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
@@ -1080,8 +1079,8 @@ pub fn decode_namespace_manifest_json(
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
-        MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope,
-        NamespaceManifestPayload, RunTier,
+        MetadataFamilyGroup, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
+        NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
     };
     use crate::{
         ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
@@ -1140,6 +1139,68 @@ mod tests {
     }
 
     #[test]
+    fn metadata_family_groups_match_the_format_spec_table() {
+        let spec = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/specs/format.md"
+        ))
+        .expect("read docs/specs/format.md");
+        let table = spec
+            .split_once("The family groups and their exact members:")
+            .expect("format.md family-group table intro")
+            .1
+            .trim_start()
+            .split_once("\n\n")
+            .expect("format.md family-group table end")
+            .0;
+
+        let mut documented = std::collections::BTreeMap::new();
+        for line in table.lines() {
+            let Some(row) = line.strip_prefix("| `") else {
+                continue;
+            };
+            let mut cells = row.split(" | ");
+            let group = cells
+                .next()
+                .expect("group cell")
+                .trim_end_matches('`')
+                .to_owned();
+            let families = cells
+                .next()
+                .expect("families cell")
+                .trim_end_matches(" |")
+                .split(", ")
+                .map(|family| family.trim_matches('`').to_owned())
+                .collect::<Vec<_>>();
+            documented.insert(group, families);
+        }
+
+        for group in MetadataFamilyGroup::ALL {
+            let families = group
+                .families()
+                .iter()
+                .map(|family| {
+                    serde_json::to_value(family)
+                        .expect("serialize metadata row family")
+                        .as_str()
+                        .expect("metadata row family serializes as a string")
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                documented.remove(group.as_str()),
+                Some(families),
+                "`{}` disagrees with the format.md family-group table",
+                group.as_str()
+            );
+        }
+        assert!(
+            documented.is_empty(),
+            "format.md documents metadata family groups this build does not define: {documented:?}"
+        );
+    }
+
+    #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
         let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
@@ -1168,6 +1229,12 @@ mod tests {
         .expect("manifest");
 
         let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
+        let document: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("decode manifest document");
+        assert_eq!(
+            document["payload"]["frozen_base_delta_merges"],
+            serde_json::json!({})
+        );
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
