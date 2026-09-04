@@ -25,7 +25,9 @@ use loonfs_core::cache::{
 use loonfs_core::time::current_time_ms;
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::Semaphore;
 
 /// Shared object-store client, read configuration, caches, and metrics.
 #[derive(Clone)]
@@ -53,6 +55,8 @@ pub(crate) struct WriterIdentity {
 /// Writer state shared weakly with the publisher worker.
 pub(crate) struct WriterBits {
     pub(crate) identity: WriterIdentity,
+    pub(crate) wal_fold_permits: Semaphore,
+    pub(crate) wal_folds_waiting: AtomicUsize,
     pub(crate) maintenance_hint_observer: Option<MaintenanceHintObserver>,
     /// Optional synchronous notification after a mutation batch durably
     /// advances a namespace. Callers promise that it does not block.
@@ -67,17 +71,10 @@ impl WriterBits {
         namespace_id: &NamespaceId,
         publication: &NamespacePublication,
     ) {
-        if let Some(observer) = &self.maintenance_hint_observer {
-            let hint = MaintenanceHint::Published(publication.clone());
-            let observed =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
-            if observed.is_err() {
-                tracing::error!(
-                    namespace_id = %namespace_id,
-                    "maintenance hint observer panicked; publication state is durable"
-                );
-            }
-        }
+        self.send_maintenance_hint(
+            namespace_id,
+            MaintenanceHint::Published(publication.clone()),
+        );
 
         let Some(through_seq) = publication.committed_through_seq else {
             return;
@@ -95,6 +92,28 @@ impl WriterBits {
                 namespace_id = %namespace_id,
                 through_seq = through_seq.0,
                 "namespace advance observer panicked; the commit was already durable"
+            );
+        }
+    }
+
+    pub(crate) fn notify_fold_finished(&self, namespace_id: &NamespaceId) {
+        self.send_maintenance_hint(
+            namespace_id,
+            MaintenanceHint::WalFoldFinished {
+                namespace_id: namespace_id.clone(),
+            },
+        );
+    }
+
+    fn send_maintenance_hint(&self, namespace_id: &NamespaceId, hint: MaintenanceHint) {
+        let Some(observer) = &self.maintenance_hint_observer else {
+            return;
+        };
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
+        if observed.is_err() {
+            tracing::error!(
+                namespace_id = %namespace_id,
+                "maintenance hint observer panicked; the durable state it describes is unaffected"
             );
         }
     }

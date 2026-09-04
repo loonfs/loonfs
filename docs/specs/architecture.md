@@ -93,12 +93,17 @@ durable state.
 
 | Job | Run | Admission |
 | --- | --- | --- |
-| `metadata` | Flush a due WAL tail and merge one bounded reorganization unit. | After a fold or due WAL publication; reconciliation recovers missed hints. |
-| `metadata-compaction` | Run one streaming metadata compaction under its two-permit limit. | Follow-up from `metadata`. |
+| `metadata` | Flush a due WAL tail found by its own run and merge one bounded reorganization unit. | When a writer's fold attempt ends, whatever its outcome, and during reconciliation or an explicit run. |
+| `metadata-compaction` | Run one streaming metadata compaction under its configured permit limit (two by default). | Follow-up from `metadata`. |
 | `gc` | Perform one bounded mark-and-sweep pass. | At reclamation deadlines. |
 | `grep-index` | Build or reorganize one bounded unit of the grep index. | After publication on hosts configured to maintain the index. |
 | `grep-gc` | Inspect one bounded part of a namespace's grep objects. | Explicit assignment. |
 | retention (*not a job*) | Advance the retention floor. | Explicit request. |
+
+A live writer folds the WAL tails of namespaces it publishes to under one writer-wide concurrency
+bound. The `metadata` job runs after each fold attempt ends, whatever its outcome, so it reorganizes
+after a successful fold and retries a failed one. It also flushes a due tail found by reconciliation
+or an explicit run; a publication hint does not start a flush.
 
 ### Hosts
 

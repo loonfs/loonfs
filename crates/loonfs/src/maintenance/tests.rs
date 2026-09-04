@@ -608,7 +608,6 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
         .hint(MaintenanceHint::Published(NamespacePublication {
             namespace_id: namespace_id.clone(),
             committed_through_seq: None,
-            folded: false,
             wal_tail_segments: 4,
         }));
     runner.drain().await.expect("nothing was scheduled");
@@ -622,7 +621,6 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
         .hint(MaintenanceHint::Published(NamespacePublication {
             namespace_id: namespace_id.clone(),
             committed_through_seq: Some(ChangeSeq(7)),
-            folded: false,
             wal_tail_segments: 5,
         }));
     runner.drain().await.expect("the subscriber's step settles");
@@ -784,6 +782,7 @@ async fn a_nudge_for_an_unregistered_job_runs_nothing() {
 struct BlockingJob {
     id: MaintenanceJobId,
     publication: bool,
+    fold: bool,
     follow_up: Option<MaintenanceJobId>,
     runs: AtomicUsize,
     entered: watch::Sender<usize>,
@@ -794,11 +793,13 @@ impl BlockingJob {
     fn new(
         id: MaintenanceJobId,
         publication: bool,
+        fold: bool,
         follow_up: Option<MaintenanceJobId>,
     ) -> Arc<Self> {
         Arc::new(Self {
             id,
             publication,
+            fold,
             follow_up,
             runs: AtomicUsize::new(0),
             entered: watch::channel(0).0,
@@ -853,16 +854,21 @@ impl MaintenanceJob for BlockingJob {
     fn should_run_after_publication(&self, _publication: &NamespacePublication) -> bool {
         self.publication
     }
+
+    fn should_run_after_fold(&self) -> bool {
+        self.fold
+    }
 }
 
 #[tokio::test]
-async fn published_hints_coalesce_and_follow_ups_admit_once() {
+async fn wal_fold_finished_hints_coalesce_and_follow_ups_admit_once() {
     let metadata = BlockingJob::new(
         MaintenanceJobId::METADATA,
+        false,
         true,
         Some(MaintenanceJobId::METADATA_COMPACTION),
     );
-    let compaction = BlockingJob::new(MaintenanceJobId::METADATA_COMPACTION, false, None);
+    let compaction = BlockingJob::new(MaintenanceJobId::METADATA_COMPACTION, false, false, None);
     let registry = MaintenanceRegistry::new();
     registry.register(metadata.clone()).expect("metadata job");
     registry
@@ -873,19 +879,27 @@ async fn published_hints_coalesce_and_follow_ups_admit_once() {
         .build()
         .expect("runner");
     let namespace_id = namespace_id("hints");
-    let publication = NamespacePublication {
-        namespace_id: namespace_id.clone(),
-        committed_through_seq: Some(ChangeSeq(1)),
-        folded: true,
-        wal_tail_segments: 0,
-    };
 
     runner
         .handle()
-        .hint(MaintenanceHint::Published(publication.clone()));
-    runner
-        .handle()
-        .hint(MaintenanceHint::Published(publication));
+        .hint(MaintenanceHint::Published(NamespacePublication {
+            namespace_id: namespace_id.clone(),
+            committed_through_seq: Some(ChangeSeq(1)),
+            wal_tail_segments: loonfs_core::limits::CHECKPOINT_AT_WAL_SEGMENTS,
+        }));
+    runner.drain().await.expect("publication schedules nothing");
+    assert_eq!(
+        metadata.runs.load(Ordering::SeqCst),
+        0,
+        "a due-tail publication does not schedule a metadata flush"
+    );
+
+    runner.handle().hint(MaintenanceHint::WalFoldFinished {
+        namespace_id: namespace_id.clone(),
+    });
+    runner.handle().hint(MaintenanceHint::WalFoldFinished {
+        namespace_id: namespace_id.clone(),
+    });
     metadata.wait_entered(1).await;
     assert_eq!(metadata.runs.load(Ordering::SeqCst), 1);
     metadata.release();
@@ -927,7 +941,6 @@ async fn reconciliation_recovers_a_hint_dropped_before_attachment() {
     let hint = MaintenanceHint::Published(NamespacePublication {
         namespace_id: namespace_id.clone(),
         committed_through_seq: Some(ChangeSeq(1)),
-        folded: false,
         wal_tail_segments: 0,
     });
     let dropped_before = MaintenanceHintRelay::dropped();

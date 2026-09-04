@@ -90,8 +90,6 @@ pub struct NamespacePublication {
     pub namespace_id: NamespaceId,
     /// Highest sequence committed by this attempt.
     pub committed_through_seq: Option<ChangeSeq>,
-    /// Whether the attempt folded the WAL tail.
-    pub folded: bool,
     /// WAL segments visible after the attempt.
     pub wal_tail_segments: u64,
 }
@@ -156,6 +154,11 @@ pub trait MaintenanceJob: Send + Sync + 'static {
 
     /// Returns whether a publication should nudge this job.
     fn should_run_after_publication(&self, _publication: &NamespacePublication) -> bool {
+        false
+    }
+
+    /// Returns whether a finished WAL-fold attempt should nudge this job.
+    fn should_run_after_fold(&self) -> bool {
         false
     }
 }

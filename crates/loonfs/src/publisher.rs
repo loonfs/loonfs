@@ -13,8 +13,8 @@ use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespacePublication,
-    NamespaceSessionPolicy, RuntimeCacheConfig, RuntimeError,
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespaceSessionPolicy,
+    RuntimeCacheConfig, RuntimeError,
 };
 use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
@@ -23,8 +23,7 @@ use loonfs_core::cache::Recency;
 use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
 use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, CONTENTION_RETRY_LIMIT};
 use loonfs_core::publish::{
-    NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WalFoldSnapshot,
-    WriterSessionState,
+    NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::collections::{HashMap, VecDeque};
@@ -1305,9 +1304,7 @@ impl NamespacePublisher {
         }
         let fold_start = if publish.wal_tail_segments >= CHECKPOINT_AT_WAL_SEGMENTS || write_stopped
         {
-            engine
-                .wal_fold_snapshot()
-                .and_then(|snapshot| self.start_fold(snapshot, publish.wal_tail_segments))
+            self.start_fold()
         } else {
             None
         };
@@ -1334,11 +1331,7 @@ impl NamespacePublisher {
         })
     }
 
-    fn start_fold(
-        &self,
-        snapshot: WalFoldSnapshot,
-        wal_tail_segments: u64,
-    ) -> Option<oneshot::Sender<()>> {
+    fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
         if state
             .fold
@@ -1357,7 +1350,7 @@ impl NamespacePublisher {
             if started.await.is_err() {
                 return;
             }
-            if AssertUnwindSafe(publisher.run_fold(snapshot, wal_tail_segments))
+            if AssertUnwindSafe(publisher.run_fold())
                 .catch_unwind()
                 .await
                 .is_err()
@@ -1373,16 +1366,42 @@ impl NamespacePublisher {
         Some(start)
     }
 
-    async fn run_fold(&self, snapshot: WalFoldSnapshot, wal_tail_segments: u64) {
+    async fn run_fold(&self) {
         let Some(writer) = self.writer.upgrade() else {
             return;
+        };
+        let waiting = writer.wal_folds_waiting.fetch_add(1, Ordering::SeqCst) + 1;
+        self.read_core
+            .instruments()
+            .publisher_wal_folds_waiting(waiting);
+        let _permit = writer
+            .wal_fold_permits
+            .acquire()
+            .await
+            .expect("fold permit semaphore should remain open");
+        let waiting = writer.wal_folds_waiting.fetch_sub(1, Ordering::SeqCst) - 1;
+        self.read_core
+            .instruments()
+            .publisher_wal_folds_waiting(waiting);
+        let snapshot = {
+            let slot = self.engine.lock().await;
+            let snapshot = slot
+                .engine
+                .as_ref()
+                .and_then(NamespaceCommitEngine::wal_fold_snapshot);
+            if snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.wal_tail_segments < CHECKPOINT_AT_WAL_SEGMENTS)
+            {
+                return;
+            }
+            snapshot
         };
         let context = match writer.identity.mutation_context() {
             Ok(context) => context,
             Err(error) => {
                 tracing::info!(
                     namespace_id = %self.namespace_id,
-                    wal_tail_segments,
                     error = %error,
                     "WAL-tail fold failed"
                 );
@@ -1391,7 +1410,7 @@ impl NamespacePublisher {
         };
         let started_ms = self.timer.monotonic_now_ms();
         let segment_cache = self.read_core.metadata_segment_cache();
-        let result = loonfs_core::fold_wal_tail_snapshot(
+        let result = loonfs_core::fold_wal_tail(
             self.read_core.store(),
             Some(segment_cache.as_ref()),
             &self.namespace_id,
@@ -1407,25 +1426,16 @@ impl NamespacePublisher {
         match result {
             Ok(_) => {
                 self.read_core.instruments().publisher_wal_fold();
-                writer.notify_after_publish(
-                    &self.namespace_id,
-                    &NamespacePublication {
-                        namespace_id: self.namespace_id.clone(),
-                        committed_through_seq: None,
-                        folded: true,
-                        wal_tail_segments: 0,
-                    },
-                );
             }
             Err(error) => {
                 tracing::info!(
                     namespace_id = %self.namespace_id,
-                    wal_tail_segments,
                     error = %error.message(),
                     "WAL-tail fold failed"
                 );
             }
         }
+        writer.notify_fold_finished(&self.namespace_id);
     }
 
     /// Runs the delete barrier. Returns true when the publisher is now

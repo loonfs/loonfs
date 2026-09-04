@@ -984,7 +984,6 @@ pub(crate) async fn publish_batch_with_engine(
         &NamespacePublication {
             namespace_id: namespace_id.clone(),
             committed_through_seq: highest_committed_seq(&results),
-            folded: false,
             wal_tail_segments,
         },
     );

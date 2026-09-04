@@ -159,6 +159,17 @@ impl MaintenanceHandle {
                     }
                 }
             }
+            MaintenanceHint::WalFoldFinished { namespace_id } => {
+                for id in inner.registry.job_ids() {
+                    if inner
+                        .registry
+                        .get(id)
+                        .is_some_and(|job| job.should_run_after_fold())
+                    {
+                        nudge_if_inactive(&inner, id, &namespace_id);
+                    }
+                }
+            }
             MaintenanceHint::DueAt {
                 namespace_id,
                 job,

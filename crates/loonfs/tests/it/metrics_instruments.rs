@@ -30,6 +30,17 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
     }
 }
 
+fn gauge(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> i64 {
+    let entry = snapshot
+        .by_name(name)
+        .find(|entry| entry.labels == labels)
+        .unwrap_or_else(|| panic!("no `{name}` registered with labels {labels:?}"));
+    match entry.value {
+        MetricValue::Gauge(value) => value,
+        ref other => panic!("expected a gauge, found {other:?}"),
+    }
+}
+
 fn histogram_count(snapshot: &MetricsSnapshot, name: &str) -> u64 {
     snapshot
         .by_name(name)
@@ -45,8 +56,8 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let namespace_id = namespace_id("demo");
-    // Enough writes to push the WAL tail past its threshold, which is what
-    // nudges the metadata job and gives the runner a step to settle.
+    // Enough writes to push the WAL tail past its threshold, so the writer
+    // folds it and nudges the metadata job to reorganize.
     let writes = MetadataMaintenanceOptions::default()
         .max_wal_tail_segments
         .get()
@@ -145,6 +156,11 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         "the threshold-crossing publish records its fold"
     );
     assert_eq!(
+        gauge(&snapshot, "loonfs.publisher.wal_folds_waiting", &[]),
+        0,
+        "the completed fold leaves no waiter"
+    );
+    assert_eq!(
         histogram_count(&snapshot, "loonfs.publisher.wal_fold_ms"),
         1,
         "the completed fold records its duration"
@@ -155,7 +171,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         "the test stays below the write-stop bound"
     );
 
-    // The runner: a write nudges the metadata job, and whatever it
+    // The runner: the fold nudges the metadata job, and whatever it
     // concluded, the step settled under its own job label.
     let metadata_steps: u64 = MetadataConclusions::all()
         .map(|conclusion| {

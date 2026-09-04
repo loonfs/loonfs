@@ -45,11 +45,11 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         tail_state: Arc::clone(&projection.tail_state),
         wal_tail_segments: projection.wal_tail_segments,
     };
-    let response = flush::fold_wal_tail_snapshot(
+    let response = flush::fold_wal_tail(
         &store,
         None,
         &namespace_id,
-        snapshot,
+        Some(snapshot),
         &context,
         &crate::time::StdMonotonicTimer::default(),
     )

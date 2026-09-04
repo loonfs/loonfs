@@ -227,14 +227,17 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     })))
 }
 
-pub async fn fold_wal_tail_snapshot<S: ObjectStore + ?Sized>(
+pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    snapshot: WalFoldSnapshot,
+    snapshot: Option<WalFoldSnapshot>,
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<FlushWalResponse> {
+    let Some(snapshot) = snapshot else {
+        return flush_wal(store, namespace_id, context).await;
+    };
     let loaded_basis = load_basis_metadata_segments(
         store,
         segment_cache,

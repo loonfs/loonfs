@@ -1,6 +1,6 @@
 use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
-    MaintenanceProbe, MaintenanceRunReport, NamespacePublication,
+    MaintenanceProbe, MaintenanceRunReport,
 };
 use crate::{
     ErrorCode, FsMaintenance, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
@@ -68,8 +68,8 @@ impl MaintenanceJob for MetadataMaintenanceJob {
         }
     }
 
-    fn should_run_after_publication(&self, publication: &NamespacePublication) -> bool {
-        publication.folded || self.options.flush_is_due(publication.wal_tail_segments)
+    fn should_run_after_fold(&self) -> bool {
+        true
     }
 }
 
