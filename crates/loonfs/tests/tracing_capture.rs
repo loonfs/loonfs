@@ -15,8 +15,8 @@
 //! installed, and the assertion is deterministic.
 
 use loonfs::{
-    CreateNamespaceOptions, FsBackgroundWork, FsWriter, MaintenanceJobId,
-    MetadataMaintenanceOptions, NamespaceId, StoreConfig,
+    CreateNamespaceOptions, FsWriter, MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner,
+    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, StoreConfig,
 };
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
@@ -48,7 +48,6 @@ fn writes_past_wal_tail_threshold() -> u32 {
 async fn writer(root: &Path) -> FsWriter {
     FsWriter::builder(store_config(root))
         .writer_id("tracing-capture-writer")
-        .background_work(FsBackgroundWork::Enabled)
         .build()
         .await
         .expect("build writer")
@@ -107,13 +106,21 @@ fn background_step_conclusions_emit_debug_events() {
             .await
             .expect("create namespace");
         fill_wal_tail_past_threshold(temp_dir.path(), &namespace_id).await;
-        writer
-            .maintenance()
+        let maintenance = writer
+            .maintenance_handle("tracing-capture-maintenance")
+            .expect("maintenance handle");
+        let registry = MaintenanceRegistry::new();
+        registry
+            .register(Arc::new(MetadataMaintenanceJob::new(maintenance)))
+            .expect("metadata job");
+        let runner = MaintenanceRunner::builder(registry)
+            .build()
+            .expect("maintenance runner");
+        runner
+            .handle()
             .nudge(MaintenanceJobId::METADATA, &namespace_id);
-        writer
-            .flush_background()
-            .await
-            .expect("background maintenance quiesces");
+        runner.drain().await.expect("maintenance quiesces");
+        runner.shutdown().await.expect("runner shutdown");
     });
 
     let log = String::from_utf8(captured.lock().expect("capture lock").clone())

@@ -7,12 +7,11 @@ use super::*;
 use crate::config::ReadConfig;
 use crate::content_tokens::ContentTokenError;
 use crate::fs::WriterIdentity;
-use crate::maintenance_runner::MaintenanceRunner;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
-    CreateNamespaceOptions, ErrorCode, FsMaintenance, RuntimeCacheConfig,
-    SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
+    CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig, SharedObjectStore as SharedStore,
+    TraceMode, TraceStoreKind,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -181,12 +180,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
-        maintenance: MaintenanceRunner::new(
-            crate::FsBackgroundWork::ManualOnly,
-            tokio::runtime::Handle::current(),
-            std::num::NonZeroUsize::new(1).expect("nonzero"),
-            RuntimeInstruments::new(None),
-        ),
+        maintenance_hint_observer: None,
         namespace_advance_observer: None,
     })
 }
@@ -2191,7 +2185,7 @@ async fn retained_tail_projections_stay_within_the_namespace_count_cap() {
 }
 
 #[tokio::test]
-async fn maintenance_over_writer_invalidates_publisher_projection() {
+async fn maintenance_invalidation_leaves_publisher_projection() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let writer = test_writer_with_interval(store.clone(), 0).await;
@@ -2210,15 +2204,12 @@ async fn maintenance_over_writer_invalidates_publisher_projection() {
         .expect("publish commit");
     assert_eq!(retained_projections(&writer.publisher()).projections, 1);
 
-    let maintenance = FsMaintenance::builder_with_store(store)
-        .actor_id("maintenance")
-        .over_writer(&writer)
-        .build()
-        .await
+    let maintenance = writer
+        .maintenance_handle("maintenance")
         .expect("build maintenance");
     maintenance.invalidate_namespace(&namespace_id);
 
-    assert_eq!(retained_projections(&writer.publisher()).projections, 0);
+    assert_eq!(retained_projections(&writer.publisher()).projections, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -8,9 +8,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This example intentionally prints the file content it just read.
     let root = std::env::temp_dir().join("loonfs-embedded-local-fs-example");
 
-    // Short-lived embedders keep the default ManualOnly policy: writes never
-    // schedule background maintenance behind the caller's back. A long-lived
-    // server would opt into FsBackgroundWork::Enabled instead.
+    // This short-lived example does not need a maintenance runner. A
+    // long-running server would compose one beside the writer.
     let writer = FsWriter::builder(StoreConfig::LocalFs {
         root: root.to_string_lossy().into_owned(),
         key_prefix: None,

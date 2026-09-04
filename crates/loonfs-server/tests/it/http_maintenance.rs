@@ -469,19 +469,21 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
 async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupted() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
-    let harness = start_server(test_config(
+    let mut warm_config = test_config(
         store_root.clone(),
         "loonfs-server-maintenance-corrupt",
         "http-maintenance-corrupt",
-    ))
-    .await;
+    );
+    warm_config.maintenance = loonfs_server::MaintenanceMode::Manual;
+    let harness = start_server(warm_config).await;
     // A new server must read the corrupted manifest; the first server has a valid cached snapshot.
-    let cold = start_server(test_config(
+    let mut cold_config = test_config(
         store_root,
         "loonfs-server-cold-reader",
         "http-maintenance-corrupt",
-    ))
-    .await;
+    );
+    cold_config.maintenance = loonfs_server::MaintenanceMode::Manual;
+    let cold = start_server(cold_config).await;
     let client = harness.client.clone();
     let cold_client = cold.client.clone();
     let server_url = harness.server_url.clone();
@@ -502,6 +504,10 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .await
         .expect("write file");
     post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
+    client
+        .get_path_entry(&target, &Default::default())
+        .await
+        .expect("warm the first server after checkpoint maintenance");
 
     let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
         .expect("construct store")

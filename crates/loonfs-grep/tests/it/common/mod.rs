@@ -7,9 +7,7 @@
 
 #![allow(dead_code)]
 
-use loonfs::{
-    FsMaintenance, FsReader, MaintenanceJob, MaintenanceStepConclusion, SharedObjectStore,
-};
+use loonfs::{FsMaintenance, FsReader, MaintenanceConclusion, MaintenanceJob, SharedObjectStore};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
     ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse, NamespaceId, PaginationPolicy, RunNo,
@@ -130,12 +128,12 @@ impl GrepHost {
                 return Ok(lifecycle);
             }
             match job
-                .step(namespace_id, None)
+                .run(namespace_id, None, &loonfs::MaintenanceCancellation::new())
                 .await
                 .map_err(GrepError::Runtime)?
                 .conclusion
             {
-                MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded => {}
+                MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded => {}
                 // Nothing this loop does next would move the index, so the
                 // caller sees where it stopped rather than a spin.
                 _ => return self.worker.lifecycle(namespace_id).await,

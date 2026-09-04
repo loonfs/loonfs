@@ -71,8 +71,8 @@ const MAX_BATCH_CANDIDATES: usize = 1024;
 /// registry returned by [`FsWriter::publisher`](crate::FsWriter::publisher).
 ///
 /// Shutdown closes admission and then drains admitted work. Prefer
-/// [`FsWriter::shutdown`](crate::FsWriter::shutdown), which also coordinates
-/// the maintenance runner.
+/// [`FsWriter::shutdown`](crate::FsWriter::shutdown), which closes admission
+/// before draining publication work.
 #[derive(Clone)]
 pub struct PublisherRegistry {
     shared: Arc<RegistryShared>,
@@ -262,9 +262,7 @@ fn projection_is_live(
 
 impl PublisherRegistry {
     /// Creates the registry a writer owns. Batches publish through each
-    /// publisher's own commit engine and writer session, and the writer's
-    /// [`FsBackgroundWork`](crate::FsBackgroundWork) policy governs any
-    /// post-publish maintenance.
+    /// publisher's own commit engine and writer session.
     pub(crate) fn new(
         read_core: ReadCore,
         writer: Weak<WriterBits>,

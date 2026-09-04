@@ -254,6 +254,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
             &fixture.namespace_id,
             MetadataMaintenanceOptions {
                 max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                ..Default::default()
             },
         )
         .await
@@ -332,6 +333,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
             &fixture.namespace_id,
             MetadataMaintenanceOptions {
                 max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                ..Default::default()
             },
         )
         .await

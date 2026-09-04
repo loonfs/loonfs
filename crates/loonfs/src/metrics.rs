@@ -16,7 +16,9 @@ pub use loonfs_objectstore::metrics::{
     RangeClass, VecObjectStoreMetricsRecorder,
 };
 
-pub(crate) use instruments::{fan_out_object_store_recorder, PublishOutcome, RuntimeInstruments};
+pub(crate) use instruments::{
+    fan_out_object_store_recorder, MaintenanceInstruments, PublishOutcome, RuntimeInstruments,
+};
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};

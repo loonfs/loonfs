@@ -1,12 +1,13 @@
 #![allow(clippy::panic)]
 //! The grep job under a real maintenance runner: what its probe answers,
-//! what its steps conclude, and how a writer's one permit pool paces them.
+//! what its runs conclude, and how a runner's permit pool paces them.
 
 use crate::common::is_content_object;
 use bytes::Bytes;
 use loonfs::{
-    DeleteNamespaceOptions, FsBackgroundWork, FsMaintenance, FsReader, FsWriter, MaintenanceJob,
-    MaintenanceProbe, MaintenanceStepConclusion, SharedObjectStore,
+    DeleteNamespaceOptions, FsMaintenance, FsReader, FsWriter, MaintenanceCancellation,
+    MaintenanceConclusion, MaintenanceJob, MaintenanceProbe, MaintenanceRegistry,
+    MaintenanceRunner, SharedObjectStore,
 };
 use loonfs_api::{ChangeSeq, IndexSegmentId, NamespaceId};
 use loonfs_grep::keyspace::{root_key, segment_key};
@@ -84,11 +85,11 @@ async fn a_tombstoned_namespace_concludes_not_enabled() {
 
     let job = job(&worker);
     assert_eq!(
-        job.step(&namespace_id, None)
+        job.run(&namespace_id, None, &MaintenanceCancellation::new())
             .await
             .expect("step tombstone")
             .conclusion,
-        MaintenanceStepConclusion::NotEnabled,
+        MaintenanceConclusion::NotEnabled,
         "a deleted namespace is not a failure to retry; it is nothing to maintain"
     );
     assert_eq!(
@@ -113,11 +114,11 @@ async fn a_disabled_root_concludes_not_enabled_on_the_next_step() {
 
     worker.disable(&namespace_id).await.expect("disable grep");
     assert_eq!(
-        job.step(&namespace_id, None)
+        job.run(&namespace_id, None, &MaintenanceCancellation::new())
             .await
             .expect("step disabled root")
             .conclusion,
-        MaintenanceStepConclusion::NotEnabled
+        MaintenanceConclusion::NotEnabled
     );
 }
 
@@ -145,11 +146,11 @@ async fn a_nudge_indexes_a_namespace_while_a_poisoned_sibling_backs_off() {
         .await
         .expect("poison root");
 
-    let host = host_writer(store.clone(), "runner-host", 2).await;
-    host.register_maintenance_job(Arc::new(job(&worker)))
+    let (jobs, host) = host_runner(2);
+    jobs.register(Arc::new(job(&worker)))
         .expect("register the grep job");
     for namespace_id in [&poisoned, &healthy] {
-        host.maintenance().nudge(GREP_INDEX_JOB, namespace_id);
+        host.handle().nudge(GREP_INDEX_JOB, namespace_id);
     }
 
     wait_for_watermark(&store, &healthy, ChangeSeq(1)).await;
@@ -198,16 +199,11 @@ async fn the_runners_one_permit_pool_caps_grep_steps_across_namespaces() {
 
     let reads_before_steps = store.reads().total;
     blocked_store.arm();
-    let host = host_writer(
-        store.clone(),
-        "concurrency-host",
-        MAX_CONCURRENT_MAINTENANCE,
-    )
-    .await;
-    host.register_maintenance_job(Arc::new(job(&worker)))
+    let (jobs, host) = host_runner(MAX_CONCURRENT_MAINTENANCE);
+    jobs.register(Arc::new(job(&worker)))
         .expect("register the grep job");
     for namespace_id in &namespace_ids {
-        host.maintenance().nudge(GREP_INDEX_JOB, namespace_id);
+        host.handle().nudge(GREP_INDEX_JOB, namespace_id);
     }
 
     tokio::time::timeout(WAIT, async {
@@ -242,13 +238,13 @@ async fn catch_up<S: ObjectStore + Clone + Send + Sync + 'static>(
 ) {
     for _ in 0..64 {
         match job
-            .step(namespace_id, None)
+            .run(namespace_id, None, &MaintenanceCancellation::new())
             .await
             .expect("grep step")
             .conclusion
         {
-            MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded => {}
-            MaintenanceStepConclusion::Idle => return,
+            MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded => {}
+            MaintenanceConclusion::Idle => return,
             settled => panic!("grep step concluded {settled:?} while catching up"),
         }
     }
@@ -273,10 +269,10 @@ async fn a_nudge_collects_what_indexing_left_behind() {
         .await
         .expect("write orphan");
 
-    let host = host_writer(store.clone(), "collect-host", 2).await;
-    host.register_maintenance_job(Arc::new(GrepGcJob::new(worker.clone())))
+    let (jobs, host) = host_runner(2);
+    jobs.register(Arc::new(GrepGcJob::new(worker.clone())))
         .expect("register the grep collection job");
-    host.maintenance().nudge(GREP_GC_JOB, &namespace_id);
+    host.handle().nudge(GREP_GC_JOB, &namespace_id);
 
     wait_for_deletion(&store, &orphan).await;
     assert!(
@@ -302,32 +298,31 @@ async fn a_refused_resume_position_restarts_the_collection_pass() {
     let job = GrepGcJob::new(worker);
 
     assert_eq!(
-        job.step(&namespace_id, Some("not-a-cursor"))
-            .await
-            .expect("a refused cursor is not a step failure")
-            .conclusion,
-        MaintenanceStepConclusion::Superseded
+        job.run(
+            &namespace_id,
+            Some("not-a-cursor"),
+            &MaintenanceCancellation::new(),
+        )
+        .await
+        .expect("a refused cursor is not a step failure")
+        .conclusion,
+        MaintenanceConclusion::Superseded
     );
-    let fresh = job.step(&namespace_id, None).await.expect("fresh pass");
-    assert_eq!(fresh.conclusion, MaintenanceStepConclusion::Idle);
+    let fresh = job
+        .run(&namespace_id, None, &MaintenanceCancellation::new())
+        .await
+        .expect("fresh pass");
+    assert_eq!(fresh.conclusion, MaintenanceConclusion::Idle);
     assert_eq!(fresh.continuation, None);
 }
 
-/// A writer that only hosts the runner: it serves no namespace of its own,
-/// so every step its pool admits is a grep step.
-async fn host_writer<S: ObjectStore + 'static>(
-    store: Arc<S>,
-    writer_id: &str,
-    max_concurrent_maintenance: usize,
-) -> FsWriter {
-    let shared: SharedObjectStore = store;
-    FsWriter::builder_with_store(shared)
-        .writer_id(writer_id)
-        .background_work(FsBackgroundWork::Enabled)
-        .max_concurrent_maintenance(max_concurrent_maintenance)
+fn host_runner(max_concurrent_maintenance: usize) -> (MaintenanceRegistry, MaintenanceRunner) {
+    let jobs = MaintenanceRegistry::new();
+    let runner = MaintenanceRunner::builder(jobs.clone())
+        .max_concurrent(max_concurrent_maintenance)
         .build()
-        .await
-        .expect("build host writer")
+        .expect("build host runner");
+    (jobs, runner)
 }
 
 /// A worker over one store: grep's own keyspace writes go straight to it,

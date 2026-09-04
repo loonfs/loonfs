@@ -5,10 +5,10 @@
 //! reclamation grace will pass. Each path plants that deadline on the
 //! garbage-collection job as a not-before time, so the pass that reclaims
 //! the session is admitted by the clock rather than by the next unrelated
-//! write to the namespace.
+//! write to the namespace. An attached runner may admit the hinted deadline.
 
 use crate::content_tokens::{CompletedUpload, CompletedUploadReceipt};
-use crate::maintenance_runner::{completed_upload_reclaim_at_ms, upload_session_reclaim_at_ms};
+use crate::maintenance::{completed_upload_reclaim_at_ms, upload_session_reclaim_at_ms};
 use crate::uploads::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
     MultipartPartTargets, ResolvedUploadCompletion,
@@ -17,8 +17,8 @@ use crate::ByteStream;
 use crate::FsWriter;
 use crate::Result;
 use crate::{
-    BeginUploadResponse, ChecksumAlgorithm, MaintenanceJobId, NamespaceId, UploadContentResponse,
-    UploadMode, UploadSession,
+    BeginUploadResponse, ChecksumAlgorithm, MaintenanceHint, MaintenanceJobId, NamespaceId,
+    UploadContentResponse, UploadMode, UploadSession,
 };
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::UploadPartChecksumClaim;
@@ -32,9 +32,18 @@ impl FsWriter {
     /// the one failure that would cost something: the pass would find the
     /// session retained, park, and have nothing left to bring it back.
     fn schedule_upload_session_reclamation(&self, namespace_id: &NamespaceId) {
-        let handle = self.bits.maintenance.handle();
-        let reclaim_at_ms = upload_session_reclaim_at_ms(handle.now_ms());
-        handle.nudge_not_before(MaintenanceJobId::GC, namespace_id, reclaim_at_ms);
+        let Some(observer) = &self.bits.maintenance_hint_observer else {
+            return;
+        };
+        let Ok(now_ms) = loonfs_core::time::current_time_ms() else {
+            return;
+        };
+        let hint = MaintenanceHint::DueAt {
+            namespace_id: namespace_id.clone(),
+            job: MaintenanceJobId::GC,
+            not_before_ms: upload_session_reclaim_at_ms(now_ms),
+        };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
     }
 
     /// Plants the deadline a completed session's content just created. The
@@ -42,9 +51,18 @@ impl FsWriter {
     /// removes it — so completion schedules its own pass rather than
     /// relying on the one the session's lease already asked for.
     fn schedule_completed_upload_reclamation(&self, namespace_id: &NamespaceId) {
-        let handle = self.bits.maintenance.handle();
-        let reclaim_at_ms = completed_upload_reclaim_at_ms(handle.now_ms());
-        handle.nudge_not_before(MaintenanceJobId::GC, namespace_id, reclaim_at_ms);
+        let Some(observer) = &self.bits.maintenance_hint_observer else {
+            return;
+        };
+        let Ok(now_ms) = loonfs_core::time::current_time_ms() else {
+            return;
+        };
+        let hint = MaintenanceHint::DueAt {
+            namespace_id: namespace_id.clone(),
+            job: MaintenanceJobId::GC,
+            not_before_ms: completed_upload_reclaim_at_ms(now_ms),
+        };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
     }
 
     /// Starts a durable upload session for a namespace.

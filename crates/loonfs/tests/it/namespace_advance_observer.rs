@@ -4,12 +4,14 @@
 // The panicking observer under test is written as a `panic!` closure.
 
 use loonfs::{
-    CreateNamespaceOptions, FsBackgroundWork, FsWriter, MaintenanceJob, MaintenanceJobId,
-    MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepReport, NamespaceAdvanceHint,
-    NamespacePublication, PutFileOptions, Result, SharedObjectStore,
+    CreateNamespaceOptions, FsWriter, MaintenanceCancellation, MaintenanceConclusion,
+    MaintenanceHintRelay, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry,
+    MaintenanceRunReport, MaintenanceRunner, NamespaceAdvanceHint, NamespacePublication,
+    PutFileOptions, Result, SharedObjectStore,
 };
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -83,22 +85,21 @@ impl MaintenanceJob for SubscribingJob {
         SUBSCRIBING_JOB
     }
 
-    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
+    fn should_run_after_publication(&self, publication: &NamespacePublication) -> bool {
         publication.committed_through_seq.is_some()
     }
 
-    async fn step(
+    async fn run(
         &self,
         namespace_id: &NamespaceId,
         _continuation: Option<&str>,
-    ) -> Result<MaintenanceStepReport> {
+        _cancellation: &MaintenanceCancellation,
+    ) -> Result<MaintenanceRunReport> {
         self.steps
             .lock()
             .expect("steps lock poisoned")
             .push(namespace_id.clone());
-        Ok(MaintenanceStepReport::concluded(
-            MaintenanceStepConclusion::Idle,
-        ))
+        Ok(MaintenanceRunReport::concluded(MaintenanceConclusion::Idle))
     }
 
     async fn probe(&self, _namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
@@ -110,18 +111,25 @@ impl MaintenanceJob for SubscribingJob {
 async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intact() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let (observer, receiver) =
+        MaintenanceHintRelay::new(NonZeroUsize::new(16).expect("relay capacity is nonzero"));
     let writer = FsWriter::builder_with_store(store)
         .writer_id("observer-panic-writer")
         .min_publish_interval_ms(0)
-        .background_work(FsBackgroundWork::Enabled)
+        .maintenance_hint_observer(move |hint| observer(hint))
         .namespace_advance_observer(|_| panic!("observer failure"))
         .build()
         .await
         .expect("writer");
     let job = Arc::new(SubscribingJob::default());
-    writer
-        .register_maintenance_job(job.clone())
+    let registry = MaintenanceRegistry::new();
+    registry
+        .register(job.clone())
         .expect("register the subscribing job");
+    let runner = MaintenanceRunner::builder(registry)
+        .build()
+        .expect("runner");
+    runner.attach_hints(receiver);
     let namespace_id = NamespaceId::parse("observer-panic").expect("namespace id");
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -159,10 +167,7 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
         .expect("the namespace publisher keeps publishing");
     assert_eq!(second.committed_seq, ChangeSeq(2));
 
-    writer
-        .flush_background()
-        .await
-        .expect("settle the nudged job");
+    runner.drain().await.expect("settle the nudged job");
     assert!(
         job.stepped().contains(&namespace_id),
         "a publication nudges its subscribers whatever the host observer does"
@@ -171,4 +176,5 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
         .shutdown()
         .await
         .expect("an observer panic is not a publication panic");
+    runner.shutdown().await.expect("runner shutdown");
 }

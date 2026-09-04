@@ -1,5 +1,5 @@
-//! The frozen-base policy over a live runtime: what an explicit compaction
-//! does that a writer's own upkeep does not.
+//! The frozen-base policy over a live runtime: amortized bounded work and
+//! explicit compaction.
 //!
 //! These tests need a family group whose base run no bounded step can fold,
 //! with delta runs still arriving above it. The shipped row budget only
@@ -9,7 +9,7 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CreateCheckpointOptions, CreateNamespaceOptions, FsBackgroundWork, FsMaintenance, FsWriter,
+    CreateCheckpointOptions, CreateNamespaceOptions, FrozenBasePolicy, FsMaintenance, FsWriter,
     MaintenanceRunRequest, MaintenanceRunResponse, MetadataCompactionOutcome, MoveOptions,
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, SharedObjectStore,
 };
@@ -33,13 +33,10 @@ use tempfile::tempdir;
 /// descriptors are per family, so its families are what they are filtered by.
 const BINDINGS: MetadataFamilyGroup = MetadataFamilyGroup::Bindings;
 
-/// A `ManualOnly` deployment: a writer that schedules nothing, and an maintenance
-/// handle with no background work behind it, over one store.
+/// A writer and two maintenance handles over one store.
 ///
 /// This is the shape the explicit compaction path exists for. The second
-/// maintenance is the contrast — the same store, but attached to the writer's
-/// runner, so its steps plan under the amortizing policy a writer's own
-/// upkeep runs under.
+/// maintenance is the contrast — it shares the writer's read core and caches.
 async fn manual_deployment(
     root: &std::path::Path,
 ) -> (
@@ -53,7 +50,6 @@ async fn manual_deployment(
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = FsWriter::builder_with_store(Arc::clone(&store))
         .writer_id("manual-writer")
-        .background_work(FsBackgroundWork::ManualOnly)
         .build()
         .await
         .expect("build the writer");
@@ -63,12 +59,9 @@ async fn manual_deployment(
         .build()
         .await
         .expect("build the standalone maintenance");
-    let scheduled = FsMaintenance::builder_with_store(store)
-        .actor_id("scheduled-maintenance")
-        .over_writer(&writer)
-        .build()
-        .await
-        .expect("build the writer-backed maintenance");
+    let scheduled = writer
+        .maintenance_handle("scheduled-maintenance")
+        .expect("build the shared maintenance handle");
     (writer, standalone, scheduled, recorder)
 }
 
@@ -385,13 +378,12 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         sustained_writes(&writer, &standalone, namespace).await;
     }
 
-    // A writer's own step, under the same budget and the same namespace
-    // shape, publishes the delta merge. That is what proves the merge was
-    // there to take.
+    // The amortized step, under the same budget and namespace shape,
+    // publishes the delta merge. That proves the merge was available.
     let response = scheduled
         .run_maintenance(&automatic, metadata_request())
         .await
-        .expect("run a writer-scheduled step");
+        .expect("run an amortized step");
     let metadata = match response {
         MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
         _ => None,
@@ -405,7 +397,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
     let response = scheduled
         .run_maintenance(&automatic, metadata_request())
         .await
-        .expect("run the second writer-scheduled step");
+        .expect("run the second amortized step");
     let metadata = match response {
         MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
         _ => None,
@@ -426,16 +418,12 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let fresh_writer = FsWriter::builder_with_store(Arc::clone(&fresh_store))
         .writer_id("fresh-writer")
-        .background_work(FsBackgroundWork::ManualOnly)
         .build()
         .await
         .expect("build a fresh writer");
-    let fresh_scheduled = FsMaintenance::builder_with_store(fresh_store)
-        .actor_id("fresh-scheduled-maintenance")
-        .over_writer(&fresh_writer)
-        .build()
-        .await
-        .expect("build a fresh writer-backed maintenance")
+    let fresh_scheduled = fresh_writer
+        .maintenance_handle("fresh-scheduled-maintenance")
+        .expect("build a fresh shared maintenance handle")
         .starve_reorganization_row_budget(budget);
     let response = fresh_scheduled
         .run_maintenance(&automatic, metadata_request())
@@ -448,8 +436,8 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
     .expect("a metadata request should return a metadata response");
     assert_eq!(
         metadata.reorganize,
-        ReorganizeStepOutcome::CompactionStarted,
-        "the fresh handle reads the manifest count and plans full compaction on the third step"
+        ReorganizeStepOutcome::CompactionRequired,
+        "the fresh handle reads the manifest count and requests full compaction on the third step"
     );
     fresh_writer
         .shutdown()
@@ -511,7 +499,7 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
 }
 
 #[tokio::test]
-async fn a_standalone_step_reports_the_compaction_the_explicit_call_runs() {
+async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
     let temp_dir = tempdir().expect("tempdir");
     let (writer, standalone, _scheduled, _recorder) = manual_deployment(temp_dir.path()).await;
     let namespace = namespace_id("manual");
@@ -522,18 +510,19 @@ async fn a_standalone_step_reports_the_compaction_the_explicit_call_runs() {
     sustained_writes(&writer, &standalone, &namespace).await;
 
     let response = standalone
-        .run_maintenance(&namespace, metadata_request())
+        .maintain_metadata(
+            &namespace,
+            crate::MetadataMaintenanceOptions {
+                max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                frozen_base: FrozenBasePolicy::CompactImmediately,
+            },
+        )
         .await
-        .expect("run a standalone step");
-    let metadata = match response {
-        MaintenanceRunResponse::Metadata(metadata) => Some(metadata),
-        _ => None,
-    }
-    .expect("a metadata request should return a metadata response");
+        .expect("run an immediate step");
     assert_eq!(
-        metadata.reorganize,
+        response.reorganize,
         ReorganizeStepOutcome::CompactionRequired,
-        "a step with nowhere to run a job says the namespace needs one"
+        "an immediate step says the namespace needs a compaction job"
     );
 
     let outcome = standalone

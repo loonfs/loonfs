@@ -5,12 +5,14 @@
 #![allow(clippy::panic)]
 // The drain test injects a step panic to assert it is surfaced.
 
+use super::runner::{MaintenanceClock, SystemMaintenanceClock};
 use super::*;
-use crate::{CreateNamespaceOptions, FsWriter, SharedObjectStore};
-use loonfs_objectstore::local_fs_store::LocalFsStore;
+use crate::{ChangeSeq, NamespaceId, Result, RuntimeError};
 use loonfs_test_support::ids::{namespace_id, nonzero_usize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::{watch, Semaphore};
 
@@ -50,13 +52,13 @@ impl MaintenanceClock for ManualClock {
 /// What one scripted step does.
 #[derive(Debug, Clone)]
 enum ScriptedStep {
-    Conclude(MaintenanceStepConclusion),
+    Conclude(MaintenanceConclusion),
     /// Conclude, and tell the runner where this step stopped.
-    Continue(MaintenanceStepConclusion, Option<String>),
+    Continue(MaintenanceConclusion, Option<String>),
     /// Conclude, and tell the runner when what this step left behind
     /// becomes eligible — what a collection pass reports for what it
     /// retained.
-    Due(MaintenanceStepConclusion, u64),
+    Due(MaintenanceConclusion, u64),
     Fail,
     Panic,
 }
@@ -128,7 +130,7 @@ impl TestJob {
     }
 
     fn idle() -> Arc<Self> {
-        Self::answering(ScriptedStep::Conclude(MaintenanceStepConclusion::Idle))
+        Self::answering(ScriptedStep::Conclude(MaintenanceConclusion::Idle))
     }
 
     fn scripted(
@@ -190,11 +192,12 @@ impl MaintenanceJob for TestJob {
         TEST_JOB
     }
 
-    async fn step(
+    async fn run(
         &self,
         namespace_id: &NamespaceId,
         continuation: Option<&str>,
-    ) -> Result<MaintenanceStepReport> {
+        _cancellation: &MaintenanceCancellation,
+    ) -> Result<MaintenanceRunReport> {
         if let Some(gate) = &self.gate {
             gate.enter().await;
         }
@@ -210,16 +213,18 @@ impl MaintenanceJob for TestJob {
             .pop_front()
             .unwrap_or_else(|| self.trailing_answer.clone());
         match answer {
-            ScriptedStep::Conclude(conclusion) => Ok(MaintenanceStepReport::concluded(conclusion)),
-            ScriptedStep::Continue(conclusion, continuation) => Ok(MaintenanceStepReport {
+            ScriptedStep::Conclude(conclusion) => Ok(MaintenanceRunReport::concluded(conclusion)),
+            ScriptedStep::Continue(conclusion, continuation) => Ok(MaintenanceRunReport {
                 conclusion,
                 continuation,
                 not_before_ms: None,
+                follow_up: None,
             }),
-            ScriptedStep::Due(conclusion, not_before_ms) => Ok(MaintenanceStepReport {
+            ScriptedStep::Due(conclusion, not_before_ms) => Ok(MaintenanceRunReport {
                 conclusion,
                 continuation: None,
                 not_before_ms: Some(not_before_ms),
+                follow_up: None,
             }),
             ScriptedStep::Fail => Err(RuntimeError::Config("scripted step failure".to_owned())),
             ScriptedStep::Panic => panic!("injected maintenance step panic"),
@@ -237,14 +242,27 @@ impl MaintenanceJob for TestJob {
 
 const SUBSCRIBING_JOB: MaintenanceJobId = MaintenanceJobId::new("subscribing");
 
-#[derive(Default)]
 struct SubscribingJob {
     steps: StdMutex<Vec<NamespaceId>>,
+    probe_answer: StdMutex<MaintenanceProbe>,
+}
+
+impl Default for SubscribingJob {
+    fn default() -> Self {
+        Self {
+            steps: StdMutex::new(Vec::new()),
+            probe_answer: StdMutex::new(MaintenanceProbe::Idle),
+        }
+    }
 }
 
 impl SubscribingJob {
     fn stepped(&self) -> Vec<String> {
         names(&self.steps)
+    }
+
+    fn set_probe(&self, answer: MaintenanceProbe) {
+        *self.probe_answer.lock().expect("probe answer") = answer;
     }
 }
 
@@ -254,48 +272,42 @@ impl MaintenanceJob for SubscribingJob {
         SUBSCRIBING_JOB
     }
 
-    fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
+    fn should_run_after_publication(&self, publication: &NamespacePublication) -> bool {
         publication.committed_through_seq.is_some()
     }
 
-    async fn step(
+    async fn run(
         &self,
         namespace_id: &NamespaceId,
         _continuation: Option<&str>,
-    ) -> Result<MaintenanceStepReport> {
+        _cancellation: &MaintenanceCancellation,
+    ) -> Result<MaintenanceRunReport> {
         self.steps.lock().expect("steps").push(namespace_id.clone());
-        Ok(MaintenanceStepReport::concluded(
-            MaintenanceStepConclusion::Idle,
-        ))
+        Ok(MaintenanceRunReport::concluded(MaintenanceConclusion::Idle))
     }
 
     async fn probe(&self, _namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        Ok(MaintenanceProbe::Idle)
+        Ok(*self.probe_answer.lock().expect("probe answer"))
     }
 }
 
 fn runner_with(
-    policy: FsBackgroundWork,
     clock: Arc<dyn MaintenanceClock>,
     job: Arc<dyn MaintenanceJob>,
 ) -> MaintenanceRunner {
-    let runner = MaintenanceRunner::with_clock(
-        policy,
-        tokio::runtime::Handle::current(),
-        nonzero_usize(1),
-        clock,
-        RuntimeInstruments::new(None),
-    );
-    runner.register(job).expect("register the test job");
+    let registry = MaintenanceRegistry::new();
+    registry.register(job).expect("register the test job");
+    let runner = MaintenanceRunner::builder(registry)
+        .max_concurrent(nonzero_usize(1).get())
+        .clock(clock)
+        .build()
+        .expect("build the runner");
+    assert!(runner.is_registered(TEST_JOB));
     runner
 }
 
 fn enabled_runner(job: Arc<dyn MaintenanceJob>) -> MaintenanceRunner {
-    runner_with(
-        FsBackgroundWork::Enabled,
-        Arc::new(SystemMaintenanceClock::default()),
-        job,
-    )
+    runner_with(Arc::new(SystemMaintenanceClock::default()), job)
 }
 
 async fn wait_for(condition: impl Fn() -> bool, what: &str) {
@@ -330,11 +342,11 @@ async fn progressed_requeues_immediately_and_stays_fair_at_the_cap() {
     // single permit, the second must not wait behind the whole backlog.
     let job = TestJob::gated(
         [
-            ScriptedStep::Conclude(MaintenanceStepConclusion::Progressed),
-            ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
-            ScriptedStep::Conclude(MaintenanceStepConclusion::Progressed),
+            ScriptedStep::Conclude(MaintenanceConclusion::Progressed),
+            ScriptedStep::Conclude(MaintenanceConclusion::Idle),
+            ScriptedStep::Conclude(MaintenanceConclusion::Progressed),
         ],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let (busy, peer) = (namespace_id("busy"), namespace_id("peer"));
@@ -363,16 +375,10 @@ async fn progressed_requeues_immediately_and_stays_fair_at_the_cap() {
 async fn a_progressing_job_resumes_from_where_its_last_step_stopped() {
     let job = TestJob::scripted(
         [
-            ScriptedStep::Continue(
-                MaintenanceStepConclusion::Progressed,
-                Some("page-1".to_owned()),
-            ),
-            ScriptedStep::Continue(
-                MaintenanceStepConclusion::Progressed,
-                Some("page-2".to_owned()),
-            ),
+            ScriptedStep::Continue(MaintenanceConclusion::Progressed, Some("page-1".to_owned())),
+            ScriptedStep::Continue(MaintenanceConclusion::Progressed, Some("page-2".to_owned())),
         ],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("paged");
@@ -401,10 +407,10 @@ async fn a_progressing_job_resumes_from_where_its_last_step_stopped() {
 async fn a_blocked_job_resumes_from_where_it_parked() {
     let job = TestJob::scripted(
         [ScriptedStep::Continue(
-            MaintenanceStepConclusion::Blocked,
+            MaintenanceConclusion::Blocked,
             Some("page-7".to_owned()),
         )],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("parked");
@@ -425,13 +431,10 @@ async fn a_blocked_job_resumes_from_where_it_parked() {
 async fn a_not_enabled_conclusion_drops_the_continuation() {
     let job = TestJob::scripted(
         [
-            ScriptedStep::Continue(
-                MaintenanceStepConclusion::Progressed,
-                Some("page-1".to_owned()),
-            ),
-            ScriptedStep::Conclude(MaintenanceStepConclusion::NotEnabled),
+            ScriptedStep::Continue(MaintenanceConclusion::Progressed, Some("page-1".to_owned())),
+            ScriptedStep::Conclude(MaintenanceConclusion::NotEnabled),
         ],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("gone");
@@ -451,8 +454,8 @@ async fn a_not_enabled_conclusion_drops_the_continuation() {
 #[tokio::test]
 async fn blocked_parks_and_a_later_nudge_retries() {
     let job = TestJob::scripted(
-        [ScriptedStep::Conclude(MaintenanceStepConclusion::Blocked)],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+        [ScriptedStep::Conclude(MaintenanceConclusion::Blocked)],
+        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("blocked");
@@ -473,10 +476,8 @@ async fn blocked_parks_and_a_later_nudge_retries() {
 #[tokio::test]
 async fn superseded_takes_the_race_again_and_not_enabled_evicts() {
     let job = TestJob::scripted(
-        [ScriptedStep::Conclude(
-            MaintenanceStepConclusion::Superseded,
-        )],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::NotEnabled),
+        [ScriptedStep::Conclude(MaintenanceConclusion::Superseded)],
+        ScriptedStep::Conclude(MaintenanceConclusion::NotEnabled),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("raced");
@@ -500,7 +501,7 @@ async fn superseded_takes_the_race_again_and_not_enabled_evicts() {
 async fn a_failed_step_backs_off_and_the_timer_retries_it() {
     let job = TestJob::scripted(
         [ScriptedStep::Fail],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("flaky");
@@ -518,7 +519,7 @@ async fn a_failed_step_backs_off_and_the_timer_retries_it() {
 async fn a_key_planted_in_the_future_does_not_fire_early() {
     let clock = ManualClock::at(1_000_000);
     let job = TestJob::idle();
-    let runner = runner_with(FsBackgroundWork::Enabled, clock.clone(), job.clone());
+    let runner = runner_with(clock.clone(), job.clone());
     let namespace_id = namespace_id("leased");
 
     runner
@@ -561,13 +562,10 @@ async fn a_key_planted_in_the_future_does_not_fire_early() {
 async fn a_step_that_reports_a_deadline_re_arms_its_own_key() {
     let clock = ManualClock::at(1_000_000);
     let job = TestJob::scripted(
-        [ScriptedStep::Due(
-            MaintenanceStepConclusion::Idle,
-            1_060_000,
-        )],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+        [ScriptedStep::Due(MaintenanceConclusion::Idle, 1_060_000)],
+        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
     );
-    let runner = runner_with(FsBackgroundWork::Enabled, clock.clone(), job.clone());
+    let runner = runner_with(clock.clone(), job.clone());
     let namespace_id = namespace_id("retained");
 
     runner.handle().nudge(TEST_JOB, &namespace_id);
@@ -600,32 +598,33 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
     let subscriber = Arc::new(SubscribingJob::default());
     let runner = enabled_runner(quiet.clone());
     runner
+        .registry()
         .register(subscriber.clone())
         .expect("register the subscribing job");
     let namespace_id = namespace_id("published");
 
-    runner.nudge_jobs_after_publication(
-        &namespace_id,
-        &NamespacePublication {
+    runner
+        .handle()
+        .hint(MaintenanceHint::Published(NamespacePublication {
+            namespace_id: namespace_id.clone(),
             committed_through_seq: None,
             folded: false,
             wal_tail_segments: 4,
-        },
-    );
+        }));
     runner.drain().await.expect("nothing was scheduled");
     assert!(
         subscriber.stepped().is_empty(),
         "a publication that committed nothing is not this job's trigger"
     );
 
-    runner.nudge_jobs_after_publication(
-        &namespace_id,
-        &NamespacePublication {
+    runner
+        .handle()
+        .hint(MaintenanceHint::Published(NamespacePublication {
+            namespace_id: namespace_id.clone(),
             committed_through_seq: Some(ChangeSeq(7)),
             folded: false,
             wal_tail_segments: 5,
-        },
-    );
+        }));
     runner.drain().await.expect("the subscriber's step settles");
 
     assert_eq!(subscriber.stepped(), vec!["published".to_owned()]);
@@ -707,7 +706,7 @@ async fn reconciliation_forgets_an_idle_key_and_never_visits_an_unadmitted_one()
 async fn a_lease_obligation_survives_a_quiet_probe() {
     let clock = ManualClock::at(1_000_000);
     let job = TestJob::idle();
-    let runner = runner_with(FsBackgroundWork::Enabled, clock, job);
+    let runner = runner_with(clock, job);
     let namespace_id = namespace_id("leased");
 
     runner
@@ -722,37 +721,14 @@ async fn a_lease_obligation_survives_a_quiet_probe() {
 }
 
 #[tokio::test]
-async fn manual_only_ignores_nudges_but_still_registers_jobs() {
-    let job = TestJob::idle();
-    let runner = runner_with(
-        FsBackgroundWork::ManualOnly,
-        Arc::new(SystemMaintenanceClock::default()),
-        job.clone(),
-    );
-    let namespace_id = namespace_id("manual");
-
-    runner.handle().nudge(TEST_JOB, &namespace_id);
-    runner
-        .handle()
-        .nudge_not_before(TEST_JOB, &namespace_id, u64::MAX);
-    runner.drain().await.expect("nothing was scheduled");
-
-    assert!(job.stepped().is_empty(), "manual-only schedules nothing");
-    assert!(!runner.is_pending(TEST_JOB, &namespace_id));
-    assert!(
-        runner.register(TestJob::idle()).is_err(),
-        "registration is accepted under either policy, so this id is taken"
-    );
-}
-
-#[tokio::test]
 async fn shutdown_clears_pending_work_and_refuses_later_nudges() {
-    let job = TestJob::gated([], ScriptedStep::Conclude(MaintenanceStepConclusion::Idle));
+    let job = TestJob::gated([], ScriptedStep::Conclude(MaintenanceConclusion::Idle));
     let runner = enabled_runner(job.clone());
     let (active, queued) = (namespace_id("active"), namespace_id("queued"));
 
     runner.handle().nudge(TEST_JOB, &active);
     job.gate().wait_entered(1).await;
+    assert_eq!(runner.running_steps(), 1);
     runner.handle().nudge(TEST_JOB, &queued);
     assert!(runner.is_pending(TEST_JOB, &queued));
 
@@ -780,75 +756,18 @@ async fn shutdown_clears_pending_work_and_refuses_later_nudges() {
 async fn drain_surfaces_a_panicked_step() {
     let job = TestJob::scripted(
         [ScriptedStep::Panic],
-        ScriptedStep::Conclude(MaintenanceStepConclusion::Idle),
+        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
     );
     let runner = enabled_runner(job.clone());
     let panicked_namespace_id = namespace_id("panics");
-    let later_namespace_id = namespace_id("runs-later");
 
     runner.handle().nudge(TEST_JOB, &panicked_namespace_id);
-    wait_for(
-        || {
-            runner
-                .inner
-                .lock_state()
-                .tasks
-                .iter()
-                .any(tokio::task::JoinHandle::is_finished)
-        },
-        "the panicked task to finish",
-    )
-    .await;
-    // Spawning this step reaps the finished panic before drain can join it.
-    runner.handle().nudge(TEST_JOB, &later_namespace_id);
     let error = runner.drain().await.expect_err("a panicked step surfaces");
     assert!(
         error.to_string().contains("panicked"),
         "drain reports panicked tasks: {error}"
     );
-    assert!(
-        !runner.is_pending(TEST_JOB, &panicked_namespace_id),
-        "a panicked step releases its key and its permit"
-    );
-    assert_eq!(
-        job.stepped(),
-        vec!["panics".to_owned(), "runs-later".to_owned()],
-        "the interleaved spawn runs after reaping the panic"
-    );
-}
-
-#[tokio::test]
-async fn work_claimed_before_a_shutdown_is_refused_and_gives_its_permit_back() {
-    let job = TestJob::idle();
-    let runner = enabled_runner(job.clone());
-    let key = MaintenanceKey::new(TEST_JOB, &namespace_id("demo"));
-
-    runner.inner.lock_state().admission.nudge(key.clone());
-    let claimed = runner
-        .inner
-        .lock_state()
-        .admission
-        .try_dispatch(0)
-        .expect("the claim lands first");
-    assert_eq!(runner.running_steps(), 1);
-
-    runner.close_admission();
-    runner.drain().await.expect("nothing is scheduled yet");
-
-    spawn_chain(&runner.inner, claimed);
-    runner
-        .drain()
-        .await
-        .expect("the refused chain registered nothing");
-    assert!(
-        job.stepped().is_empty(),
-        "a refused chain must never run a step"
-    );
-    assert_eq!(
-        runner.running_steps(),
-        0,
-        "a refused spawn drops the chain, and the drop gives the permit back"
-    );
+    assert!(!runner.is_pending(TEST_JOB, &panicked_namespace_id));
 }
 
 #[tokio::test]
@@ -862,296 +781,171 @@ async fn a_nudge_for_an_unregistered_job_runs_nothing() {
     assert!(!runner.is_pending(unknown, &namespace_id));
 }
 
-async fn upload_writer(root: &std::path::Path, clock: Arc<dyn MaintenanceClock>) -> FsWriter {
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
-    FsWriter::builder_with_store(store)
-        .writer_id("upload-lease-writer")
-        .background_work(FsBackgroundWork::Enabled)
-        .maintenance_clock(clock)
-        .build()
-        .await
-        .expect("build writer")
+struct BlockingJob {
+    id: MaintenanceJobId,
+    publication: bool,
+    follow_up: Option<MaintenanceJobId>,
+    runs: AtomicUsize,
+    entered: watch::Sender<usize>,
+    permits: Arc<Semaphore>,
 }
 
-#[tokio::test]
-async fn upload_paths_plant_the_collection_deadlines_they_create() {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let clock = ManualClock::at(1_700_000_000_000);
-    let namespace_id = namespace_id("uploads");
-    let writer = upload_writer(temp_dir.path(), clock.clone()).await;
-    writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
-
-    let begun = writer
-        .create_upload(&namespace_id)
-        .await
-        .expect("begin upload");
-    assert_eq!(
-        writer
-            .bits
-            .maintenance
-            .not_before_ms(MaintenanceJobId::GC, &namespace_id),
-        Some(upload_session_reclaim_at_ms(clock.now_ms())),
-        "an open session's lease schedules the pass that may abort it"
-    );
-
-    writer
-        .put_upload_content(&namespace_id, begun.upload_id(), b"body")
-        .await
-        .expect("upload content");
-    writer
-        .complete_upload(
-            &namespace_id,
-            begun.upload_id(),
-            crate::uploads::ResolvedUploadCompletion::KnownContent,
-        )
-        .await
-        .expect("complete upload");
-    // The session's own lease comes due first, so it stays the next wake;
-    // completion's later grace is remembered and re-arms after that pass.
-    assert_eq!(
-        writer
-            .bits
-            .maintenance
-            .not_before_ms(MaintenanceJobId::GC, &namespace_id),
-        Some(upload_session_reclaim_at_ms(clock.now_ms())),
-        "the soonest planted deadline is what the runner wakes for"
-    );
-    clock.advance_to(upload_session_reclaim_at_ms(1_700_000_000_000));
-    writer.bits.maintenance.dispatch_now();
-    assert_eq!(
-        writer
-            .bits
-            .maintenance
-            .not_before_ms(MaintenanceJobId::GC, &namespace_id),
-        Some(completed_upload_reclaim_at_ms(1_700_000_000_000)),
-        "completion's reclamation grace outlives the lease pass it did not ask for"
-    );
-
-    writer
-        .shutdown()
-        .await
-        .expect("shut down writer background work");
-    assert_eq!(
-        writer
-            .bits
-            .maintenance
-            .not_before_ms(MaintenanceJobId::GC, &namespace_id),
-        None,
-        "shutdown clears the obligations it will not be around to honor"
-    );
-}
-
-#[tokio::test]
-async fn the_runtime_registers_its_metadata_and_gc_jobs() {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let writer = upload_writer(temp_dir.path(), ManualClock::at(0)).await;
-
-    for id in [MaintenanceJobId::METADATA, MaintenanceJobId::GC] {
-        assert!(
-            writer.bits.maintenance.is_registered(id),
-            "the runtime registers `{id}` on every write-capable handle"
-        );
-    }
-    assert!(
-        !writer
-            .bits
-            .maintenance
-            .is_registered(MaintenanceJobId::new("retention")),
-        "retention is not a job and never gets one"
-    );
-
-    // An extension's executor registers alongside them, once.
-    writer
-        .register_maintenance_job(TestJob::idle())
-        .expect("register an extension job");
-    assert!(
-        writer.register_maintenance_job(TestJob::idle()).is_err(),
-        "an id may only be registered once"
-    );
-}
-
-fn claim_all(
-    compactions: &BackgroundCompactions,
-    count: usize,
-) -> Vec<compaction::CompactionClaim> {
-    (0..count)
-        .map(|index| {
-            compactions
-                .claim(&namespace_id(&format!("job-{index}")))
-                .expect("each namespace claims its own slot")
+impl BlockingJob {
+    fn new(
+        id: MaintenanceJobId,
+        publication: bool,
+        follow_up: Option<MaintenanceJobId>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            publication,
+            follow_up,
+            runs: AtomicUsize::new(0),
+            entered: watch::channel(0).0,
+            permits: Arc::new(Semaphore::new(0)),
         })
-        .collect()
-}
-
-#[tokio::test]
-async fn at_most_the_process_limit_of_compactions_run_however_many_namespaces_plan_one() {
-    let runner = enabled_runner(TestJob::idle());
-    let compactions = runner.compactions();
-    let claims = claim_all(&compactions, compaction::MAX_CONCURRENT_COMPACTIONS + 2);
-
-    assert_eq!(
-        claims.iter().filter(|claim| !claim.is_queued()).count(),
-        compaction::MAX_CONCURRENT_COMPACTIONS,
-        "the permits are what decide how many run"
-    );
-
-    // The queued claims wait, and each one starts as a permit frees.
-    let mut claims = claims.into_iter();
-    let running: Vec<_> = claims
-        .by_ref()
-        .take(compaction::MAX_CONCURRENT_COMPACTIONS)
-        .collect();
-    let admitted = Arc::new(AtomicU64::new(0));
-    let waiting_started = Arc::new(AtomicU64::new(0));
-    let waiting: Vec<_> = claims
-        .map(|mut claim| {
-            let admitted = Arc::clone(&admitted);
-            let waiting_started = Arc::clone(&waiting_started);
-            tokio::spawn(async move {
-                waiting_started.fetch_add(1, Ordering::SeqCst);
-                assert!(claim.admitted().await, "a freed permit admits this job");
-                admitted.fetch_add(1, Ordering::SeqCst);
-            })
-        })
-        .collect();
-    wait_for(
-        || waiting_started.load(Ordering::SeqCst) == waiting.len() as u64,
-        "every queued compaction to start waiting",
-    )
-    .await;
-    assert_eq!(
-        admitted.load(Ordering::SeqCst),
-        0,
-        "a queued job runs nothing while every permit is held"
-    );
-
-    for (freed, claim) in running.into_iter().enumerate() {
-        drop(claim);
-        wait_for(
-            || admitted.load(Ordering::SeqCst) as usize > freed,
-            "the next queued compaction to start",
-        )
-        .await;
     }
-    for task in waiting {
-        task.await.expect("the queued jobs settle");
-    }
-}
 
-#[tokio::test]
-async fn a_queued_job_still_holds_its_namespace() {
-    let runner = enabled_runner(TestJob::idle());
-    let compactions = runner.compactions();
-    let _running = claim_all(&compactions, compaction::MAX_CONCURRENT_COMPACTIONS);
-
-    let queued_namespace = namespace_id("queued");
-    let queued = compactions
-        .claim(&queued_namespace)
-        .expect("a namespace with no job claims its slot");
-    assert!(queued.is_queued(), "every permit is held");
-    assert!(
-        compactions.claim(&queued_namespace).is_none(),
-        "a second job for one namespace is refused while the first waits"
-    );
-
-    drop(queued);
-    assert!(
-        compactions.claim(&queued_namespace).is_some(),
-        "and the slot goes back when the claim does"
-    );
-}
-
-#[tokio::test]
-async fn cancellation_reaches_a_job_that_is_still_waiting_for_a_permit() {
-    let runner = enabled_runner(TestJob::idle());
-    let compactions = runner.compactions();
-    let _running = claim_all(&compactions, compaction::MAX_CONCURRENT_COMPACTIONS);
-    let mut queued = compactions
-        .claim(&namespace_id("queued"))
-        .expect("a namespace with no job claims its slot");
-    assert!(queued.is_queued());
-
-    let ran = Arc::new(AtomicU64::new(0));
-    let waiting_started = Arc::new(AtomicU64::new(0));
-    let waiting = tokio::spawn({
-        let ran = Arc::clone(&ran);
-        let waiting_started = Arc::clone(&waiting_started);
-        async move {
-            waiting_started.store(1, Ordering::SeqCst);
-            let admitted = queued.admitted().await;
-            if admitted {
-                ran.fetch_add(1, Ordering::SeqCst);
-            }
-            admitted
+    async fn wait_entered(&self, count: usize) {
+        let mut entered = self.entered.subscribe();
+        while *entered.borrow_and_update() < count {
+            entered.changed().await.expect("job remains present");
         }
-    });
-    wait_for(
-        || waiting_started.load(Ordering::SeqCst) == 1,
-        "the queued compaction to start waiting",
-    )
-    .await;
+    }
 
-    compactions.cancel_all();
+    fn release(&self) {
+        self.permits.add_permits(1);
+    }
+}
 
-    assert!(
-        !waiting.await.expect("the queued job settles"),
-        "a cancelled job must not be admitted by a permit that frees later"
-    );
-    assert_eq!(
-        ran.load(Ordering::SeqCst),
-        0,
-        "and it must run nothing, so it stages nothing"
-    );
+#[async_trait::async_trait]
+impl MaintenanceJob for BlockingJob {
+    fn id(&self) -> MaintenanceJobId {
+        self.id
+    }
+
+    async fn run(
+        &self,
+        _namespace_id: &NamespaceId,
+        _continuation: Option<&str>,
+        _cancellation: &MaintenanceCancellation,
+    ) -> Result<MaintenanceRunReport> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        self.entered.send_modify(|entered| *entered += 1);
+        self.permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("job remains open")
+            .forget();
+        Ok(MaintenanceRunReport {
+            conclusion: MaintenanceConclusion::Blocked,
+            continuation: None,
+            not_before_ms: None,
+            follow_up: self.follow_up,
+        })
+    }
+
+    async fn probe(&self, _namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
+        Ok(MaintenanceProbe::Idle)
+    }
+
+    fn should_run_after_publication(&self, _publication: &NamespacePublication) -> bool {
+        self.publication
+    }
 }
 
 #[tokio::test]
-async fn a_job_that_ends_frees_its_slot_and_requeues_its_namespace() {
-    let job = TestJob::gated([], ScriptedStep::Conclude(MaintenanceStepConclusion::Idle));
-    let clock = ManualClock::at(1_700_000_000_000);
-    let runner = runner_with(FsBackgroundWork::Enabled, clock.clone(), job.clone());
-    let compactions = runner.compactions();
-    // The one admission permit is held by a step that never finishes, so a
-    // nudged key stays where the nudge put it.
+async fn published_hints_coalesce_and_follow_ups_admit_once() {
+    let metadata = BlockingJob::new(
+        MaintenanceJobId::METADATA,
+        true,
+        Some(MaintenanceJobId::METADATA_COMPACTION),
+    );
+    let compaction = BlockingJob::new(MaintenanceJobId::METADATA_COMPACTION, false, None);
+    let registry = MaintenanceRegistry::new();
+    registry.register(metadata.clone()).expect("metadata job");
+    registry
+        .register(compaction.clone())
+        .expect("compaction job");
+    let runner = MaintenanceRunner::builder(registry)
+        .max_concurrent(2)
+        .build()
+        .expect("runner");
+    let namespace_id = namespace_id("hints");
+    let publication = NamespacePublication {
+        namespace_id: namespace_id.clone(),
+        committed_through_seq: Some(ChangeSeq(1)),
+        folded: true,
+        wal_tail_segments: 0,
+    };
+
     runner
         .handle()
-        .nudge(TEST_JOB, &namespace_id("holds-the-permit"));
-    job.gate().wait_entered(1).await;
+        .hint(MaintenanceHint::Published(publication.clone()));
+    runner
+        .handle()
+        .hint(MaintenanceHint::Published(publication));
+    metadata.wait_entered(1).await;
+    assert_eq!(metadata.runs.load(Ordering::SeqCst), 1);
+    metadata.release();
 
-    let published = namespace_id("published");
-    compactions
-        .claim(&published)
-        .expect("the namespace claims its slot")
-        .finished(true);
-    assert!(
-        runner.is_pending(MaintenanceJobId::METADATA, &published),
-        "a published job hands the namespace straight back to metadata maintenance"
-    );
+    compaction.wait_entered(1).await;
+    runner
+        .handle()
+        .nudge(MaintenanceJobId::METADATA, &namespace_id);
+    metadata.wait_entered(2).await;
+    metadata.release();
+    wait_for(
+        || metadata.runs.load(Ordering::SeqCst) == 2,
+        "the second metadata report",
+    )
+    .await;
+    tokio::task::yield_now().await;
     assert_eq!(
-        runner.not_before_ms(MaintenanceJobId::METADATA, &published),
-        None,
-        "and it waits for nothing"
-    );
-    assert!(
-        compactions.claim(&published).is_some(),
-        "the slot is back before the nudge, so the step it wakes may fold the rebuilt group"
+        compaction.runs.load(Ordering::SeqCst),
+        1,
+        "an identical follow-up coalesces while compaction is admitted"
     );
 
-    let abandoned = namespace_id("abandoned");
-    compactions
-        .claim(&abandoned)
-        .expect("the namespace claims its slot")
-        .finished(false);
-    assert_eq!(
-        runner.not_before_ms(MaintenanceJobId::METADATA, &abandoned),
-        Some(clock.now_ms() + RECONCILE_INTERVAL_MS),
-        "a job that published nothing is planned again after a backoff, not at once"
-    );
+    compaction.release();
+    runner.shutdown().await.expect("runner shutdown");
+}
 
-    job.gate().release(8);
-    runner.close_admission();
-    runner.drain().await.expect("the held step settles");
+#[tokio::test]
+async fn reconciliation_recovers_a_hint_dropped_before_attachment() {
+    let subscriber = Arc::new(SubscribingJob::default());
+    let registry = MaintenanceRegistry::new();
+    registry
+        .register(subscriber.clone())
+        .expect("subscriber job");
+    let runner = MaintenanceRunner::builder(registry)
+        .build()
+        .expect("runner");
+    let (observer, receiver) = MaintenanceHintRelay::new(NonZeroUsize::new(1).expect("nonzero"));
+    let namespace_id = namespace_id("dropped");
+    let hint = MaintenanceHint::Published(NamespacePublication {
+        namespace_id: namespace_id.clone(),
+        committed_through_seq: Some(ChangeSeq(1)),
+        folded: false,
+        wal_tail_segments: 0,
+    });
+    let dropped_before = MaintenanceHintRelay::dropped();
+
+    observer(hint.clone());
+    observer(hint);
+    assert_eq!(MaintenanceHintRelay::dropped(), dropped_before + 1);
+
+    runner.attach_hints(receiver);
+    wait_for(
+        || subscriber.stepped().len() == 1,
+        "the retained hint to run",
+    )
+    .await;
+    subscriber.set_probe(MaintenanceProbe::Due);
+    runner.reconcile_now().await;
+    runner.drain().await.expect("reconciled run");
+    assert_eq!(subscriber.stepped().len(), 2);
+
+    runner.shutdown().await.expect("runner shutdown");
 }

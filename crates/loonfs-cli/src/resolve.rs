@@ -10,12 +10,16 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::default_namespace;
 use loonfs::{
-    DecodedBlockCacheConfig, FsBackgroundWork, FsMaintenance, FsWriter, SharedObjectStore,
-    TraceStoreKind,
+    DecodedBlockCacheConfig, FsWriter, GarbageCollectionJob, MaintenanceHintRelay,
+    MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
+    SharedObjectStore, TraceStoreKind,
 };
 use loonfs_api::{ActorId, ActorKind, ActorRef, NamespaceId, SecretString};
 use loonfs_client::Client;
-use loonfs_grep::{GrepBlockCache, GrepService, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
+use loonfs_grep::{
+    GramIndexBuildPolicy, GrepBlockCache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
+    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+};
 use std::sync::Arc;
 
 pub(crate) struct LoadedConfig {
@@ -214,13 +218,12 @@ impl EmbeddedTarget {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(default_writer_id);
+        let (observer, receiver) = MaintenanceHintRelay::new(
+            std::num::NonZeroUsize::new(1024).expect("relay capacity is nonzero"),
+        );
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
-            // The server's policy: publishes past the WAL threshold schedule
-            // their own step. The backend settles scheduled work after each
-            // mutation, so a one-shot command exits with maintenance done
-            // rather than stalling at the WAL backpressure cap.
-            .background_work(FsBackgroundWork::Enabled)
+            .maintenance_hint_observer(move |hint| observer(hint))
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.
             .min_publish_interval_ms(0)
@@ -229,19 +232,42 @@ impl EmbeddedTarget {
             .await
             .map_err(map_runtime_error)?;
         let reader = writer.reader();
-        let maintenance = FsMaintenance::builder_with_store(store)
-            .actor_id(writer_id)
-            .trace_store_kind(trace_store_kind)
-            .build()
-            .await
+        let maintenance = writer
+            .maintenance_handle(format!("{writer_id}-maintenance"))
             .map_err(map_runtime_error)?;
         let grep_block_cache = Arc::new(GrepBlockCache::new(
             DecodedBlockCacheConfig::with_max_decoded_bytes(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         ));
+        let grep_worker = GrepWorker::with_block_cache(
+            writer.object_store(),
+            reader.clone(),
+            maintenance.clone(),
+            Arc::clone(&grep_block_cache),
+        );
+        let jobs = MaintenanceRegistry::new();
+        jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
+            .map_err(map_runtime_error)?;
+        jobs.register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
+            .map_err(map_runtime_error)?;
+        jobs.register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
+            .map_err(map_runtime_error)?;
+        jobs.register(Arc::new(GrepMaintenanceJob::new(
+            grep_worker.clone(),
+            GramIndexBuildPolicy::default(),
+        )))
+        .map_err(map_runtime_error)?;
+        jobs.register(Arc::new(GrepGcJob::new(grep_worker)))
+            .map_err(map_runtime_error)?;
+        let runner = MaintenanceRunner::builder(jobs.clone())
+            .build()
+            .map_err(map_runtime_error)?;
+        runner.attach_hints(receiver);
         let backend = EmbeddedBackend {
             writer,
             reader,
             maintenance,
+            jobs,
+            runner,
             // Embedded mode composes grep itself: the runtime handles above
             // know nothing about it.
             grep: GrepService::new(Arc::clone(&grep_block_cache)),

@@ -1179,13 +1179,7 @@ pub enum ReorganizeStepOutcome {
     NotNeeded,
     /// One family group was merged and a manifest published.
     UnitPublished,
-    /// The step started a background streaming compaction for an oversized group.
-    CompactionStarted,
-    /// A compaction job is already running for this namespace.
-    CompactionRunning,
-    /// This namespace's compaction job is waiting for a process permit.
-    CompactionAtCapacity,
-    /// A group requires a streaming compaction that an operator must schedule.
+    /// A family group needs a streaming compaction. Run the `metadata_compaction` job.
     CompactionRequired,
     /// Another publisher updated the metadata root before this step could reference its manifest.
     RootAdvanced,
@@ -1233,8 +1227,6 @@ pub enum MetadataCompactionOutcome {
     NotNeeded,
     /// The planner chose a bounded merge and this run published it; no full compaction was needed.
     BoundedMergePublished,
-    /// A compaction already holds this namespace's slot in this process.
-    AlreadyRunning,
     /// The rebuilt group replaced its snapshot in a published manifest.
     Published {
         /// Manifest published by the compaction.

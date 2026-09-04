@@ -2,12 +2,11 @@
 
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::ReadConfig;
-use crate::maintenance_runner::{MaintenanceRunner, NamespacePublication};
 use crate::metrics::RuntimeInstruments;
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 use crate::{
-    ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, NamespaceId, ObjectStore,
-    RuntimeCacheStats,
+    ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, MaintenanceHint,
+    MaintenanceHintObserver, NamespaceId, NamespacePublication, ObjectStore, RuntimeCacheStats,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
@@ -40,7 +39,7 @@ pub(crate) struct ReadCoreInner {
     pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
-    /// Publication, maintenance, and collection metrics.
+    /// Publication, collection, and completed-compaction metrics.
     pub(crate) instruments: Arc<RuntimeInstruments>,
 }
 
@@ -53,24 +52,31 @@ pub(crate) struct WriterIdentity {
 /// Writer state shared weakly with the publisher worker.
 pub(crate) struct WriterBits {
     pub(crate) identity: WriterIdentity,
-    /// Background maintenance owned by this writer.
-    pub(crate) maintenance: MaintenanceRunner,
+    pub(crate) maintenance_hint_observer: Option<MaintenanceHintObserver>,
     /// Optional synchronous notification after a mutation batch durably
     /// advances a namespace. Callers promise that it does not block.
     pub(crate) namespace_advance_observer: Option<NamespaceAdvanceObserver>,
 }
 
 impl WriterBits {
-    /// Notifies maintenance after every publish attempt and the observer
+    /// Notifies maintenance after every publish attempt and the change observer
     /// after a successful commit.
     pub(crate) fn notify_after_publish(
         &self,
         namespace_id: &NamespaceId,
         publication: &NamespacePublication,
     ) {
-        // Notify maintenance before running host code.
-        self.maintenance
-            .nudge_jobs_after_publication(namespace_id, publication);
+        if let Some(observer) = &self.maintenance_hint_observer {
+            let hint = MaintenanceHint::Published(publication.clone());
+            let observed =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
+            if observed.is_err() {
+                tracing::error!(
+                    namespace_id = %namespace_id,
+                    "maintenance hint observer panicked; publication state is durable"
+                );
+            }
+        }
 
         let Some(through_seq) = publication.committed_through_seq else {
             return;

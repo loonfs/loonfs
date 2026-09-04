@@ -4,8 +4,8 @@
 //! Checks operation spans for the writer, reader, and maintenance handles.
 
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, FsBackgroundWork, FsMaintenance, FsWriter,
-    PutFileOptions, StoreConfig,
+    CreateDirectoryOptions, CreateNamespaceOptions, FsMaintenance, FsWriter, PutFileOptions,
+    StoreConfig,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
@@ -62,7 +62,6 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
     block_on(async {
         let writer = FsWriter::builder(store_config(temp_dir.path()))
             .writer_id("operation-span-writer")
-            .background_work(FsBackgroundWork::ManualOnly)
             .build()
             .await
             .expect("build writer");
@@ -127,7 +126,6 @@ fn delegated_writer_calls_close_one_operation_span() {
     let (create_log, put_log) = block_on(async {
         let writer = FsWriter::builder(store_config(temp_dir.path()))
             .writer_id("operation-span-count-writer")
-            .background_work(FsBackgroundWork::ManualOnly)
             .build()
             .await
             .expect("build writer");

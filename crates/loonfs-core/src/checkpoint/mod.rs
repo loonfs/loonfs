@@ -78,6 +78,7 @@ pub(crate) use self::load::{
 pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::record::load_checkpoint_record;
 pub(crate) use self::release::release_checkpoint;
+pub use self::reorganize::metadata_maintenance_due;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};

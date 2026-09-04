@@ -219,11 +219,6 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         )
         .await
         .expect("write delta");
-    writer
-        .flush_background()
-        .await
-        .expect("background work quiesces");
-
     let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
         .await
         .expect("load grep root")

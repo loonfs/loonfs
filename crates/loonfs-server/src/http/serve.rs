@@ -13,7 +13,9 @@ use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
-    FsMaintenance, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob, MaintenanceProbe,
+    FsMaintenance, FsReader, FsWriter, GarbageCollectionJob, MaintenanceHandle,
+    MaintenanceHintObserver, MaintenanceHintRelay, MaintenanceJob, MaintenanceProbe,
+    MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
     SharedObjectStore, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, TraceMode,
     TraceStoreKind,
 };
@@ -125,16 +127,18 @@ impl http_body::Body for DrainedBody {
 /// Request handles built over one shared store client.
 ///
 /// Read handlers use `reader`, mutations use `writer`, and maintenance uses
-/// `maintenance`. The host also shuts down `writer` after the listener drains.
-/// `reader` is stored separately because most handlers require only read
-/// access.
+/// `maintenance`. After the listener drains, the host shuts down the writer
+/// and the optional maintenance runner. `reader` is stored separately because
+/// most handlers require only read access.
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Arc<ServerConfig>,
-    /// Writer handle that owns publication and maintenance work.
+    /// Writer handle that owns mutation and publication work.
     pub writer: FsWriter,
     pub(super) reader: FsReader,
     pub(super) maintenance: FsMaintenance,
+    pub jobs: MaintenanceRegistry,
+    pub runner: Option<MaintenanceRunner>,
     /// The store itself, for the one endpoint whose subject is the store
     /// rather than a namespace: the contract probe. It is the same
     /// instrumented client the handles were built on, so a probe measures
@@ -150,9 +154,9 @@ pub struct AppState {
     /// rather than part of the runtime the handles come from.
     pub(super) grep_service: Option<Arc<GrepService>>,
     /// Present when this deployment maintains the index automatically: how a
-    /// request tells the writer's runner a namespace may have indexing to
-    /// do. Absent under `maintenance = "manual"`, where the mutating index
-    /// routes still work and nothing schedules itself behind them.
+    /// request tells the runner a namespace may have indexing to do. Absent
+    /// under `maintenance = "manual"`, where the mutating index routes still
+    /// work and nothing schedules itself behind them.
     pub(super) grep_maintenance: Option<GrepMaintenance>,
     /// Bounds concurrently streamed proxied-upload bodies; bodies forward to
     /// the store incrementally, so worst-case upload memory is this times one
@@ -230,11 +234,10 @@ pub struct AppOptions {
 
 /// Builds the router and returns its state.
 ///
-/// After an embedded listener drains, the host must call
-/// [`FsWriter::shutdown`] on [`AppState::writer`] to settle publication and
-/// maintenance tasks, then close [`AppState::local_cache`] so in-memory
-/// entries are flushed. [`serve`] performs both steps automatically. The
-/// cache is present only when `[local_cache]` is configured.
+/// After an embedded listener drains, the host must shut down
+/// [`AppState::writer`] and [`AppState::runner`], then close
+/// [`AppState::local_cache`] so in-memory entries are flushed. [`serve`]
+/// performs these steps automatically. The runner and cache are optional.
 pub async fn app(
     config: ServerConfig,
     options: AppOptions,
@@ -259,8 +262,16 @@ pub async fn app(
     // Two switches decide automatic grep indexing and nothing else does:
     // whether this server maintains anything automatically, and whether its
     // grep mode maintains the index.
-    let maintains_grep_index =
-        config.maintenance.registers_automatic_jobs() && config.grep.mode.maintains_index();
+    let automatic = config.maintenance.runs_automatically();
+    let maintains_grep_index = config.grep.mode.maintains_index();
+    let (maintenance_hint_observer, maintenance_hint_receiver) = if automatic {
+        let (observer, receiver) = MaintenanceHintRelay::new(
+            std::num::NonZeroUsize::new(4096).expect("relay capacity is nonzero"),
+        );
+        (Some(observer), Some(receiver))
+    } else {
+        (None, None)
+    };
     // Opened before the handles, because the handles are what it is
     // installed on: a directory that cannot be owned fails startup here
     // rather than after a runtime is already running on it.
@@ -276,6 +287,7 @@ pub async fn app(
         &metrics,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
         local_cache.clone(),
+        maintenance_hint_observer,
     )
     .await?;
     let probe_store = writer.object_store();
@@ -301,7 +313,14 @@ pub async fn app(
         .mode
         .serves_grep()
         .then(|| Arc::new(GrepService::new(Arc::clone(&grep_block_cache))));
-    let grep_maintenance = if maintains_grep_index {
+    let jobs = MaintenanceRegistry::new();
+    jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
+        .map_err(maintenance_config_error)?;
+    jobs.register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
+        .map_err(maintenance_config_error)?;
+    jobs.register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
+        .map_err(maintenance_config_error)?;
+    let grep_job = if maintains_grep_index {
         let grep_worker = grep_worker
             .as_ref()
             .expect("grep maintenance requires a grep worker");
@@ -311,21 +330,33 @@ pub async fn app(
             .build_policy()
             .map_err(grep_config_error)?;
         let job = Arc::new(GrepMaintenanceJob::new(grep_worker.clone(), policy));
-        writer
-            .register_maintenance_job(job.clone())
+        jobs.register(job.clone()).map_err(grep_config_error)?;
+        jobs.register(Arc::new(GrepGcJob::new(grep_worker.clone())))
             .map_err(grep_config_error)?;
-        // Register garbage collection with index maintenance so deployments
-        // that create grep objects also reclaim them.
-        writer
-            .register_maintenance_job(Arc::new(GrepGcJob::new(grep_worker.clone())))
-            .map_err(grep_config_error)?;
-        Some(GrepMaintenance {
-            handle: writer.maintenance(),
-            job,
-        })
+        Some(job)
     } else {
         None
     };
+    let runner = if automatic {
+        let runner = MaintenanceRunner::builder(jobs.clone())
+            .max_concurrent(config.max_concurrent_maintenance)
+            .metrics_recorder(metrics.recorder())
+            .build()
+            .map_err(maintenance_config_error)?;
+        runner.attach_hints(
+            maintenance_hint_receiver.expect("automatic maintenance has a hint relay"),
+        );
+        Some(runner)
+    } else {
+        None
+    };
+    let grep_maintenance = runner
+        .as_ref()
+        .zip(grep_job)
+        .map(|(runner, job)| GrepMaintenance {
+            handle: runner.handle(),
+            job,
+        });
     let config = Arc::new(config);
     let state = AppState {
         upload_permits: Arc::new(Semaphore::new(
@@ -338,6 +369,8 @@ pub async fn app(
         writer,
         reader,
         maintenance,
+        jobs,
+        runner,
         probe_store,
         direct_transfers,
         grep_worker,
@@ -347,6 +380,13 @@ pub async fn app(
         local_cache,
     };
     Ok((router(state.clone()), state))
+}
+
+fn maintenance_config_error(error: impl std::fmt::Display) -> ServerConfigError {
+    ServerConfigError::InvalidField {
+        field: "maintenance",
+        reason: error.to_string(),
+    }
 }
 
 fn grep_config_error(error: impl std::fmt::Display) -> ServerConfigError {
@@ -386,6 +426,7 @@ pub(super) async fn build_handles(
     metrics: &ServerMetrics,
     metrics_jsonl_path: Option<OsString>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
+    maintenance_hint_observer: Option<MaintenanceHintObserver>,
 ) -> Result<(FsWriter, FsReader, FsMaintenance), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
@@ -396,16 +437,17 @@ pub(super) async fn build_handles(
 
     let mut writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
-        .background_work(config.maintenance.background_work())
         .min_publish_interval_ms(config.min_publish_interval_ms)
         // The reader below shares this core, so the read cap covers every
         // proxied content read the server serves.
         .max_read_content_bytes(config.max_download_bytes)
-        .max_concurrent_maintenance(config.max_concurrent_maintenance)
         .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());
+    if let Some(observer) = maintenance_hint_observer {
+        writer_builder = writer_builder.maintenance_hint_observer(move |hint| observer(hint));
+    }
     if let Some(samples) = &samples {
         writer_builder = writer_builder.object_store_metrics_recorder(Arc::clone(samples));
     }
@@ -414,24 +456,9 @@ pub(super) async fn build_handles(
     }
     let writer = writer_builder.build().await.map_err(runtime_error)?;
     let reader = writer.reader();
-
-    let mut maintenance_builder = FsMaintenance::builder_with_store(store)
-        .actor_id(format!("{}-maintenance", config.writer_id))
-        // The maintenance honors the configured cache sizing and shares the
-        // writer's decoded-block cache instance, so explicit maintenance
-        // reuses blocks reader traffic already decoded instead of
-        // populating a second, default-sized cache. It also shares the
-        // publisher and background compactions so maintenance invalidates
-        // writer projections and uses the writer's runner.
-        .runtime_cache(config.runtime_cache_config())
-        .over_writer(&writer)
-        .trace_mode(TraceMode::Remote)
-        .trace_store_kind(trace_store_kind)
-        .metrics_recorder(metrics.recorder());
-    if let Some(samples) = samples {
-        maintenance_builder = maintenance_builder.object_store_metrics_recorder(samples);
-    }
-    let maintenance = maintenance_builder.build().await.map_err(runtime_error)?;
+    let maintenance = writer
+        .maintenance_handle(format!("{}-maintenance", config.writer_id))
+        .map_err(runtime_error)?;
 
     Ok((writer, reader, maintenance))
 }
@@ -469,7 +496,7 @@ pub enum ServeError {
     Tls(#[source] TlsConfigError),
     #[error("server failed while serving requests: {0}")]
     Serve(#[source] std::io::Error),
-    #[error("background work did not settle during shutdown: {0}")]
+    #[error("writer or maintenance shutdown did not settle: {0}")]
     Shutdown(#[source] loonfs::RuntimeError),
     #[error("the local block cache did not close during shutdown: {0}")]
     LocalCacheClose(#[source] StoredMetadataBlockCacheCloseError),
@@ -518,7 +545,7 @@ pub async fn probe_store(config: &ServerConfig) -> Result<StoreProbeReport, Serv
 
 /// Serves until ctrl-c or SIGTERM, then shuts down gracefully. Admission
 /// closes while the listener remains available to reads and probes. After
-/// active requests drain, the listener closes and writer-owned work settles.
+/// active requests drain, the listener closes and accepted work settles.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
     serve_with_shutdown(config, shutdown_signal()).await
 }
@@ -569,6 +596,7 @@ where
         listener,
         router,
         state.writer,
+        state.runner,
         state.local_cache,
         shutdown_deadline_ms,
         shutdown,
@@ -587,6 +615,7 @@ pub(super) async fn serve_and_settle<L>(
     listener: L,
     router: Router,
     writer: FsWriter,
+    runner: Option<MaintenanceRunner>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
     shutdown_deadline_ms: u64,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -613,6 +642,9 @@ where
         () = shutdown.as_mut() => {
             // This is synchronous so readiness changes before the drain waits.
             writer.close_admission_for_shutdown();
+            if let Some(runner) = &runner {
+                runner.close_admission();
+            }
             // The budget starts when shutdown fires. It does not limit uptime.
             let deadline = tokio::time::Instant::now()
                 + Duration::from_millis(shutdown_deadline_ms);
@@ -630,9 +662,14 @@ where
     // Dropping the server cancels requests left behind by an expired drain.
     drop(server);
     served.map_err(ServeError::Serve)?;
-    // Admission is already closed on the signal path. This idempotent call
-    // drains publisher and maintenance work after the listener closes.
-    let settled = writer.shutdown().await.map_err(ServeError::Shutdown);
+    let writer_settled = writer.shutdown().await;
+    let runner_settled = match runner {
+        Some(runner) => runner.shutdown().await,
+        None => Ok(()),
+    };
+    let settled = writer_settled
+        .and(runner_settled)
+        .map_err(ServeError::Shutdown);
     // Close the cache after writer shutdown, even when writer shutdown fails.
     // Closing flushes retained memory entries to disk. If both steps fail, report
     // the writer failure.

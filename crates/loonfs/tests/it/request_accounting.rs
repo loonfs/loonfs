@@ -199,6 +199,7 @@ async fn warm_phase_request_accounting() {
                     &namespace_id,
                     MetadataMaintenanceOptions {
                         max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                        ..Default::default()
                     },
                 )
                 .await

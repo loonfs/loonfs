@@ -48,6 +48,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
             namespace_id,
             MetadataMaintenanceOptions {
                 max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                ..Default::default()
             },
         )
         .await
