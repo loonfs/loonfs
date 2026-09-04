@@ -15,11 +15,8 @@ use crate::{GcResponse, MaintenanceConclusion, MaintenanceJobId, MetadataCompact
 use loonfs_core::cache::{DecodedBlockCacheObserver, DecodedBlockWeight};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-
-const WAL_FOLD_MS_BOUNDARIES: &[f64] = &[
-    1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1_000.0, 3_000.0, 10_000.0, 30_000.0, 60_000.0, 120_000.0,
-];
 
 trait MetricLabel: Copy + PartialEq + 'static {
     const VALUES: &'static [Self];
@@ -169,7 +166,7 @@ const GC_CATEGORIES: [GcCategory; 10] = [
 /// Instruments owned by one maintenance runner.
 pub(crate) struct MaintenanceInstruments {
     installed: Option<InstalledMaintenance>,
-    observed_hints_dropped: std::sync::atomic::AtomicU64,
+    observed_hints_dropped: AtomicU64,
 }
 
 struct InstalledMaintenance {
@@ -208,7 +205,7 @@ impl MaintenanceInstruments {
                 ),
                 recorder,
             }),
-            observed_hints_dropped: std::sync::atomic::AtomicU64::new(0),
+            observed_hints_dropped: AtomicU64::new(0),
         })
     }
 
@@ -267,9 +264,7 @@ impl MaintenanceInstruments {
     }
 
     pub(crate) fn hints_dropped(&self, total: u64) {
-        let previous = self
-            .observed_hints_dropped
-            .swap(total, std::sync::atomic::Ordering::Relaxed);
+        let previous = self.observed_hints_dropped.swap(total, Ordering::Relaxed);
         if let Some(installed) = &self.installed {
             installed
                 .hints_dropped
@@ -480,7 +475,10 @@ impl RuntimeInstruments {
         let Some(installed) = &self.installed else {
             return;
         };
-        installed.publisher.wal_fold_ms.record(elapsed_ms as f64);
+        installed
+            .publisher
+            .wal_fold_seconds
+            .record(seconds_from_ms(elapsed_ms));
     }
 
     pub(crate) fn publisher_write_stop_refusal(&self) {
@@ -997,7 +995,7 @@ struct PublisherInstruments {
     batches: Arc<dyn CounterHandle>,
     wal_folds: Arc<dyn CounterHandle>,
     wal_folds_waiting: Arc<dyn GaugeHandle>,
-    wal_fold_ms: Arc<dyn HistogramHandle>,
+    wal_fold_seconds: Arc<dyn HistogramHandle>,
     write_stop_refusals: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
@@ -1026,11 +1024,11 @@ impl PublisherInstruments {
                 "WAL-tail folds waiting for a writer permit",
                 &[],
             ),
-            wal_fold_ms: recorder.register_histogram(
-                "loonfs.publisher.wal_fold_ms",
-                "Duration of a WAL-tail fold in milliseconds",
+            wal_fold_seconds: recorder.register_histogram(
+                "loonfs.publisher.wal_fold_seconds",
+                "Duration of a WAL-tail fold in seconds",
                 &[],
-                WAL_FOLD_MS_BOUNDARIES,
+                LATENCY_SECONDS_BOUNDARIES,
             ),
             write_stop_refusals: recorder.register_counter(
                 "loonfs.publisher.write_stop_refusals",

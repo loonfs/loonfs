@@ -4,8 +4,8 @@
 // The panicking observer under test is written as a `panic!` closure.
 
 use loonfs::{
-    CreateNamespaceOptions, FsWriter, MaintenanceCancellation, MaintenanceConclusion,
-    MaintenanceHintRelay, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry,
+    maintenance_hint_relay, CreateNamespaceOptions, FsWriter, MaintenanceCancellation,
+    MaintenanceConclusion, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry,
     MaintenanceRunReport, MaintenanceRunner, NamespaceAdvanceHint, NamespacePublication,
     PutFileOptions, Result, SharedObjectStore,
 };
@@ -112,7 +112,7 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let (observer, receiver) =
-        MaintenanceHintRelay::new(NonZeroUsize::new(16).expect("relay capacity is nonzero"));
+        maintenance_hint_relay(NonZeroUsize::new(16).expect("relay capacity is nonzero"));
     let writer = FsWriter::builder_with_store(store)
         .writer_id("observer-panic-writer")
         .min_publish_interval_ms(0)

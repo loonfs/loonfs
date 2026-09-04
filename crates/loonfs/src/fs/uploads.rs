@@ -32,18 +32,20 @@ impl FsWriter {
     /// the one failure that would cost something: the pass would find the
     /// session retained, park, and have nothing left to bring it back.
     fn schedule_upload_session_reclamation(&self, namespace_id: &NamespaceId) {
-        let Some(observer) = &self.bits.maintenance_hint_observer else {
+        if self.bits.maintenance_hint_observer.is_none() {
             return;
-        };
+        }
         let Ok(now_ms) = loonfs_core::time::current_time_ms() else {
             return;
         };
-        let hint = MaintenanceHint::DueAt {
-            namespace_id: namespace_id.clone(),
-            job: MaintenanceJobId::GC,
-            not_before_ms: upload_session_reclaim_at_ms(now_ms),
-        };
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
+        self.bits.send_maintenance_hint(
+            namespace_id,
+            MaintenanceHint::DueAt {
+                namespace_id: namespace_id.clone(),
+                job: MaintenanceJobId::GC,
+                not_before_ms: upload_session_reclaim_at_ms(now_ms),
+            },
+        );
     }
 
     /// Plants the deadline a completed session's content just created. The
@@ -51,18 +53,20 @@ impl FsWriter {
     /// removes it — so completion schedules its own pass rather than
     /// relying on the one the session's lease already asked for.
     fn schedule_completed_upload_reclamation(&self, namespace_id: &NamespaceId) {
-        let Some(observer) = &self.bits.maintenance_hint_observer else {
+        if self.bits.maintenance_hint_observer.is_none() {
             return;
-        };
+        }
         let Ok(now_ms) = loonfs_core::time::current_time_ms() else {
             return;
         };
-        let hint = MaintenanceHint::DueAt {
-            namespace_id: namespace_id.clone(),
-            job: MaintenanceJobId::GC,
-            not_before_ms: completed_upload_reclaim_at_ms(now_ms),
-        };
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
+        self.bits.send_maintenance_hint(
+            namespace_id,
+            MaintenanceHint::DueAt {
+                namespace_id: namespace_id.clone(),
+                job: MaintenanceJobId::GC,
+                not_before_ms: completed_upload_reclaim_at_ms(now_ms),
+            },
+        );
     }
 
     /// Starts a durable upload session for a namespace.

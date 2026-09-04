@@ -105,7 +105,7 @@ impl WriterBits {
         );
     }
 
-    fn send_maintenance_hint(&self, namespace_id: &NamespaceId, hint: MaintenanceHint) {
+    pub(crate) fn send_maintenance_hint(&self, namespace_id: &NamespaceId, hint: MaintenanceHint) {
         let Some(observer) = &self.maintenance_hint_observer else {
             return;
         };

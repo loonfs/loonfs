@@ -1,3 +1,5 @@
+//! Garbage-collection scheduling over the runtime maintenance handle.
+
 use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport,
@@ -6,6 +8,7 @@ use crate::{
     ErrorCode, FsMaintenance, GcConfig, GcResponse, MaintenanceRunRequest, MaintenanceRunResponse,
     NamespaceId, Result, RuntimeError,
 };
+use async_trait::async_trait;
 use loonfs_api::GcRequest;
 use loonfs_core::limits::{
     CONTENT_RECLAMATION_GRACE_MS, GC_SAFETY_MARGIN_MS, UPLOAD_SESSION_LEASE_MS,
@@ -36,7 +39,7 @@ impl GarbageCollectionJob {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl MaintenanceJob for GarbageCollectionJob {
     fn id(&self) -> MaintenanceJobId {
         MaintenanceJobId::GC
@@ -66,7 +69,7 @@ impl MaintenanceJob for GarbageCollectionJob {
                 ));
             }
             Err(error) if continuation.is_some() && error.code() == ErrorCode::InvalidRequest => {
-                tracing::info!(
+                tracing::warn!(
                     namespace_id = %namespace_id,
                     error = %error.public_message(),
                     "collection rejected its resume position; restarting the pass"

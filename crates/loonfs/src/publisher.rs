@@ -690,9 +690,12 @@ async fn finish_namespace_close(
     let fenced = match AssertUnwindSafe(async {
         publisher.wait_for_worker().await;
         if let Err(error) = publisher.wait_for_fold().await {
-            tracing::info!(
-                namespace_id = %publisher.namespace_id,
-                error = %error,
+            phase_event!(
+                publisher.read_core,
+                "wal_fold",
+                publisher.namespace_id,
+                tracing::Level::WARN,
+                error = %error.public_message(),
                 "wal fold failed while the namespace session closed"
             );
         }
@@ -820,6 +823,34 @@ struct FoldExit(watch::Sender<bool>);
 impl Drop for FoldExit {
     fn drop(&mut self) {
         let _ = self.0.send(true);
+    }
+}
+
+/// A fold counted as waiting for a writer permit.
+struct WaitingFold<'a> {
+    counter: &'a AtomicUsize,
+    instruments: &'a crate::metrics::RuntimeInstruments,
+}
+
+impl<'a> WaitingFold<'a> {
+    fn new(counter: &'a AtomicUsize, instruments: &'a crate::metrics::RuntimeInstruments) -> Self {
+        let waiting_fold = Self {
+            counter,
+            instruments,
+        };
+        let waiting = counter.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+        instruments.publisher_wal_folds_waiting(waiting);
+        waiting_fold
+    }
+}
+
+impl Drop for WaitingFold<'_> {
+    fn drop(&mut self) {
+        let waiting = self
+            .counter
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        self.instruments.publisher_wal_folds_waiting(waiting);
     }
 }
 
@@ -1331,6 +1362,9 @@ impl NamespacePublisher {
         })
     }
 
+    /// Starts a fold task after its triggering publication releases the engine.
+    /// A panicked fold is retried by the next publish over the threshold. The
+    /// drain reports the contained panic.
     fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
         if state
@@ -1370,19 +1404,13 @@ impl NamespacePublisher {
         let Some(writer) = self.writer.upgrade() else {
             return;
         };
-        let waiting = writer.wal_folds_waiting.fetch_add(1, Ordering::SeqCst) + 1;
-        self.read_core
-            .instruments()
-            .publisher_wal_folds_waiting(waiting);
+        let waiting = WaitingFold::new(&writer.wal_folds_waiting, self.read_core.instruments());
         let _permit = writer
             .wal_fold_permits
             .acquire()
             .await
             .expect("fold permit semaphore should remain open");
-        let waiting = writer.wal_folds_waiting.fetch_sub(1, Ordering::SeqCst) - 1;
-        self.read_core
-            .instruments()
-            .publisher_wal_folds_waiting(waiting);
+        drop(waiting);
         let snapshot = {
             let slot = self.engine.lock().await;
             let snapshot = slot
@@ -1400,9 +1428,12 @@ impl NamespacePublisher {
         let context = match writer.identity.mutation_context() {
             Ok(context) => context,
             Err(error) => {
-                tracing::info!(
-                    namespace_id = %self.namespace_id,
-                    error = %error,
+                phase_event!(
+                    self.read_core,
+                    "wal_fold",
+                    self.namespace_id,
+                    tracing::Level::WARN,
+                    error = %error.public_message(),
                     "WAL-tail fold failed"
                 );
                 return;
@@ -1428,9 +1459,13 @@ impl NamespacePublisher {
                 self.read_core.instruments().publisher_wal_fold();
             }
             Err(error) => {
-                tracing::info!(
-                    namespace_id = %self.namespace_id,
-                    error = %error.message(),
+                let error = RuntimeError::Core(error);
+                phase_event!(
+                    self.read_core,
+                    "wal_fold",
+                    self.namespace_id,
+                    tracing::Level::WARN,
+                    error = %error.public_message(),
                     "WAL-tail fold failed"
                 );
             }
@@ -1464,9 +1499,12 @@ impl NamespacePublisher {
                     take_queued_waiters(&mut state)
                 };
                 if let Err(error) = self.wait_for_fold().await {
-                    tracing::info!(
-                        namespace_id = %self.namespace_id,
-                        error = %error,
+                    phase_event!(
+                        self.read_core,
+                        "wal_fold",
+                        self.namespace_id,
+                        tracing::Level::WARN,
+                        error = %error.public_message(),
                         "wal fold failed while the namespace was deleted"
                     );
                 }

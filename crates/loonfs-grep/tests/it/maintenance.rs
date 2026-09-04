@@ -20,6 +20,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, KeyPredicate, MetadataMapStore, OperationClass,
 };
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -319,7 +320,10 @@ async fn a_refused_resume_position_restarts_the_collection_pass() {
 fn host_runner(max_concurrent_maintenance: usize) -> (MaintenanceRegistry, MaintenanceRunner) {
     let jobs = MaintenanceRegistry::new();
     let runner = MaintenanceRunner::builder(jobs.clone())
-        .max_concurrent(max_concurrent_maintenance)
+        .max_concurrent(
+            NonZeroUsize::new(max_concurrent_maintenance)
+                .expect("test maintenance concurrency should be nonzero"),
+        )
         .build()
         .expect("build host runner");
     (jobs, runner)

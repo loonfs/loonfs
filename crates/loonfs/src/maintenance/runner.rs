@@ -11,6 +11,8 @@ use crate::{NamespaceId, Result, RuntimeError};
 use futures::FutureExt as _;
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -45,7 +47,7 @@ pub(crate) trait MaintenanceClock: fmt::Debug + Send + Sync {
 #[derive(Debug)]
 pub(crate) struct SystemMaintenanceClock {
     /// Counter behind the backoff jitter, advanced once per draw.
-    jitter: std::sync::atomic::AtomicU64,
+    jitter: AtomicU64,
 }
 
 /// The odd increment SplitMix64 walks its counter by.
@@ -58,7 +60,7 @@ impl Default for SystemMaintenanceClock {
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
         hasher.write_u64(JITTER_GAMMA);
         Self {
-            jitter: std::sync::atomic::AtomicU64::new(hasher.finish()),
+            jitter: AtomicU64::new(hasher.finish()),
         }
     }
 }
@@ -76,9 +78,7 @@ impl MaintenanceClock for SystemMaintenanceClock {
         if span_ms == 0 {
             return 0;
         }
-        let counter = self
-            .jitter
-            .fetch_add(JITTER_GAMMA, std::sync::atomic::Ordering::Relaxed);
+        let counter = self.jitter.fetch_add(JITTER_GAMMA, Ordering::Relaxed);
         split_mix_64(counter) % span_ms
     }
 }
@@ -188,7 +188,7 @@ pub struct MaintenanceRunner {
 /// Builder for [`MaintenanceRunner`].
 pub struct MaintenanceRunnerBuilder {
     registry: MaintenanceRegistry,
-    max_concurrent: usize,
+    max_concurrent: NonZeroUsize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
     #[cfg(test)]
     clock: Option<Arc<dyn MaintenanceClock>>,
@@ -214,16 +214,14 @@ pub struct MaintenanceRunnerStats {
 #[derive(Debug, Default)]
 struct RunnerCounters {
     /// Steps that failed and were scheduled for a backoff retry.
-    backoff_scheduled: std::sync::atomic::AtomicU64,
+    backoff_scheduled: AtomicU64,
     /// Timer wakes that found at least one not-before deadline arrived.
-    not_before_wakes: std::sync::atomic::AtomicU64,
+    not_before_wakes: AtomicU64,
 }
 
 impl RunnerCounters {
-    fn bump(counter: &std::sync::atomic::AtomicU64) -> u64 {
-        counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1)
+    fn bump(counter: &AtomicU64) -> u64 {
+        counter.fetch_add(1, Ordering::Relaxed).saturating_add(1)
     }
 }
 
@@ -241,7 +239,7 @@ pub(crate) struct RunnerInner {
     counters: RunnerCounters,
     /// Tasks a later spawn reaped after they panicked. Their join handles no
     /// longer reach [`MaintenanceRunner::drain`], so the count does.
-    panicked_tasks: std::sync::atomic::AtomicUsize,
+    panicked_tasks: AtomicUsize,
     /// Where settled steps report. The two [`RunnerCounters`] above stay
     /// where they are: they answer "is this happening at all", which a
     /// number on an existing trace answers for a reader with no metrics
@@ -267,7 +265,8 @@ impl MaintenanceRunner {
     pub fn builder(registry: MaintenanceRegistry) -> MaintenanceRunnerBuilder {
         MaintenanceRunnerBuilder {
             registry,
-            max_concurrent: crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+            max_concurrent: NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
+                .expect("default maintenance concurrency should be nonzero"),
             metrics_recorder: None,
             #[cfg(test)]
             clock: None,
@@ -298,7 +297,7 @@ impl MaintenanceRunner {
                 clock,
                 wake: Arc::new(Notify::new()),
                 counters: RunnerCounters::default(),
-                panicked_tasks: std::sync::atomic::AtomicUsize::new(0),
+                panicked_tasks: AtomicUsize::new(0),
                 instruments: MaintenanceInstruments::new(metrics_recorder),
             }),
         }
@@ -385,10 +384,7 @@ impl MaintenanceRunner {
                 }
             }
         }
-        panicked += self
-            .inner
-            .panicked_tasks
-            .load(std::sync::atomic::Ordering::SeqCst);
+        panicked += self.inner.panicked_tasks.load(Ordering::SeqCst);
         if panicked > 0 {
             return Err(RuntimeError::RuntimeTask(format!(
                 "{panicked} background maintenance task(s) panicked"
@@ -507,7 +503,7 @@ impl MaintenanceRunner {
 
 impl MaintenanceRunnerBuilder {
     /// Sets the shared invocation permit count.
-    pub fn max_concurrent(mut self, permits: usize) -> Self {
+    pub fn max_concurrent(mut self, permits: NonZeroUsize) -> Self {
         self.max_concurrent = permits;
         self
     }
@@ -526,11 +522,6 @@ impl MaintenanceRunnerBuilder {
 
     /// Builds the runner on the current Tokio runtime.
     pub fn build(self) -> Result<MaintenanceRunner> {
-        if self.max_concurrent == 0 {
-            return Err(RuntimeError::Config(
-                "`max_concurrent` must be greater than zero".to_owned(),
-            ));
-        }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             RuntimeError::Config(
                 "maintenance runner must be built inside a Tokio runtime".to_owned(),
@@ -545,7 +536,7 @@ impl MaintenanceRunnerBuilder {
         Ok(MaintenanceRunner::new(
             self.registry,
             runtime,
-            self.max_concurrent,
+            self.max_concurrent.get(),
             clock,
             self.metrics_recorder,
         ))
@@ -584,8 +575,7 @@ impl RunnerInner {
                 .now_or_never()
                 .is_some_and(|outcome| outcome.is_err_and(|error| error.is_panic()))
             {
-                self.panicked_tasks
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.panicked_tasks.fetch_add(1, Ordering::SeqCst);
             }
             false
         });
@@ -736,7 +726,7 @@ fn report_compactions(state: &RunnerState, instruments: &MaintenanceInstruments)
         .keys()
         .filter(|key| key.job == MaintenanceJobId::METADATA_COMPACTION)
         .count();
-    let running = active.min(super::metadata_compaction::MAX_CONCURRENT_COMPACTIONS);
+    let running = active.min(crate::config::DEFAULT_MAX_CONCURRENT_COMPACTIONS);
     instruments.compactions(running, active.saturating_sub(running));
 }
 

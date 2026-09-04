@@ -1,14 +1,15 @@
+//! Streaming metadata compaction under a process-local concurrency limit.
+
 use super::runner::RECONCILE_INTERVAL_MS;
 use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport,
 };
 use crate::{FsMaintenance, MetadataCompactionOutcome, NamespaceId, Result};
+use async_trait::async_trait;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-
-pub(super) const MAX_CONCURRENT_COMPACTIONS: usize = 2;
 
 /// Runs streaming metadata compaction under a process-local permit limit.
 pub struct MetadataCompactionJob {
@@ -21,7 +22,9 @@ impl MetadataCompactionJob {
     pub fn new(maintenance: FsMaintenance) -> Self {
         Self {
             maintenance,
-            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_COMPACTIONS)),
+            permits: Arc::new(Semaphore::new(
+                crate::config::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+            )),
         }
     }
 
@@ -32,7 +35,7 @@ impl MetadataCompactionJob {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl MaintenanceJob for MetadataCompactionJob {
     fn id(&self) -> MaintenanceJobId {
         MaintenanceJobId::METADATA_COMPACTION

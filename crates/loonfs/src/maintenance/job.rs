@@ -1,4 +1,7 @@
+//! Contracts and reports shared by registered maintenance jobs.
+
 use crate::{ChangeSeq, NamespaceId, Result};
+use async_trait::async_trait;
 use std::fmt;
 
 /// Stable identifier for a registered maintenance job.
@@ -133,8 +136,8 @@ impl MaintenanceCancellation {
     }
 }
 
-#[async_trait::async_trait]
 /// One maintenance operation available to a registry.
+#[async_trait]
 pub trait MaintenanceJob: Send + Sync + 'static {
     /// Returns this job's stable identifier.
     fn id(&self) -> MaintenanceJobId;

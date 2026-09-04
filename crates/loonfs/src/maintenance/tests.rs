@@ -7,6 +7,7 @@
 
 use super::runner::{MaintenanceClock, SystemMaintenanceClock};
 use super::*;
+use crate::maintenance::hints::dropped_hints;
 use crate::{ChangeSeq, NamespaceId, Result, RuntimeError};
 use loonfs_test_support::ids::{namespace_id, nonzero_usize};
 use std::collections::VecDeque;
@@ -298,7 +299,7 @@ fn runner_with(
     let registry = MaintenanceRegistry::new();
     registry.register(job).expect("register the test job");
     let runner = MaintenanceRunner::builder(registry)
-        .max_concurrent(nonzero_usize(1).get())
+        .max_concurrent(nonzero_usize(1))
         .clock(clock)
         .build()
         .expect("build the runner");
@@ -875,7 +876,7 @@ async fn wal_fold_finished_hints_coalesce_and_follow_ups_admit_once() {
         .register(compaction.clone())
         .expect("compaction job");
     let runner = MaintenanceRunner::builder(registry)
-        .max_concurrent(2)
+        .max_concurrent(nonzero_usize(2))
         .build()
         .expect("runner");
     let namespace_id = namespace_id("hints");
@@ -936,18 +937,18 @@ async fn reconciliation_recovers_a_hint_dropped_before_attachment() {
     let runner = MaintenanceRunner::builder(registry)
         .build()
         .expect("runner");
-    let (observer, receiver) = MaintenanceHintRelay::new(NonZeroUsize::new(1).expect("nonzero"));
+    let (observer, receiver) = maintenance_hint_relay(NonZeroUsize::new(1).expect("nonzero"));
     let namespace_id = namespace_id("dropped");
     let hint = MaintenanceHint::Published(NamespacePublication {
         namespace_id: namespace_id.clone(),
         committed_through_seq: Some(ChangeSeq(1)),
         wal_tail_segments: 0,
     });
-    let dropped_before = MaintenanceHintRelay::dropped();
+    let dropped_before = dropped_hints();
 
     observer(hint.clone());
     observer(hint);
-    assert_eq!(MaintenanceHintRelay::dropped(), dropped_before + 1);
+    assert_eq!(dropped_hints(), dropped_before + 1);
 
     runner.attach_hints(receiver);
     wait_for(

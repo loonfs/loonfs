@@ -8,10 +8,11 @@
 
 use crate::common::collect_path_entries;
 use loonfs::{
-    CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader,
-    FsWriter, GarbageCollectionJob, MaintenanceHintRelay, MaintenanceRegistry, MaintenanceRunner,
-    ManifestNo, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
-    NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
+    maintenance_hint_relay, CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode,
+    FsMaintenance, FsReader, FsWriter, GarbageCollectionJob, MaintenanceRegistry,
+    MaintenanceRunner, ManifestNo, MetadataCompactionJob, MetadataMaintenanceJob,
+    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError,
+    SharedObjectStore, StoreConfig,
 };
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
@@ -64,7 +65,7 @@ async fn writer_with_runner(
     runtime_cache: RuntimeCacheConfig,
 ) -> (FsWriter, FsMaintenance, MaintenanceRunner) {
     let (observer, receiver) =
-        MaintenanceHintRelay::new(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
+        maintenance_hint_relay(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
     let writer = FsWriter::builder(store_config(root))
         .writer_id("handle-test-writer")
         .runtime_cache(runtime_cache)
@@ -504,7 +505,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
             InjectedError::PermissionDenied("injected manifest write failure".to_owned()),
         ));
         let (observer, receiver) =
-            MaintenanceHintRelay::new(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
+            maintenance_hint_relay(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
         let store: SharedObjectStore = failing.clone();
         let writer = FsWriter::builder_with_store(store)
             .writer_id("fold-retry-writer")
@@ -923,12 +924,6 @@ fn builders_require_identity_and_a_runtime() {
 
     let outside_runtime = MaintenanceRunner::builder(MaintenanceRegistry::new()).build();
     assert!(matches!(outside_runtime, Err(RuntimeError::Config(_))));
-    block_on(async {
-        let zero = MaintenanceRunner::builder(MaintenanceRegistry::new())
-            .max_concurrent(0)
-            .build();
-        assert!(matches!(zero, Err(RuntimeError::Config(_))));
-    });
 }
 
 #[test]
