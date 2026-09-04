@@ -12,7 +12,6 @@ use super::streaming_compaction::MetadataCompactionSpec;
 use crate::control_object::{
     expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
 };
-use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::limits::{
     METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS, METADATA_COMPACTION_LEASE_EXPIRY_MS,
@@ -23,11 +22,8 @@ use loonfs_api::wire::control::{
     encode_control_state, CompactionLeaseStatus, ControlObjectKind, MetadataCompactionLeaseState,
 };
 use loonfs_api::{MetadataCompactionId, MetadataFamilyGroup, NamespaceId};
-use loonfs_objectstore::keys::{
-    metadata_compaction_job_id_from_key, metadata_compaction_lease, metadata_compaction_prefix,
-};
+use loonfs_objectstore::keys::metadata_compaction_lease;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-use std::collections::BTreeSet;
 
 /// Who owns the objects under one job's prefix, as a collector reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,45 +43,64 @@ pub(crate) enum CompactionPrefixOwner {
     NoOne,
 }
 
-/// Returns the current prefix owner, claiming an expired lease when possible.
-///
-/// A collector parses `metadata_compaction_id` from the key it is deciding.
-/// A lease naming a different job or namespace is corrupt because the key
-/// and embedded fence disagree.
-///
-/// An expired lease is not collectable until the compare-and-swap succeeds;
-/// the job may still resume and refresh it first.
-pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
+/// Returns the current prefix owner, claiming its expired group lease when possible.
+#[cfg(test)]
+pub(crate) async fn claim_group_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    group: MetadataFamilyGroup,
     metadata_compaction_id: &MetadataCompactionId,
     now_ms: u64,
 ) -> Result<CompactionPrefixOwner> {
-    let object_key = metadata_compaction_lease(namespace_id, metadata_compaction_id);
+    let Some(loaded) = load_group_lease(store, namespace_id, group).await? else {
+        return Ok(CompactionPrefixOwner::NoOne);
+    };
+    claim_loaded_group_lease(store, namespace_id, metadata_compaction_id, loaded, now_ms).await
+}
+
+pub(crate) type LoadedCompactionLease =
+    crate::control_object::LoadedControl<MetadataCompactionLeaseState>;
+
+pub(crate) async fn load_group_lease<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    group: MetadataFamilyGroup,
+) -> Result<Option<LoadedCompactionLease>> {
     let loaded = load_control_object(
         store,
-        object_key,
+        metadata_compaction_lease(namespace_id, group),
         ControlObjectKind::CompactionLease,
         |state: &MetadataCompactionLeaseState| {
             expect_namespace(namespace_id, &state.namespace_id)?;
             expect_identity_field(
-                "compaction job id",
-                metadata_compaction_id.as_str(),
-                state.job_id.as_str(),
+                "metadata family group",
+                group.as_str(),
+                state.group.as_str(),
             )
         },
     )
     .await;
-    let loaded = match loaded {
-        Ok(loaded) => loaded,
-        Err(ControlObjectLoadError::MissingObject { .. }) => {
-            return Ok(CompactionPrefixOwner::NoOne)
-        }
-        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-    };
+    match loaded {
+        Ok(loaded) => Ok(Some(loaded)),
+        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+        Err(error) => Err(CoreError::ControlObjectLoad(error)),
+    }
+}
+
+pub(crate) async fn claim_loaded_group_lease<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    metadata_compaction_id: &MetadataCompactionId,
+    loaded: LoadedCompactionLease,
+    now_ms: u64,
+) -> Result<CompactionPrefixOwner> {
     let object_key = loaded.object_key;
     let expected_etag = loaded.etag;
     let state = loaded.state;
+    // A group lease protects only the staged objects written by the job id it names.
+    if state.job_id != *metadata_compaction_id {
+        return Ok(CompactionPrefixOwner::NoOne);
+    }
     // Terminal: somebody already fenced this job, so the reap goes on from
     // wherever the pass that started it stopped.
     if state.status == (CompactionLeaseStatus::Reaping {}) {
@@ -110,8 +125,8 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
                 job_id = metadata_compaction_id.as_str(),
                 writer_id = reaping.writer_id.as_str(),
                 heartbeat_at_ms = reaping.heartbeat_at_ms,
-                "a streaming metadata compaction lease expired; garbage collection claimed its \
-                 prefix and the job that wrote it can no longer publish"
+                "a streaming metadata compaction lease expired; garbage collection claimed the \
+                 group lease and the job that wrote it can no longer publish"
             );
             Ok(CompactionPrefixOwner::ThisCollector)
         }
@@ -125,44 +140,36 @@ pub(crate) async fn claim_compaction_prefix<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Groups under an active, unexpired lease in this namespace.
-pub(crate) async fn groups_under_active_leases<S: ObjectStore + ?Sized>(
+/// Availability of one family group's deterministic lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GroupLeaseState {
+    /// No lease exists.
+    Free,
+    /// An unexpired job or a collector holds the lease.
+    Held,
+    /// The active lease may be taken over.
+    Expired,
+}
+
+/// Reads one family group's lease for planning.
+pub(super) async fn group_lease_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    group: MetadataFamilyGroup,
     now_ms: u64,
-) -> Result<BTreeSet<MetadataFamilyGroup>> {
-    let prefix = metadata_compaction_prefix(namespace_id);
-    let keys = store
-        .list_prefix(&prefix)
-        .await
-        .map_err(|error| CoreError::store(&prefix, &error))?;
-    let job_ids = keys
-        .iter()
-        .filter_map(|key| metadata_compaction_job_id_from_key(key))
-        .filter_map(|job_id| MetadataCompactionId::parse(job_id).ok())
-        .collect::<BTreeSet<_>>();
-    let mut groups = BTreeSet::new();
-    for job_id in job_ids {
-        let loaded = load_control_object(
-            store,
-            metadata_compaction_lease(namespace_id, &job_id),
-            ControlObjectKind::CompactionLease,
-            |state: &MetadataCompactionLeaseState| {
-                expect_namespace(namespace_id, &state.namespace_id)?;
-                expect_identity_field("compaction job id", job_id.as_str(), state.job_id.as_str())
-            },
-        )
-        .await;
-        let state = match loaded {
-            Ok(loaded) => loaded.state,
-            Err(ControlObjectLoadError::MissingObject { .. }) => continue,
-            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-        };
-        if active_lease_is_unexpired(&state, now_ms) {
-            groups.insert(state.group);
-        }
-    }
-    Ok(groups)
+) -> Result<GroupLeaseState> {
+    let Some(loaded) = load_group_lease(store, namespace_id, group).await? else {
+        return Ok(GroupLeaseState::Free);
+    };
+    Ok(
+        if active_lease_is_unexpired(&loaded.state, now_ms)
+            || loaded.state.status == (CompactionLeaseStatus::Reaping {})
+        {
+            GroupLeaseState::Held
+        } else {
+            GroupLeaseState::Expired
+        },
+    )
 }
 
 fn active_lease_is_unexpired(state: &MetadataCompactionLeaseState, now_ms: u64) -> bool {
@@ -184,6 +191,14 @@ pub(super) enum LeaseHold {
     Fenced,
 }
 
+/// Result of trying to acquire a family group's lease.
+pub(super) enum LeaseAcquire<'a> {
+    /// This job owns the lease.
+    Acquired(CompactionLease<'a>),
+    /// Another job or a collector holds the lease.
+    Held,
+}
+
 /// One running job's claim on its own prefix.
 ///
 /// The wall clock is read once, when the job starts; every later heartbeat
@@ -200,30 +215,128 @@ pub(super) struct CompactionLease<'a> {
 }
 
 impl<'a> CompactionLease<'a> {
-    /// Writes the lease before the job's first output object.
-    pub(super) async fn create<S: ObjectStore + ?Sized>(
+    /// Acquires the group lease before the job's first output object.
+    pub(super) async fn acquire<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
         spec: &MetadataCompactionSpec,
         writer_id: &str,
         started_at_ms: u64,
         timer: &'a dyn MonotonicTimer,
-    ) -> Result<Self> {
+    ) -> Result<LeaseAcquire<'a>> {
         let started_monotonic_ms = timer.monotonic_now_ms();
-        let object_key = metadata_compaction_lease(namespace_id, spec.job_id());
+        let object_key = metadata_compaction_lease(namespace_id, spec.group());
         let state = initial_lease_state(namespace_id, spec, writer_id, started_at_ms);
         let encoded = encode_lease(&state)?;
-        let metadata =
-            create_control_object_under_generated_id(store, &object_key, encoded).await?;
-        let etag = required_etag(&object_key, metadata.etag)?;
-        Ok(Self {
+        let loaded = load_group_lease(store, namespace_id, spec.group()).await?;
+        let etag = match loaded {
+            Some(loaded) => {
+                return Self::take_over_expired(
+                    store,
+                    loaded,
+                    object_key,
+                    state,
+                    encoded,
+                    timer,
+                    started_monotonic_ms,
+                )
+                .await
+            }
+            None => match store.put_if_absent(&object_key, encoded.clone()).await {
+                Ok(metadata) => required_etag(&object_key, metadata.etag)?,
+                Err(ObjectStoreError::PreconditionFailed { .. }) => {
+                    let Some(loaded) = load_group_lease(store, namespace_id, spec.group()).await?
+                    else {
+                        return Ok(LeaseAcquire::Held);
+                    };
+                    return Self::take_over_expired(
+                        store,
+                        loaded,
+                        object_key,
+                        state,
+                        encoded,
+                        timer,
+                        started_monotonic_ms,
+                    )
+                    .await;
+                }
+                Err(error @ ObjectStoreError::Transport { .. }) => {
+                    let Some(loaded) = load_group_lease(store, namespace_id, spec.group()).await?
+                    else {
+                        return Err(CoreError::store(&object_key, &error));
+                    };
+                    if loaded.state == state {
+                        loaded.etag
+                    } else {
+                        return Self::take_over_expired(
+                            store,
+                            loaded,
+                            object_key,
+                            state,
+                            encoded,
+                            timer,
+                            started_monotonic_ms,
+                        )
+                        .await;
+                    }
+                }
+                Err(error) => return Err(CoreError::store(&object_key, &error)),
+            },
+        };
+        Ok(LeaseAcquire::Acquired(Self {
             object_key,
             state,
             etag,
             timer,
             started_monotonic_ms,
             next_heartbeat_monotonic_ms: started_monotonic_ms,
-        })
+        }))
+    }
+
+    async fn take_over_expired<S: ObjectStore + ?Sized>(
+        store: &S,
+        loaded: LoadedCompactionLease,
+        object_key: String,
+        state: MetadataCompactionLeaseState,
+        encoded: Bytes,
+        timer: &'a dyn MonotonicTimer,
+        started_monotonic_ms: u64,
+    ) -> Result<LeaseAcquire<'a>> {
+        if active_lease_is_unexpired(&loaded.state, state.started_at_ms)
+            || loaded.state.status == (CompactionLeaseStatus::Reaping {})
+        {
+            return Ok(LeaseAcquire::Held);
+        }
+        // Replacing the complete expired lease in one CAS fences the previous job's next heartbeat.
+        let etag = match store
+            .compare_and_swap(&object_key, &loaded.etag, encoded)
+            .await
+        {
+            Ok(metadata) => required_etag(&object_key, metadata.etag)?,
+            Err(
+                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::NotFound { .. },
+            ) => return Ok(LeaseAcquire::Held),
+            Err(error @ ObjectStoreError::Transport { .. }) => {
+                let Some(confirmed) =
+                    load_group_lease(store, &state.namespace_id, state.group).await?
+                else {
+                    return Err(CoreError::store(&object_key, &error));
+                };
+                if confirmed.state != state {
+                    return Ok(LeaseAcquire::Held);
+                }
+                confirmed.etag
+            }
+            Err(error) => return Err(CoreError::store(&object_key, &error)),
+        };
+        Ok(LeaseAcquire::Acquired(Self {
+            object_key,
+            state,
+            etag,
+            timer,
+            started_monotonic_ms,
+            next_heartbeat_monotonic_ms: started_monotonic_ms,
+        }))
     }
 
     /// The clock the job paces itself by. One clock for the job's heartbeat
@@ -275,7 +388,7 @@ impl<'a> CompactionLease<'a> {
                     .saturating_add(METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS);
                 Ok(LeaseHold::Held)
             }
-            // Garbage collection claimed the prefix, or the object is gone.
+            // Garbage collection claimed the group lease, or the object is gone.
             // Either way this job no longer owns what it wrote.
             Err(
                 ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::NotFound { .. },
@@ -310,33 +423,27 @@ impl<'a> CompactionLease<'a> {
         started_at_ms: u64,
         timer: &'a dyn MonotonicTimer,
     ) -> Result<Self> {
-        let object_key = metadata_compaction_lease(namespace_id, spec.job_id());
-        let loaded = load_control_object(
-            store,
-            object_key.clone(),
-            ControlObjectKind::CompactionLease,
-            |state: &MetadataCompactionLeaseState| {
-                expect_namespace(namespace_id, &state.namespace_id)?;
-                expect_identity_field(
-                    "compaction job id",
-                    spec.job_id().as_str(),
-                    state.job_id.as_str(),
-                )
-            },
-        )
-        .await;
-        let loaded = match loaded {
-            Ok(loaded) => loaded,
-            Err(ControlObjectLoadError::MissingObject { .. }) => {
-                return Self::create(store, namespace_id, spec, writer_id, started_at_ms, timer)
-                    .await
-            }
-            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
+        match Self::acquire(store, namespace_id, spec, writer_id, started_at_ms, timer).await? {
+            LeaseAcquire::Acquired(lease) => return Ok(lease),
+            LeaseAcquire::Held => {}
+        }
+        let object_key = metadata_compaction_lease(namespace_id, spec.group());
+        let Some(loaded) = load_group_lease(store, namespace_id, spec.group()).await? else {
+            return Err(CoreError::Internal(format!(
+                "the compaction lease `{object_key}` disappeared while a test reopened it"
+            )));
         };
+        if loaded.state.job_id != *spec.job_id()
+            || loaded.state.status != (CompactionLeaseStatus::Active {})
+        {
+            return Err(CoreError::Internal(format!(
+                "the compaction lease `{object_key}` is held by another owner"
+            )));
+        }
         let started_monotonic_ms = timer.monotonic_now_ms();
         Ok(Self {
             object_key,
-            state: initial_lease_state(namespace_id, spec, writer_id, started_at_ms),
+            state: loaded.state,
             etag: loaded.etag,
             timer,
             started_monotonic_ms,
@@ -372,7 +479,7 @@ fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
 }
 
 fn encode_lease(state: &MetadataCompactionLeaseState) -> Result<Bytes> {
-    let object_key = metadata_compaction_lease(&state.namespace_id, &state.job_id);
+    let object_key = metadata_compaction_lease(&state.namespace_id, state.group);
     encode_control_state(ControlObjectKind::CompactionLease, state)
         .map(Bytes::from)
         .map_err(|error| CoreError::Codec {

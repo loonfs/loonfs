@@ -9,7 +9,7 @@
 //! [`FrozenBasePolicy`] decides when a blocked base requires full compaction.
 
 use super::block_fetch::load_segment_index_for_reorganization;
-use super::compaction_lease::groups_under_active_leases;
+use super::compaction_lease::{group_lease_state, GroupLeaseState};
 use super::error::ManifestLoadError;
 use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after, next_run_no_after};
 use super::load::load_verified_manifest_segments;
@@ -153,8 +153,6 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let snapshot = load_control_snapshot(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let groups_under_active_leases =
-        groups_under_active_leases(store, namespace_id, context.now_ms).await?;
     let floor_seq = snapshot.retention_floor_seq;
     // A namespace that has published no manifest of its own has no runs to
     // fold: reorganization has nothing to do until its first flush.
@@ -183,7 +181,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { delta_runs },
         ));
     }
-    let Some(group) = select_family_group(&previous.payload, &groups_under_active_leases) else {
+    let Some(group) =
+        select_family_group(store, namespace_id, &previous.payload, context.now_ms).await?
+    else {
         // Delta runs exist but hold no rows (empty families), or the only group
         // with rows is the one a job is rebuilding; nothing to fold here.
         return Ok(report(
@@ -749,7 +749,7 @@ fn manifest_has_reorganization_work(
     runs: &[MetadataRunManifest],
     policy: MetadataLsmPolicy,
 ) -> bool {
-    let has_group_rows = select_family_group(payload, &BTreeSet::new()).is_some();
+    let has_group_rows = !ranked_family_groups(payload).is_empty();
     (delta_run_count(payload) >= policy.max_delta_runs.get() && has_group_rows)
         || manifest_has_partial_reorganization(runs)
         || payload
@@ -793,33 +793,41 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
     Ok(decoded_bytes)
 }
 
-/// The family group with the most delta rows to fold; ties resolve in group
-/// order. `None` when no group has delta rows.
+/// The available family group with the most delta rows to fold; ties resolve
+/// in group order. `None` when no available group has delta rows.
 ///
-/// Groups under active compaction leases are skipped. A job's snapshot is
-/// every run its group held, while merges of other groups leave those
-/// descriptors unchanged.
+/// Groups under unexpired active or reaping leases are skipped. A job's
+/// snapshot is every run its group held, while merges of other groups leave
+/// those descriptors unchanged.
 ///
 /// Without it the excluded group would win every step for as long as the job
 /// ran — its delta rows are frozen in the job's snapshot, so its count never
 /// falls, while every other group's falls the moment it folds — and the step
 /// would spend itself re-planning a job that is already running.
-pub(super) fn select_family_group(
+pub(super) async fn select_family_group<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
     payload: &NamespaceManifestPayload,
-    rebuilding: &BTreeSet<MetadataFamilyGroup>,
-) -> Option<MetadataFamilyGroup> {
-    REORGANIZE_FAMILY_GROUPS
+    now_ms: u64,
+) -> Result<Option<MetadataFamilyGroup>> {
+    for group in ranked_family_groups(payload) {
+        if group_lease_state(store, namespace_id, group, now_ms).await? != GroupLeaseState::Held {
+            return Ok(Some(group));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn ranked_family_groups(payload: &NamespaceManifestPayload) -> Vec<MetadataFamilyGroup> {
+    let mut ranked = REORGANIZE_FAMILY_GROUPS
         .into_iter()
-        .filter(|group| !rebuilding.contains(group))
         .map(|group| (group_delta_rows(payload, group), group))
         .filter(|(rows, _)| *rows > 0)
-        .max_by(|(left_rows, left), (right_rows, right)| {
-            // On ties the EARLIER group must win, and group order is the
-            // enum's declaration order; comparing the groups reversed makes
-            // max_by pick it.
-            left_rows.cmp(right_rows).then_with(|| right.cmp(left))
-        })
-        .map(|(_, group)| group)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_rows, left), (right_rows, right)| {
+        right_rows.cmp(left_rows).then_with(|| left.cmp(right))
+    });
+    ranked.into_iter().map(|(_, group)| group).collect()
 }
 
 fn group_delta_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGroup) -> u64 {

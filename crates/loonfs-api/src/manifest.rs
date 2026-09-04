@@ -89,6 +89,30 @@ pub enum MetadataFamilyGroup {
 }
 
 impl MetadataFamilyGroup {
+    /// Every family group in serialized declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Bindings,
+        Self::Revisions,
+        Self::Inodes,
+        Self::Tombstones,
+        Self::ActiveDeletions,
+        Self::CommitReceipts,
+        Self::Attributes,
+    ];
+
+    /// Returns the snake-case name used in durable keys and serialized values.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bindings => "bindings",
+            Self::Revisions => "revisions",
+            Self::Inodes => "inodes",
+            Self::Tombstones => "tombstones",
+            Self::ActiveDeletions => "active_deletions",
+            Self::CommitReceipts => "commit_receipts",
+            Self::Attributes => "attributes",
+        }
+    }
+
     /// Returns the families this group merges together.
     pub const fn families(self) -> &'static [MetadataRowFamily] {
         match self {

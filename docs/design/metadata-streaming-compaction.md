@@ -32,7 +32,7 @@ Merges above the base can continue reducing delta-run count, but they cannot app
 ## Non-goals
 
 - Durable resume after a process restart.
-- More than one active metadata compaction per namespace.
+- More than one active metadata compaction per family group.
 - A fixed wall-clock limit for the complete job.
 - Changes to the metadata segment format.
 - Configurable process-wide concurrency. The `metadata-compaction` job uses a fixed limit of two concurrent runs.
@@ -54,7 +54,7 @@ Normal bounded merges remain the preferred path. Streaming compaction is selecte
 The complete operation has five stages:
 
 1. Capture an immutable compaction specification containing a generated job ID, the family group, selected input runs, output identity, and retention floor.
-2. Create the job lease, open sorted iterators over the selected runs, and merge their rows in key order.
+2. Acquire the family-group lease, open sorted iterators over the selected runs, and merge their rows in key order.
 3. Apply the retention rules and write completed output segments under `metadata/compactions/{job_id}/segments/`.
 4. Reload the current manifest and confirm that every selected input is still present and unchanged.
 5. Publish one manifest update that removes the selected inputs and adds the completed output.
@@ -94,7 +94,7 @@ The count is stored in the namespace manifest for each `MetadataFamilyGroup`. It
 
 Callers provide a `FrozenBasePolicy` when planning. The `metadata` job uses `Amortized`, which reads the manifest's per-group count. `FsMaintenance::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction.
 
-The bounded step reports `compaction_required`; the `metadata-compaction` job runs the streaming compaction under its own two-permit limit. The planner excludes every family group whose compaction lease is active and unexpired, so the lease excludes that group while unrelated groups remain available. Runner shutdown cancels running jobs.
+The bounded step reports `compaction_required`; the `metadata-compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order and reads each selected group's lease by key, skipping an `active` unexpired or `reaping` lease while unrelated groups remain available. Runner shutdown cancels running jobs.
 
 Runs published after the snapshot was captured are not part of the compaction input. Final publication preserves those runs.
 
@@ -149,17 +149,17 @@ Step budgets therefore price the selected logical input, and a step-contained me
 
 ## Job leases and garbage collection
 
-Each job owns `metadata/compactions/{job_id}/`. Output segments are stored in its `segments/` subdirectory, and lifecycle ownership is recorded in `lease.json` beside that directory.
+Each family group has one lease at `metadata/compaction_leases/{group}.json`, and its payload names the job whose output under `metadata/compactions/{job_id}/segments/` it protects. An `active` unexpired or `reaping` group lease excludes every other job for that group.
 
 The lease records the job ID, namespace ID, owner ID, status, start time, and most recent heartbeat. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
 
-The job creates the lease with `active` status and create-if-absent semantics before writing the first output segment. Every refresh uses compare-and-swap with the ETag returned by the preceding lease write. Refreshes occur every five minutes while the job runs and at the start of every finalization attempt. An active lease remains valid for 25 minutes after its last heartbeat, which covers missed heartbeats and the complete manifest-publication budget.
+The job creates a missing lease with `active` status and create-if-absent semantics before writing the first output segment. It takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and heartbeat fields; a held unexpired or `reaping` lease supersedes the new job. Every refresh uses compare-and-swap with the ETag returned by the preceding lease write. Refreshes occur every five minutes while the job runs and at the start of every finalization attempt. An active lease remains valid for 25 minutes after its last heartbeat, which covers missed heartbeats and the complete manifest-publication budget.
 
-Garbage collection reads at most one lease per job prefix during a pass. A fresh active lease keeps the complete prefix regardless of object age. For an expired active lease, the collector uses compare-and-swap to change the status to `reaping`. If a concurrent heartbeat wins, the collector retains the prefix. If the collector wins, the job's next heartbeat fails, the job returns a fenced outcome without publishing, and unreferenced objects in the prefix become eligible for collection. The `reaping` status is terminal, so a later pass can continue an interrupted cleanup without repeating the ownership decision.
+Garbage collection reads the seven group lease keys once per namespace per pass and maps each named job to its lease. A fresh active lease keeps only that job's objects regardless of age. For an expired active lease, the collector uses compare-and-swap to change the status to `reaping`. If a concurrent heartbeat wins, the collector retains the job's objects. If the collector wins, the job's next heartbeat fails, the job returns a fenced outcome without publishing, and its unreferenced objects become eligible for collection. The `reaping` status is terminal, so a later pass can continue an interrupted cleanup without repeating the ownership decision.
 
-A missing, invalid, or mismatched lease provides no ownership claim. Unreferenced objects in that prefix become eligible after a staging grace period derived from the lease expiry and the normal publication grace. Unrecognized keys under the compaction prefix are retained because ownership cannot be established safely.
+A missing lease or a lease naming another job provides no ownership claim. An invalid lease fails the pass. Unreferenced objects in that prefix become eligible after a staging grace period derived from the lease expiry and the normal publication grace. Unrecognized keys under the compaction prefix are retained because ownership cannot be established safely.
 
-After publication, the job stops heartbeating but leaves its final active lease in place. This protects the output from a collection pass that captured its live references before the manifest update. After the lease expires, a later pass reads the updated manifest, retains the referenced output segments, claims the lease, and deletes the lease after processing the rest of the prefix. Failed, cancelled, abandoned, superseded, and fenced jobs leave unreferenced output that is eventually collected.
+After publication, the job stops heartbeating but leaves its final active lease in place. This protects the output from a collection pass that captured its live references before the manifest update. After the lease expires, a later pass reads the updated manifest, retains the referenced output segments, claims the lease, and deletes it after processing the named job's prefix. Failed, cancelled, abandoned, superseded, and fenced jobs leave unreferenced output that is eventually collected.
 
 ## Finalization
 
@@ -200,7 +200,7 @@ The implementation is validated with the following tests:
 - Fence a job after garbage collection claims its prefix and verify that the job publishes nothing.
 - Leave the final lease after publication and verify that an older collection pass cannot remove the published output.
 - Reclaim staged output after a lease expires, is already marked `reaping`, or is missing.
-- Reject malformed and mismatched leases as job ownership records.
+- Reject malformed leases and leases whose namespace or group disagrees with their key.
 - Exercise continuous delta creation and verify that metadata maintenance requests full compaction after two published delta merges.
 - Verify that explicit compaction selects full compaction immediately for a frozen base.
 - Process large attribute histories and heavily reused binding slots while holding at most one row in retention state.

@@ -2,7 +2,7 @@
 //! and the bounded, resumable sweep.
 
 use super::budget::PassBudget;
-use super::compaction_staging::CompactionLeases;
+use super::compaction_staging::{CompactionLeases, GroupLeaseSweep};
 use super::config::{GcConfig, GcPolicy};
 use super::cursor::{cursor_after, CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
@@ -36,7 +36,7 @@ fn is_live(live: &LiveSet, family: CandidateFamily, key: &str) -> bool {
             .and_then(std::result::Result::ok)
             .is_some_and(|manifest_object_id| live.manifests.contains(&manifest_object_id)),
         CandidateFamily::Checkpoints => live.checkpoint_keys.contains(key),
-        CandidateFamily::UploadSessions => false,
+        CandidateFamily::CompactionLeases | CandidateFamily::UploadSessions => false,
     }
 }
 
@@ -183,6 +183,12 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         // therefore leave data protected for an extra pass, never a readable
         // record whose basis was removed underneath it.
         for &family in &CandidateFamily::ALL[resume_family.index()..] {
+            if matches!(
+                family,
+                CandidateFamily::CompactionStaging | CandidateFamily::CompactionLeases
+            ) {
+                self.leases.load_once(self.store, self.namespace_id).await?;
+            }
             let prefix = family.prefix(self.namespace_id);
             let start_after = if family == resume_family {
                 resume_last_key.as_deref()
@@ -213,6 +219,10 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                 self.budget.charge();
                 self.position = Some(cursor_after(self.namespace_id, family, key));
             }
+            if family == CandidateFamily::CompactionStaging {
+                self.leases.staging_finished();
+                self.leases.finish(self.store).await?;
+            }
         }
         Ok(PassEnd::Complete)
     }
@@ -237,6 +247,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             CandidateFamily::WalSegments
             | CandidateFamily::MetadataSegments
             | CandidateFamily::CompactionStaging
+            | CandidateFamily::CompactionLeases
             | CandidateFamily::Manifests
             | CandidateFamily::Checkpoints => {}
         };
@@ -276,6 +287,7 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                     .await?
             }
             CandidateFamily::CompactionStaging => self.process_compaction_staging(key).await?,
+            CandidateFamily::CompactionLeases => self.process_compaction_lease(key).await?,
             CandidateFamily::Checkpoints => self.process_checkpoint(key).await?,
             CandidateFamily::UploadSessions => self.process_upload_session(key).await?,
         }
@@ -318,9 +330,6 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             return Ok(());
         }
 
-        // A compaction job's prefix holds the segments it has written and
-        // the lease that says who owns them. A claimed lease goes only after
-        // the objects it fenced, which [`Self::run`] enforces at every exit.
         match self
             .leases
             .owner_of(self.store, self.namespace_id, key, self.mutation.now_ms)
@@ -332,8 +341,6 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             None => {
                 self.report.retain(RetainedReason::UnrecognizedKey);
             }
-            // The claimed lease is deleted once its prefix is processed.
-            Some(CompactionPrefixOwner::ThisCollector) if self.leases.is_claimed_lease(key) => {}
             Some(CompactionPrefixOwner::ThisCollector | CompactionPrefixOwner::NoOne) => {
                 if key.ends_with(".sst.zst")
                     && self
@@ -343,6 +350,25 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                     self.report.deleted.metadata_segments += 1;
                 }
             }
+        }
+        Ok(())
+    }
+
+    async fn process_compaction_lease(&mut self, key: &str) -> Result<()> {
+        if self.sweep.degraded {
+            self.report.retain(RetainedReason::DegradedRoots);
+            return Ok(());
+        }
+        match self
+            .leases
+            .sweep_group_lease(self.store, self.namespace_id, key, self.mutation.now_ms)
+            .await?
+        {
+            Some(GroupLeaseSweep::Delete) => self.delete_key(key).await?,
+            Some(GroupLeaseSweep::Retain) => {
+                self.report.retain(RetainedReason::WithinGraceWindow);
+            }
+            None => self.report.retain(RetainedReason::UnrecognizedKey),
         }
         Ok(())
     }

@@ -4,12 +4,13 @@
 
 use crate::layout::{
     metadata_compaction_job_id_from_key as parse_metadata_compaction_job_id,
+    metadata_compaction_lease_group_from_key as parse_metadata_compaction_lease_group,
     wal_segment_id_from_key as parse_wal_segment_id,
 };
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
     CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-    MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
+    MetadataFamilyGroup, MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
 };
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
@@ -102,13 +103,20 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
     }
 }
 
-/// Builds the mutable lease key one streaming compaction job holds over its
-/// own prefix.
-pub fn metadata_compaction_lease(
-    namespace_id: &NamespaceId,
-    metadata_compaction_id: &MetadataCompactionId,
-) -> String {
-    format!("namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/lease.json")
+/// Builds the mutable lease key for one metadata family group.
+pub fn metadata_compaction_lease(namespace_id: &NamespaceId, group: MetadataFamilyGroup) -> String {
+    let group = group.as_str();
+    format!("namespaces/{namespace_id}/metadata/compaction_leases/{group}.json")
+}
+
+/// Builds the listing prefix containing every metadata family-group lease.
+pub fn metadata_compaction_lease_prefix(namespace_id: &NamespaceId) -> String {
+    format!("namespaces/{namespace_id}/metadata/compaction_leases/")
+}
+
+/// Extracts the family group from a current-format compaction lease key.
+pub fn metadata_compaction_lease_group_from_key(key: &str) -> Option<MetadataFamilyGroup> {
+    parse_metadata_compaction_lease_group(key)
 }
 
 /// Builds the listing prefix containing every streaming compaction job's
@@ -119,8 +127,7 @@ pub fn metadata_compaction_prefix(namespace_id: &NamespaceId) -> String {
 
 /// Extracts the job id from a key under one namespace's compaction prefix.
 ///
-/// Returns `None` for a key under the prefix that is neither a job's lease
-/// nor one of its staged segments.
+/// Returns `None` for a key under the prefix that is not a staged segment.
 pub fn metadata_compaction_job_id_from_key(key: &str) -> Option<&str> {
     parse_metadata_compaction_job_id(key)
 }
@@ -154,16 +161,17 @@ pub fn content_blob(content_store_id: &ContentStoreId, content_id: &ContentId) -
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_prefix,
-        metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
-        metadata_segment_object_key, upload_session, wal_floor, wal_head, wal_segment,
-        wal_segment_id_from_key, wal_segment_prefix,
+        checkpoint_record, content_blob, metadata_compaction_lease,
+        metadata_compaction_lease_prefix, metadata_compaction_prefix, metadata_compaction_segment,
+        metadata_manifest_object, metadata_root, metadata_segment, metadata_segment_object_key,
+        upload_session, wal_floor, wal_head, wal_segment, wal_segment_id_from_key,
+        wal_segment_prefix,
     };
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-        MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
+        MetadataFamilyGroup, MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -250,6 +258,7 @@ mod tests {
                 )
                 .replace("{checkpoint_id}", "chk_00000000000000000000000000000001")
                 .replace("{job_id}", "cmp_00000000000000000000000000000001")
+                .replace("{group}", "bindings")
                 .replace("{segment_id}", "seg_00000000000000000000000000000001")
                 .replace("{upload_id}", "upl_00000000000000000000000000000001")
                 .replace("{content_id[4..6]}", &CONTENT_ID[4..6])
@@ -293,7 +302,7 @@ mod tests {
             ),
             (
                 "Compaction leases",
-                metadata_compaction_lease(&namespace_id(), &metadata_compaction_id()),
+                metadata_compaction_lease(&namespace_id(), MetadataFamilyGroup::Bindings),
             ),
             (
                 "Upload sessions",
@@ -349,6 +358,10 @@ mod tests {
         assert_eq!(
             metadata_compaction_prefix(&namespace_id()),
             "namespaces/ns-1/metadata/compactions/"
+        );
+        assert_eq!(
+            metadata_compaction_lease_prefix(&namespace_id()),
+            "namespaces/ns-1/metadata/compaction_leases/"
         );
     }
 

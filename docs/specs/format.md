@@ -94,7 +94,7 @@ The required durable object families and standard key patterns are:
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user, fork target, or snapshot). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
 | **Compaction staging** | Immutable | Holds segments written by a streaming compaction before publication. The descriptor stores the job id used to derive this key. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
-| **Compaction leases** | Mutable lifecycle | Record ownership of a compaction output prefix. A job creates and refreshes an `active` lease. Garbage collection may change an expired lease to terminal `reaping` before reclaiming the output. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/lease.json` |
+| **Compaction leases** | Mutable lifecycle | Record ownership of one family group's active compaction output. A job creates or takes over and refreshes an `active` lease. Garbage collection may change an expired lease to terminal `reaping` before reclaiming the named job's output. | `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
@@ -2246,7 +2246,7 @@ because that makes "the newest at the floor" arbitrary and the drop unsafe.
 
 A rebuild that cannot fit within one maintenance step runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
 
-The separate prefix prevents GC from treating unfinished output as abandoned metadata. The job id groups the output under one lease ("Garbage collection", rule 12). A published manifest references the segments in place, so publication does not move them. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
+The separate prefix prevents GC from treating unfinished output as abandoned metadata. Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json`, and an `active` unexpired or `reaping` lease excludes every other job for that group. A job acquires a missing lease with create-if-absent before its first output object, or takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and heartbeat fields. Garbage collection changes an expired `active` lease to terminal `reaping` with compare-and-swap before reclaiming output belonging to the job id the lease names. A group lease never protects objects written by another job id. Collection passes are shorter than `METADATA_COMPACTION_LEASE_EXPIRY_MS`, so a pass does not mistake a lease that it observed as live for one that expired during the pass. A published manifest references the segments in place, so publication does not move them. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
 
 The rules a rebuild applies are the same however it runs them. A bounded
 merge holds every row of its window and decides them together. A streaming
@@ -2300,8 +2300,8 @@ does not exist, so there is nothing to collect and nothing to ignore.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/segments/`, `metadata/compactions/`, `checkpoints/`, and
-`wal/segments/` collections. A live manifest roots every object key its
+`metadata/segments/`, `metadata/compactions/`, `metadata/compaction_leases/`,
+`checkpoints/`, and `wal/segments/` collections. A live manifest roots every object key its
 `runs` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
 halves are split at the completed line and described in rule 11.
@@ -2482,15 +2482,17 @@ publishing CAS) — under these rules:
    a job may run, which is exactly what the design refuses to bound.
 
    The lease says so instead. Every job owns the prefix
-   `namespaces/{namespace_id}/metadata/compactions/{job_id}/`, writes its
-   output under `segments/` inside it, and holds a lease at `lease.json` beside
-   that directory. The lease carries ownership only — job, namespace, group,
-   owner, the tagged `status`, `started_at_ms`, `heartbeat_at_ms` — and never a
-   cursor, an output descriptor, an offset, or resumable progress. The job
-   creates it `active` with create-if-absent before its first output object,
-   and refreshes it by compare-and-swap on the etag it last observed, every
-   `METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS` while it runs and at the top of
-   every finalization attempt.
+   `namespaces/{namespace_id}/metadata/compactions/{job_id}/` and writes its
+   output under `segments/` inside it, while its family group has one lease at
+   `namespaces/{namespace_id}/metadata/compaction_leases/{group}.json`. The
+   lease carries ownership only — job, namespace, group, owner, the tagged
+   `status`, `started_at_ms`, `heartbeat_at_ms` — and never a cursor, an output
+   descriptor, an offset, or resumable progress. The job creates a missing
+   lease `active` with create-if-absent before its first output object, takes
+   over an expired `active` lease with one compare-and-swap, and refreshes the
+   etag it last observed every `METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS`
+   while it runs and at the top of every finalization attempt. An `active`
+   unexpired or `reaping` lease excludes every other job for the group.
 
    The lease is a fence, not a timestamp. An expired lease alone proves
    nothing — the job may be resuming from a long stall — so a pass claims one
@@ -2515,14 +2517,15 @@ publishing CAS) — under these rules:
    owns them. The fresh lease covers that pass, a later pass reads a root that
    already references the objects, and that pass removes the expired lease.
 
-   A pass decides one of the prefix's objects as follows. An object the
-   manifest references is live, like every other referenced object. Otherwise,
-   if the owning job's lease decodes, is `active`, and its `heartbeat_at_ms`
-   is within `METADATA_COMPACTION_LEASE_EXPIRY_MS`, the object is retained
-   whatever its age; so is one whose expired lease the pass tried and failed
-   to claim. Otherwise the prefix is orphaned and the object ages as an
-   ordinary unreferenced orphan under `METADATA_COMPACTION_STAGING_GRACE_MS`,
-   which is derived rather than tuned:
+   A pass reads the seven group lease keys once and decides one staged object
+   as follows. An object the manifest references is live, like every other
+   referenced object. Otherwise, if a lease naming that job is `active` and
+   its `heartbeat_at_ms` is within `METADATA_COMPACTION_LEASE_EXPIRY_MS`, the
+   object is retained whatever its age; so is one whose expired lease the pass
+   tried and failed to claim. A lease naming a different job protects nothing
+   in this prefix. Otherwise the object ages as an ordinary unreferenced orphan
+   under `METADATA_COMPACTION_STAGING_GRACE_MS`, which is derived rather than
+   tuned:
 
    ```
    METADATA_COMPACTION_STAGING_GRACE_MS
@@ -2539,16 +2542,18 @@ publishing CAS) — under these rules:
    at the top of an attempt cannot have its prefix claimed before that
    attempt's root compare-and-swap.
 
-   Deletion within a claimed prefix runs objects first and the lease last, for
-   the same reason deletion runs data before records everywhere else: a pass
-   that stops in between leaves a `reaping` lease saying the reap is
-   unfinished, rather than nothing at all.
+   Deletion processes a claimed job's staged prefix before its group lease,
+   for the same reason deletion runs data before records everywhere else: a
+   pass that stops in between leaves a `reaping` lease saying the reap is
+   unfinished, rather than nothing at all. A pass also claims and deletes an
+   expired `active` lease after confirming its named job has no staged object
+   left.
 
    The lease is a mutable control object and decodes strictly like every
-   other. A lease that does not decode, or that names another job or another
-   namespace, is treated as missing and reported: nothing else reads the
-   object, so believing a corrupt one would keep its prefix alive forever and
-   nothing would ever say why. Every other rule — the reference anchor,
+   other. A lease that does not decode, or whose namespace or group disagrees
+   with its key, fails the pass and is reported: nothing else reads the object,
+   so believing a corrupt one would keep its named job's output alive forever
+   and nothing would ever say why. Every other rule — the reference anchor,
    delete-time re-verification, degraded roots — applies here exactly as it
    applies to `metadata/segments/`.
 

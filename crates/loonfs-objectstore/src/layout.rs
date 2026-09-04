@@ -1,6 +1,6 @@
 //! The durable key grammar: object families and key classification.
 
-use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, UploadId};
+use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, MetadataFamilyGroup, UploadId};
 
 /// One family in the [durable object key grammar].
 ///
@@ -21,7 +21,7 @@ pub enum DurableObjectFamily {
     MetadataSegment,
     /// Classifies an immutable metadata segment written by a streaming compaction.
     MetadataCompactionStaging,
-    /// Classifies the mutable lease for one streaming compaction.
+    /// Classifies the mutable lease for one metadata family group.
     MetadataCompactionLease,
     /// Classifies a mutable checkpoint lifecycle record.
     CheckpointRecord,
@@ -115,11 +115,17 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 Some(job_id),
             ))
         }
-        ["namespaces", namespace, "metadata", "compactions", job_id, "lease.json"] => Some(parsed(
-            DurableObjectFamily::MetadataCompactionLease,
-            Some(namespace),
-            Some(job_id),
-        )),
+        ["namespaces", namespace, "metadata", "compaction_leases", lease] => {
+            lease.strip_suffix(".json").and_then(|group| {
+                parse_metadata_family_group(group).map(|_| {
+                    parsed(
+                        DurableObjectFamily::MetadataCompactionLease,
+                        Some(namespace),
+                        Some(group),
+                    )
+                })
+            })
+        }
         ["namespaces", namespace, "checkpoints", checkpoint] => {
             checkpoint.strip_suffix(".json").map(|identifier| {
                 parsed(
@@ -168,14 +174,21 @@ pub fn upload_id_of(key: &str) -> Option<UploadId> {
 
 pub(crate) fn metadata_compaction_job_id_from_key(key: &str) -> Option<&str> {
     parse_object_key(key)
-        .filter(|parsed| {
-            matches!(
-                parsed.family(),
-                DurableObjectFamily::MetadataCompactionStaging
-                    | DurableObjectFamily::MetadataCompactionLease
-            )
-        })
+        .filter(|parsed| parsed.family() == DurableObjectFamily::MetadataCompactionStaging)
         .and_then(|parsed| parsed.identifier())
+}
+
+pub(crate) fn metadata_compaction_lease_group_from_key(key: &str) -> Option<MetadataFamilyGroup> {
+    parse_object_key(key)
+        .filter(|parsed| parsed.family() == DurableObjectFamily::MetadataCompactionLease)
+        .and_then(|parsed| parsed.identifier())
+        .and_then(parse_metadata_family_group)
+}
+
+fn parse_metadata_family_group(value: &str) -> Option<MetadataFamilyGroup> {
+    MetadataFamilyGroup::ALL
+        .into_iter()
+        .find(|group| group.as_str() == value)
 }
 
 fn parsed<'a>(
@@ -194,13 +207,14 @@ fn parsed<'a>(
 mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_segment,
-        metadata_manifest_object, metadata_root, metadata_segment, metadata_segment_prefix,
-        upload_session, wal_floor, wal_head, wal_segment, wal_segment_prefix,
+        checkpoint_record, content_blob, metadata_compaction_lease,
+        metadata_compaction_lease_prefix, metadata_compaction_segment, metadata_manifest_object,
+        metadata_root, metadata_segment, metadata_segment_prefix, upload_session, wal_floor,
+        wal_head, wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-        MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
+        MetadataFamilyGroup, MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
     #[test]
@@ -255,9 +269,9 @@ mod tests {
                 Some(compaction_id.as_str()),
             ),
             (
-                metadata_compaction_lease(&namespace_id, &compaction_id),
+                metadata_compaction_lease(&namespace_id, MetadataFamilyGroup::Bindings),
                 DurableObjectFamily::MetadataCompactionLease,
-                Some(compaction_id.as_str()),
+                Some("bindings"),
             ),
             (
                 checkpoint_record(&namespace_id, &checkpoint_id),
@@ -288,20 +302,19 @@ mod tests {
     }
 
     #[test]
-    fn listing_prefixes_hold_only_their_family_and_a_lease_sorts_first() {
+    fn listing_prefixes_hold_only_their_family() {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
         let job = MetadataCompactionId::parse("cmp_00000000000000000000000000000001")
             .expect("compaction id");
-        let next_job = MetadataCompactionId::parse("cmp_00000000000000000000000000000002")
-            .expect("compaction id");
         let segment_id =
             MetadataSegmentId::parse("seg_00000000000000000000000000000001").expect("segment id");
-        let lease = metadata_compaction_lease(&namespace_id, &job);
         let staged = metadata_compaction_segment(&namespace_id, &job, &segment_id);
 
-        assert!(lease < staged);
-        assert!(staged < metadata_compaction_lease(&namespace_id, &next_job));
         assert!(!staged.starts_with(&metadata_segment_prefix(&namespace_id)));
+        assert!(
+            metadata_compaction_lease(&namespace_id, MetadataFamilyGroup::Bindings)
+                .starts_with(&metadata_compaction_lease_prefix(&namespace_id))
+        );
         let wal_segments = wal_segment_prefix(&namespace_id);
         assert!(!wal_head(&namespace_id).starts_with(&wal_segments));
         assert!(!wal_floor(&namespace_id).starts_with(&wal_segments));
@@ -315,6 +328,8 @@ mod tests {
             "namespaces/ns-1/wal/wal_00000000000000000001-0123456789abcdef.wal.zst",
             "namespaces/ns-1/wal/segments/random.tmp",
             "namespaces/ns-1/metadata/compactions/cmp_1/segments/seg_1.tmp",
+            "namespaces/ns-1/metadata/compactions/cmp_1/lease.json",
+            "namespaces/ns-1/metadata/compaction_leases/unknown.json",
             "content-stores/cs-1/objects/ab/deadbeef",
         ] {
             assert!(
