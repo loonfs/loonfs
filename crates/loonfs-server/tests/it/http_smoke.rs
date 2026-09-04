@@ -9,8 +9,9 @@ use loonfs::publish::{
     MAX_COMMIT_OPERATIONS,
 };
 use loonfs_api::{
-    ChangeSeq, CommitId, DestinationBehavior, InodeKind, DEFAULT_MAX_PAGE_LIMIT,
-    DEFAULT_PAGE_LIMIT, LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+    ChangeSeq, CommitId, DestinationBehavior, InodeKind, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
+    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_DOWNLOAD_MAX_CONCURRENT,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
     LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
@@ -150,8 +151,17 @@ async fn capabilities_endpoint_advertises_capabilities() {
         .await
         .expect("fetch capabilities");
     assert_eq!(capabilities.protocol_version, "v0");
-    assert!(capabilities.has_api_group("filesystem/v0"));
-    assert!(capabilities.has_api_group("maintenance/v0"));
+    assert_eq!(
+        capabilities.api_groups,
+        vec![
+            API_GROUP_FILESYSTEM_V0.to_owned(),
+            API_GROUP_MAINTENANCE_V0.to_owned(),
+            API_GROUP_QUERY_V0.to_owned(),
+        ]
+    );
+    capabilities
+        .validate()
+        .expect("the capability document is well formed");
     assert!(!capabilities.supports("filesystem.namespaces.list"));
     assert!(capabilities.supports("filesystem.namespaces.create"));
     assert!(capabilities.supports("filesystem.namespaces.fork"));

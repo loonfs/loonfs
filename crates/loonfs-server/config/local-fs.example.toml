@@ -23,8 +23,8 @@ writer_id = "loonfs-server-local"
 # `loonfs maintenance` operation working exactly as before. Set "manual" on a
 # write-serving node when a dedicated maintenance process owns these
 # namespaces, and assign them to it with `loonfs maintenance run --namespaces ...`.
-# This word and the grep mode are the only maintenance switches.
 #maintenance = "automatic"
+#serve_maintenance = true # Set false to hide the /v0/maintenance/ routes.
 
 # Largest request body accepted for service-proxied upload content, in
 # bytes. The server never holds the body whole. It forwards one transfer

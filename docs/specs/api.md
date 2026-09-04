@@ -35,9 +35,8 @@ Notes:
   `maintenance/v0` (maintenance is manually triggerable). A minimal server that
   wraps the embedded engine over HTTP advertises the same two API groups and is
   fully conformant.
-- A hosted server may disable individual features per tenant and typically
-  hides `maintenance/v0` because maintenance runs automatically. Both choices are
-  fully conformant.
+- A hosted LoonFS server may set `serve_maintenance = false` to hide
+  `maintenance/v0`; both serving choices are fully conformant.
 - API groups version independently (`filesystem/v0` could coexist with a future
   `maintenance/v1`). The group name — the segment before the slash — is the stable
   identity that feature keys reference.

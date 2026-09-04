@@ -23,8 +23,9 @@ use loonfs_api::{
     AttributeRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
 };
 use loonfs_api::{
-    ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
-    PaginationPolicy, RevisionNo, FEATURE_QUERY_GREP,
+    CapabilityDocument, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    GrepRequest, NamespaceId, PaginationPolicy, RevisionNo, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_QUERY_V0, FEATURE_QUERY_GREP,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
@@ -2686,6 +2687,97 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let mut config = test_config(temp_dir.path(), "hidden-maintenance-writer");
+    config.serve_maintenance = false;
+    let (router, state) = app(config, options_with_store(store))
+        .await
+        .expect("build app");
+    assert!(state.runner.is_some());
+
+    let capabilities_response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v0/capabilities")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .expect("capabilities request"),
+        )
+        .await
+        .expect("capabilities response");
+    assert_eq!(capabilities_response.status(), StatusCode::OK);
+    let capabilities_body = axum::body::to_bytes(capabilities_response.into_body(), usize::MAX)
+        .await
+        .expect("capabilities body");
+    let capabilities: CapabilityDocument =
+        serde_json::from_slice(&capabilities_body).expect("capability document");
+    assert_eq!(
+        capabilities.api_groups,
+        vec![
+            API_GROUP_FILESYSTEM_V0.to_owned(),
+            API_GROUP_QUERY_V0.to_owned(),
+        ]
+    );
+    assert!(!capabilities
+        .features
+        .keys()
+        .any(|feature| feature.starts_with("maintenance.")));
+    capabilities
+        .validate()
+        .expect("the capability document is well formed");
+
+    let diagnostics_response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v0/maintenance/namespaces/hidden/diagnostics")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .expect("diagnostics request"),
+        )
+        .await
+        .expect("diagnostics response");
+    assert_eq!(diagnostics_response.status(), StatusCode::NOT_FOUND);
+    let diagnostics_body = axum::body::to_bytes(diagnostics_response.into_body(), usize::MAX)
+        .await
+        .expect("diagnostics body");
+    let diagnostics_error: serde_json::Value =
+        serde_json::from_slice(&diagnostics_body).expect("diagnostics error");
+    assert_eq!(diagnostics_error["code"], "route_not_found");
+
+    let namespace_id = namespace_id("hidden");
+    state
+        .writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let commit_response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/v0/namespaces/hidden/commits")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    r#"{
+                        "commit_id":"hidden-maintenance-commit",
+                        "actor":{"kind":"service","id":"test-service"},
+                        "operations":[{"kind":"create_directory","path":"/docs"}]
+                    }"#,
+                ))
+                .expect("commit request"),
+        )
+        .await
+        .expect("commit response");
+    assert_eq!(commit_response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_unknown_routes_and_methods_answer_in_envelope() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
@@ -3530,6 +3622,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
             ..crate::config::GrepConfig::default()
         },
         maintenance: crate::config::MaintenanceMode::Automatic,
+        serve_maintenance: true,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,
