@@ -25,9 +25,9 @@ use futures::StreamExt as _;
 use loonfs::{
     delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
     select_next_iterator, write_segments_in_waves, CheckpointFilesPageCursor, CoreError,
-    CreateCheckpointOptions, FsAdmin, FsReader, GcCursorKeyspace, GraceAge, NamespaceGcCursor,
-    PassBudget, RuntimeError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
-    DEFAULT_GC_MAX_OBJECTS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    CreateCheckpointOptions, FsMaintenance, FsReader, GcCursorKeyspace, GraceAge,
+    NamespaceGcCursor, PassBudget, RuntimeError, SegmentBlockLoader, SegmentRowIterator,
+    StoreFailureClass, DEFAULT_GC_MAX_OBJECTS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
@@ -201,14 +201,14 @@ pub struct GrepGcReport {
 /// Bounded writer for grep-owned durable state.
 ///
 /// The worker writes only grep keys. It reads namespace state through
-/// `FsReader` and creates or releases backfill checkpoints through `FsAdmin`,
-/// preserving the admin handle's actor identity. Scheduling is external to
+/// `FsReader` and creates or releases backfill checkpoints through `FsMaintenance`,
+/// preserving the maintenance handle's actor identity. Scheduling is external to
 /// this type.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,
     reader: FsReader,
-    admin: FsAdmin,
+    maintenance: FsMaintenance,
     block_cache: Arc<GrepBlockCache>,
 }
 
@@ -227,11 +227,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker over one grep-keyspace store handle and the runtime
     /// handles it reads and checkpoints through, with a fresh default-sized
     /// block cache.
-    pub fn new(store: S, reader: FsReader, admin: FsAdmin) -> Self {
+    pub fn new(store: S, reader: FsReader, maintenance: FsMaintenance) -> Self {
         Self::with_block_cache(
             store,
             reader,
-            admin,
+            maintenance,
             Arc::new(GrepBlockCache::new(
                 loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
                     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -244,13 +244,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     pub fn with_block_cache(
         store: S,
         reader: FsReader,
-        admin: FsAdmin,
+        maintenance: FsMaintenance,
         block_cache: Arc<GrepBlockCache>,
     ) -> Self {
         Self {
             store,
             reader,
-            admin,
+            maintenance,
             block_cache,
         }
     }
@@ -475,7 +475,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_api::Checkpoint> {
         Ok(self
-            .admin
+            .maintenance
             .create_checkpoint(
                 namespace_id,
                 CreateCheckpointOptions {
@@ -491,7 +491,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
     ) -> Result<()> {
-        self.admin
+        self.maintenance
             .release_checkpoint(namespace_id, checkpoint_id)
             .await?;
         Ok(())

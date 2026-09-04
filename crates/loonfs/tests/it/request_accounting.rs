@@ -8,8 +8,8 @@
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MetadataMaintenanceOptions, NamespaceId,
-    PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
+    NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::AbsolutePath;
 
@@ -138,11 +138,11 @@ async fn warm_phase_request_accounting() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("acct-admin")
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("acct-maintenance")
         .build()
         .await
-        .expect("build admin");
+        .expect("build maintenance");
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -194,7 +194,7 @@ async fn warm_phase_request_accounting() {
         }
         publish_candidates(&writer, &namespace_id, candidates).await;
         if (index / BATCH) % STEP_EVERY_BATCHES == 0 {
-            admin
+            maintenance
                 .maintain_metadata(
                     &namespace_id,
                     MetadataMaintenanceOptions {

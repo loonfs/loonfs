@@ -1,10 +1,10 @@
 #![allow(clippy::panic)]
 // Include the captured output when an assertion fails.
 
-//! Checks operation spans for the writer, reader, and admin handles.
+//! Checks operation spans for the writer, reader, and maintenance handles.
 
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsWriter,
+    CreateDirectoryOptions, CreateNamespaceOptions, FsBackgroundWork, FsMaintenance, FsWriter,
     PutFileOptions, StoreConfig,
 };
 use loonfs_test_support::block_on::block_on;
@@ -81,11 +81,11 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .await
             .expect("read namespace state");
 
-        FsAdmin::builder_with_store(writer.object_store())
-            .actor_id("operation-span-admin")
+        FsMaintenance::builder_with_store(writer.object_store())
+            .actor_id("operation-span-maintenance")
             .build()
             .await
-            .expect("build admin")
+            .expect("build maintenance")
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("read namespace diagnostics");

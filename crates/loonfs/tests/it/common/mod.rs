@@ -9,8 +9,8 @@ use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     AdvanceRetentionResponse, BeginUploadResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm,
     CommitResponse, ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, FsAdmin,
-    FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, ListChangesResponse,
+    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes,
+    FsMaintenance, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, ListChangesResponse,
     MaintenanceRunRequest, MaintenanceRunResponse, MetadataMaintenanceResponse, MoveOptions,
     NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry, PutFileOptions,
     RuntimeError, SharedObjectStore, UploadContentResponse, UploadId, UploadSession,
@@ -62,7 +62,7 @@ pub(crate) async fn collect_path_entries(
 }
 
 pub(crate) async fn collect_checkpoints(
-    admin: &FsAdmin,
+    maintenance: &FsMaintenance,
     namespace_id: &NamespaceId,
 ) -> loonfs::Result<loonfs::ListCheckpointsResponse> {
     let request = PageRequest {
@@ -71,7 +71,7 @@ pub(crate) async fn collect_checkpoints(
             .expect("default page limit"),
         cursor: None,
     };
-    let mut pager = admin.list_checkpoints_pager(namespace_id, request);
+    let mut pager = maintenance.list_checkpoints_pager(namespace_id, request);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
@@ -97,12 +97,12 @@ pub(crate) fn metadata_request(max_wal_tail_segments: u64) -> MaintenanceRunRequ
 }
 
 /// One handle set per test fixture: a writer, its derived reader, and an
-/// admin handle sharing the same store, exercised through the blocking
+/// maintenance handle sharing the same store, exercised through the blocking
 /// helpers below.
 pub(crate) struct TestRuntime {
     pub(crate) writer: FsWriter,
     pub(crate) reader: FsReader,
-    pub(crate) admin: FsAdmin,
+    pub(crate) maintenance: FsMaintenance,
 }
 
 pub(crate) fn runtime(root: &Path, writer_id: &str) -> TestRuntime {
@@ -136,15 +136,15 @@ pub(crate) async fn open_runtime_with_async(
         .await
         .expect("build writer");
     let reader = writer.reader();
-    let admin = FsAdmin::builder_with_store(store)
+    let maintenance = FsMaintenance::builder_with_store(store)
         .actor_id(writer_id)
         .build()
         .await
-        .expect("build admin");
+        .expect("build maintenance");
     TestRuntime {
         writer,
         reader,
-        admin,
+        maintenance,
     }
 }
 
@@ -250,7 +250,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<Checkpoint> {
-        self.admin
+        self.maintenance
             .create_checkpoint(
                 namespace_id,
                 CreateCheckpointOptions {
@@ -428,7 +428,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<NamespaceDiagnostics> {
-        block_on(self.admin.get_namespace_diagnostics(namespace_id))
+        block_on(self.maintenance.get_namespace_diagnostics(namespace_id))
     }
 
     fn maintenance_run_namespace_blocking(
@@ -436,14 +436,14 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         request: MaintenanceRunRequest,
     ) -> loonfs::Result<MaintenanceRunResponse> {
-        block_on(self.admin.run_maintenance(namespace_id, request))
+        block_on(self.maintenance.run_maintenance(namespace_id, request))
     }
 
     fn flush_wal_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<MetadataMaintenanceResponse> {
-        block_on(self.admin.flush_wal(namespace_id))
+        block_on(self.maintenance.flush_wal(namespace_id))
     }
 
     fn stat_path_blocking(
@@ -616,7 +616,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<AdvanceRetentionResponse> {
-        block_on(self.admin.advance_retention_floor(namespace_id))
+        block_on(self.maintenance.advance_retention_floor(namespace_id))
     }
 }
 

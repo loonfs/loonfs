@@ -1,8 +1,8 @@
 //! Runtime maintenance jobs for metadata upkeep and garbage collection.
 //!
-//! Both jobs use the public [`FsAdmin`] operations on the writer's runtime,
+//! Both jobs use the public [`FsMaintenance`] operations on the writer's runtime,
 //! so they share the same behavior and cache invalidation paths as manual
-//! maintenance. Retention-floor advancement remains an explicit admin action
+//! maintenance. Retention-floor advancement remains an explicit maintenance action
 //! because it discards replay history.
 
 use super::{
@@ -12,7 +12,7 @@ use super::{
 use crate::fs::{ReadCore, WriterBits};
 use crate::publisher::PublisherRegistry;
 use crate::{
-    ErrorCode, FsAdmin, GcConfig, GcResponse, MaintenanceRunRequest, MaintenanceRunResponse,
+    ErrorCode, FsMaintenance, GcConfig, GcResponse, MaintenanceRunRequest, MaintenanceRunResponse,
     MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId, ReorganizeStepOutcome,
     Result, RuntimeError, WalFlushStepOutcome,
 };
@@ -80,15 +80,15 @@ struct StepContext {
 }
 
 impl StepContext {
-    fn admin(&self) -> Option<(Arc<WriterBits>, FsAdmin)> {
+    fn maintenance(&self) -> Option<(Arc<WriterBits>, FsMaintenance)> {
         let bits = self.bits.upgrade()?;
-        let admin = FsAdmin::from_writer_parts(
+        let maintenance = FsMaintenance::from_writer_parts(
             self.core.clone(),
             bits.identity.clone(),
             self.publisher.clone(),
             self.compactions.clone(),
         );
-        Some((bits, admin))
+        Some((bits, maintenance))
     }
 }
 
@@ -117,12 +117,15 @@ impl MaintenanceJob for MetadataJob {
         namespace_id: &NamespaceId,
         _continuation: Option<&str>,
     ) -> Result<MaintenanceStepReport> {
-        let Some((_writer, admin)) = self.context.admin() else {
+        let Some((_writer, maintenance)) = self.context.maintenance() else {
             return Ok(MaintenanceStepReport::concluded(
                 MaintenanceStepConclusion::NotEnabled,
             ));
         };
-        match admin.maintain_metadata(namespace_id, self.options).await {
+        match maintenance
+            .maintain_metadata(namespace_id, self.options)
+            .await
+        {
             Ok(metadata) => {
                 let conclusion = metadata_conclusion(&metadata);
                 Ok(MaintenanceStepReport::concluded(conclusion))
@@ -184,12 +187,12 @@ impl MaintenanceJob for GcJob {
         namespace_id: &NamespaceId,
         continuation: Option<&str>,
     ) -> Result<MaintenanceStepReport> {
-        let Some((_writer, admin)) = self.context.admin() else {
+        let Some((_writer, maintenance)) = self.context.maintenance() else {
             return Ok(MaintenanceStepReport::concluded(
                 MaintenanceStepConclusion::NotEnabled,
             ));
         };
-        let response = match admin
+        let response = match maintenance
             .run_maintenance(
                 namespace_id,
                 MaintenanceRunRequest::Gc(GcRequest {

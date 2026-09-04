@@ -459,7 +459,7 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
     // The target has published nothing of its own, so its checkpoint's
     // manifest names metadata files the source owns.
     let checkpoint = fs
-        .admin
+        .maintenance
         .create_checkpoint(
             &target,
             CreateCheckpointOptions {
@@ -540,7 +540,7 @@ async fn a_released_checkpoint_refuses_enumeration_instead_of_answering_current_
         .create_checkpoint(&namespace_id)
         .await
         .expect("create checkpoint");
-    fs.admin
+    fs.maintenance
         .release_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("release checkpoint");

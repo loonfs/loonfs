@@ -43,13 +43,13 @@ const MAX_RECONCILE_PROBES_PER_SWEEP: usize = 64;
 ///
 /// Background work may compact metadata and collect expired uploads. It never
 /// advances the retention floor; that remains an explicit
-/// [`FsAdmin`](crate::FsAdmin) operation.
+/// [`FsMaintenance`](crate::FsMaintenance) operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsBackgroundWork {
     /// Run maintenance for namespaces used or explicitly assigned to this
     /// process.
     Enabled,
-    /// Disable automatic maintenance. Explicit admin operations remain
+    /// Disable automatic maintenance. Explicit maintenance operations remain
     /// available.
     ManualOnly,
 }

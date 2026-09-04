@@ -408,7 +408,7 @@ impl RuntimeInstruments {
 
     /// Reports what one collection pass reclaimed and retained.
     ///
-    /// Every runtime collection path records at the shared admin pass before
+    /// Every runtime collection path records at the shared maintenance pass before
     /// its caller can drop the response.
     pub(crate) fn gc_pass(&self, gc: &GcResponse) {
         let Some(installed) = &self.installed else {

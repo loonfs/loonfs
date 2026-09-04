@@ -1,4 +1,4 @@
-//! [`FsAdmin`]'s explicit maintenance: steps, GC, checkpoints, WAL
+//! [`FsMaintenance`]'s explicit maintenance: steps, GC, checkpoints, WAL
 //! flushes, and retention.
 //!
 //! Derived indexes are not here and not in this crate: `loonfs-grep`
@@ -7,21 +7,19 @@
 
 use crate::maintenance_runner::CompactionStart;
 use crate::trace::phase_span;
-use crate::FsAdmin;
+use crate::FsMaintenance;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions,
-    CreateSnapshotOptions, ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse,
-    ListSnapshotsResponse, MaintenanceRunRequest, MaintenanceRunResponse,
-    MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceOptions,
-    MetadataMaintenanceResponse, NamespaceId, ReleaseCheckpointResponse, ReleaseSnapshotResponse,
-    ReorganizeStepOutcome, SharedObjectStore, SnapshotSummary, WalFlushStepOutcome,
+    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions, ErrorCode,
+    FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenanceRunRequest,
+    MaintenanceRunResponse, MetadataCompactionOutcome, MetadataCompactionResponse,
+    MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
 use loonfs_core::cache::{load_namespace_flush_basis, NamespaceStorageDiagnostics};
 use loonfs_core::CheckpointPageCursor;
-use std::num::NonZeroU32;
 use tokio::time::Instant;
 use tracing::Instrument;
 
@@ -73,7 +71,7 @@ fn metadata_compaction_response(
     MetadataCompactionResponse { outcome }
 }
 
-impl FsAdmin {
+impl FsMaintenance {
     /// A mutating engine under this handle's actor identity.
     fn engine(
         &self,
@@ -466,7 +464,7 @@ impl FsAdmin {
                 tracing::warn!(
                     families = ?families,
                     "a family group needs a streaming metadata compaction, and this handle \
-                     schedules no background work; run `FsAdmin::compact_metadata` to rebuild it"
+                     schedules no background work; run `FsMaintenance::compact_metadata` to rebuild it"
                 );
                 ReorganizeStepOutcome::CompactionRequired
             }
@@ -682,102 +680,6 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Creates a snapshot of the current namespace state.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.maintenance.snapshot_create",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "maintenance.snapshot_create",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn create_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        options: CreateSnapshotOptions,
-    ) -> Result<Checkpoint> {
-        let span = tracing::Span::current();
-        self.core.record_trace_context(&span);
-        let result = self
-            .engine(namespace_id)
-            .create_snapshot(options.name, options.expires_at_ms)
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    /// Creates a snapshot only when the namespace has quota for it.
-    ///
-    /// A caller that exceeds the quota releases its tentative snapshot before
-    /// returning the quota error.
-    pub async fn create_snapshot_with_quota(
-        &self,
-        namespace_id: &NamespaceId,
-        options: CreateSnapshotOptions,
-        now_ms: u64,
-        max_live: usize,
-    ) -> Result<Checkpoint> {
-        let checkpoint = self.create_snapshot(namespace_id, options).await?;
-        if let Err(error) = self
-            .ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 0)
-            .await
-        {
-            self.release_snapshot(namespace_id, &checkpoint.checkpoint_id)
-                .await?;
-            return Err(error);
-        }
-        Ok(checkpoint)
-    }
-
-    async fn ensure_live_snapshot_limit(
-        &self,
-        namespace_id: &NamespaceId,
-        now_ms: u64,
-        max_live: usize,
-        additional_live: usize,
-    ) -> Result<()> {
-        let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
-        let mut cursor = None;
-        let mut live_with_additional = additional_live;
-        let quota_error = || {
-            RuntimeError::Core(loonfs_core::Error::SnapshotQuotaExceeded {
-                namespace_id: namespace_id.clone(),
-                max_live,
-            })
-        };
-        if live_with_additional > max_live {
-            return Err(quota_error());
-        }
-        loop {
-            let page = self
-                .engine(namespace_id)
-                .list_checkpoints_page(PageRequest {
-                    limit: loonfs_api::EffectiveLimit::new(page_limit),
-                    cursor,
-                })
-                .await
-                .map_err(RuntimeError::from)?;
-            for checkpoint in page.items {
-                if SnapshotSummary::from_checkpoint(checkpoint)
-                    .is_some_and(|snapshot| snapshot.expires_at_ms > now_ms)
-                {
-                    live_with_additional = live_with_additional.saturating_add(1);
-                    if live_with_additional > max_live {
-                        return Err(quota_error());
-                    }
-                }
-            }
-            let Some(next_cursor) = page.next_cursor else {
-                return Ok(());
-            };
-            cursor = Some(next_cursor);
-        }
-    }
-
     /// Creates a checkpoint pager beginning at `request.cursor`.
     pub fn list_checkpoints_pager(
         &self,
@@ -788,10 +690,10 @@ impl FsAdmin {
             loonfs_api::encode_cursor(cursor).expect("typed checkpoint cursor should encode")
         });
         let limit = request.limit;
-        let admin = self.clone();
+        let maintenance = self.clone();
         let namespace_id = namespace_id.clone();
         loonfs_api::Pager::new(cursor, move |cursor| {
-            let admin = admin.clone();
+            let maintenance = maintenance.clone();
             let namespace_id = namespace_id.clone();
             async move {
                 let cursor = cursor
@@ -799,7 +701,7 @@ impl FsAdmin {
                     .map(loonfs_api::decode_cursor)
                     .transpose()
                     .map_err(|error| crate::CoreError::InvalidCursor(error.to_string()))?;
-                admin
+                maintenance
                     .list_checkpoints_page(&namespace_id, PageRequest { limit, cursor })
                     .await
             }
@@ -832,128 +734,6 @@ impl FsAdmin {
             .await?;
         response.next_cursor = super::core::encode_next_cursor(next_cursor.as_ref())?;
         Ok(response)
-    }
-
-    /// Lists one page of live snapshots.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.maintenance.list_snapshots",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "maintenance.list_snapshots",
-            method = "list_snapshots_page",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn list_snapshots_page(
-        &self,
-        namespace_id: &NamespaceId,
-        request: PageRequest<CheckpointPageCursor>,
-    ) -> Result<ListSnapshotsResponse> {
-        self.core.record_trace_context(&tracing::Span::current());
-        let now_ms = self.actor.mutation_context()?.now_ms;
-        let requested = request.limit.as_usize();
-        let mut cursor = request.cursor;
-        let mut snapshots = Vec::with_capacity(requested);
-        loop {
-            let remaining = requested - snapshots.len();
-            let limit = NonZeroU32::new(u32::try_from(remaining).map_err(|error| {
-                RuntimeError::Core(loonfs_core::Error::Internal(format!(
-                    "snapshot page limit does not fit u32: {error}"
-                )))
-            })?)
-            .expect("a snapshot page with room remaining has a nonzero limit");
-            let page = self
-                .engine(namespace_id)
-                .list_checkpoints_page(PageRequest {
-                    limit: loonfs_api::EffectiveLimit::new(limit),
-                    cursor,
-                })
-                .await
-                .map_err(RuntimeError::from)?;
-            snapshots.extend(page.items.into_iter().filter_map(|checkpoint| {
-                SnapshotSummary::from_checkpoint(checkpoint)
-                    .filter(|snapshot| snapshot.expires_at_ms > now_ms)
-            }));
-            match page.next_cursor {
-                Some(next_cursor) if snapshots.len() < requested => cursor = Some(next_cursor),
-                next_cursor => {
-                    return Ok(ListSnapshotsResponse {
-                        namespace_id: namespace_id.clone(),
-                        snapshots,
-                        next_cursor: super::core::encode_next_cursor(next_cursor.as_ref())?,
-                    })
-                }
-            }
-        }
-    }
-
-    /// Extends a live snapshot, capped from its durable creation time.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.maintenance.snapshot_extend",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "maintenance.snapshot_extend",
-            namespace_id = %namespace_id,
-            snapshot_id = %snapshot_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn extend_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
-        requested_expires_at_ms: u64,
-        max_lifetime_ms: u64,
-    ) -> Result<SnapshotSummary> {
-        self.core.record_trace_context(&tracing::Span::current());
-        let result = self
-            .engine(namespace_id)
-            .extend_snapshot(snapshot_id, requested_expires_at_ms, max_lifetime_ms)
-            .await
-            .map_err(RuntimeError::from)
-            .and_then(|checkpoint| {
-                SnapshotSummary::from_checkpoint(checkpoint).ok_or_else(|| {
-                    RuntimeError::Core(loonfs_core::Error::Internal(
-                        "snapshot extension returned a non-snapshot checkpoint".to_owned(),
-                    ))
-                })
-            });
-        self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    /// Releases a snapshot. Repeated releases succeed.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.maintenance.snapshot_release",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "maintenance.snapshot_release",
-            namespace_id = %namespace_id,
-            snapshot_id = %snapshot_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn release_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
-    ) -> Result<ReleaseSnapshotResponse> {
-        self.core.record_trace_context(&tracing::Span::current());
-        let result = self
-            .engine(namespace_id)
-            .release_snapshot(snapshot_id)
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
     }
 
     async fn list_checkpoints_page_typed(

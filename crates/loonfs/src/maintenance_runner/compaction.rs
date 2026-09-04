@@ -5,7 +5,7 @@
 //! permits and are cancelled and joined during writer shutdown.
 
 use super::{MaintenanceJobId, RunnerInner};
-use crate::{FsAdmin, NamespaceId};
+use crate::{FsMaintenance, NamespaceId};
 use loonfs_core::{
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
@@ -98,11 +98,11 @@ impl BackgroundCompactions {
         Some(claim)
     }
 
-    /// Starts `spec` as a background job under `admin`'s identity, unless a
+    /// Starts `spec` as a background job under `maintenance`'s identity, unless a
     /// job already holds the namespace's one slot.
     pub(crate) fn start(
         &self,
-        admin: &FsAdmin,
+        maintenance: &FsMaintenance,
         namespace_id: &NamespaceId,
         spec: MetadataCompactionSpec,
     ) -> CompactionStart {
@@ -117,16 +117,16 @@ impl BackgroundCompactions {
         // moment it exists. A spawn a shutdown refuses drops the future
         // without polling it, and that drop is what gives the slot and the
         // permit back.
-        let admin = admin.clone();
+        let maintenance = maintenance.clone();
         let namespace_id = namespace_id.clone();
         runner.spawn(async move {
             if !claim.admitted().await {
-                admin.core.instruments().compaction_not_admitted();
+                maintenance.core.instruments().compaction_not_admitted();
                 return;
             }
             // Every ending is logged inside, including the error one, so what
             // a task nobody awaits needs from it is only what to do next.
-            let outcome = admin
+            let outcome = maintenance
                 .run_streaming_compaction(&namespace_id, &spec, claim.cancellation())
                 .await;
             let published = matches!(outcome, Ok(MetadataCompactionJobOutcome::Published { .. }));

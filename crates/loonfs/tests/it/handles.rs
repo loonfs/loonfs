@@ -8,8 +8,8 @@
 
 use crate::common::collect_path_entries;
 use loonfs::{
-    CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsAdmin,
-    FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, ManifestNo, MetadataMaintenanceOptions,
+    CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsBackgroundWork,
+    FsMaintenance, FsReader, FsWriter, MaintenanceJobId, ManifestNo, MetadataMaintenanceOptions,
     NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
@@ -149,12 +149,12 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             .expect("shutdown must not hang with a non-empty queue")
             .expect("shut down writer background work");
 
-        let admin = FsAdmin::builder_with_store(blocking.clone() as SharedObjectStore)
-            .actor_id("handle-test-admin")
+        let maintenance = FsMaintenance::builder_with_store(blocking.clone() as SharedObjectStore)
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin");
-        let status = admin
+            .expect("build maintenance");
+        let status = maintenance
             .get_namespace_diagnostics(&queued_namespace)
             .await
             .expect("queued namespace status after shutdown");
@@ -184,7 +184,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             .flush_background()
             .await
             .expect("nothing may spawn after shutdown");
-        let status = admin
+        let status = maintenance
             .get_namespace_diagnostics(&queued_namespace)
             .await
             .expect("queued namespace status after the post-shutdown nudge");
@@ -196,7 +196,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
 }
 
 #[test]
-fn writer_reader_and_admin_share_a_namespace_through_store_config() {
+fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -241,20 +241,20 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
         assert_eq!(entries.len(), 1);
 
         // Admin inspects the same namespace through its own handle.
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
+        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin");
-        let status = admin
+            .expect("build maintenance");
+        let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("namespace status");
         assert_eq!(status.namespace_id, namespace_id);
         assert_eq!(status.wal_tail_segments, 1);
-        // Admin-driven work is observable through the admin handle's own
+        // Admin-driven work is observable through the maintenance handle's own
         // cache counters, like writer and reader work through theirs.
-        let _ = admin.runtime_cache_stats();
+        let _ = maintenance.runtime_cache_stats();
 
         // Only the writer owns background work, so only the writer has
         // anything to shut down.
@@ -318,7 +318,7 @@ fn standalone_reader_builds_without_writer_identity() {
 }
 
 #[test]
-fn admin_over_writer_core_invalidates_shared_caches() {
+fn maintenance_over_writer_core_invalidates_shared_caches() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -344,12 +344,12 @@ fn admin_over_writer_core_invalidates_shared_caches() {
             .await
             .expect("background maintenance quiesces");
 
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
+        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin");
-        let status = admin
+            .expect("build maintenance");
+        let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status after the scheduled step");
@@ -495,12 +495,12 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
             .await
             .expect("no background work to wait for");
 
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
+        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin");
-        let status = admin
+            .expect("build maintenance");
+        let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status after writes");
@@ -537,11 +537,11 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                 .await
                 .expect("create namespace");
 
-            let admin = FsAdmin::builder(store_config(temp_dir.path()))
-                .actor_id("handle-test-admin")
+            let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
+                .actor_id("handle-test-maintenance")
                 .build()
                 .await
-                .expect("build admin");
+                .expect("build maintenance");
             writer
                 .put_file_bytes(
                     &namespace_id,
@@ -555,7 +555,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                 .flush_background()
                 .await
                 .expect("nothing was scheduled below the threshold");
-            let status = admin
+            let status = maintenance
                 .get_namespace_diagnostics(&namespace_id)
                 .await
                 .expect("status below the threshold");
@@ -581,7 +581,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
                 .await
                 .expect("background maintenance quiesces");
 
-            let status = admin
+            let status = maintenance
                 .get_namespace_diagnostics(&namespace_id)
                 .await
                 .expect("status after auto step");
@@ -633,12 +633,12 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             )
             .await
             .expect("the runtime publish folds the preexisting tail and lands");
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
+        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin");
-        let status = admin
+            .expect("build maintenance");
+        let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status after the folding publish");
@@ -719,12 +719,12 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             )
             .await
             .expect("the recovered manifest store lets the next publish fold and land");
-        let admin = FsAdmin::builder_with_store(failing as SharedObjectStore)
-            .actor_id("handle-test-admin")
+        let maintenance = FsMaintenance::builder_with_store(failing as SharedObjectStore)
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin");
-        let status = admin
+            .expect("build maintenance");
+        let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status after fold recovery");
@@ -755,11 +755,11 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             )
             .await
             .expect("put file before the shutdown");
-        let tail_at_shutdown = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
+        let tail_at_shutdown = FsMaintenance::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin")
+            .expect("build maintenance")
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status before the shutdown")
@@ -790,12 +790,12 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .flush_background()
             .await
             .expect("nothing scheduled after the shutdown");
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
+        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin");
-        let status = admin
+            .expect("build maintenance");
+        let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status after the shutdown");
@@ -827,7 +827,7 @@ fn builders_require_identity_and_a_runtime() {
         Err(other) => panic!("expected config error for a blank writer_id, got {other:?}"),
         Ok(_) => panic!("a whitespace-only writer_id must be rejected"),
     }
-    match block_on(FsAdmin::builder(store_config(temp_dir.path())).build()) {
+    match block_on(FsMaintenance::builder(store_config(temp_dir.path())).build()) {
         Err(RuntimeError::Config(_)) => {}
         Err(other) => panic!("expected config error for missing actor_id, got {other:?}"),
         Ok(_) => panic!("actor_id must be required"),
@@ -867,7 +867,7 @@ fn writer_builder_rejects_zero_maintenance_concurrency() {
 }
 
 #[test]
-fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
+fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -886,12 +886,12 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("put file");
 
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
+        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build admin");
-        let checkpoint = admin
+            .expect("build maintenance");
+        let checkpoint = maintenance
             .create_checkpoint(
                 &namespace_id,
                 CreateCheckpointOptions {
@@ -902,7 +902,7 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("create checkpoint");
         assert!(checkpoint.manifest_no > ManifestNo(0));
-        let retention = admin
+        let retention = maintenance
             .advance_retention_floor(&namespace_id)
             .await
             .expect("advance retention");
@@ -911,7 +911,7 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
 }
 
 #[test]
-fn enabled_writer_drains_reorganization_backlog_without_admin() {
+fn enabled_writer_drains_reorganization_backlog_without_maintenance() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {

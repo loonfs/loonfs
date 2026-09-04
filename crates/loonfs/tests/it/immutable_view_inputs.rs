@@ -1,8 +1,8 @@
 //! Immutable view inputs are cached once per handle.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MetadataMaintenanceOptions, NamespaceId,
-    PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
+    NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -23,11 +23,11 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("seed-admin")
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("seed-maintenance")
         .build()
         .await
-        .expect("build admin");
+        .expect("build maintenance");
     writer
         .create_namespace(namespace_id, CreateNamespaceOptions::default())
         .await
@@ -43,7 +43,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
             .await
             .expect("seed file");
     }
-    admin
+    maintenance
         .maintain_metadata(
             namespace_id,
             MetadataMaintenanceOptions {

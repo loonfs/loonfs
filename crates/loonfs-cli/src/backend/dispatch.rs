@@ -748,7 +748,7 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => target
                 .backend
-                .admin
+                .writer
                 .release_snapshot(namespace_id, snapshot_id)
                 .await
                 .scoped(namespace_id),
@@ -812,7 +812,7 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => target
                 .backend
-                .admin
+                .maintenance
                 .release_checkpoint(namespace_id, checkpoint_id)
                 .await
                 .scoped(namespace_id),

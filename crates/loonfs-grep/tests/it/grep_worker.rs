@@ -6,7 +6,7 @@
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use bytes::Bytes;
 use loonfs::{
-    CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsReader,
+    CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsMaintenance, FsReader,
     FsWriter, GcConfig, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
     SharedObjectStore,
 };
@@ -113,8 +113,11 @@ async fn new_query_page(
     .await
 }
 
-async fn flush_wal_and_advance_retention(admin: &FsAdmin, namespace_id: &NamespaceId) -> ChangeSeq {
-    admin
+async fn flush_wal_and_advance_retention(
+    maintenance: &FsMaintenance,
+    namespace_id: &NamespaceId,
+) -> ChangeSeq {
+    maintenance
         .maintain_metadata(
             namespace_id,
             MetadataMaintenanceOptions {
@@ -123,7 +126,7 @@ async fn flush_wal_and_advance_retention(admin: &FsAdmin, namespace_id: &Namespa
         )
         .await
         .expect("flush wal");
-    admin
+    maintenance
         .advance_retention_floor(namespace_id)
         .await
         .expect("advance retention")
@@ -478,7 +481,7 @@ async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    let host = GrepHost::new(&store, "enable-root-failure-admin").await;
+    let host = GrepHost::new(&store, "enable-root-failure-maintenance").await;
     let grep_root_key = root_key(&namespace_id);
     let root_loads = Arc::new(AtomicUsize::new(0));
     let observed_root_loads = Arc::clone(&root_loads);
@@ -495,7 +498,7 @@ async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
     let worker = GrepWorker::with_block_cache(
         failing_store.clone(),
         host.reader.clone(),
-        host.admin.clone(),
+        host.maintenance.clone(),
         Arc::clone(&host.block_cache),
     );
 
@@ -512,7 +515,9 @@ async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
             .expect("default page limit"),
         cursor: None,
     };
-    let mut pager = host.admin.list_checkpoints_pager(&namespace_id, request);
+    let mut pager = host
+        .maintenance
+        .list_checkpoints_pager(&namespace_id, request);
     let checkpoints = pager
         .next()
         .await
@@ -541,7 +546,7 @@ async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous()
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    let host = GrepHost::new(&store, "ambiguous-enable-admin").await;
+    let host = GrepHost::new(&store, "ambiguous-enable-maintenance").await;
     let grep_root_key = root_key(&namespace_id);
     let failing_store = Arc::new(
         FailStore::matching(
@@ -564,7 +569,7 @@ async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous()
     let worker = GrepWorker::with_block_cache(
         failing_store.clone(),
         host.reader.clone(),
-        host.admin.clone(),
+        host.maintenance.clone(),
         Arc::clone(&host.block_cache),
     );
 
@@ -595,13 +600,13 @@ async fn restart_retains_its_checkpoint_when_the_root_write_result_is_ambiguous(
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    let host = GrepHost::new(&store, "ambiguous-restart-admin").await;
+    let host = GrepHost::new(&store, "ambiguous-restart-maintenance").await;
     host.worker
         .enable(&namespace_id)
         .await
         .expect("enable grep");
     let previous_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    host.admin
+    host.maintenance
         .release_checkpoint(&namespace_id, &previous_checkpoint_id)
         .await
         .expect("make the current backfill restart");
@@ -628,7 +633,7 @@ async fn restart_retains_its_checkpoint_when_the_root_write_result_is_ambiguous(
     let worker = GrepWorker::with_block_cache(
         failing_store.clone(),
         host.reader.clone(),
-        host.admin.clone(),
+        host.maintenance.clone(),
         Arc::clone(&host.block_cache),
     );
 
@@ -656,11 +661,11 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .build()
         .await
         .expect("writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("gap-admin")
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("gap-maintenance")
         .build()
         .await
-        .expect("admin");
+        .expect("maintenance");
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -678,7 +683,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         )
         .await
         .expect("write after watermark");
-    let retention_floor_seq = flush_wal_and_advance_retention(&admin, &namespace_id).await;
+    let retention_floor_seq = flush_wal_and_advance_retention(&maintenance, &namespace_id).await;
     assert!(retention_floor_seq > ChangeSeq(0));
 
     // The feed can no longer reach the watermark, which the worker must
@@ -696,7 +701,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     // The second trigger: the pinned checkpoint stops pinning its basis
     // mid-backfill. The enumeration says so out loud instead of quietly
     // answering current state, and the worker starts over again.
-    admin
+    maintenance
         .release_checkpoint(&namespace_id, &gap_checkpoint_id)
         .await
         .expect("remove checkpoint mid-backfill");
@@ -734,11 +739,11 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .build()
         .await
         .expect("writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("handoff-gap-admin")
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("handoff-gap-maintenance")
         .build()
         .await
-        .expect("admin");
+        .expect("maintenance");
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -790,7 +795,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         )
         .await
         .expect("write during backfill");
-    let retention_floor_seq = flush_wal_and_advance_retention(&admin, &namespace_id).await;
+    let retention_floor_seq = flush_wal_and_advance_retention(&maintenance, &namespace_id).await;
     assert!(retention_floor_seq > target_seq);
 
     // Checkpoint pages remain readable after retention passes their basis,
@@ -2154,11 +2159,11 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .build()
         .await
         .expect("writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("gc-admin")
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("gc-maintenance")
         .build()
         .await
-        .expect("admin");
+        .expect("maintenance");
     for namespace_id in [&live_namespace, &deleted_namespace, &corrupt_namespace] {
         writer
             .create_namespace(namespace_id, CreateNamespaceOptions::default())
@@ -2332,7 +2337,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .await
         .expect("write grep sentinel");
     aged_store.reset();
-    admin
+    maintenance
         .gc_namespace(&live_namespace, &GcConfig::default())
         .await
         .expect("core gc");

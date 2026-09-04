@@ -196,7 +196,7 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             .await
             .expect("create namespace");
         let checkpoint = fs
-            .admin
+            .maintenance
             .create_checkpoint(
                 &namespace_id,
                 CreateCheckpointOptions {
@@ -212,7 +212,7 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             .await
             .expect("pin checkpoint");
         let read_snapshot = fs
-            .admin
+            .writer
             .create_snapshot(
                 &namespace_id,
                 CreateSnapshotOptions {

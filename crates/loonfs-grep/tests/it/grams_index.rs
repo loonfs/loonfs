@@ -92,7 +92,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-admin").await;
+    let host = GrepHost::new(&store, "grams-maintenance").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -196,7 +196,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-auto-admin").await;
+    let host = GrepHost::new(&store, "grams-auto-maintenance").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -269,7 +269,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-config-admin").await;
+    let host = GrepHost::new(&store, "grams-config-maintenance").await;
     let policy = GramIndexBuildPolicy {
         max_files_per_step: nonzero_usize(3),
         ..GramIndexBuildPolicy::default()
@@ -338,7 +338,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-thousand-admin").await;
+    let host = GrepHost::new(&store, "grams-thousand-maintenance").await;
     let first_worker = &host.worker;
 
     writer
@@ -572,7 +572,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-tiered-admin").await;
+    let host = GrepHost::new(&store, "grams-tiered-maintenance").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -650,7 +650,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-cache-admin").await;
+    let host = GrepHost::new(&store, "grams-cache-maintenance").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -721,7 +721,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-fault-admin").await;
+    let host = GrepHost::new(&store, "grams-fault-maintenance").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -831,7 +831,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-oversized-admin").await;
+    let host = GrepHost::new(&store, "grams-oversized-maintenance").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -953,7 +953,7 @@ async fn worker_and_service_share_decoded_index_blocks() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-shared-cache-admin").await;
+    let host = GrepHost::new(&store, "grams-shared-cache-maintenance").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1043,7 +1043,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-fan-out-admin").await;
+    let host = GrepHost::new(&store, "grams-fan-out-maintenance").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())

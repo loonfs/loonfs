@@ -278,7 +278,7 @@ pub(super) async fn get_namespace_diagnostics(
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::NamespaceDiagnostics>, ApiResponseError> {
     let diagnostics = state
-        .admin
+        .maintenance
         .get_namespace_diagnostics(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -412,7 +412,7 @@ pub(super) async fn create_snapshot(
     let now_ms = super::handlers_uploads::current_unix_ms()?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let checkpoint = state
-        .admin
+        .writer
         .create_snapshot_with_quota(
             &namespace_id,
             CreateSnapshotOptions {
@@ -470,7 +470,7 @@ pub(super) async fn list_snapshots(
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
     let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
     let response = state
-        .admin
+        .reader
         .list_snapshots_page(
             &namespace_id,
             PageRequest {
@@ -519,7 +519,7 @@ pub(super) async fn extend_snapshot(
     let now_ms = super::handlers_uploads::current_unix_ms()?;
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let response = state
-        .admin
+        .writer
         .extend_snapshot(
             &namespace_id,
             &snapshot_id,
@@ -561,7 +561,7 @@ pub(super) async fn release_snapshot(
 ) -> Result<Json<ReleaseSnapshotResponse>, ApiResponseError> {
     let snapshot_id = parse_path_id::<CheckpointId>("snapshot_id", &snapshot_id)?;
     let response = state
-        .admin
+        .writer
         .release_snapshot(&namespace_id, &snapshot_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -635,7 +635,7 @@ pub(super) async fn create_checkpoint(
     AppJson(request): AppJson<CreateCheckpointRequest>,
 ) -> Result<Json<Checkpoint>, ApiResponseError> {
     let response = state
-        .admin
+        .maintenance
         .create_checkpoint(
             &namespace_id,
             loonfs::CreateCheckpointOptions::from_request(request),
@@ -686,7 +686,7 @@ pub(super) async fn list_checkpoints(
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
     let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
     let response = state
-        .admin
+        .maintenance
         .list_checkpoints_page(
             &namespace_id,
             PageRequest {
@@ -730,7 +730,7 @@ pub(super) async fn release_checkpoint(
 ) -> Result<Json<ReleaseCheckpointResponse>, ApiResponseError> {
     let checkpoint_id = parse_path_id::<CheckpointId>("checkpoint_id", &checkpoint_id)?;
     let response = state
-        .admin
+        .maintenance
         .release_checkpoint(&namespace_id, &checkpoint_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -787,7 +787,7 @@ pub(super) async fn run_maintenance(
     AppJson(request): AppJson<MaintenanceRunRequest>,
 ) -> Result<Json<MaintenanceRunResponse>, ApiResponseError> {
     let result = state
-        .admin
+        .maintenance
         .run_maintenance(&namespace_id, request)
         .await
         .map_err(|error| {

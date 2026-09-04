@@ -28,6 +28,7 @@ mod publication;
 mod read_snapshot;
 mod request_accounting;
 mod runtime_config;
+mod snapshots;
 mod staged_content_reclamation;
 mod streamed_put;
 mod streamed_read;

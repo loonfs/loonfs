@@ -5,7 +5,7 @@
 use crate::common::is_content_object;
 use bytes::Bytes;
 use loonfs::{
-    DeleteNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader, FsWriter, MaintenanceJob,
+    DeleteNamespaceOptions, FsBackgroundWork, FsMaintenance, FsReader, FsWriter, MaintenanceJob,
     MaintenanceProbe, MaintenanceStepConclusion, SharedObjectStore,
 };
 use loonfs_api::{ChangeSeq, IndexSegmentId, NamespaceId};
@@ -339,12 +339,12 @@ async fn worker<S: ObjectStore + 'static>(store: Arc<S>, actor: &str) -> GrepWor
         .build()
         .await
         .expect("build reader");
-    let admin = FsAdmin::builder_with_store(shared)
+    let maintenance = FsMaintenance::builder_with_store(shared)
         .actor_id(actor)
         .build()
         .await
-        .expect("build admin");
-    GrepWorker::new(store, reader, admin)
+        .expect("build maintenance");
+    GrepWorker::new(store, reader, maintenance)
 }
 
 async fn seed<S: ObjectStore + 'static>(store: Arc<S>, namespace_id: &NamespaceId) -> FsWriter {
