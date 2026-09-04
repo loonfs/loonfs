@@ -2138,8 +2138,8 @@ Maintenance keeps read cost bounded, retention safe, and durable state clean.
 Maintenance **effects** are normative format semantics; maintenance
 **scheduling and triggering** are not. Two behaviors keep an un-administered
 deployment's read costs bounded regardless of scheduling: the reference
-implementation nudges its maintenance runner after any runtime publish that
-observes the WAL tail at or past the WAL-tail policy's checkpoint threshold
+implementation's writer folds the WAL tail into a manifest before a publish
+that observes the tail at or past the WAL-tail policy's checkpoint threshold
 (32 segments at defaults), and every publish surface rejects with
 `maintenance_required` once the tail reaches the same policy's
 write-rejection threshold (128 at defaults). Reads never gate on tail

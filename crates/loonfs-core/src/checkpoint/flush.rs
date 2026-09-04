@@ -24,7 +24,8 @@ use crate::error::Result;
 use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control_snapshot::load_control_snapshot;
+use crate::namespace::control_snapshot::{load_control_snapshot, resolve_retention_floor_seq};
+use crate::protocol::{PublishMetadataView, PublishTailProjection};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
     ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
@@ -38,6 +39,7 @@ use loonfs_api::{
     NamespaceId, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
+use std::sync::Arc;
 use tracing::Instrument;
 
 /// Manifest that covers the head after a flush attempt.
@@ -91,13 +93,9 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
         || async move {
             Result::Ok(
                 match try_flush_wal(store, namespace_id, context, timer).await? {
-                    TryFlushWal::Settled(basis) => CasAttempt::Settled(FlushWalResponse {
-                        namespace_id: namespace_id.clone(),
-                        target_head_seq: basis.target_head_seq,
-                        manifest_no: basis.root_after_manifest_no,
-                        manifest_head_seq: basis.root_after_head_seq,
-                        outcome: basis.outcome,
-                    }),
+                    TryFlushWal::Settled(basis) => {
+                        CasAttempt::Settled(flush_wal_response(namespace_id, *basis))
+                    }
                     TryFlushWal::RaceLost => CasAttempt::Contended(CoreError::HeadPublish(
                         CommitHeadPublishError::StaleHead,
                     )),
@@ -121,13 +119,23 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<TryFlushWal> {
-    let publication_started_ms = timer.monotonic_now_ms();
     let projection = load_root_projection(store, namespace_id)
         .instrument(tracing::debug_span!(
             "loonfs.phase",
             phase = "scan_namespace_state"
         ))
         .await?;
+    try_flush_wal_projection(store, namespace_id, &projection, context, timer).await
+}
+
+async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    projection: &RootProjection<'_, S>,
+    context: &MutationContext,
+    timer: &dyn MonotonicTimer,
+) -> Result<TryFlushWal> {
+    let publication_started_ms = timer.monotonic_now_ms();
     let head_seq = projection.head.seq;
     let basis_manifest_no = projection.basis.manifest_no();
     // Only a manifest this namespace published can already cover the head.
@@ -156,7 +164,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     let manifest = build_namespace_manifest_for_projection(
         store,
         namespace_id,
-        &projection,
+        projection,
         manifest_no,
         ManifestObjectId::generate(manifest_no),
     )
@@ -217,14 +225,68 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     })))
 }
 
+pub(crate) async fn fold_publish_tail_projection<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    publish_view: &PublishMetadataView<'_, S>,
+    projection: &PublishTailProjection,
+    context: &MutationContext,
+    timer: &dyn MonotonicTimer,
+) -> Result<FlushWalResponse> {
+    let floor_seq = match publish_view.retention_floor_seq() {
+        Some(floor_seq) => floor_seq,
+        None => resolve_retention_floor_seq(store, publish_view.head())
+            .await
+            .map_err(CoreError::ControlObjectLoad)?,
+    };
+    let root_projection = RootProjection {
+        head: publish_view.head().clone(),
+        basis: projection.basis().clone(),
+        floor_seq,
+        manifest_segments: ProjectionManifestSegments::Borrowed(publish_view.manifest_segments()),
+        tail_state: Arc::clone(&projection.tail_state),
+    };
+    // A fold publishes metadata without updating the namespace head.
+    match try_flush_wal_projection(store, namespace_id, &root_projection, context, timer).await? {
+        TryFlushWal::Settled(basis) => Ok(flush_wal_response(namespace_id, *basis)),
+        TryFlushWal::RaceLost => flush_wal(store, namespace_id, context).await,
+    }
+}
+
+fn flush_wal_response(namespace_id: &NamespaceId, basis: FlushedBasis) -> FlushWalResponse {
+    FlushWalResponse {
+        namespace_id: namespace_id.clone(),
+        target_head_seq: basis.target_head_seq,
+        manifest_no: basis.root_after_manifest_no,
+        manifest_head_seq: basis.root_after_head_seq,
+        outcome: basis.outcome,
+    }
+}
+
+pub(super) enum ProjectionManifestSegments<'a, S: ObjectStore + ?Sized> {
+    Loaded(VerifiedMetadataSegments<'a, S>),
+    Borrowed(&'a VerifiedMetadataSegments<'a, S>),
+}
+
+impl<'a, S: ObjectStore + ?Sized> std::ops::Deref for ProjectionManifestSegments<'a, S> {
+    type Target = VerifiedMetadataSegments<'a, S>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Loaded(segments) => segments,
+            Self::Borrowed(segments) => segments,
+        }
+    }
+}
+
 pub(super) struct RootProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: HeadState,
     pub(super) basis: MetadataBasis,
     pub(super) floor_seq: ChangeSeq,
-    pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
+    pub(super) manifest_segments: ProjectionManifestSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
-    pub(super) tail_state: MetadataState,
+    pub(super) tail_state: Arc<MetadataState>,
 }
 
 pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
@@ -282,8 +344,8 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         head,
         basis,
         floor_seq,
-        manifest_segments,
-        tail_state: replayed.resulting_metadata_state,
+        manifest_segments: ProjectionManifestSegments::Loaded(manifest_segments),
+        tail_state: Arc::new(replayed.resulting_metadata_state),
     })
 }
 

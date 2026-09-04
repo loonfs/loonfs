@@ -117,6 +117,11 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         counter(&snapshot, "loonfs.publisher.batches", &[]),
         "every batch taken files its size"
     );
+    assert_eq!(
+        counter(&snapshot, "loonfs.publisher.wal_folds", &[]),
+        1,
+        "the threshold-crossing publish records its fold"
+    );
 
     // The runner: a write nudges the metadata job, and whatever it
     // concluded, the step settled under its own job label.

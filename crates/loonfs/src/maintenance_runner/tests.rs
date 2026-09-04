@@ -608,6 +608,7 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
         &namespace_id,
         &NamespacePublication {
             committed_through_seq: None,
+            folded: false,
             wal_tail_segments: 4,
         },
     );
@@ -621,6 +622,7 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
         &namespace_id,
         &NamespacePublication {
             committed_through_seq: Some(ChangeSeq(7)),
+            folded: false,
             wal_tail_segments: 5,
         },
     );

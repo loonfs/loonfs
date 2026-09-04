@@ -1847,6 +1847,7 @@ dependencies = [
  "loonfs",
  "loonfs-api",
  "loonfs-client",
+ "loonfs-core",
  "loonfs-grep",
  "loonfs-objectstore",
  "loonfs-test-support",

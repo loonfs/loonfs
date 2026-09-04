@@ -17,6 +17,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::{AdvanceRetentionRequest, GcRequest, MetadataCompactionRequest};
+use loonfs_core::test_support::append_wal_segments;
+use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, wal_head, wal_segment_prefix,
 };
@@ -191,15 +193,16 @@ fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    for revision in 0..LEGACY_RECENT_SEGMENTS + 4 {
-        fs.put_file_bytes_blocking(
-            &namespace_id,
-            &format!("/docs/hello-{revision}.txt"),
-            format!("rev {revision}").as_bytes(),
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-        .expect("put file");
-    }
+    block_on(append_wal_segments(
+        store.as_ref(),
+        &namespace_id,
+        u64::try_from(LEGACY_RECENT_SEGMENTS + 4).expect("segment count"),
+        &MutationContext {
+            writer_id: loonfs_api::WriterId::parse("legacy-tail-writer").expect("writer id"),
+            now_ms: 1_000,
+        },
+    ))
+    .expect("build legacy WAL tail");
     truncate_recent_segments(&store, &namespace_id, LEGACY_RECENT_SEGMENTS);
 
     let error = fs

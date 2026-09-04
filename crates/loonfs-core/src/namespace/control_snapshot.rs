@@ -29,6 +29,7 @@ impl NamespaceControlSnapshot {
 pub(crate) struct LoadedNamespaceBasis {
     pub(crate) head: LoadedHeadObject,
     pub(crate) basis: MetadataBasis,
+    pub(crate) retention_floor_seq: Option<ChangeSeq>,
 }
 
 /// Reads a consistent head and retention floor without reading the root.
@@ -80,6 +81,7 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     let root = reads.root.into_loaded();
     Ok(LoadedNamespaceBasis {
         basis: basis_of(&head.state, root.as_ref()),
+        retention_floor_seq: reads.floor_seq,
         head,
     })
 }

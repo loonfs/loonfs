@@ -390,6 +390,14 @@ impl RuntimeInstruments {
         installed.publisher.batch_size.record(batch_size as f64);
     }
 
+    /// Reports one WAL-tail fold on the publication path.
+    pub(crate) fn publisher_wal_fold(&self) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.publisher.wal_folds.increment(1);
+    }
+
     /// Reports one publication result delivered to its caller.
     pub(crate) fn publisher_publish(&self, outcome: PublishOutcome) {
         let Some(installed) = &self.installed else {
@@ -918,6 +926,7 @@ impl CompactionInstruments {
 /// construction, so all of them register once.
 struct PublisherInstruments {
     batches: Arc<dyn CounterHandle>,
+    wal_folds: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
     retained_projections: Arc<dyn GaugeHandle>,
@@ -931,6 +940,11 @@ impl PublisherInstruments {
             batches: recorder.register_counter(
                 "loonfs.publisher.batches",
                 "Mutation batches taken for publication",
+                &[],
+            ),
+            wal_folds: recorder.register_counter(
+                "loonfs.publisher.wal_folds",
+                "WAL tails folded on the publication path",
                 &[],
             ),
             batch_size: recorder.register_histogram(
@@ -1313,6 +1327,7 @@ mod tests {
         assert!(fan_out_object_store_recorder(None, instruments.object_store_recorder()).is_none());
 
         instruments.publisher_batch(4);
+        instruments.publisher_wal_fold();
         instruments.publisher_publish(PublishOutcome::Ok);
         instruments.maintenance_step(MaintenanceJobId::GC, MaintenanceStepConclusion::Idle, 1, 2);
     }

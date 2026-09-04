@@ -1062,10 +1062,11 @@ mod tests {
         RuntimeError, SharedObjectStore, StatPathOptions,
     };
     use loonfs_api::{
-        ChangeSeq, CreateCheckpointRequest, DestinationBehavior, ErrorCode, InodeId, NamespaceId,
-        RevisionNo,
+        ChangeSeq, CreateCheckpointRequest, ErrorCode, InodeId, NamespaceId, RevisionNo,
     };
     use loonfs_client::NamespacePath;
+    use loonfs_core::test_support::append_wal_segments;
+    use loonfs_core::MutationContext;
     use tempfile::tempdir;
 
     fn namespace_id(value: &str) -> NamespaceId {
@@ -1090,12 +1091,8 @@ mod tests {
         ]
     }
 
-    /// Leaves a namespace with a metadata backlog no scheduler will touch:
-    /// a `ManualOnly` writer publishes past the WAL-tail checkpoint
-    /// threshold, which is exactly the state a cold namespace is in when the
-    /// process that wrote it went away.
     async fn seed_wal_backlog(store: &SharedObjectStore, namespace_id: &NamespaceId) {
-        const PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD: usize = 34;
+        const PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD: u64 = 34;
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(format!("{namespace_id}-backlog"))
             .background_work(FsBackgroundWork::ManualOnly)
@@ -1107,17 +1104,18 @@ mod tests {
             .create_namespace(namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
-        for index in 0..PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD {
-            writer
-                .put_file_bytes(
-                    namespace_id,
-                    &format!("/notes/note-{index}.txt"),
-                    b"assigned needle\n",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
-                )
-                .await
-                .unwrap_or_else(|error| panic!("seed put {index} failed: {error}"));
-        }
+        append_wal_segments(
+            store.as_ref(),
+            namespace_id,
+            PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD,
+            &MutationContext {
+                writer_id: loonfs_api::WriterId::parse(format!("{namespace_id}-tail"))
+                    .expect("writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("seed WAL backlog");
     }
 
     fn local_store(temp_dir: &std::path::Path) -> (StoreConfig, SharedObjectStore) {
@@ -1523,14 +1521,11 @@ mod tests {
             key_prefix: None,
         };
 
-        // Accumulate WAL debt the way pre-fix builds did: a ManualOnly
-        // writer publishes until the backpressure gate refuses the next
-        // publish outright.
         let store = store_config
             .configured_object_store()
             .expect("configure store")
             .into_shared();
-        let writer = FsWriter::builder_with_store(store)
+        let writer = FsWriter::builder_with_store(store.clone())
             .writer_id("debt-builder")
             .background_work(FsBackgroundWork::ManualOnly)
             .min_publish_interval_ms(0)
@@ -1542,39 +1537,18 @@ mod tests {
             .create_namespace(&namespace, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
-        let mut stalled = false;
-        for index in 0..200 {
-            let result =
-                writer
-                    .put_file_bytes(
-                        &namespace,
-                        &format!("/files/f{index}.txt"),
-                        b"payload",
-                        PutFileOptions {
-                            behavior: DestinationBehavior::NoReplace,
-                            commit: loonfs_client::CommitOptions::new(
-                                loonfs_test_support::test_actor(),
-                            ),
-                            expected_inode_id: None,
-                            expected_revision_no: None,
-                        },
-                    )
-                    .await;
-            match result {
-                Ok(_) => {}
-                Err(RuntimeError::Core(error))
-                    if matches!(error.code(), ErrorCode::MaintenanceRequired) =>
-                {
-                    stalled = true;
-                    break;
-                }
-                Err(error) => panic!("unexpected stall error: {error}"),
-            }
-        }
-        assert!(stalled, "ManualOnly writer never hit the backpressure cap");
+        append_wal_segments(
+            store.as_ref(),
+            &namespace,
+            loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS,
+            &MutationContext {
+                writer_id: loonfs_api::WriterId::parse("debt-builder").expect("writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("seed WAL debt at the write-stop bound");
 
-        // The embedded backend digs itself out: the gated publish schedules
-        // its own step, the backend settles it and resubmits.
         let target = EmbeddedTarget::new(&store_config, None)
             .await
             .expect("build embedded target");

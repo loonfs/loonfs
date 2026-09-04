@@ -106,7 +106,7 @@ impl MaintenanceJob for MetadataJob {
     }
 
     fn should_nudge_after_publication(&self, publication: &NamespacePublication) -> bool {
-        self.options.flush_is_due(publication.wal_tail_segments)
+        publication.folded || self.options.flush_is_due(publication.wal_tail_segments)
     }
 
     /// Carries no continuation: what is left to flush or fold is what the

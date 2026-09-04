@@ -20,7 +20,7 @@ use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::cache::Recency;
 use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
-use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
+use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, CONTENTION_RETRY_LIMIT};
 use loonfs_core::publish::{NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::collections::{HashMap, VecDeque};
@@ -980,6 +980,7 @@ impl NamespacePublisher {
             NamespaceCommitEngine::new(self.namespace_id.clone())
                 .segment_cache(self.read_core.metadata_segment_cache())
                 .writer_session(Arc::clone(&slot.session))
+                .fold_wal_tail_at(std::num::NonZeroU64::new(CHECKPOINT_AT_WAL_SEGMENTS))
         })
     }
 

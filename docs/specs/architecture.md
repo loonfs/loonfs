@@ -88,7 +88,7 @@ provider outage does not make every namespace retry at the same time.
 
 | Job | Step | Admission |
 | --- | --- | --- |
-| `metadata` | Flush the WAL tail when needed, then perform one bounded reorganization step. | Automatic after publication. |
+| `metadata` | Merge one bounded reorganization unit; flush a WAL tail another writer left behind. | Automatic after a fold. |
 | `gc` | Perform one bounded mark-and-sweep pass. | Automatic after publication or when a lease or grace period expires. |
 | `grep-index` | Build or reorganize one bounded unit of the grep index. | Automatic on hosts configured to maintain the index. |
 | `grep-gc` | Inspect one bounded part of a namespace's grep objects. | Runs only when explicitly requested. |

@@ -3,6 +3,89 @@
 use super::*;
 
 #[tokio::test]
+async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("publish-fold").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    crate::test_support::append_wal_segments(&store, &namespace_id, 3, &context)
+        .await
+        .expect("build WAL tail");
+    let expected_tail = Arc::clone(
+        &flush::load_root_projection(&store, &namespace_id)
+            .await
+            .expect("load store projection")
+            .tail_state,
+    );
+    let head = load_head_object(&store, &namespace_id)
+        .await
+        .expect("load head");
+    let acquired_writer = loonfs_api::wire::control::AcquiredWriter {
+        writer_id: context.writer_id.to_string(),
+        writer_epoch: head.state.writer_epoch,
+    };
+    let (publish_view, projection) = crate::protocol::load_publish_metadata_view(
+        &store,
+        None,
+        &namespace_id,
+        acquired_writer,
+        None,
+        &PublishTailOptions::default(),
+    )
+    .await
+    .expect("load publish projection");
+
+    let response = flush::fold_publish_tail_projection(
+        &store,
+        &namespace_id,
+        &publish_view,
+        &projection,
+        &context,
+        &crate::time::StdMonotonicTimer::default(),
+    )
+    .await
+    .expect("fold publish projection");
+    assert_eq!(response.outcome, loonfs_api::FlushWalOutcome::Published);
+    let materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, response.manifest_no)
+            .await
+            .expect("load folded manifest");
+    let delta = materialized
+        .manifest
+        .payload
+        .runs
+        .last()
+        .expect("folded manifest has a delta run");
+    assert_eq!(delta.tier, RunTier::Delta);
+    let delta_manifest = runs_in_materialization_order(&materialized.manifest.payload)
+        .into_iter()
+        .find(|run| run.run_no == delta.run_no)
+        .expect("folded delta run is valid");
+    let manifest_key = metadata_manifest_object(
+        &namespace_id,
+        &materialized.manifest.payload.manifest_object_id,
+    );
+    let mut actual_tail = MetadataStateBuilder::default();
+    inspection_materialization::append_manifest_segments_to_metadata(
+        &store,
+        &namespace_id,
+        &manifest_key,
+        delta_manifest.run_seq,
+        &delta_manifest.segments,
+        &mut actual_tail,
+    )
+    .await
+    .expect("load delta run");
+    assert!(metadata_states_equivalent(
+        &expected_tail,
+        &actual_tail.finish()
+    ));
+}
+
+#[tokio::test]
 async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

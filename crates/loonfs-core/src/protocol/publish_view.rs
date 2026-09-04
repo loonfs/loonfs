@@ -32,6 +32,7 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) acquired_writer: AcquiredWriter,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
     tail_state: Arc<MetadataState>,
+    retention_floor_seq: Option<ChangeSeq>,
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
@@ -41,6 +42,18 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 
     pub(crate) fn content_store_id(&self) -> &ContentStoreId {
         &self.content_store_id
+    }
+
+    pub(crate) fn head(&self) -> &HeadState {
+        &self.head
+    }
+
+    pub(crate) fn manifest_segments(&self) -> &VerifiedMetadataSegments<'_, S> {
+        &self.manifest_segments
+    }
+
+    pub(crate) fn retention_floor_seq(&self) -> Option<ChangeSeq> {
+        self.retention_floor_seq
     }
 
     pub(super) async fn find_commit_receipt(
@@ -161,6 +174,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
+    let retention_floor_seq = loaded.retention_floor_seq;
     let head_etag = loaded.head.etag;
     let head = loaded.head.state;
     if head.status.is_deleted() {
@@ -209,6 +223,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             acquired_writer,
             manifest_segments,
             tail_state,
+            retention_floor_seq,
         },
         projection,
     ))

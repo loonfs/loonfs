@@ -15,6 +15,52 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Appends one small commit per WAL segment without folding the tail.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn append_wal_segments<S: loonfs_objectstore::ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &loonfs_api::NamespaceId,
+    count: u64,
+    context: &crate::MutationContext,
+) -> crate::error::Result<()> {
+    let mut engine = crate::publish::NamespaceCommitEngine::new(namespace_id.clone());
+    for _ in 0..count {
+        let commit_id = loonfs_api::CommitId::generate();
+        let path =
+            loonfs_api::AbsolutePath::parse(format!("/wal-tail-{commit_id}")).map_err(|error| {
+                crate::error::CoreError::Internal(format!("test WAL-tail path: {error}"))
+            })?;
+        let request = crate::publish::CommitRequest::single(
+            commit_id,
+            loonfs_api::ActorRef::loonfs_system(),
+            None,
+            crate::publish::FilesystemOperation::CreateDirectory {
+                path,
+                parents: false,
+            },
+        );
+        let mut results = engine
+            .publish_batch(
+                store,
+                vec![crate::publish::CommitCandidate::new(request)],
+                context,
+                &crate::publish::PublishTailOptions::default(),
+            )
+            .await
+            .results;
+        if results.len() != 1 {
+            return Err(crate::error::CoreError::Internal(format!(
+                "test WAL-tail publish returned {count} results for one candidate",
+                count = results.len(),
+            )));
+        }
+        results
+            .pop()
+            .expect("single-candidate test publish should hold one result")?;
+    }
+    Ok(())
+}
+
 /// A call recorded by [`RecordingStoredMetadataBlockCache`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordedStoredMetadataBlockCall {

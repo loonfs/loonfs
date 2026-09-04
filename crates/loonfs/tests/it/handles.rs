@@ -14,12 +14,17 @@ use loonfs::{
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
+use loonfs_core::test_support::append_wal_segments;
+use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -56,254 +61,40 @@ async fn writer(root: &Path, background_work: FsBackgroundWork) -> FsWriter {
         .expect("build writer")
 }
 
-async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &NamespaceId) {
-    for round in 0..writes_past_wal_tail_threshold() {
-        writer
-            .put_file_bytes(
-                namespace_id,
-                &format!("/docs/file-{round}.txt"),
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect("put file");
-    }
+async fn fill_wal_tail_past_threshold<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) {
+    append_wal_segments(
+        store,
+        namespace_id,
+        wal_tail_segment_count_past_threshold(),
+        &MutationContext {
+            writer_id: loonfs_api::WriterId::parse("wal-tail-test-writer").expect("writer id"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("fill WAL tail past threshold");
 }
 
 /// Leaves the tail exactly at the write-stop bound: every write here is
 /// admitted, and the next one is not.
-async fn fill_wal_tail_to_write_stop(writer: &FsWriter, namespace_id: &NamespaceId) {
-    let writes = u32::try_from(loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS)
-        .expect("the WAL write-stop bound should fit in u32");
-    for round in 0..writes {
-        writer
-            .put_file_bytes(
-                namespace_id,
-                &format!("/write-stop/file-{round}.txt"),
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect("put file up to the write-stop boundary");
-    }
-}
-
-#[test]
-fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
-    // The interleaving behind the CI failures on the extraction stack: the
-    // first crossing's step is mid-run when more publishes cross the
-    // threshold. Their requests must defer and rerun the step — dropping
-    // them leaves the tail unbounded when those were the last writes before
-    // an idle period.
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    block_on(async {
-        // The root is published by whichever step gets there first: a
-        // create-if-absent for a namespace that has never flushed, a
-        // compare-and-swap after that. Both are the publication this test
-        // holds.
-        let blocking = Arc::new(BlockingStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::metadata_root(&namespace_id),
-            OperationClass::Put,
-        ));
-        let store: SharedObjectStore = blocking.clone();
-        let writer = FsWriter::builder_with_store(store)
-            .writer_id("handle-test-writer")
-            .background_work(FsBackgroundWork::Enabled)
-            .build()
-            .await
-            .expect("build writer");
-        writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-
-        // The threshold-crossing publish spawns the step; the armed store
-        // holds that step at its metadata root CAS.
-        blocking.block_next();
-        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
-        blocking.wait_until_blocked().await;
-
-        // A full second threshold's worth of publishes lands while the step
-        // is held; every crossing defers to the running step.
-        for round in 0..writes_past_wal_tail_threshold() {
-            writer
-                .put_file_bytes(
-                    &namespace_id,
-                    &format!("/docs/held/file-{round}.txt"),
-                    b"body",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
-                )
-                .await
-                .expect("put file during held step");
-        }
-
-        blocking.release();
-        writer
-            .flush_background()
-            .await
-            .expect("background maintenance quiesces");
-
-        let admin = FsAdmin::builder_with_store(blocking.clone() as SharedObjectStore)
-            .actor_id("handle-test-admin")
-            .build()
-            .await
-            .expect("build admin");
-        let status = admin
-            .get_namespace_diagnostics(&namespace_id)
-            .await
-            .expect("status after deferred rerun");
-        assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
-            "deferred crossings must rerun the step and bound the tail: {status:?}"
-        );
-        writer
-            .shutdown()
-            .await
-            .expect("shut down writer background work");
-    });
-}
-
-#[test]
-fn a_step_queued_at_the_global_cap_runs_without_another_publish() {
-    let temp_dir = tempdir().expect("tempdir");
-    let active_namespace = namespace_id("active");
-    let queued_namespace = namespace_id("queued");
-    block_on(async {
-        // The root is published by whichever step gets there first: a
-        // create-if-absent for a namespace that has never flushed, a
-        // compare-and-swap after that. Both are the publication this test
-        // holds.
-        let blocking = Arc::new(BlockingStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::metadata_root(&active_namespace),
-            OperationClass::Put,
-        ));
-        let store: SharedObjectStore = blocking.clone();
-        let writer = FsWriter::builder_with_store(store)
-            .writer_id("handle-test-writer")
-            .background_work(FsBackgroundWork::Enabled)
-            .max_concurrent_maintenance(1)
-            .build()
-            .await
-            .expect("build writer");
-        for namespace_id in [&active_namespace, &queued_namespace] {
-            writer
-                .create_namespace(namespace_id, CreateNamespaceOptions::default())
-                .await
-                .expect("create namespace");
-        }
-
-        blocking.block_next();
-        fill_wal_tail_past_threshold(&writer, &active_namespace).await;
-        blocking.wait_until_blocked().await;
-        fill_wal_tail_past_threshold(&writer, &queued_namespace).await;
-
-        blocking.release();
-        writer
-            .flush_background()
-            .await
-            .expect("queued maintenance quiesces");
-
-        let admin = FsAdmin::builder_with_store(blocking.clone() as SharedObjectStore)
-            .actor_id("handle-test-admin")
-            .build()
-            .await
-            .expect("build admin");
-        let status = admin
-            .get_namespace_diagnostics(&queued_namespace)
-            .await
-            .expect("queued namespace status");
-        assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
-            "the queued step must run without another publish: {status:?}"
-        );
-        writer
-            .shutdown()
-            .await
-            .expect("shut down writer background work");
-    });
-}
-
-#[test]
-fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
-    let temp_dir = tempdir().expect("tempdir");
-    let active_namespace = namespace_id("active");
-    let write_stopped_namespace = namespace_id("write-stopped");
-    block_on(async {
-        // The root is published by whichever step gets there first: a
-        // create-if-absent for a namespace that has never flushed, a
-        // compare-and-swap after that. Both are the publication this test
-        // holds.
-        let blocking = Arc::new(BlockingStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::metadata_root(&active_namespace),
-            OperationClass::Put,
-        ));
-        let store: SharedObjectStore = blocking.clone();
-        let writer = FsWriter::builder_with_store(store)
-            .writer_id("handle-test-writer")
-            .background_work(FsBackgroundWork::Enabled)
-            .max_concurrent_maintenance(1)
-            .build()
-            .await
-            .expect("build writer");
-        for namespace_id in [&active_namespace, &write_stopped_namespace] {
-            writer
-                .create_namespace(namespace_id, CreateNamespaceOptions::default())
-                .await
-                .expect("create namespace");
-        }
-
-        blocking.block_next();
-        fill_wal_tail_past_threshold(&writer, &active_namespace).await;
-        blocking.wait_until_blocked().await;
-        fill_wal_tail_to_write_stop(&writer, &write_stopped_namespace).await;
-        let error = writer
-            .put_file_bytes(
-                &write_stopped_namespace,
-                "/write-stop/rejected.txt",
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect_err("writes against a tail at the hard limit must reject");
-        assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
-
-        blocking.release();
-        writer
-            .flush_background()
-            .await
-            .expect("queued maintenance quiesces");
-
-        writer
-            .put_file_bytes(
-                &write_stopped_namespace,
-                "/write-stop/rejected.txt",
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect("the queued step must unblock writes without another publish");
-        let admin = FsAdmin::builder_with_store(blocking.clone() as SharedObjectStore)
-            .actor_id("handle-test-admin")
-            .build()
-            .await
-            .expect("build admin");
-        let status = admin
-            .get_namespace_diagnostics(&write_stopped_namespace)
-            .await
-            .expect("write-stopped namespace status");
-        assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
-            "the queued step must flush the write-stopped tail before the retry: {status:?}"
-        );
-        writer
-            .shutdown()
-            .await
-            .expect("shut down writer background work");
-    });
+async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) {
+    append_wal_segments(
+        store,
+        namespace_id,
+        loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS,
+        &MutationContext {
+            writer_id: loonfs_api::WriterId::parse("wal-tail-test-writer").expect("writer id"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("fill WAL tail to write-stop bound");
 }
 
 #[test]
@@ -322,7 +113,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
-        let writer = FsWriter::builder_with_store(store)
+        let writer = FsWriter::builder_with_store(store.clone())
             .writer_id("handle-test-writer")
             .background_work(FsBackgroundWork::Enabled)
             .max_concurrent_maintenance(1)
@@ -336,10 +127,16 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
                 .expect("create namespace");
         }
 
+        fill_wal_tail_past_threshold(blocking.as_ref(), &active_namespace).await;
         blocking.block_next();
-        fill_wal_tail_past_threshold(&writer, &active_namespace).await;
+        writer
+            .maintenance()
+            .nudge(MaintenanceJobId::METADATA, &active_namespace);
         blocking.wait_until_blocked().await;
-        fill_wal_tail_past_threshold(&writer, &queued_namespace).await;
+        fill_wal_tail_past_threshold(blocking.as_ref(), &queued_namespace).await;
+        writer
+            .maintenance()
+            .nudge(MaintenanceJobId::METADATA, &queued_namespace);
 
         let mut shutdown = Box::pin(writer.shutdown());
         assert!(
@@ -531,14 +328,22 @@ fn admin_over_writer_core_invalidates_shared_caches() {
             .await
             .expect("create namespace");
         let reader = writer.reader();
-        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+        for round in 0..writes_past_wal_tail_threshold() {
+            writer
+                .put_file_bytes(
+                    &namespace_id,
+                    &format!("/docs/file-{round}.txt"),
+                    b"body",
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("put file");
+        }
         writer
             .flush_background()
             .await
             .expect("background maintenance quiesces");
 
-        // The scheduled step ran: it published a manifest and bounded the
-        // tail, both through the writer's own runtime.
         let admin = FsAdmin::builder(store_config(temp_dir.path()))
             .actor_id("handle-test-admin")
             .build()
@@ -665,7 +470,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
 }
 
 #[test]
-fn manual_only_writer_never_schedules_maintenance() {
+fn manual_only_writer_folds_without_scheduling_maintenance() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -674,7 +479,17 @@ fn manual_only_writer_never_schedules_maintenance() {
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
-        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+        for round in 0..=(wal_tail_segment_threshold() * 2) {
+            writer
+                .put_file_bytes(
+                    &namespace_id,
+                    &format!("/docs/file-{round}.txt"),
+                    b"body",
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("put file");
+        }
         writer
             .flush_background()
             .await
@@ -690,35 +505,13 @@ fn manual_only_writer_never_schedules_maintenance() {
             .await
             .expect("status after writes");
         assert_eq!(
-            status.current_manifest_no, None,
-            "manual-only writer must not publish checkpoints: {status:?}"
-        );
-        assert!(
-            status.wal_tail_segments >= wal_tail_segment_count_past_threshold(),
-            "manual-only writer must leave the tail alone: {status:?}"
-        );
-
-        // Explicit admin maintenance bounds the tail the writer left.
-        let step = admin
-            .maintain_metadata(&namespace_id, MetadataMaintenanceOptions::default())
-            .await
-            .expect("explicit maintenance step");
-        assert_ne!(
-            step.wal_flush,
-            loonfs::WalFlushStepOutcome::NotNeeded,
-            "step should act on the oversized tail"
-        );
-        let status = admin
-            .get_namespace_diagnostics(&namespace_id)
-            .await
-            .expect("status after explicit step");
-        assert!(
-            status.current_manifest_no.is_some(),
-            "explicit step should publish a manifest: {status:?}"
+            status.current_manifest_no,
+            Some(ManifestNo(2)),
+            "the writer should have folded twice without a maintenance runner: {status:?}"
         );
         assert!(
             status.wal_tail_segments < wal_tail_segment_threshold(),
-            "explicit step should bound the tail: {status:?}"
+            "the writer must keep its own tail below the fold threshold: {status:?}"
         );
     });
 }
@@ -772,7 +565,17 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             );
             assert_eq!(status.wal_tail_segments, 1, "{status:?}");
 
-            fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+            for round in 0..writes_past_wal_tail_threshold() {
+                writer
+                    .put_file_bytes(
+                        &namespace_id,
+                        &format!("/docs/file-{round}.txt"),
+                        b"body",
+                        PutFileOptions::new(loonfs_test_support::test_actor()),
+                    )
+                    .await
+                    .expect("put file");
+            }
             writer
                 .flush_background()
                 .await
@@ -799,7 +602,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
 }
 
 #[test]
-fn a_refused_publish_schedules_the_step_that_relieves_the_debt() {
+fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -813,41 +616,14 @@ fn a_refused_publish_schedules_the_step_that_relieves_the_debt() {
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
-        fill_wal_tail_to_write_stop(&stalled, &namespace_id).await;
+        let tail_store = LocalFsStore::new(temp_dir.path()).expect("open tail store");
+        fill_wal_tail_to_write_stop(&tail_store, &namespace_id).await;
         stalled
             .shutdown()
             .await
             .expect("shut down the first writer");
 
         let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
-        let refused = writer
-            .put_file_bytes(
-                &namespace_id,
-                "/write-stop/refused.txt",
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect_err("a tail at the write-stop bound refuses the publish");
-        assert_eq!(refused.code(), ErrorCode::MaintenanceRequired);
-
-        writer
-            .flush_background()
-            .await
-            .expect("the step the refusal asked for settles");
-        let admin = FsAdmin::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-admin")
-            .build()
-            .await
-            .expect("build admin");
-        let status = admin
-            .get_namespace_diagnostics(&namespace_id)
-            .await
-            .expect("status after the refused publish");
-        assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
-            "the refused publish must schedule the flush that unblocks it: {status:?}"
-        );
         writer
             .put_file_bytes(
                 &namespace_id,
@@ -856,11 +632,103 @@ fn a_refused_publish_schedules_the_step_that_relieves_the_debt() {
                 PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
-            .expect("the retry lands once the debt is cleared");
+            .expect("the runtime publish folds the preexisting tail and lands");
+        let admin = FsAdmin::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .get_namespace_diagnostics(&namespace_id)
+            .await
+            .expect("status after the folding publish");
+        assert_eq!(status.wal_tail_segments, 1, "{status:?}");
+        assert!(status.current_manifest_no.is_some(), "{status:?}");
         writer
             .shutdown()
             .await
             .expect("shut down writer background work");
+    });
+}
+
+#[test]
+fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    block_on(async {
+        let failing = Arc::new(FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::family(DurableObjectFamily::MetadataManifest),
+            OperationClass::Put,
+            InjectedError::PermissionDenied("manifest writes disabled".to_owned()),
+        ));
+        let store: SharedObjectStore = failing.clone();
+        let writer = FsWriter::builder_with_store(store)
+            .writer_id("fold-failure-writer")
+            .background_work(FsBackgroundWork::ManualOnly)
+            .build()
+            .await
+            .expect("build writer");
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        let seed_segments = wal_tail_segment_threshold() - 1;
+        append_wal_segments(
+            failing.as_ref(),
+            &namespace_id,
+            seed_segments,
+            &MutationContext {
+                writer_id: loonfs_api::WriterId::parse("fold-failure-seed").expect("writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("seed WAL tail below fold threshold");
+
+        failing.fail_all();
+        for round in 0..(loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS - seed_segments) {
+            writer
+                .put_file_bytes(
+                    &namespace_id,
+                    &format!("/failed-fold/file-{round}.txt"),
+                    b"body",
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("publishes below the write-stop bound continue after a failed fold");
+        }
+        let error = writer
+            .put_file_bytes(
+                &namespace_id,
+                "/failed-fold/refused.txt",
+                b"body",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect_err("the write-stop invariant still refuses the full tail");
+        assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
+
+        failing.clear();
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                "/failed-fold/recovered.txt",
+                b"body",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("the recovered manifest store lets the next publish fold and land");
+        let admin = FsAdmin::builder_with_store(failing as SharedObjectStore)
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .get_namespace_diagnostics(&namespace_id)
+            .await
+            .expect("status after fold recovery");
+        assert_eq!(status.wal_tail_segments, 1, "{status:?}");
     });
 }
 
