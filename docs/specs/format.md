@@ -1849,11 +1849,11 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Family | `kind` | Encoding | Current version |
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
-| Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via manifest) |
+| Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 3 (via namespace manifest) |
 | Grep root pointer | `grep_root` | JSON, uncompressed | 1 |
 | Grep manifest | `grep_manifest` | JSON, uncompressed | 1 |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the grep manifest) |
-| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 2 |
+| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 3 |
 | Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
@@ -1932,7 +1932,7 @@ Every metadata row key identifies exactly one row, so a read merges runs by key 
 
 A row key contains hyphen-separated components. The first component is the singular, kebab-case family name. Numeric components use fixed-width decimal encoding: 20 digits for `u64` and 10 for `u32`. This makes byte order match numeric order. String components such as `name_key` and `commit_id` use the lowercase hexadecimal encoding of their UTF-8 bytes.
 
-The row's `kind` and its family serve different purposes. A row kind may appear in multiple families, so their names do not need to match. For example, a `file_revision` row appears in both `revisions` and `revisions_by_inode_desc`.
+The row's `kind` and its family serve different purposes. A row kind may appear in multiple families, so their names do not need to match. For example, a `direntry_bind` row appears in both `direntry_binds` and `direntry_child_binds`.
 
 The ten families and their exact grammar:
 
@@ -1942,8 +1942,7 @@ The ten families and their exact grammar:
 | `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{bind_seq:020}-{bind_delta_index:010}` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}` |
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{bind_seq:020}-{bind_delta_index:010}-{parent_inode_id:020}-{name_key_hex}` | `direntry-child-bind-{child_inode_id:020}` |
 | `direntry_unbinds` | `direntry-unbind-{parent_inode_id:020}-{name_key_hex}-{bind_seq:020}-{bind_delta_index:010}-{unbind_seq:020}-{unbind_delta_index:010}` | `direntry-unbind-{parent_inode_id:020}-{name_key_hex}` |
-| `revisions` | `revision-{inode_id:020}-{revision_no:020}-{delta_index:010}` | `revision-{inode_id:020}` |
-| `revisions_by_inode_desc` | `revision-by-inode-desc-{inode_id:020}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` | `revision-by-inode-desc-{inode_id:020}` |
+| `revisions` | `revision-{inode_id:020}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` | `revision-{inode_id:020}` |
 | `tombstones` | `tombstone-{root_inode_id:020}-{generation.seq:020}-{generation.delta_index:010}` | `tombstone-{root_inode_id:020}` |
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` | the row key |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` | `commit-receipt-{commit_id_hex}` |
@@ -1954,7 +1953,7 @@ The family groups and their exact members:
 | Group | Row families |
 | --- | --- |
 | `bindings` | `direntry_binds`, `direntry_child_binds`, `direntry_unbinds` |
-| `revisions` | `revisions`, `revisions_by_inode_desc` |
+| `revisions` | `revisions` |
 | `inodes` | `inodes` |
 | `tombstones` | `tombstones` |
 | `active_deletions` | `active_deletions` |
@@ -2187,15 +2186,17 @@ The namespace manifest may reference one or more immutable metadata runs. Runs
 are not a second source of truth; they are rebuildable metadata rows used to
 keep normal metadata view loading from replaying an unbounded WAL tail.
 
-For file revisions, a valid manifest includes the canonical `revisions` family
-and the `revisions_by_inode_desc` index family. The index family must contain
-exactly the same revision rows as the canonical family, keyed for newest-first
-inode revision scans. Readers treat a missing, extra, duplicate, or changed
-revision index row as namespace corruption. Segment reads verify the per-block
-checksums in the block handles and enforce key ranges. Manifest loads
-enforce per-run row-count equality between canonical and index families; full
-row-level index equality is enforced by every reorganization rewrite over the
-complete input runs that the rewrite selected.
+File revisions are stored once in the `revisions` family, newest first within
+an inode, using the same descending revision, sequence, and delta ordering as
+attribute revisions. Exact revision reads and paginated history scans use this
+family directly. The namespace manifest version governs these row-key meanings;
+version 3 requires this ordering. The metadata block framing is unchanged.
+
+Segment reads verify the per-block checksums in the block handles and enforce
+key ranges. Directory bindings retain both parent-and-name and child lookup
+families. Manifest loads enforce per-run row-count equality between these two
+families; every reorganization rewrite checks their full row-level equality
+over the complete input runs it selected.
 
 ### 6.2 Compaction
 

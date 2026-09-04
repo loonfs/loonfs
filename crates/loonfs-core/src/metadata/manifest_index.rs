@@ -231,11 +231,11 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Option<RevisionRecord>> {
-    let exact_prefix = lookup_keys::revision_by_inode_desc_revision_prefix(inode_id, revision_no);
-    let filter_probe = lookup_keys::revision_by_inode_desc_probe(inode_id);
+    let exact_prefix = lookup_keys::revision_number_prefix(inode_id, revision_no);
+    let filter_probe = lookup_keys::revision_probe(inode_id);
     segments
         .scan_range_page_for_lookup(
-            MetadataRowFamily::RevisionsByInodeDesc,
+            MetadataRowFamily::Revisions,
             &exact_prefix,
             string_prefix_upper_bound(&exact_prefix).as_deref(),
             1,
@@ -258,11 +258,11 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let inode_prefix = lookup_keys::revision_by_inode_desc_prefix(inode_id);
-    let filter_probe = lookup_keys::revision_by_inode_desc_probe(inode_id);
+    let inode_prefix = lookup_keys::revision_prefix(inode_id);
+    let filter_probe = lookup_keys::revision_probe(inode_id);
     let lower_bound = start_after
         .map(|position| {
-            lookup_keys::after_row_key(&lookup_keys::revision_by_inode_desc_row_key(
+            lookup_keys::after_row_key(&lookup_keys::revision_row_key(
                 inode_id,
                 position.revision_no,
                 position.committed_seq,
@@ -272,7 +272,7 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
         .unwrap_or_else(|| inode_prefix.clone());
     segments
         .scan_range_page_for_lookup(
-            MetadataRowFamily::RevisionsByInodeDesc,
+            MetadataRowFamily::Revisions,
             &lower_bound,
             string_prefix_upper_bound(&inode_prefix).as_deref(),
             limit,

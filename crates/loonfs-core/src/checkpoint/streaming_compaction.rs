@@ -719,12 +719,8 @@ const fn row_cluster(families: &'static [MetadataRowFamily]) -> RetentionCluster
     }
 }
 
-/// Revision rows are never dropped and their index travels with them, so both
-/// families are a straight rewrite in key order.
-const REVISION_CLUSTERS: [RetentionCluster; 2] = [
-    row_cluster(&[MetadataRowFamily::Revisions]),
-    row_cluster(&[MetadataRowFamily::RevisionsByInodeDesc]),
-];
+/// Revision rows are never dropped, so they are rewritten in key order.
+const REVISION_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Revisions])];
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
 const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Tombstones])];
 /// A receipt is kept or dropped by its own sequence against the floor.
@@ -1296,11 +1292,8 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
             MetadataRowFamily::DirentryBinds,
             MetadataRowFamily::DirentryChildBinds,
         )),
-        MetadataFamilyGroup::Revisions => Some((
-            MetadataRowFamily::Revisions,
-            MetadataRowFamily::RevisionsByInodeDesc,
-        )),
-        MetadataFamilyGroup::Inodes
+        MetadataFamilyGroup::Revisions
+        | MetadataFamilyGroup::Inodes
         | MetadataFamilyGroup::Tombstones
         | MetadataFamilyGroup::ActiveDeletions
         | MetadataFamilyGroup::CommitReceipts

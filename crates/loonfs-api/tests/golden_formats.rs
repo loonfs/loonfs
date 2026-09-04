@@ -500,7 +500,7 @@ fn assert_wal_segment_is_corrupt(payload: WalSegmentPayload) -> String {
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("encode");
-    assert_matches_golden("namespace_manifest.v2.json", &encoded);
+    assert_matches_golden("namespace_manifest.v3.json", &encoded);
     let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
@@ -509,7 +509,7 @@ fn namespace_manifest_matches_golden_bytes() {
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v2.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v3.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
 }
@@ -1417,7 +1417,6 @@ fn metadata_row_family_wire_tags_are_pinned() {
         MetadataRowFamily::DirentryChildBinds,
         MetadataRowFamily::DirentryUnbinds,
         MetadataRowFamily::Revisions,
-        MetadataRowFamily::RevisionsByInodeDesc,
         MetadataRowFamily::Tombstones,
         MetadataRowFamily::ActiveDeletions,
         MetadataRowFamily::CommitReceipts,
@@ -1434,7 +1433,6 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"direntry_child_binds\"",
             "\"direntry_unbinds\"",
             "\"revisions\"",
-            "\"revisions_by_inode_desc\"",
             "\"tombstones\"",
             "\"active_deletions\"",
             "\"commit_receipts\"",
@@ -1737,22 +1735,23 @@ fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    document["format_version"] = serde_json::Value::from(7);
-    let wrong_version = serde_json::to_vec(&document).expect("encode document");
-
-    let err =
-        decode_namespace_manifest_json(&wrong_version).expect_err("wrong version must be rejected");
-    assert!(
-        matches!(
-            err,
-            EnvelopeCodecError::UnsupportedFormatVersion {
-                found: 7,
-                supported: 2,
-                ..
-            }
-        ),
-        "unexpected error: {err}"
-    );
+    for version in [1, 2, 7] {
+        document["format_version"] = serde_json::Value::from(version);
+        let wrong_version = serde_json::to_vec(&document).expect("encode document");
+        let err = decode_namespace_manifest_json(&wrong_version)
+            .expect_err("wrong version must be rejected");
+        assert!(
+            matches!(
+                err,
+                EnvelopeCodecError::UnsupportedFormatVersion {
+                    found,
+                    supported: 3,
+                    ..
+                } if found == version
+            ),
+            "unexpected error: {err}"
+        );
+    }
 }
 
 #[test]
@@ -1772,7 +1771,7 @@ fn namespace_manifest_decode_rejects_tampered_payload_as_checksum_mismatch() {
 }
 
 #[test]
-fn namespace_manifest_v2_rejects_missing_frozen_base_delta_merges() {
+fn namespace_manifest_v3_rejects_missing_frozen_base_delta_merges() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
@@ -2049,16 +2048,6 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
     [
         MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
             inode_id: InodeId(2),
-            revision_no: RevisionNo(1),
-            committed_seq: ChangeSeq(3),
-            commit_id: commit_id(),
-            committed_at_ms: 3_000,
-            committed_by: actor(),
-            delta_index: 0,
-            content_ref: sample_content_ref(),
-        }),
-        MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
-            inode_id: InodeId(2),
             revision_no: RevisionNo(2),
             committed_seq: ChangeSeq(4),
             commit_id: commit_id(),
@@ -2066,6 +2055,16 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_by: actor(),
             delta_index: 0,
             content_ref: sample_crc_content_ref(),
+        }),
+        MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(1),
+            committed_seq: ChangeSeq(3),
+            commit_id: commit_id(),
+            committed_at_ms: 3_000,
+            committed_by: actor(),
+            delta_index: 0,
+            content_ref: sample_content_ref(),
         }),
     ]
 }

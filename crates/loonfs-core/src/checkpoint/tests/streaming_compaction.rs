@@ -1487,7 +1487,7 @@ async fn rewrite_base_segment(
 }
 
 #[tokio::test]
-async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
+async fn a_repeated_revision_row_key_is_refused() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1495,8 +1495,7 @@ async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
     seed_bindings_workload(&store, &namespace_id).await;
     let group = MetadataFamilyGroup::Revisions;
 
-    // Fold everything into one base run, then repeat one revision inside both
-    // families of the pair.
+    // Fold everything into one base run, then repeat one revision.
     drain_reorganization(&store, &namespace_id, &context, fold_everything_policy()).await;
     let mut manifest = load_current_manifest_segments(&store, &namespace_id)
         .await
@@ -1508,14 +1507,10 @@ async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
         .expect("the namespace has revisions")
         .clone();
     let duplicated_key = repeated.row_key_for_family(ApiMetadataRowFamily::Revisions);
-    for family in [
-        ApiMetadataRowFamily::Revisions,
-        ApiMetadataRowFamily::RevisionsByInodeDesc,
-    ] {
-        let mut family_rows = rows[&family].clone();
-        family_rows.push(repeated.clone());
-        rewrite_base_segment(&store, &namespace_id, &mut manifest, family, family_rows).await;
-    }
+    let family = ApiMetadataRowFamily::Revisions;
+    let mut family_rows = rows[&family].clone();
+    family_rows.push(repeated);
+    rewrite_base_segment(&store, &namespace_id, &mut manifest, family, family_rows).await;
     super::index_parity::overwrite_manifest(&store, &namespace_id, manifest).await;
     // One delta run above the doctored base, so a bottom-anchored window makes
     // progress and the merge reads the base.
@@ -1533,8 +1528,8 @@ async fn a_row_key_repeated_in_both_families_of_an_index_pair_is_refused() {
         .await
         .expect("checkpoint the late write");
 
-    // A doctored run still loads: the two families hold the same rows as each
-    // other, so descriptor counts and the digests agree.
+    // Loading descriptors does not read the duplicate rows. The merge must
+    // detect them before publishing its output.
     let keys_before = group_segment_keys(&store, &namespace_id, group).await;
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;

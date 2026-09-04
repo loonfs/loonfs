@@ -1032,3 +1032,83 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
         .expect("retained revision bytes remain readable by inode");
     assert_eq!(bytes, b"revision one");
 }
+
+#[tokio::test]
+async fn revision_history_pages_survive_wal_folds_and_compaction() {
+    let harness = VisibilityHarness::new("revision-history-storage").await;
+    for revision in 1..=8u8 {
+        harness
+            .put_file(
+                "/history.txt",
+                &[revision],
+                if revision == 1 {
+                    DestinationBehavior::NoReplace
+                } else {
+                    DestinationBehavior::Replace
+                },
+            )
+            .await
+            .expect("write revision");
+        if revision < 8 {
+            harness.engine.flush_wal().await.expect("flush revision");
+        }
+    }
+    let inode_id = harness.inode_id("/history.txt").await;
+
+    async fn assert_history(harness: &VisibilityHarness, inode_id: InodeId) {
+        let context = harness.read_context().await;
+        let mut cursor = None;
+        let mut numbers = Vec::new();
+        for page_no in 0..4 {
+            let page = harness
+                .engine
+                .list_file_revisions_for_inode_page(
+                    inode_id,
+                    PageRequest {
+                        limit: loonfs_test_support::ids::page_limit(2),
+                        cursor,
+                    },
+                    &context,
+                )
+                .await
+                .expect("read revision page");
+            assert_eq!(page.items.len(), 2);
+            numbers.extend(page.items.iter().map(|row| row.revision_no.0));
+            cursor = page.next_cursor;
+            assert_eq!(cursor.is_some(), page_no < 3);
+        }
+        assert_eq!(numbers, vec![8, 7, 6, 5, 4, 3, 2, 1]);
+        for revision in 1..=8u8 {
+            let bytes = harness
+                .engine
+                .get_file_revision_for_inode(
+                    inode_id,
+                    RevisionNo(u64::from(revision)),
+                    &context,
+                    None,
+                )
+                .await
+                .expect("read exact historical revision");
+            assert_eq!(bytes, vec![revision]);
+        }
+    }
+
+    // The first page combines a WAL revision with stored revisions. After
+    // compaction, the same history comes entirely from the single family.
+    assert_history(&harness, inode_id).await;
+    harness
+        .engine
+        .flush_wal()
+        .await
+        .expect("flush last revision");
+    drain_reorganization(
+        &harness,
+        &[
+            ExpectedInode::visible(InodeId(1), "/"),
+            ExpectedInode::visible(inode_id, "/history.txt"),
+        ],
+        "after revision compaction",
+    )
+    .await;
+    assert_history(&harness, inode_id).await;
+}

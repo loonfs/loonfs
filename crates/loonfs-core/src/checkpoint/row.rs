@@ -38,7 +38,7 @@ pub(super) fn manifest_rows_for_family(
             .cloned()
             .map(MetadataRow::DirentryUnbind)
             .collect::<Vec<_>>(),
-        MetadataRowFamily::Revisions | MetadataRowFamily::RevisionsByInodeDesc => metadata_state
+        MetadataRowFamily::Revisions => metadata_state
             .revisions()
             .iter()
             .cloned()
