@@ -346,6 +346,11 @@ The WAL floor and the metadata root are the only control objects that carry
 `updated_at_ms`. That field records when the object's last rewrite succeeded,
 and nothing reads it for ordering or validity.
 
+A compaction lease carries `expires_at_ms`. The job writes its current time
+plus `METADATA_COMPACTION_LEASE_EXPIRY_MS` when it creates or refreshes the
+lease. Readers compare their current time directly with that stored instant;
+they do not apply the writer's lifetime policy again.
+
 Mutable control-object decoders reject unknown fields in both the envelope and
 the complete nested payload. Otherwise, an older binary could tolerate a
 newer field, erase it during read-modify-write, and still report a successful
@@ -2260,7 +2265,7 @@ because that makes "the newest at the floor" arbitrary and the drop unsafe.
 
 A rebuild that cannot fit within one maintenance step runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
 
-The separate prefix prevents GC from treating unfinished output as abandoned metadata. Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json`, and an `active` unexpired or `reaping` lease excludes every other job for that group. A job acquires a missing lease with create-if-absent before its first output object, or takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and heartbeat fields. Garbage collection changes an expired `active` lease to terminal `reaping` with compare-and-swap before reclaiming output belonging to the job id the lease names. A group lease never protects objects written by another job id. Collection passes are shorter than `METADATA_COMPACTION_LEASE_EXPIRY_MS`, so a pass does not mistake a lease that it observed as live for one that expired during the pass. A published manifest references the segments in place, so publication does not move them. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
+The separate prefix prevents GC from treating unfinished output as abandoned metadata. Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json`, and an `active` unexpired or `reaping` lease excludes every other job for that group. A job acquires a missing lease with create-if-absent before its first output object, or takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and expiry fields. Garbage collection changes an expired `active` lease to terminal `reaping` with compare-and-swap before reclaiming output belonging to the job id the lease names. A group lease never protects objects written by another job id. Collection passes are shorter than `METADATA_COMPACTION_LEASE_EXPIRY_MS`, so a pass does not mistake a lease that it observed as live for one that expired during the pass. A published manifest references the segments in place, so publication does not move them. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
 
 The rules a rebuild applies are the same however it runs them. A bounded
 merge holds every row of its window and decides them together. A streaming
@@ -2500,12 +2505,14 @@ publishing CAS) — under these rules:
    output under `segments/` inside it, while its family group has one lease at
    `namespaces/{namespace_id}/metadata/compaction_leases/{group}.json`. The
    lease carries ownership only — job, namespace, group, `writer_id`, the tagged
-   `status`, `started_at_ms`, `heartbeat_at_ms` — and never a cursor, an output
+   `status`, `started_at_ms`, `expires_at_ms` — and never a cursor, an output
    descriptor, an offset, or resumable progress. The job creates a missing
    lease `active` with create-if-absent before its first output object, takes
    over an expired `active` lease with one compare-and-swap, and refreshes the
-   etag it last observed every `METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS`
-   while it runs and at the top of every finalization attempt. An `active`
+   etag it last observed every `METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS`
+   while it runs and at the top of every finalization attempt. Creation and
+   every refresh store the job's current time plus
+   `METADATA_COMPACTION_LEASE_EXPIRY_MS` in `expires_at_ms`. An `active`
    unexpired or `reaping` lease excludes every other job for the group.
 
    The lease is a fence, not a timestamp. An expired lease alone proves
@@ -2514,17 +2521,17 @@ publishing CAS) — under these rules:
    only the winner of that compare-and-swap may act:
 
    ```
-   the job's heartbeat wins    -> the pass retains the prefix
-   the pass's claim wins       -> the job is fenced: its next heartbeat fails,
-                                  it publishes nothing, and the prefix is the
-                                  pass's to reclaim
+   the job's refresh wins -> the pass retains the prefix
+   the pass's claim wins  -> the job is fenced: its next refresh fails,
+                             it publishes nothing, and the prefix is the
+                             pass's to reclaim
    ```
 
    `reaping` is terminal. Nothing returns a lease to `active`, so a job that
    lost ownership never regains it, and a `reaping` lease a later pass finds
    means an unfinished reap to carry on with.
 
-   A published job stops heartbeating and leaves its final lease in place; it
+   A published job stops refreshing and leaves its final lease in place; it
    never deletes it. Deleting it would open the hole the lease exists to
    close: a pass that collected its live set before the publication would find
    output objects far older than any grace window and no lease saying who
@@ -2534,25 +2541,24 @@ publishing CAS) — under these rules:
    A pass reads the seven group lease keys once and decides one staged object
    as follows. An object the manifest references is live, like every other
    referenced object. Otherwise, if a lease naming that job is `active` and
-   its `heartbeat_at_ms` is within `METADATA_COMPACTION_LEASE_EXPIRY_MS`, the
-   object is retained whatever its age; so is one whose expired lease the pass
-   tried and failed to claim. A lease naming a different job protects nothing
-   in this prefix. Otherwise the object ages as an ordinary unreferenced orphan
-   under `METADATA_COMPACTION_STAGING_GRACE_MS`, which is derived rather than
-   tuned:
+   its `expires_at_ms` has not passed, the object is retained whatever its
+   age; so is one whose expired lease the pass tried and failed to claim. A
+   lease naming a different job protects nothing in this prefix. Otherwise
+   the object ages as an ordinary unreferenced orphan under
+   `METADATA_COMPACTION_STAGING_GRACE_MS`, which is derived rather than tuned:
 
    ```
    METADATA_COMPACTION_STAGING_GRACE_MS
-       >= METADATA_COMPACTION_LEASE_EXPIRY_MS   (a job's claim outliving its last heartbeat)
+       >= METADATA_COMPACTION_LEASE_EXPIRY_MS   (the lifetime written by a refresh)
           + T                                (rule 1: the publication that may still name it)
    ```
 
    `METADATA_COMPACTION_LEASE_EXPIRY_MS` is
-   `METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS` times the heartbeat interval,
-   and it must itself be at least `T`: a job's last heartbeat before
+   `METADATA_COMPACTION_LEASE_MISSED_REFRESHES` times the refresh interval,
+   and it must itself be at least `T`: a job's last refresh before
    its output becomes referenced is at the top of a finalization attempt, and
    that attempt's compare-and-swap lands within one publication bound of it.
-   That inequality is also what completes the fence — a job that heartbeated
+   That inequality is also what completes the fence — a job that refreshed
    at the top of an attempt cannot have its prefix claimed before that
    attempt's root compare-and-swap.
 

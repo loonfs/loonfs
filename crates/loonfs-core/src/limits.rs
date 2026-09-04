@@ -118,36 +118,36 @@ pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 /// Default candidate budget for one step-driven garbage-collection pass.
 pub const DEFAULT_GC_MAX_OBJECTS: u64 = 1024;
 
-/// Interval between streaming-compaction lease heartbeats.
+/// Interval between streaming-compaction lease refreshes.
 ///
 /// The interval must exceed one provider operation bound so a healthy job can
-/// refresh its lease before the next heartbeat is due.
-pub const METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS: u64 = 5 * 60 * 1000;
+/// refresh its lease before the next refresh is due.
+pub const METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
-/// Heartbeats a lease may miss before its job is considered inactive.
-pub const METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS: u64 = 5;
+/// Refreshes a lease may miss before its job is considered inactive.
+pub const METADATA_COMPACTION_LEASE_MISSED_REFRESHES: u64 = 5;
 
-/// Time after the last heartbeat before a compaction lease expires.
+/// Lifetime written into a compaction lease whenever the job refreshes it.
 ///
 /// This must outlast one publication so garbage collection cannot claim a
 /// job's prefix while its final compare-and-swap is in progress.
 pub const METADATA_COMPACTION_LEASE_EXPIRY_MS: u64 =
-    METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS * METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS;
+    METADATA_COMPACTION_LEASE_MISSED_REFRESHES * METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS;
 
 /// Minimum age of staged compaction output before it may be collected after
 /// its lease expires.
 pub const METADATA_COMPACTION_STAGING_GRACE_MS: u64 =
     METADATA_COMPACTION_LEASE_EXPIRY_MS + GC_MIN_GRACE_WINDOW_MS;
 
-/// Returns whether a heartbeat can complete before the next is due.
-const fn heartbeats_land_before_the_next_one_is_due(interval_ms: u64) -> bool {
+/// Returns whether a refresh can complete before the next is due.
+const fn refreshes_land_before_the_next_one_is_due(interval_ms: u64) -> bool {
     interval_ms > PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS
 }
 
-// Keep the heartbeat interval above the maximum provider operation time.
+// Keep the refresh interval above the maximum provider operation time.
 const _: () = assert!(
-    heartbeats_land_before_the_next_one_is_due(METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS),
-    "a heartbeat that spends its whole provider budget must still land before the next is due"
+    refreshes_land_before_the_next_one_is_due(METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS),
+    "a refresh that spends its whole provider budget must still land before the next is due"
 );
 
 /// Returns whether a lease can cover one metadata publication.
@@ -328,16 +328,17 @@ mod tests {
     }
 
     #[test]
-    fn the_heartbeat_interval_floor_rejects_an_interval_one_provider_bound_short() {
-        assert!(heartbeats_land_before_the_next_one_is_due(
-            METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS
+    fn the_refresh_interval_floor_rejects_an_interval_one_provider_bound_short() {
+        assert!(refreshes_land_before_the_next_one_is_due(
+            METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS
         ));
-        assert!(!heartbeats_land_before_the_next_one_is_due(
+        assert!(!refreshes_land_before_the_next_one_is_due(
             PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS
         ));
         assert_eq!(
             METADATA_COMPACTION_LEASE_EXPIRY_MS,
-            METADATA_COMPACTION_LEASE_MISSED_HEARTBEATS * METADATA_COMPACTION_HEARTBEAT_INTERVAL_MS
+            METADATA_COMPACTION_LEASE_MISSED_REFRESHES
+                * METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS
         );
     }
 }

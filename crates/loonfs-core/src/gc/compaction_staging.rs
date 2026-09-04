@@ -140,11 +140,7 @@ impl CompactionLeases {
         };
         if !self.staging_complete
             || (loaded.state.status == (CompactionLeaseStatus::Active {})
-                && now_ms
-                    <= loaded
-                        .state
-                        .heartbeat_at_ms
-                        .saturating_add(crate::limits::METADATA_COMPACTION_LEASE_EXPIRY_MS))
+                && now_ms <= loaded.state.expires_at_ms)
         {
             return Ok(Some(GroupLeaseSweep::Retain));
         }

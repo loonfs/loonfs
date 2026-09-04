@@ -2263,19 +2263,19 @@ async fn namespace_with_staged_output(
     (store, staged_key, lease_key)
 }
 
-/// Writes an active compaction lease with the given heartbeat time.
+/// Writes an active compaction lease with the given expiry.
 async fn write_compaction_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     metadata_compaction_id: &loonfs_api::MetadataCompactionId,
-    heartbeat_at_ms: u64,
+    expires_at_ms: u64,
 ) {
     write_compaction_lease_in_state(
         store,
         namespace_id,
         metadata_compaction_id,
         loonfs_api::MetadataFamilyGroup::Bindings,
-        heartbeat_at_ms,
+        expires_at_ms,
         loonfs_api::wire::control::CompactionLeaseStatus::Active {},
     )
     .await;
@@ -2287,7 +2287,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     metadata_compaction_id: &loonfs_api::MetadataCompactionId,
     group: loonfs_api::MetadataFamilyGroup,
-    heartbeat_at_ms: u64,
+    expires_at_ms: u64,
     status: loonfs_api::wire::control::CompactionLeaseStatus,
 ) {
     let envelope = loonfs_api::wire::control::MetadataCompactionLeaseEnvelope::from_state(
@@ -2299,7 +2299,7 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
             writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
             status,
             started_at_ms: 1_000,
-            heartbeat_at_ms,
+            expires_at_ms,
         },
     )
     .expect("build a lease");
@@ -2335,7 +2335,7 @@ async fn a_live_jobs_staged_output_survives_however_old_it_is() {
         &store,
         &namespace_id,
         &test_metadata_compaction_id(),
-        now_ms,
+        now_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
     )
     .await;
 
@@ -2367,17 +2367,18 @@ async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
         namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
             .await;
 
-    // The job's last heartbeat, and then a pass one lease expiry later. The
+    // The job's last refresh, and then a pass after the recorded expiry. The
     // lease is stale, but the objects are still inside the staging window.
     let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
+    let expires_at_ms = died_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
     write_compaction_lease(
         &store,
         &namespace_id,
         &test_metadata_compaction_id(),
-        died_at_ms,
+        expires_at_ms,
     )
     .await;
-    let expired_ms = died_at_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS + 1;
+    let expired_ms = expires_at_ms.saturating_add(1);
     let report = gc_namespace(&store, &namespace_id, &config(), &context(expired_ms))
         .await
         .expect("gc pass once the lease expired");
@@ -2493,7 +2494,7 @@ async fn two_group_leases_naming_the_same_job_are_namespace_corruption() {
             &namespace_id,
             &metadata_compaction_id,
             group,
-            now_ms,
+            now_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
             loonfs_api::wire::control::CompactionLeaseStatus::Active {},
         )
         .await;
@@ -2519,11 +2520,12 @@ async fn a_candidate_error_still_finishes_the_claimed_compaction_lease() {
             .await;
 
     let died_at_ms = now_after_newest_object(inner.inner(), &namespace_id, 0).await;
+    let expires_at_ms = died_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
     write_compaction_lease(
         &inner,
         &namespace_id,
         &test_metadata_compaction_id(),
-        died_at_ms,
+        expires_at_ms,
     )
     .await;
     let reclaimable_ms = now_after_newest_object(
@@ -2576,14 +2578,15 @@ async fn a_budget_stop_finishes_the_claimed_compaction_lease() {
             .await;
 
     let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
+    let expires_at_ms = died_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
     write_compaction_lease(
         &store,
         &namespace_id,
         &test_metadata_compaction_id(),
-        died_at_ms,
+        expires_at_ms,
     )
     .await;
-    let reclaimable = context(died_at_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS + 1);
+    let reclaimable = context(expires_at_ms.saturating_add(1));
     let marking = marking_units(&store, &namespace_id, &reclaimable).await;
 
     // Resume immediately before compaction staging and buy exactly its staged

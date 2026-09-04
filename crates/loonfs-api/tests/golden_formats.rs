@@ -723,7 +723,7 @@ fn control_objects_match_golden_bytes() {
             writer_id: WriterId::parse("writer-1").expect("writer id"),
             status: CompactionLeaseStatus::Active {},
             started_at_ms: 1_000,
-            heartbeat_at_ms: 3_000,
+            expires_at_ms: 1_503_000,
         },
     );
     check_control_golden(
@@ -926,10 +926,34 @@ fn every_mutable_control_payload_rejects_unknown_fields_as_corruption() {
         ControlObjectKind::UploadSession,
         add_unknown,
     );
+    assert_control_payload_edit_is_corrupt::<MetadataCompactionLeaseState>(
+        "control_compaction_lease.v2.json",
+        ControlObjectKind::CompactionLease,
+        add_unknown,
+    );
     assert_control_payload_edit_is_corrupt::<HeadState>(
         "control_namespace_head.fork.v1.json",
         ControlObjectKind::WalHead,
         add_unknown,
+    );
+}
+
+#[test]
+fn compaction_leases_reject_the_retired_refresh_instant_field() {
+    let retired_field = ["heart", "beat_at_ms"].concat();
+    let field_for_edit = retired_field.clone();
+    let message = assert_control_payload_edit_is_corrupt::<MetadataCompactionLeaseState>(
+        "control_compaction_lease.v2.json",
+        ControlObjectKind::CompactionLease,
+        move |payload| {
+            let fields = payload.as_object_mut().expect("lease payload");
+            fields.remove("expires_at_ms");
+            fields.insert(field_for_edit, serde_json::Value::from(3_000));
+        },
+    );
+    assert!(
+        message.contains("unknown field") && message.contains(&retired_field),
+        "unexpected refusal: {message}"
     );
 }
 
@@ -1360,7 +1384,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
                 writer_id: WriterId::parse("writer-1").expect("writer id"),
                 status: CompactionLeaseStatus::Active {},
                 started_at_ms: 1_000,
-                heartbeat_at_ms: 3_000,
+                expires_at_ms: 1_503_000,
             })
             .expect("compaction lease state"),
         ),

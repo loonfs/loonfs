@@ -4,7 +4,7 @@
 //! independent of the size of what it merges.
 
 use super::super::compaction_lease::{
-    claim_group_lease, CompactionLease, CompactionPrefixOwner, LeaseHold,
+    claim_group_lease, load_group_lease, CompactionLease, CompactionPrefixOwner, LeaseHold,
 };
 use super::super::reorganize::{
     group_run_descriptors, select_reorganization_input, FrozenBasePolicy, ReorganizationPlan,
@@ -596,7 +596,7 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
 /// The claim a job holds while it runs, opened the way the job driver opens
 /// it. These tests split the rebuild from the driver, so they create the
 /// lease themselves — every later write compare-and-swaps against the etag
-/// this one returns, so a lease that was never created cannot heartbeat.
+/// this one returns, so a lease that was never created cannot be refreshed.
 async fn test_lease<'a, S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -620,13 +620,13 @@ async fn write_active_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    heartbeat_at_ms: u64,
+    expires_at_ms: u64,
 ) {
     write_lease_in_state(
         store,
         namespace_id,
         spec,
-        heartbeat_at_ms,
+        expires_at_ms,
         loonfs_api::wire::control::CompactionLeaseStatus::Active {},
     )
     .await;
@@ -636,7 +636,7 @@ async fn write_lease_in_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    heartbeat_at_ms: u64,
+    expires_at_ms: u64,
     status: loonfs_api::wire::control::CompactionLeaseStatus,
 ) {
     let state = loonfs_api::wire::control::MetadataCompactionLeaseState {
@@ -645,8 +645,8 @@ async fn write_lease_in_state<S: ObjectStore + ?Sized>(
         group: spec.group(),
         writer_id: loonfs_api::WriterId::parse("test-writer").expect("writer id"),
         status,
-        started_at_ms: heartbeat_at_ms,
-        heartbeat_at_ms,
+        started_at_ms: 1_000,
+        expires_at_ms,
     };
     let bytes = loonfs_api::wire::control::encode_control_state(
         loonfs_api::wire::control::ControlObjectKind::CompactionLease,
@@ -979,7 +979,15 @@ async fn held_group_leases_are_skipped_and_an_expired_lease_is_available() {
     let reaping_store = LocalFsStore::new(reaping_dir.path()).expect("store");
     let expired_store = LocalFsStore::new(expired_dir.path()).expect("store");
 
-    write_active_lease(&active_store, &namespace_id, &spec, context.now_ms).await;
+    write_active_lease(
+        &active_store,
+        &namespace_id,
+        &spec,
+        context
+            .now_ms
+            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
+    )
+    .await;
     let active = super::super::reorganize_metadata_step(
         &active_store,
         &namespace_id,
@@ -2343,6 +2351,14 @@ async fn group_lease_acquisition_supersedes_a_second_job_and_fences_an_expired_o
             .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS)
             .saturating_add(1),
     );
+    let previous = load_group_lease(&store, &namespace_id, first_spec.group())
+        .await
+        .expect("load the first lease")
+        .expect("the first lease exists");
+    assert!(
+        previous.state.expires_at_ms < takeover_context.now_ms,
+        "takeover requires the stored expiry to be in the past"
+    );
     let taken_over = run_metadata_compaction_job(
         &store,
         &namespace_id,
@@ -2359,9 +2375,9 @@ async fn group_lease_acquisition_supersedes_a_second_job_and_fences_an_expired_o
     ));
     assert_eq!(
         first_lease
-            .heartbeat(&store)
+            .refresh(&store)
             .await
-            .expect("heartbeat the old lease"),
+            .expect("refresh the old lease"),
         LeaseHold::Fenced
     );
 }
@@ -2414,9 +2430,9 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
     );
 
     assert_eq!(
-        lease.heartbeat(&store).await.expect("heartbeat the lease"),
+        lease.refresh(&store).await.expect("refresh the lease"),
         LeaseHold::Fenced,
-        "the worker's next heartbeat must find the claim and stop"
+        "the worker's next refresh must find the claim and stop"
     );
     let finalization = finalize_metadata_compaction(
         &store,
@@ -2451,7 +2467,49 @@ impl MonotonicTimer for SteppingTimer {
 }
 
 #[tokio::test]
-async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
+async fn lease_creation_and_refresh_write_absolute_expiry() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let context = test_context();
+    let timer = SteppingTimer::default();
+    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
+
+    let created = load_group_lease(&store, &namespace_id, spec.group())
+        .await
+        .expect("load the created lease")
+        .expect("created lease");
+    assert_eq!(
+        created.state.expires_at_ms,
+        context
+            .now_ms
+            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
+        "creation writes the expiry policy as an absolute instant"
+    );
+
+    assert_eq!(
+        lease.refresh(&store).await.expect("refresh the lease"),
+        LeaseHold::Held
+    );
+    let refreshed = load_group_lease(&store, &namespace_id, spec.group())
+        .await
+        .expect("load the refreshed lease")
+        .expect("refreshed lease");
+    assert_eq!(
+        refreshed.state.expires_at_ms,
+        context
+            .now_ms
+            .saturating_add(1_000)
+            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
+        "refresh writes its current time plus the expiry policy"
+    );
+}
+
+#[tokio::test]
+async fn exactly_one_of_a_refresh_and_a_reaping_claim_wins() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2459,14 +2517,14 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
-    // The stepping clock below moves each heartbeat's stamp forward a few
+    // The stepping clock below moves each refresh's expiry forward a few
     // seconds, so the pass's clock is set well past the expiry rather than one
     // millisecond past it.
     let expired_ms = test_context().now_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS * 2;
     // The local store's etags are content hashes, so two lease writes inside
     // one millisecond would carry identical bytes under an identical etag and
     // the race under test would not be one. A stepping clock makes every
-    // heartbeat a distinct document, which is what a provider etag gives for
+    // refresh a distinct document, which is what a provider etag gives for
     // free.
     let timer = SteppingTimer::default();
     let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
@@ -2477,7 +2535,7 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
         OperationClass::CompareAndSwap,
     );
     gated.block_next();
-    let (claimed, beat) = tokio::join!(
+    let (claimed, refresh) = tokio::join!(
         claim_group_lease(
             &gated,
             &namespace_id,
@@ -2487,13 +2545,13 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
         ),
         async {
             gated.wait_until_blocked().await;
-            let beat = lease.heartbeat(&store).await.expect("heartbeat the lease");
+            let refresh = lease.refresh(&store).await.expect("refresh the lease");
             gated.release();
-            beat
+            refresh
         }
     );
     assert_eq!(
-        beat,
+        refresh,
         LeaseHold::Held,
         "the worker got there first, so it keeps its prefix"
     );
@@ -2503,7 +2561,7 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
         "and the claim behind it is refused, so exactly one of the two won"
     );
 
-    // The other order, on the same lease: the claim lands, and the heartbeat
+    // The other order, on the same lease: the claim lands, and the refresh
     // behind it finds an etag it does not hold.
     assert_eq!(
         claim_group_lease(
@@ -2518,7 +2576,7 @@ async fn exactly_one_of_a_heartbeat_and_a_reaping_claim_wins() {
         CompactionPrefixOwner::ThisCollector
     );
     assert_eq!(
-        lease.heartbeat(&store).await.expect("heartbeat the lease"),
+        lease.refresh(&store).await.expect("refresh the lease"),
         LeaseHold::Fenced,
         "exactly one of the two compare-and-swaps may win"
     );
@@ -2951,7 +3009,15 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                 if active.is_none() {
                     assert_eq!(planned_group, group, "this budget starves this group first");
                     active = Some(spec.clone());
-                    write_active_lease(&store, &namespace_id, spec, context.now_ms).await;
+                    write_active_lease(
+                        &store,
+                        &namespace_id,
+                        spec,
+                        context
+                            .now_ms
+                            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
+                    )
+                    .await;
                     if arrived_keys.is_empty() {
                         // A run arrives while the first job runs. It is
                         // outside that job's snapshot, so the job never reads
