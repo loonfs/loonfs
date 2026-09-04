@@ -914,6 +914,11 @@ impl FsWriter {
     }
 }
 
+pub(crate) struct EnginePublishResult {
+    pub(crate) results: Vec<Result<CommitResponse>>,
+    pub(crate) wal_tail_segments: u64,
+}
+
 /// Publishes already-classified candidates as one batch — one WAL
 /// segment, one head compare-and-swap — through the namespace
 /// publisher's own commit engine, and settles the runtime state the
@@ -928,12 +933,17 @@ pub(crate) async fn publish_batch_with_engine(
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
     candidates: Vec<CommitCandidate>,
-) -> Vec<Result<CommitResponse>> {
+) -> EnginePublishResult {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();
     let context = match writer.identity.mutation_context() {
         Ok(context) => context,
-        Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
+        Err(error) => {
+            return EnginePublishResult {
+                results: candidates.iter().map(|_| Err(error.clone())).collect(),
+                wal_tail_segments: 0,
+            };
+        }
     };
     let cache_config = core.runtime_cache_config();
     // The per-projection ceiling. The publisher applies the same two knobs
@@ -945,21 +955,8 @@ pub(crate) async fn publish_batch_with_engine(
     // Boxing erases the engine's deeply nested publish future; without
     // it, callers awaiting a put or commit (CLI, server, embedding
     // crates) exceed rustc's type-recursion depth.
-    let fold_span = phase_span!(core, "wal_fold", namespace_id);
-    let mut publish = Box::pin(engine.publish_batch_with_fold_span(
-        &store,
-        candidates,
-        &context,
-        &tail_options,
-        fold_span,
-    ))
-    .await;
-    if !core.control_cache_enabled() {
-        // Diagnostic mode: the publisher's engine outlives the publish
-        // even with caches off, so drop the tail projection it just
-        // built. Every publish then reads what a cold engine reads.
-        engine.invalidate_projection();
-    }
+    let mut publish =
+        Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options)).await;
     {
         let _span = phase_span!(core, "batch_update_cache", namespace_id, batch_size).entered();
         match publish.resulting_read_state.take() {
@@ -977,10 +974,6 @@ pub(crate) async fn publish_batch_with_engine(
         }
     }
     let wal_tail_segments = publish.wal_tail_segments;
-    let folded = publish.folded;
-    if folded {
-        core.instruments().publisher_wal_fold();
-    }
     let results = publish
         .results
         .into_iter()
@@ -991,11 +984,14 @@ pub(crate) async fn publish_batch_with_engine(
         &NamespacePublication {
             namespace_id: namespace_id.clone(),
             committed_through_seq: highest_committed_seq(&results),
-            folded,
+            folded: false,
             wal_tail_segments,
         },
     );
-    results
+    EnginePublishResult {
+        results,
+        wal_tail_segments,
+    }
 }
 
 /// Returns the highest sequence committed by the batch.

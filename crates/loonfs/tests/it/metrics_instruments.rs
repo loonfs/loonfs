@@ -92,6 +92,10 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
                 .await
                 .expect("put file");
         }
+        fs.writer
+            .wait_for_fold(&namespace_id)
+            .await
+            .expect("publisher fold settles");
         runner.drain().await.expect("maintenance settles");
         let snapshot = recorder.snapshot();
         runner.shutdown().await.expect("runner shutdown");
@@ -139,6 +143,16 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         counter(&snapshot, "loonfs.publisher.wal_folds", &[]),
         1,
         "the threshold-crossing publish records its fold"
+    );
+    assert_eq!(
+        histogram_count(&snapshot, "loonfs.publisher.wal_fold_ms"),
+        1,
+        "the completed fold records its duration"
+    );
+    assert_eq!(
+        counter(&snapshot, "loonfs.publisher.write_stop_refusals", &[]),
+        0,
+        "the test stays below the write-stop bound"
     );
 
     // The runner: a write nudges the metadata job, and whatever it

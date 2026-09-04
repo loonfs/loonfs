@@ -145,7 +145,7 @@ pub mod publish {
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionState,
-        WriterSessionState,
+        WalFoldSnapshot, WriterSessionState,
     };
     pub use crate::path::write::{CommitRequest, FilesystemOperation};
     pub use crate::protocol::{PublishTailOptions, PublishTailWeight};
@@ -156,12 +156,14 @@ pub mod publish {
 // `MetadataReorganizeReport` remains public because
 // `NamespaceEngine::reorganize_metadata` returns it.
 pub use checkpoint::{
-    ensure_metadata_publication_budget, next_run_no_after, refill_iterators, select_next_iterator,
-    write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
-    CheckpointPageCursor, FrozenBasePolicy, MetadataCompactionCancellation,
-    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataFamilyGroup,
-    MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader, SegmentRowIterator,
+    ensure_metadata_publication_budget, fold_wal_tail_snapshot, next_run_no_after,
+    refill_iterators, select_next_iterator, write_segments_in_waves, CheckpointFile,
+    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, FrozenBasePolicy,
+    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
+    MetadataFamilyGroup, MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader,
+    SegmentRowIterator,
 };
+pub use commit_engine::WalFoldSnapshot;
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{

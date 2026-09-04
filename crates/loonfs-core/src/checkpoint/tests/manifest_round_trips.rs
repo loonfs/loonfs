@@ -27,7 +27,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         writer_id: context.writer_id.to_string(),
         writer_epoch: head.state.writer_epoch,
     };
-    let (publish_view, projection) = crate::protocol::load_publish_metadata_view(
+    let (_, projection) = crate::protocol::load_publish_metadata_view(
         &store,
         None,
         &namespace_id,
@@ -38,11 +38,18 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     .await
     .expect("load publish projection");
 
-    let response = flush::fold_publish_tail_projection(
+    let snapshot = crate::WalFoldSnapshot {
+        head: projection.head.clone(),
+        basis: projection.basis().clone(),
+        retention_floor_seq: projection.retention_floor_seq,
+        tail_state: Arc::clone(&projection.tail_state),
+        wal_tail_segments: projection.wal_tail_segments,
+    };
+    let response = flush::fold_wal_tail_snapshot(
         &store,
+        None,
         &namespace_id,
-        &publish_view,
-        &projection,
+        snapshot,
         &context,
         &crate::time::StdMonotonicTimer::default(),
     )

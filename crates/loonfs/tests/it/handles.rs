@@ -20,10 +20,13 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn store_config(root: &Path) -> StoreConfig {
@@ -368,7 +371,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
 }
 
 #[test]
-fn writer_folds_without_scheduling_maintenance() {
+fn manual_only_writer_folds_without_scheduling_maintenance() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -388,6 +391,10 @@ fn writer_folds_without_scheduling_maintenance() {
                 .await
                 .expect("put file");
         }
+        writer
+            .wait_for_fold(&namespace_id)
+            .await
+            .expect("settle the writer's fold");
 
         let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
             .actor_id("handle-test-maintenance")
@@ -499,6 +506,20 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .expect("shut down the first writer");
 
         let writer = writer(temp_dir.path()).await;
+        let refused = writer
+            .put_file_bytes(
+                &namespace_id,
+                "/write-stop/recovered.txt",
+                b"body",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect_err("the write-stopped tail refuses the first publish");
+        assert_eq!(refused.code(), ErrorCode::MaintenanceRequired);
+        writer
+            .wait_for_fold(&namespace_id)
+            .await
+            .expect("settle the fold started by the refusal");
         writer
             .put_file_bytes(
                 &namespace_id,
@@ -507,7 +528,7 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
                 PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
-            .expect("the runtime publish folds the preexisting tail and lands");
+            .expect("the retry lands after the fold");
         let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
             .actor_id("handle-test-maintenance")
             .build()
@@ -585,6 +606,10 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
 
         failing.clear();
         writer
+            .wait_for_fold(&namespace_id)
+            .await
+            .expect("settle the fold after the manifest store recovers");
+        writer
             .put_file_bytes(
                 &namespace_id,
                 "/failed-fold/recovered.txt",
@@ -592,7 +617,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
-            .expect("the recovered manifest store lets the next publish fold and land");
+            .expect("the recovered manifest store lets the retry land");
         let maintenance = FsMaintenance::builder_with_store(failing as SharedObjectStore)
             .actor_id("handle-test-maintenance")
             .build()
@@ -603,6 +628,81 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .await
             .expect("status after fold recovery");
         assert_eq!(status.wal_tail_segments, 1, "{status:?}");
+    });
+}
+
+#[test]
+fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    block_on(async {
+        let blocking = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::family(DurableObjectFamily::MetadataManifest),
+            OperationClass::Put,
+        ));
+        let writer = FsWriter::builder_with_store(blocking.clone())
+            .writer_id("parked-fold-writer")
+            .build()
+            .await
+            .expect("build writer");
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        append_wal_segments(
+            blocking.inner(),
+            &namespace_id,
+            wal_tail_segment_threshold() - 1,
+            &MutationContext {
+                writer_id: loonfs_api::WriterId::parse("parked-fold-seed").expect("writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("seed the WAL tail below the fold threshold");
+
+        blocking.block_next();
+        let put = tokio::spawn({
+            let writer = writer.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                writer
+                    .put_file_bytes(
+                        &namespace_id,
+                        "/crossing.txt",
+                        b"body",
+                        PutFileOptions::new(loonfs_test_support::test_actor()),
+                    )
+                    .await
+            }
+        });
+        blocking.wait_until_blocked().await;
+        let published = match tokio::time::timeout(Duration::from_secs(1), put).await {
+            Ok(published) => published,
+            Err(error) => {
+                blocking.release();
+                panic!("the publish waited for its parked fold: {error}");
+            }
+        };
+        published
+            .expect("join the crossing publish")
+            .expect("the crossing publish lands");
+
+        blocking.release();
+        writer
+            .wait_for_fold(&namespace_id)
+            .await
+            .expect("settle the released fold");
+        let maintenance = writer
+            .maintenance_handle("parked-fold-inspection")
+            .expect("build maintenance handle");
+        let status = maintenance
+            .get_namespace_diagnostics(&namespace_id)
+            .await
+            .expect("inspect the folded namespace");
+        assert!(status.current_manifest_no.is_some(), "{status:?}");
+        writer.shutdown().await.expect("shut down writer");
     });
 }
 
