@@ -10,7 +10,7 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::default_namespace;
 use loonfs::{
-    DecodedBlockCacheConfig, FsWriter, GarbageCollectionJob, MaintenanceHintRelay,
+    maintenance_hint_relay, DecodedBlockCacheConfig, FsWriter, GarbageCollectionJob,
     MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
     SharedObjectStore, TraceStoreKind,
 };
@@ -218,7 +218,7 @@ impl EmbeddedTarget {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(default_writer_id);
-        let (observer, receiver) = MaintenanceHintRelay::new(
+        let (observer, receiver) = maintenance_hint_relay(
             std::num::NonZeroUsize::new(1024).expect("relay capacity is nonzero"),
         );
         let writer = FsWriter::builder_with_store(store.clone())

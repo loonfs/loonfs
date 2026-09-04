@@ -7,11 +7,11 @@
 //! use std::num::NonZeroUsize;
 //! use std::sync::Arc;
 //! use loonfs::{
-//!     FsWriter, GarbageCollectionJob, MaintenanceHintRelay, MaintenanceRegistry,
+//!     maintenance_hint_relay, FsWriter, GarbageCollectionJob, MaintenanceRegistry,
 //!     MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
 //! };
 //!
-//! let (observer, receiver) = MaintenanceHintRelay::new(
+//! let (observer, receiver) = maintenance_hint_relay(
 //!     NonZeroUsize::new(1024).expect("nonzero capacity"),
 //! );
 //! let writer = FsWriter::builder(store_config)
@@ -171,8 +171,8 @@ pub use loonfs_objectstore::{
 
 pub use cache::RuntimeCacheStats;
 pub use config::{
-    RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE,
-    DEFAULT_MAX_OPEN_NAMESPACES,
+    RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS,
+    DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_OPEN_NAMESPACES,
 };
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
@@ -183,11 +183,11 @@ pub use handle::{
     NamespaceSessionPolicy,
 };
 pub use maintenance::{
-    GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation, MaintenanceConclusion,
-    MaintenanceHandle, MaintenanceHint, MaintenanceHintObserver, MaintenanceHintReceiver,
-    MaintenanceHintRelay, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry,
-    MaintenanceRunReport, MaintenanceRunner, MaintenanceRunnerBuilder, MaintenanceRunnerStats,
-    MetadataCompactionJob, MetadataMaintenanceJob, NamespacePublication,
+    maintenance_hint_relay, GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation,
+    MaintenanceConclusion, MaintenanceHandle, MaintenanceHint, MaintenanceHintObserver,
+    MaintenanceHintReceiver, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
+    MaintenanceRegistry, MaintenanceRunReport, MaintenanceRunner, MaintenanceRunnerBuilder,
+    MaintenanceRunnerStats, MetadataCompactionJob, MetadataMaintenanceJob, NamespacePublication,
 };
 pub use options::{
     gc_config_from_request, CommitOptions, CopyOptions, CreateCheckpointOptions,

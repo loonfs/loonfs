@@ -1,15 +1,27 @@
+//! Registration and direct execution for maintenance jobs.
+
 use super::{
-    MaintenanceAssignment, MaintenanceCancellation, MaintenanceJob, MaintenanceJobId,
-    MaintenanceProbe, MaintenanceRunReport,
+    MaintenanceCancellation, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
+    MaintenanceRunReport,
 };
 use crate::{NamespaceId, Result, RuntimeError};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-#[derive(Clone, Default)]
 /// Thread-safe set of maintenance jobs.
+#[derive(Clone, Default)]
 pub struct MaintenanceRegistry {
     jobs: Arc<Mutex<BTreeMap<MaintenanceJobId, Arc<dyn MaintenanceJob>>>>,
+}
+
+/// One maintenance job assigned to one namespace.
+pub struct MaintenanceAssignment {
+    /// Namespace to maintain.
+    pub namespace_id: NamespaceId,
+    /// Registered job to run.
+    pub job: MaintenanceJobId,
+    /// Process-local resume position.
+    pub continuation: Option<String>,
 }
 
 impl MaintenanceRegistry {

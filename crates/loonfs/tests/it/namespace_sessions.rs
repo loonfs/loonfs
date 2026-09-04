@@ -2,28 +2,16 @@
 
 #![allow(clippy::panic)]
 
+use crate::common::{directory_options, expect_code, writer};
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, ErrorCode, FsWriter, NamespaceId,
-    NamespaceSessionPolicy, NamespaceSessionState, SharedObjectStore,
+    CreateNamespaceOptions, ErrorCode, FsWriter, NamespaceId, NamespaceSessionPolicy,
+    NamespaceSessionState, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
-
-async fn writer(store: SharedObjectStore, writer_id: &str) -> FsWriter {
-    FsWriter::builder_with_store(store)
-        .writer_id(writer_id)
-        .min_publish_interval_ms(0)
-        .build()
-        .await
-        .expect("build writer")
-}
-
-fn directory_options() -> CreateDirectoryOptions {
-    CreateDirectoryOptions::new(loonfs_test_support::test_actor())
-}
 
 async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId) {
     writer
@@ -39,11 +27,6 @@ async fn writer_epoch(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
         .state
         .writer_epoch
         .0
-}
-
-fn expect_code<T: std::fmt::Debug>(result: loonfs::Result<T>, code: ErrorCode) {
-    let error = result.expect_err("operation must fail");
-    assert_eq!(error.code(), code, "unexpected error: {error:?}");
 }
 
 #[tokio::test]

@@ -38,6 +38,24 @@ pub(crate) fn store(root: &Path) -> SharedObjectStore {
     Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
 }
 
+pub(crate) async fn writer(store: SharedObjectStore, writer_id: &str) -> FsWriter {
+    FsWriter::builder_with_store(store)
+        .writer_id(writer_id)
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build writer")
+}
+
+pub(crate) fn directory_options() -> CreateDirectoryOptions {
+    CreateDirectoryOptions::new(loonfs_test_support::test_actor())
+}
+
+pub(crate) fn expect_code<T: std::fmt::Debug>(result: loonfs::Result<T>, code: ErrorCode) {
+    let error = result.expect_err("operation must fail");
+    assert_eq!(error.code(), code, "unexpected error: {error:?}");
+}
+
 pub(crate) async fn collect_path_entries(
     reader: &FsReader,
     namespace_id: &NamespaceId,

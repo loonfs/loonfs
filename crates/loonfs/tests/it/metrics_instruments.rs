@@ -8,8 +8,8 @@
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use loonfs::{
-    CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions, GarbageCollectionJob,
-    MaintenanceConclusion, MaintenanceHintRelay, MaintenanceJobId, MaintenanceRegistry,
+    maintenance_hint_relay, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
+    GarbageCollectionJob, MaintenanceConclusion, MaintenanceJobId, MaintenanceRegistry,
     MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
     PutFileOptions,
 };
@@ -64,7 +64,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         + 1;
     let snapshot = block_on(async {
         let (observer, receiver) =
-            MaintenanceHintRelay::new(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
+            maintenance_hint_relay(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
         let fs = open_runtime_with_async(store(temp_dir.path()), "metrics-writer", |builder| {
             builder
                 .maintenance_hint_observer(move |hint| observer(hint))
@@ -161,7 +161,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         "the completed fold leaves no waiter"
     );
     assert_eq!(
-        histogram_count(&snapshot, "loonfs.publisher.wal_fold_ms"),
+        histogram_count(&snapshot, "loonfs.publisher.wal_fold_seconds"),
         1,
         "the completed fold records its duration"
     );

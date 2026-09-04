@@ -1,3 +1,5 @@
+//! Standalone execution of every core maintenance job through a registry.
+
 use loonfs::{
     CreateNamespaceOptions, FsMaintenance, FsWriter, GarbageCollectionJob, MaintenanceAssignment,
     MaintenanceJobId, MaintenanceRegistry, MetadataCompactionJob, MetadataMaintenanceJob,

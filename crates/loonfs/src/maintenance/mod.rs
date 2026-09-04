@@ -1,3 +1,5 @@
+//! Runtime maintenance jobs, hint delivery, registry execution, and optional scheduling.
+
 mod admission;
 mod gc;
 mod hints;
@@ -12,7 +14,7 @@ mod tests;
 pub use gc::GarbageCollectionJob;
 pub(crate) use gc::{completed_upload_reclaim_at_ms, upload_session_reclaim_at_ms};
 pub use hints::{
-    MaintenanceHint, MaintenanceHintObserver, MaintenanceHintReceiver, MaintenanceHintRelay,
+    maintenance_hint_relay, MaintenanceHint, MaintenanceHintObserver, MaintenanceHintReceiver,
 };
 pub use job::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
@@ -20,17 +22,7 @@ pub use job::{
 };
 pub use metadata::MetadataMaintenanceJob;
 pub use metadata_compaction::MetadataCompactionJob;
-pub use registry::MaintenanceRegistry;
+pub use registry::{MaintenanceAssignment, MaintenanceRegistry};
 pub use runner::{
     MaintenanceHandle, MaintenanceRunner, MaintenanceRunnerBuilder, MaintenanceRunnerStats,
 };
-
-/// One maintenance job assigned to one namespace.
-pub struct MaintenanceAssignment {
-    /// Namespace to maintain.
-    pub namespace_id: crate::NamespaceId,
-    /// Registered job to run.
-    pub job: MaintenanceJobId,
-    /// Process-local resume position.
-    pub continuation: Option<String>,
-}

@@ -13,8 +13,8 @@ use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
-    FsMaintenance, FsReader, FsWriter, GarbageCollectionJob, MaintenanceHandle,
-    MaintenanceHintObserver, MaintenanceHintRelay, MaintenanceJob, MaintenanceProbe,
+    maintenance_hint_relay, FsMaintenance, FsReader, FsWriter, GarbageCollectionJob,
+    MaintenanceHandle, MaintenanceHintObserver, MaintenanceJob, MaintenanceProbe,
     MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
     SharedObjectStore, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, TraceMode,
     TraceStoreKind,
@@ -29,6 +29,7 @@ use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -265,9 +266,8 @@ pub async fn app(
     let automatic = config.maintenance.runs_automatically();
     let maintains_grep_index = config.grep.mode.maintains_index();
     let (maintenance_hint_observer, maintenance_hint_receiver) = if automatic {
-        let (observer, receiver) = MaintenanceHintRelay::new(
-            std::num::NonZeroUsize::new(4096).expect("relay capacity is nonzero"),
-        );
+        let (observer, receiver) =
+            maintenance_hint_relay(NonZeroUsize::new(4096).expect("relay capacity is nonzero"));
         (Some(observer), Some(receiver))
     } else {
         (None, None)
@@ -339,7 +339,10 @@ pub async fn app(
     };
     let runner = if automatic {
         let runner = MaintenanceRunner::builder(jobs.clone())
-            .max_concurrent(config.max_concurrent_maintenance)
+            .max_concurrent(
+                NonZeroUsize::new(config.max_concurrent_maintenance)
+                    .expect("validated maintenance concurrency should be nonzero"),
+            )
             .metrics_recorder(metrics.recorder())
             .build()
             .map_err(maintenance_config_error)?;

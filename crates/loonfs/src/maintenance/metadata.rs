@@ -1,3 +1,5 @@
+//! Bounded metadata maintenance over the runtime maintenance handle.
+
 use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport,
@@ -6,6 +8,7 @@ use crate::{
     ErrorCode, FsMaintenance, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
     ReorganizeStepOutcome, Result, RuntimeError, WalFlushStepOutcome,
 };
+use async_trait::async_trait;
 
 /// Flushes the WAL tail and runs bounded metadata reorganization.
 pub struct MetadataMaintenanceJob {
@@ -16,19 +19,20 @@ pub struct MetadataMaintenanceJob {
 impl MetadataMaintenanceJob {
     /// Creates a job with default metadata options.
     pub fn new(maintenance: FsMaintenance) -> Self {
-        Self::with_options(maintenance, MetadataMaintenanceOptions::default())
-    }
-
-    /// Creates a job with explicit metadata options.
-    pub fn with_options(maintenance: FsMaintenance, options: MetadataMaintenanceOptions) -> Self {
         Self {
             maintenance,
-            options,
+            options: MetadataMaintenanceOptions::default(),
         }
+    }
+
+    /// Sets the metadata maintenance options.
+    pub fn options(mut self, options: MetadataMaintenanceOptions) -> Self {
+        self.options = options;
+        self
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl MaintenanceJob for MetadataMaintenanceJob {
     fn id(&self) -> MaintenanceJobId {
         MaintenanceJobId::METADATA
