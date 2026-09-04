@@ -37,8 +37,8 @@ Notes:
   fully conformant.
 - A hosted LoonFS server serves `maintenance/v0` when `maintenance` is
   `serve_and_maintain` or `serve_only`. In `maintain_only` or `disabled` mode,
-  every route under `/v0/maintenance/` answers `not_supported` with `feature`
-  set to `maintenance/v0`; all four choices are fully conformant.
+  every route under `/v0/maintenance/` answers `route_not_found`, as any path
+  outside the served surface does; all four choices are fully conformant.
 - API groups version independently (`filesystem/v0` could coexist with a future
   `maintenance/v1`). The group name — the segment before the slash — is the stable
   identity that feature keys reference.

@@ -25,7 +25,7 @@ use loonfs_api::{
 use loonfs_api::{
     CapabilityDocument, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
     GrepRequest, NamespaceId, PaginationPolicy, RevisionNo, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_QUERY_GREP,
+    API_GROUP_QUERY_V0, FEATURE_QUERY_GREP,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
@@ -2747,14 +2747,14 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
         )
         .await
         .expect("diagnostics response");
-    assert_eq!(diagnostics_response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(diagnostics_response.status(), StatusCode::NOT_FOUND);
     let diagnostics_body = axum::body::to_bytes(diagnostics_response.into_body(), usize::MAX)
         .await
         .expect("diagnostics body");
     let diagnostics_error: serde_json::Value =
         serde_json::from_slice(&diagnostics_body).expect("diagnostics error");
-    assert_eq!(diagnostics_error["code"], "not_supported");
-    assert_eq!(diagnostics_error["feature"], API_GROUP_MAINTENANCE_V0);
+    assert_eq!(diagnostics_error["code"], "route_not_found");
+    assert!(diagnostics_error.get("feature").is_none());
 
     let namespace_id = namespace_id("hidden");
     state

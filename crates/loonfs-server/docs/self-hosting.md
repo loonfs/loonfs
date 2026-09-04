@@ -380,7 +380,7 @@ API group and schedules metadata maintenance and garbage collection. Use
 `serve_only` to serve explicit requests without scheduling work,
 `maintain_only` to schedule work without serving the group, or `disabled` to
 do neither. A mode that does not serve the group answers every route under
-`/v0/maintenance/` with `not_supported`; a mode that does not maintain leaves
+`/v0/maintenance/` with `route_not_found`; a mode that does not maintain leaves
 scheduled work to another process. Long metadata compactions can log progress
 for an extended period. No action is required unless failures repeat.
 

@@ -26,7 +26,7 @@ writer_id = "loonfs-server-local"
 # Whether this server serves the maintenance API group, schedules maintenance,
 # both, or neither. `serve_and_maintain` is the default. The other values are
 # `serve_only`, `maintain_only`, and `disabled`. A mode that does not serve the
-# group answers its routes with `not_supported`; a mode that does not maintain
+# group answers its routes with `route_not_found`; a mode that does not maintain
 # leaves scheduled work to another process. Assign dedicated maintenance work
 # with `loonfs maintenance loop --namespaces ...`.
 #maintenance = "serve_and_maintain"

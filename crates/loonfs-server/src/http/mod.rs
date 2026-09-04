@@ -68,7 +68,7 @@ use axum::Router;
 use loonfs::ErrorCode;
 #[cfg(test)]
 use loonfs::SharedObjectStore;
-use loonfs_api::{ErrorKind, API_GROUP_MAINTENANCE_V0};
+use loonfs_api::ErrorKind;
 
 /// Response header carrying the request's correlation id.
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -462,9 +462,12 @@ async fn route_not_found() -> ApiResponseError {
     )
 }
 
+/// 404 for the maintenance routes on a deployment that does not serve that
+/// API group. The group is a capability-document `api_groups` entry, not a
+/// feature key, so `not_supported` and its `feature` field do not apply.
 async fn maintenance_not_served() -> ApiResponseError {
-    ApiResponseError::not_supported(
-        API_GROUP_MAINTENANCE_V0,
+    ApiResponseError::new(
+        ErrorCode::RouteNotFound,
         "this deployment does not serve the maintenance API group; set `maintenance` to \
          `serve_only` or `serve_and_maintain`",
     )
