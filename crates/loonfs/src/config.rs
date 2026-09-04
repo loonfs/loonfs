@@ -19,6 +19,8 @@ pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// Default maximum writer sessions held at once.
 pub const DEFAULT_MAX_OPEN_NAMESPACES: usize = 10_000;
+/// Default maximum WAL-tail folds one writer runs concurrently.
+pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
 /// Default cap on concurrently running maintenance invocations.
 /// Each job already runs at most once per namespace at a time; this bounds how many may run at
 /// once, so a write burst across many namespaces cannot fan out into

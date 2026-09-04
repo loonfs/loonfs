@@ -466,6 +466,16 @@ impl RuntimeInstruments {
         installed.publisher.wal_folds.increment(1);
     }
 
+    pub(crate) fn publisher_wal_folds_waiting(&self, waiting: usize) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed
+            .publisher
+            .wal_folds_waiting
+            .set(i64::try_from(waiting).unwrap_or(i64::MAX));
+    }
+
     pub(crate) fn publisher_wal_fold_duration(&self, elapsed_ms: u64) {
         let Some(installed) = &self.installed else {
             return;
@@ -986,6 +996,7 @@ impl CompactionInstruments {
 struct PublisherInstruments {
     batches: Arc<dyn CounterHandle>,
     wal_folds: Arc<dyn CounterHandle>,
+    wal_folds_waiting: Arc<dyn GaugeHandle>,
     wal_fold_ms: Arc<dyn HistogramHandle>,
     write_stop_refusals: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
@@ -1008,6 +1019,11 @@ impl PublisherInstruments {
             wal_folds: recorder.register_counter(
                 "loonfs.publisher.wal_folds",
                 "WAL tails folded by namespace publishers",
+                &[],
+            ),
+            wal_folds_waiting: recorder.register_gauge(
+                "loonfs.publisher.wal_folds_waiting",
+                "WAL-tail folds waiting for a writer permit",
                 &[],
             ),
             wal_fold_ms: recorder.register_histogram(
@@ -1412,6 +1428,7 @@ mod tests {
 
         instruments.publisher_batch(4);
         instruments.publisher_wal_fold();
+        instruments.publisher_wal_folds_waiting(1);
         instruments.publisher_wal_fold_duration(5);
         instruments.publisher_write_stop_refusal();
         instruments.publisher_publish(PublishOutcome::Ok);

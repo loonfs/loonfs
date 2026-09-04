@@ -4,6 +4,7 @@ use super::{
     MaintenanceProbe, MaintenanceRunReport,
 };
 use crate::{FsMaintenance, MetadataCompactionOutcome, NamespaceId, Result};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -22,6 +23,12 @@ impl MetadataCompactionJob {
             maintenance,
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_COMPACTIONS)),
         }
+    }
+
+    /// Sets the maximum compactions this job runs concurrently.
+    pub fn max_concurrent(mut self, max_concurrent: NonZeroUsize) -> Self {
+        self.permits = Arc::new(Semaphore::new(max_concurrent.get()));
+        self
     }
 }
 

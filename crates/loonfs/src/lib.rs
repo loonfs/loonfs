@@ -171,7 +171,8 @@ pub use loonfs_objectstore::{
 
 pub use cache::RuntimeCacheStats;
 pub use config::{
-    RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_OPEN_NAMESPACES,
+    RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+    DEFAULT_MAX_OPEN_NAMESPACES,
 };
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,

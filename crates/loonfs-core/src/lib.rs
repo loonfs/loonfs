@@ -156,9 +156,9 @@ pub mod publish {
 // `MetadataReorganizeReport` remains public because
 // `NamespaceEngine::reorganize_metadata` returns it.
 pub use checkpoint::{
-    ensure_metadata_publication_budget, fold_wal_tail_snapshot, next_run_no_after,
-    refill_iterators, select_next_iterator, write_segments_in_waves, CheckpointFile,
-    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, FrozenBasePolicy,
+    ensure_metadata_publication_budget, fold_wal_tail, next_run_no_after, refill_iterators,
+    select_next_iterator, write_segments_in_waves, CheckpointFile, CheckpointFilesPage,
+    CheckpointFilesPageCursor, CheckpointPageCursor, FrozenBasePolicy,
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
     MetadataFamilyGroup, MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader,
     SegmentRowIterator,

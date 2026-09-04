@@ -10,8 +10,8 @@ use crate::fs::WriterIdentity;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
-    CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig, SharedObjectStore as SharedStore,
-    TraceMode, TraceStoreKind,
+    CreateNamespaceOptions, ErrorCode, MaintenanceHint, RuntimeCacheConfig,
+    SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -19,12 +19,13 @@ use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
 use loonfs_api::{AbsolutePath, ActorId, ActorRef, ChangeSeq, DestinationBehavior};
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
-use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
+use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_head, wal_segment_prefix};
 use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    RecordingStore,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -183,6 +184,8 @@ fn test_read_core(store: SharedStore) -> ReadCore {
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
+        wal_fold_permits: tokio::sync::Semaphore::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS),
+        wal_folds_waiting: AtomicUsize::new(0),
         maintenance_hint_observer: None,
         namespace_advance_observer: None,
     })
@@ -352,6 +355,16 @@ async fn wait_for_queued_candidates(publisher: &NamespacePublisher, expected: us
     while queued_candidates(&publisher_state(publisher)) < expected {
         tokio::task::yield_now().await;
     }
+}
+
+async fn wait_for_fold_waiters(writer: &crate::FsWriter, expected: usize) {
+    timeout(Duration::from_secs(10), async {
+        while writer.bits.wal_folds_waiting.load(Ordering::SeqCst) != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fold waiters should reach the expected count");
 }
 
 /// Yields until all expected callers are waiting on one in-flight commit ID.
@@ -1879,6 +1892,265 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         drain_error.to_string().contains("panicked"),
         "drain reports panicked publisher tasks: {drain_error}"
     );
+}
+
+#[tokio::test]
+async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("no-projection").expect("valid namespace id");
+    let hints = Arc::new(Mutex::new(Vec::new()));
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("writer-a")
+        .runtime_cache(RuntimeCacheConfig::disabled())
+        .maintenance_hint_observer({
+            let hints = Arc::clone(&hints);
+            move |hint| hints.lock().expect("hint log").push(hint)
+        })
+        .build()
+        .await
+        .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
+    append_wal_segments(
+        store.as_ref(),
+        &namespace_id,
+        CHECKPOINT_AT_WAL_SEGMENTS - 1,
+        &MutationContext {
+            writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("seed the WAL tail below the fold threshold");
+
+    writer
+        .publisher()
+        .submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("cross-threshold", "docs")),
+        )
+        .await
+        .expect("publish across the fold threshold");
+    writer
+        .wait_for_fold(&namespace_id)
+        .await
+        .expect("fold the uncached tail");
+
+    let status = writer
+        .maintenance_handle("fold-inspection")
+        .expect("maintenance handle")
+        .get_namespace_diagnostics(&namespace_id)
+        .await
+        .expect("inspect the folded namespace");
+    assert!(status.current_manifest_no.is_some(), "{status:?}");
+    assert!(
+        status.wal_tail_segments < CHECKPOINT_AT_WAL_SEGMENTS,
+        "{status:?}"
+    );
+    {
+        let hints = hints.lock().expect("hint log");
+        assert!(hints.iter().any(|hint| matches!(
+            hint,
+            MaintenanceHint::Published(publication)
+                if publication.namespace_id == namespace_id
+                    && publication.wal_tail_segments >= CHECKPOINT_AT_WAL_SEGMENTS
+        )));
+        assert!(hints.iter().any(|hint| matches!(
+            hint,
+            MaintenanceHint::WalFolded { namespace_id: folded } if folded == &namespace_id
+        )));
+    }
+    writer.shutdown().await.expect("shut down writer");
+}
+
+#[tokio::test]
+async fn wal_folds_share_the_writer_concurrency_bound() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespaces = [
+        NamespaceId::parse("fold-a").expect("valid namespace id"),
+        NamespaceId::parse("fold-b").expect("valid namespace id"),
+        NamespaceId::parse("fold-c").expect("valid namespace id"),
+    ];
+    let fold_c = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespaces[2])),
+        OperationClass::Put,
+    );
+    let fold_b = BlockingStore::new(
+        fold_c,
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespaces[1])),
+        OperationClass::Put,
+    );
+    let blocking = Arc::new(BlockingStore::new(
+        fold_b,
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespaces[0])),
+        OperationClass::Put,
+    ));
+    let writer = crate::FsWriter::builder_with_store(blocking.clone())
+        .writer_id("writer-a")
+        .max_concurrent_folds(NonZeroUsize::new(1).expect("nonzero fold limit"))
+        .build()
+        .await
+        .expect("build writer");
+    for namespace_id in &namespaces {
+        writer
+            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("bootstrap");
+        append_wal_segments(
+            blocking.as_ref(),
+            namespace_id,
+            CHECKPOINT_AT_WAL_SEGMENTS - 1,
+            &MutationContext {
+                writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("seed the WAL tail below the fold threshold");
+    }
+    blocking.block_next();
+    blocking.inner().block_next();
+    blocking.inner().inner().block_next();
+
+    for (index, namespace_id) in namespaces.iter().enumerate() {
+        writer
+            .publisher()
+            .submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::new(create_directory_request(
+                    format!("cross-threshold-{index}"),
+                    "docs",
+                )),
+            )
+            .await
+            .expect("publish across the fold threshold");
+        if index == 0 {
+            blocking.wait_until_blocked().await;
+        } else {
+            wait_for_fold_waiters(&writer, index).await;
+        }
+    }
+    assert_eq!(writer.bits.wal_fold_permits.available_permits(), 0);
+    let closing = tokio::spawn({
+        let writer = writer.clone();
+        let namespace_id = namespaces[2].clone();
+        async move { writer.close_namespace(&namespace_id).await }
+    });
+    while writer.namespace_session_state(&namespaces[2]) != NamespaceSessionState::Closing {
+        tokio::task::yield_now().await;
+    }
+
+    blocking.release();
+    blocking.inner().wait_until_blocked().await;
+    blocking.inner().release();
+    blocking.inner().inner().wait_until_blocked().await;
+    blocking.inner().inner().release();
+    for namespace_id in &namespaces[..2] {
+        writer
+            .wait_for_fold(namespace_id)
+            .await
+            .expect("released fold settles");
+    }
+    timeout(Duration::from_secs(10), closing)
+        .await
+        .expect("namespace close should settle")
+        .expect("join namespace close")
+        .expect("close namespace with a waiting fold");
+    assert_eq!(writer.bits.wal_folds_waiting.load(Ordering::SeqCst), 0);
+    assert_eq!(writer.bits.wal_fold_permits.available_permits(), 1);
+    writer.shutdown().await.expect("shut down writer");
+}
+
+#[tokio::test]
+async fn a_late_fold_does_not_republish_an_already_folded_tail() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_a = NamespaceId::parse("fold-a").expect("valid namespace id");
+    let namespace_b = NamespaceId::parse("fold-b").expect("valid namespace id");
+    let blocked = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_a)),
+        OperationClass::Put,
+    );
+    let recording = Arc::new(RecordingStore::new(
+        blocked,
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_b)),
+    ));
+    let writer = crate::FsWriter::builder_with_store(recording.clone())
+        .writer_id("writer-a")
+        .max_concurrent_folds(NonZeroUsize::new(1).expect("nonzero fold limit"))
+        .build()
+        .await
+        .expect("build writer");
+    for namespace_id in [&namespace_a, &namespace_b] {
+        writer
+            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("bootstrap");
+        append_wal_segments(
+            recording.as_ref(),
+            namespace_id,
+            CHECKPOINT_AT_WAL_SEGMENTS - 1,
+            &MutationContext {
+                writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("seed the WAL tail below the fold threshold");
+    }
+    recording.inner().block_next();
+
+    for (namespace_id, commit_id) in [(&namespace_a, "cross-a"), (&namespace_b, "cross-b")] {
+        writer
+            .publisher()
+            .submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::new(create_directory_request(commit_id, "docs")),
+            )
+            .await
+            .expect("publish across the fold threshold");
+        if namespace_id == &namespace_a {
+            recording.inner().wait_until_blocked().await;
+        } else {
+            wait_for_fold_waiters(&writer, 1).await;
+        }
+    }
+
+    writer
+        .maintenance_handle("late-fold-maintenance")
+        .expect("maintenance handle")
+        .flush_wal(&namespace_b)
+        .await
+        .expect("fold the waiting namespace tail");
+    assert_eq!(recording.count(OperationClass::Put), 1);
+    writer
+        .publisher()
+        .submit_candidate(
+            namespace_b.clone(),
+            CommitCandidate::new(create_directory_request("after-flush", "after-flush")),
+        )
+        .await
+        .expect("refresh the retained projection below the fold threshold");
+
+    recording.inner().release();
+    writer
+        .wait_for_fold(&namespace_a)
+        .await
+        .expect("first fold settles");
+    writer
+        .wait_for_fold(&namespace_b)
+        .await
+        .expect("late fold settles");
+    assert_eq!(
+        recording.count(OperationClass::Put),
+        1,
+        "the late fold must not write a second manifest"
+    );
+    writer.shutdown().await.expect("shut down writer");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

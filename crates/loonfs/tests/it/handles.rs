@@ -251,6 +251,10 @@ fn a_writer_maintenance_handle_invalidates_shared_read_caches() {
                 .await
                 .expect("put file");
         }
+        writer
+            .wait_for_fold(&namespace_id)
+            .await
+            .expect("writer fold settles");
         runner.drain().await.expect("maintenance quiesces");
         let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
@@ -464,6 +468,10 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
                     .await
                     .expect("put file");
             }
+            writer
+                .wait_for_fold(&namespace_id)
+                .await
+                .expect("writer fold settles");
             runner.drain().await.expect("maintenance quiesces");
 
             let status = maintenance

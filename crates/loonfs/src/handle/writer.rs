@@ -16,7 +16,9 @@ use crate::{
 use loonfs_core::cache::MetadataSegmentCache;
 use loonfs_core::cache::StoredMetadataBlockCache;
 use std::num::NonZeroUsize;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 /// How a writer treats a namespace it has no open session for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +245,7 @@ pub struct FsWriterBuilder {
     min_publish_interval_ms: u64,
     namespace_session_policy: NamespaceSessionPolicy,
     max_open_namespaces: NonZeroUsize,
+    max_concurrent_folds: NonZeroUsize,
     namespace_advance_observer: Option<NamespaceAdvanceObserver>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
 }
@@ -256,6 +259,8 @@ impl FsWriterBuilder {
             namespace_session_policy: NamespaceSessionPolicy::OpenOnFirstWrite,
             max_open_namespaces: NonZeroUsize::new(crate::config::DEFAULT_MAX_OPEN_NAMESPACES)
                 .expect("default maximum open namespaces should be nonzero"),
+            max_concurrent_folds: NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS)
+                .expect("default maximum concurrent folds should be nonzero"),
             namespace_advance_observer: None,
             maintenance_hint_observer: None,
         }
@@ -303,6 +308,13 @@ impl FsWriterBuilder {
     /// default is [`crate::DEFAULT_MAX_OPEN_NAMESPACES`].
     pub fn max_open_namespaces(mut self, limit: NonZeroUsize) -> Self {
         self.max_open_namespaces = limit;
+        self
+    }
+
+    /// Sets the maximum number of WAL tails this writer folds concurrently.
+    /// The default is [`crate::DEFAULT_MAX_CONCURRENT_FOLDS`].
+    pub fn max_concurrent_folds(mut self, limit: NonZeroUsize) -> Self {
+        self.max_concurrent_folds = limit;
         self
     }
 
@@ -409,6 +421,8 @@ impl FsWriterBuilder {
         let core = self.core.open_read_core()?;
         let bits = Arc::new(WriterBits {
             identity,
+            wal_fold_permits: Semaphore::new(self.max_concurrent_folds.get()),
+            wal_folds_waiting: AtomicUsize::new(0),
             namespace_advance_observer: self.namespace_advance_observer,
             maintenance_hint_observer: self.maintenance_hint_observer,
         });
