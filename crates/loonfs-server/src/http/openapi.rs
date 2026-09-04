@@ -196,7 +196,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         (name = "filesystem", description = "Path-oriented filesystem APIs"),
         (name = "inodes", description = "Identity-oriented inode read APIs"),
         (name = "uploads", description = "Upload session APIs"),
-        (name = "maintenance", description = "Maintenance plane APIs"),
+        (name = "maintenance", description = "Maintenance API group"),
         (name = "query", description = "Derived-index query APIs")
     )
 )]

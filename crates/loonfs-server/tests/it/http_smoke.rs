@@ -150,8 +150,8 @@ async fn capabilities_endpoint_advertises_capabilities() {
         .await
         .expect("fetch capabilities");
     assert_eq!(capabilities.protocol_version, "v0");
-    assert!(capabilities.has_plane("filesystem/v0"));
-    assert!(capabilities.has_plane("maintenance/v0"));
+    assert!(capabilities.has_api_group("filesystem/v0"));
+    assert!(capabilities.has_api_group("maintenance/v0"));
     assert!(!capabilities.supports("filesystem.namespaces.list"));
     assert!(capabilities.supports("filesystem.namespaces.create"));
     assert!(capabilities.supports("filesystem.namespaces.fork"));

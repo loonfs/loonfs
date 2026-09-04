@@ -402,8 +402,15 @@
         "type": "string"
       },
       "CapabilityDocument": {
-        "description": "The planes, features, and limits advertised by a deployment.",
+        "description": "The API groups, features, and limits advertised by a deployment.",
         "properties": {
+          "api_groups": {
+            "description": "The advertised `group/version` API groups, each with every required operation implemented.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "features": {
             "additionalProperties": {
               "type": "boolean"
@@ -426,13 +433,6 @@
             },
             "type": "object"
           },
-          "planes": {
-            "description": "The advertised `plane/version` planes, each with every required operation implemented.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "protocol_version": {
             "description": "The protocol generation, currently `v0`.",
             "type": "string"
@@ -440,7 +440,7 @@
         },
         "required": [
           "protocol_version",
-          "planes"
+          "api_groups"
         ],
         "type": "object"
       },
@@ -2038,7 +2038,7 @@
       },
       "GrepGcRequest": {
         "additionalProperties": false,
-        "description": "One explicit grep-index garbage-collection pass (maintenance plane).",
+        "description": "One explicit grep-index garbage-collection pass (maintenance API group).",
         "properties": {
           "cursor": {
             "description": "The opaque `next_cursor` returned by an earlier pass for the same namespace.",
@@ -2060,7 +2060,7 @@
         "type": "object"
       },
       "GrepGcResponse": {
-        "description": "Result of one explicit grep-index garbage-collection pass (maintenance plane).",
+        "description": "Result of one explicit grep-index garbage-collection pass (maintenance API group).",
         "properties": {
           "deleted_other_objects": {
             "description": "Other unreferenced grep objects deleted after the grace window.",
@@ -8438,7 +8438,7 @@
       "name": "uploads"
     },
     {
-      "description": "Maintenance plane APIs",
+      "description": "Maintenance API group",
       "name": "maintenance"
     },
     {

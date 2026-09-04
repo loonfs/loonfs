@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::Path;
 
-// --- maintenance plane ---
+// --- maintenance API group ---
 
 pub(crate) async fn run_maintenance_command(
     kind: CommandKind,

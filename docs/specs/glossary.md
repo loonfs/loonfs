@@ -30,7 +30,7 @@
 | **Commit id** | A stable client-generated id used for idempotent retries of one commit request. |
 | **Operation id** | Optional commit metadata used to correlate multiple commits that belong to one higher-level workflow. |
 | **Control object** | A server-side control-plane object used to preserve authoritative state across multiple requests, such as a pinned read snapshot, a resumable upload, or a stable destination binding. |
-| **Plane** | An all-or-nothing API conformance unit (for example `filesystem/v0`). A deployment advertises a plane only when every required op in it is implemented. |
-| **Feature** | A named optional capability inside an advertised plane, keyed `plane.area.name` (for example `filesystem.uploads.direct_put`). |
-| **Capability document** | The self-description a deployment returns from `GET /v0/capabilities` (or exposes as a constant when embedded): protocol version, advertised planes, features, and advisory limits. |
+| **API group** | An all-or-nothing API conformance unit (for example `filesystem/v0`). A deployment advertises an API group only when every required op in it is implemented. |
+| **Feature** | A named optional capability inside an advertised API group, keyed `group.area.name` (for example `filesystem.uploads.direct_put`). |
+| **Capability document** | The self-description a deployment returns from `GET /v0/capabilities` (or exposes as a constant when embedded): protocol version, advertised API groups, features, and advisory limits. |
 | **Extension keyspace** | Namespace-scoped durable state owned and versioned by one derived subsystem below `namespaces/{namespace_id}/extensions/{name}/`. |

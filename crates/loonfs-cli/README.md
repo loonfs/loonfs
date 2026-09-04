@@ -307,7 +307,7 @@ History and recovery
 
 Inspection and diagnostics
   loonfs capabilities [--profile <name>]
-    Show the protocol version, planes, features, and limits supported by
+    Show the protocol version, API groups, features, and limits supported by
     the selected deployment
 
   loonfs doctor [--profile <name>] [--namespace <name>] [--write-check]

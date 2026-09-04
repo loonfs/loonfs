@@ -113,7 +113,7 @@ impl Client {
     }
 
     /// Creates a named, user-owned checkpoint pinning the namespace's
-    /// current view (maintenance plane). Every call creates a new checkpoint; the
+    /// current view (maintenance API group). Every call creates a new checkpoint; the
     /// name is a label, not a key. This is a maintenance operation, not a
     /// file mutation. The record is a garbage-collection root until released
     /// or expired.
@@ -131,7 +131,7 @@ impl Client {
             .await
     }
 
-    /// Creates a checkpoint pager beginning at `cursor` (maintenance plane).
+    /// Creates a checkpoint pager beginning at `cursor` (maintenance API group).
     pub fn list_checkpoints_pager(
         &self,
         namespace_id: &NamespaceId,
@@ -151,7 +151,7 @@ impl Client {
         })
     }
 
-    /// Lists one bounded page of active checkpoint records (maintenance plane).
+    /// Lists one bounded page of active checkpoint records (maintenance API group).
     pub async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
@@ -168,7 +168,7 @@ impl Client {
             .await
     }
 
-    /// Releases a user-owned checkpoint pin by id (maintenance plane). Idempotent:
+    /// Releases a user-owned checkpoint pin by id (maintenance API group). Idempotent:
     /// releasing an already-released or reaped record succeeds.
     pub async fn release_checkpoint(
         &self,
@@ -183,7 +183,7 @@ impl Client {
             .await
     }
 
-    /// Runs one maintenance job against a namespace (maintenance plane).
+    /// Runs one maintenance job against a namespace (maintenance API group).
     /// Retrying this request starts a distinct attempt.
     pub async fn run_maintenance(
         &self,
@@ -199,7 +199,7 @@ impl Client {
     }
 
     /// Proves the server's backing store honours the object-store contract
-    /// LoonFS depends on (maintenance plane).
+    /// LoonFS depends on (maintenance API group).
     ///
     /// The probe writes and deletes objects under a scratch prefix, so it
     /// runs only when asked. A store that fails a check answers with that
@@ -212,7 +212,7 @@ impl Client {
             .await
     }
 
-    /// Content search over the namespace's grep index (query plane).
+    /// Content search over the namespace's grep index (query API group).
     /// Gate on the `query.grep` capability before calling against unknown
     /// deployments; the namespace must also have a materialized active
     /// grep root or the server answers `not_supported`.
@@ -250,7 +250,7 @@ impl Client {
             .await
     }
 
-    /// Enables the namespace's grep root (maintenance plane); embedded mode starts
+    /// Enables the namespace's grep root (maintenance API group); embedded mode starts
     /// that namespace's event-driven backfill. Idempotent.
     pub async fn enable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
@@ -261,7 +261,7 @@ impl Client {
             .await
     }
 
-    /// Disables the namespace's grep root (maintenance plane); garbage collection
+    /// Disables the namespace's grep root (maintenance API group); garbage collection
     /// reclaims the segments. Idempotent.
     pub async fn disable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(

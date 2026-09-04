@@ -17,14 +17,14 @@ use loonfs_api::{
     CreateNamespaceRequest, CreateSnapshotRequest, ErrorCode, ExtendSnapshotRequest,
     ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, MaintenanceRunRequest,
     MaintenanceRunResponse, PageRequest, PaginationPolicy, ReleaseCheckpointResponse,
-    ReleaseSnapshotResponse, SnapshotSummary, FEATURE_DOWNLOADS_DIRECT_GET,
+    ReleaseSnapshotResponse, SnapshotSummary, API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
     LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_SNAPSHOT_MAX_LIFETIME_MS,
     LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE, LIMIT_SNAPSHOT_MAX_TTL_MS,
     LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PLANE_QUERY_V0,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -140,15 +140,15 @@ pub(super) async fn get_capabilities(
         LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE.to_owned(),
         state.config.snapshot_max_live_per_namespace as u64,
     );
-    // The runtime handles describe the filesystem and maintenance planes. Grep is a
+    // The runtime handles describe the filesystem and maintenance API groups. Grep is a
     // composed extension, so this deployment — not the runtime — says
-    // whether the query plane exists and what it costs.
+    // whether the query API group exists and what it costs.
     //
     // Serving searches and maintaining the index are separate jobs and
     // separately deployable, so they are separately advertised. The
-    // maintenance key sits in the maintenance plane, which the runtime always
+    // maintenance key sits in the maintenance API group, which the runtime always
     // advertises: a deployment that maintains an index it does not serve has
-    // no query plane for a `query.` key to be parented by.
+    // no query API group for a `query.` key to be parented by.
     set_feature(
         &mut capabilities,
         FEATURE_MAINTENANCE_GREP_INDEX,
@@ -156,7 +156,7 @@ pub(super) async fn get_capabilities(
     );
     if state.config.grep.mode.serves_grep() {
         let pagination = PaginationPolicy::default();
-        capabilities.planes.push(PLANE_QUERY_V0.to_owned());
+        capabilities.api_groups.push(API_GROUP_QUERY_V0.to_owned());
         capabilities
             .features
             .insert(FEATURE_QUERY_GREP.to_owned(), true);

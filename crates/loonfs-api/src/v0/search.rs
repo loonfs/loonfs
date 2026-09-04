@@ -161,7 +161,7 @@ pub struct GrepIndex {
     pub reorganize_pending: bool,
 }
 
-/// One explicit grep-index garbage-collection pass (maintenance plane).
+/// One explicit grep-index garbage-collection pass (maintenance API group).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -174,7 +174,7 @@ pub struct GrepGcRequest {
     pub cursor: Option<String>,
 }
 
-/// Result of one explicit grep-index garbage-collection pass (maintenance plane).
+/// Result of one explicit grep-index garbage-collection pass (maintenance API group).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepGcResponse {

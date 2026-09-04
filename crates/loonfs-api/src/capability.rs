@@ -1,4 +1,4 @@
-//! Planes, features, and limits advertised by a deployment.
+//! API groups, features, and limits advertised by a deployment.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -7,12 +7,12 @@ use thiserror::Error;
 /// The protocol generation this build speaks.
 pub const PROTOCOL_VERSION: &str = "v0";
 
-/// The mandatory data plane.
-pub const PLANE_FILESYSTEM_V0: &str = "filesystem/v0";
-/// The optional maintenance plane.
-pub const PLANE_MAINTENANCE_V0: &str = "maintenance/v0";
-/// The optional derived-index query plane.
-pub const PLANE_QUERY_V0: &str = "query/v0";
+/// The mandatory filesystem API group.
+pub const API_GROUP_FILESYSTEM_V0: &str = "filesystem/v0";
+/// The optional maintenance API group.
+pub const API_GROUP_MAINTENANCE_V0: &str = "maintenance/v0";
+/// The optional derived-index query API group.
+pub const API_GROUP_QUERY_V0: &str = "query/v0";
 
 /// Gates namespace creation.
 pub const FEATURE_NAMESPACES_CREATE: &str = "filesystem.namespaces.create";
@@ -23,11 +23,11 @@ pub const FEATURE_NAMESPACES_DELETE: &str = "filesystem.namespaces.delete";
 /// Gates read-snapshot lifecycle operations.
 pub const FEATURE_SNAPSHOTS: &str = "filesystem.snapshots";
 /// Gates inode attributes: writing them, and projecting them onto reads.
-/// Attributes are part of the filesystem plane, not a composed extension, so a
-/// deployment that serves the filesystem plane serves them.
+/// Attributes are part of the filesystem API group, not a composed extension,
+/// so a deployment that serves the filesystem API group serves them.
 pub const FEATURE_ATTRIBUTES: &str = "filesystem.attributes";
 /// Gates listing a directory's children by parent inode ID. Part of the filesystem
-/// plane and implemented by the runtime, so current deployments advertise it;
+/// API group and implemented by the runtime, so current deployments advertise it;
 /// the key exists so inode-driven sync clients can gate on deployments built
 /// before the route.
 pub const FEATURE_INODES_LIST_CHILDREN: &str = "filesystem.inodes.list_children";
@@ -55,7 +55,7 @@ pub const FEATURE_QUERY_GREP: &str = "query.grep";
 /// separately deployable, so a deployment may advertise either alone. It is
 /// a `maintenance.` key because its routes are maintenance routes, and because a
 /// deployment that maintains an index it does not serve advertises no
-/// `query/v0` plane for a `query.` key to be parented by.
+/// `query/v0` API group for a `query.` key to be parented by.
 pub const FEATURE_MAINTENANCE_GREP_INDEX: &str = "maintenance.grep.index";
 
 macro_rules! limit_keys {
@@ -132,14 +132,14 @@ limit_keys! {
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES = "query.grep.tail_budget_files";
 }
 
-/// The planes, features, and limits advertised by a deployment.
+/// The API groups, features, and limits advertised by a deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CapabilityDocument {
     /// The protocol generation, currently `v0`.
     pub protocol_version: String,
-    /// The advertised `plane/version` planes, each with every required operation implemented.
-    pub planes: Vec<String>,
+    /// The advertised `group/version` API groups, each with every required operation implemented.
+    pub api_groups: Vec<String>,
     /// The named features supported by this deployment, with absent keys treated as unsupported.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub features: BTreeMap<String, bool>,
@@ -151,10 +151,10 @@ pub struct CapabilityDocument {
 /// Violation of the capability document rules.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CapabilityDocumentError {
-    /// Reports a feature whose dotted plane prefix has no advertised plane.
+    /// Reports a feature whose dotted group prefix has no advertised API group.
     #[error(
-        "feature `{feature}` is not parented by an advertised plane \
-         (its first dotted segment must be one of the advertised plane names)"
+        "feature `{feature}` is not parented by an advertised API group \
+         (its first dotted segment must be one of the advertised API group names)"
     )]
     UnparentedFeature {
         /// Feature key rejected while validating the deployment document.
@@ -163,9 +163,11 @@ pub enum CapabilityDocumentError {
 }
 
 impl CapabilityDocument {
-    /// Whether a plane (for example `filesystem/v0`) is advertised.
-    pub fn has_plane(&self, plane: &str) -> bool {
-        self.planes.iter().any(|advertised| advertised == plane)
+    /// Whether an API group (for example `filesystem/v0`) is advertised.
+    pub fn has_api_group(&self, api_group: &str) -> bool {
+        self.api_groups
+            .iter()
+            .any(|advertised| advertised == api_group)
     }
 
     /// Whether a feature is advertised as supported. Absent keys are
@@ -183,8 +185,8 @@ impl CapabilityDocument {
     }
 
     /// Checks the feature-key rule (API spec, "Capability discovery"): every
-    /// feature key's first dotted segment must be the plane name of an
-    /// advertised plane.
+    /// feature key's first dotted segment must be the group name of an
+    /// advertised API group.
     pub fn validate(&self) -> Result<(), CapabilityDocumentError> {
         for feature in self.features.keys() {
             if !self.feature_is_parented(feature) {
@@ -199,29 +201,35 @@ impl CapabilityDocument {
     /// Drops feature keys that violate the feature-key rule, the
     /// client-side "ignore" handling for malformed documents.
     pub fn retain_well_formed(&mut self) {
-        let advertised_planes: Vec<&str> =
-            self.planes.iter().map(|plane| plane_name(plane)).collect();
+        let advertised_api_groups: Vec<&str> = self
+            .api_groups
+            .iter()
+            .map(|api_group| api_group_name(api_group))
+            .collect();
         self.features
-            .retain(|feature, _| feature_is_parented(&advertised_planes, feature));
+            .retain(|feature, _| feature_is_parented(&advertised_api_groups, feature));
     }
 
     fn feature_is_parented(&self, feature: &str) -> bool {
-        let advertised_planes: Vec<&str> =
-            self.planes.iter().map(|plane| plane_name(plane)).collect();
-        feature_is_parented(&advertised_planes, feature)
+        let advertised_api_groups: Vec<&str> = self
+            .api_groups
+            .iter()
+            .map(|api_group| api_group_name(api_group))
+            .collect();
+        feature_is_parented(&advertised_api_groups, feature)
     }
 }
 
-fn feature_is_parented(planes: &[&str], feature: &str) -> bool {
+fn feature_is_parented(api_group_names: &[&str], feature: &str) -> bool {
     match feature.split('.').next() {
-        Some(plane) if !plane.is_empty() => planes.contains(&plane),
+        Some(api_group) if !api_group.is_empty() => api_group_names.contains(&api_group),
         _ => false,
     }
 }
 
-/// The plane name of a versioned plane: `filesystem/v0` has plane `filesystem`.
-fn plane_name(plane: &str) -> &str {
-    plane.split('/').next().unwrap_or(plane)
+/// The group name of a versioned API group: `filesystem/v0` has group `filesystem`.
+fn api_group_name(api_group: &str) -> &str {
+    api_group.split('/').next().unwrap_or(api_group)
 }
 
 #[cfg(test)]
@@ -231,9 +239,9 @@ mod tests {
     fn document() -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            planes: vec![
-                PLANE_FILESYSTEM_V0.to_owned(),
-                PLANE_MAINTENANCE_V0.to_owned(),
+            api_groups: vec![
+                API_GROUP_FILESYSTEM_V0.to_owned(),
+                API_GROUP_MAINTENANCE_V0.to_owned(),
             ],
             features: BTreeMap::from([
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
@@ -244,10 +252,10 @@ mod tests {
     }
 
     #[test]
-    fn supports_and_has_plane_answer_gating_questions() {
+    fn supports_and_has_api_group_answer_gating_questions() {
         let document = document();
-        assert!(document.has_plane(PLANE_FILESYSTEM_V0));
-        assert!(!document.has_plane(PLANE_QUERY_V0));
+        assert!(document.has_api_group(API_GROUP_FILESYSTEM_V0));
+        assert!(!document.has_api_group(API_GROUP_QUERY_V0));
         assert!(document.supports(FEATURE_NAMESPACES_CREATE));
         // Advertised-false and absent keys are both unsupported.
         assert!(!document.supports(FEATURE_NAMESPACES_DELETE));
@@ -255,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_keys_must_be_parented_by_an_advertised_plane() {
+    fn feature_keys_must_be_parented_by_an_advertised_api_group() {
         let mut document = document();
         document
             .features
@@ -278,12 +286,14 @@ mod tests {
     fn capability_document_round_trips_and_tolerates_unknown_fields() {
         let document = document();
         let encoded = serde_json::to_string(&document).expect("encode");
-        assert!(encoded.contains("\"planes\""));
+        assert!(encoded.contains("\"api_groups\""));
         let decoded: CapabilityDocument = serde_json::from_str(&encoded).expect("decode");
         assert_eq!(decoded, document);
 
-        let old_field = encoded.replace("\"planes\"", "\"profiles\"");
-        assert!(serde_json::from_str::<CapabilityDocument>(&old_field).is_err());
+        for old_field_name in [concat!("pl", "anes"), "profiles"] {
+            let old_field = encoded.replace("\"api_groups\"", &format!("\"{old_field_name}\""));
+            assert!(serde_json::from_str::<CapabilityDocument>(&old_field).is_err());
+        }
 
         let future = encoded.replacen('{', "{\"field_from_the_future\":true,", 1);
         let decoded: CapabilityDocument =

@@ -6,7 +6,7 @@ and the consistency and durability invariants. Any implementation that reads
 and writes a store according to this document is format-conformant, whether or
 not it exposes any API surface.
 
-The companion document is `api.md` — the LoonFS API specification: planes,
+The companion document is `api.md` — the LoonFS API specification: API groups,
 capability discovery, the standard error contract, and the HTTP binding;
 normative where implemented.
 
@@ -2150,7 +2150,7 @@ automatic half only: the retention floor never advances on its own, so
 history retention — and the row reclamation that follows it — remains an
 explicit operator decision. An embedded engine where an operator
 triggers maintenance manually and a server that runs the same work invisibly
-are equally conformant (see `api.md` for the optional maintenance plane). The
+are equally conformant (see `api.md` for the optional maintenance API group). The
 invariants below bind every implementation, whoever runs the work: maintenance
 never creates a second source of truth for the filesystem.
 
@@ -2594,7 +2594,7 @@ their presence and lifecycle are recorded in their extension-owned keyspace
 ## 7. Access-control boundaries
 
 ACL and share design is reserved future work (`api.md` reserves the
-authorization plane). Two boundaries are format rules today so that
+authorization API group). Two boundaries are format rules today so that
 authorization can arrive without a format break:
 
 1. Authorization state is control-plane state. ACL or share changes never
