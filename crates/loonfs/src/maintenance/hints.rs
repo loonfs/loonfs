@@ -9,9 +9,9 @@ use std::sync::Arc;
 pub enum MaintenanceHint {
     /// A namespace publication was attempted.
     Published(NamespacePublication),
-    /// A namespace WAL tail was folded successfully.
-    WalFolded {
-        /// Namespace whose WAL tail was folded.
+    /// A namespace WAL-tail fold attempt finished.
+    WalFoldFinished {
+        /// Namespace whose WAL-tail fold attempt finished.
         namespace_id: NamespaceId,
     },
     /// A job becomes eligible at a durable deadline.

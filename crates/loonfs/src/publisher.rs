@@ -1426,7 +1426,6 @@ impl NamespacePublisher {
         match result {
             Ok(_) => {
                 self.read_core.instruments().publisher_wal_fold();
-                writer.notify_after_fold(&self.namespace_id);
             }
             Err(error) => {
                 tracing::info!(
@@ -1436,6 +1435,7 @@ impl NamespacePublisher {
                 );
             }
         }
+        writer.notify_fold_finished(&self.namespace_id);
     }
 
     /// Runs the delete barrier. Returns true when the publisher is now

@@ -861,7 +861,7 @@ impl MaintenanceJob for BlockingJob {
 }
 
 #[tokio::test]
-async fn wal_folded_hints_coalesce_and_follow_ups_admit_once() {
+async fn wal_fold_finished_hints_coalesce_and_follow_ups_admit_once() {
     let metadata = BlockingJob::new(
         MaintenanceJobId::METADATA,
         false,
@@ -894,10 +894,10 @@ async fn wal_folded_hints_coalesce_and_follow_ups_admit_once() {
         "a due-tail publication does not schedule a metadata flush"
     );
 
-    runner.handle().hint(MaintenanceHint::WalFolded {
+    runner.handle().hint(MaintenanceHint::WalFoldFinished {
         namespace_id: namespace_id.clone(),
     });
-    runner.handle().hint(MaintenanceHint::WalFolded {
+    runner.handle().hint(MaintenanceHint::WalFoldFinished {
         namespace_id: namespace_id.clone(),
     });
     metadata.wait_entered(1).await;

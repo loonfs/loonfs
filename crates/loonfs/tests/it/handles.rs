@@ -493,6 +493,104 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
 }
 
 #[test]
+fn a_runner_retries_a_failed_writer_fold_without_another_write() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    block_on(async {
+        let failing = Arc::new(FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::family(DurableObjectFamily::MetadataManifest),
+            OperationClass::Put,
+            InjectedError::PermissionDenied("injected manifest write failure".to_owned()),
+        ));
+        let (observer, receiver) =
+            MaintenanceHintRelay::new(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
+        let store: SharedObjectStore = failing.clone();
+        let writer = FsWriter::builder_with_store(store)
+            .writer_id("fold-retry-writer")
+            .maintenance_hint_observer(move |hint| observer(hint))
+            .build()
+            .await
+            .expect("build writer");
+        let maintenance = writer
+            .maintenance_handle("fold-retry-maintenance")
+            .expect("build maintenance handle");
+        let registry = MaintenanceRegistry::new();
+        registry
+            .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
+            .expect("metadata job");
+        registry
+            .register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
+            .expect("metadata compaction job");
+        registry
+            .register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
+            .expect("garbage collection job");
+        let runner = MaintenanceRunner::builder(registry)
+            .build()
+            .expect("build runner");
+        runner.attach_hints(receiver);
+
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        append_wal_segments(
+            failing.as_ref(),
+            &namespace_id,
+            wal_tail_segment_threshold() - 1,
+            &MutationContext {
+                writer_id: loonfs_api::WriterId::parse("fold-retry-seed").expect("writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("seed WAL tail below fold threshold");
+
+        failing.fail_next(1);
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                "/docs/cross-threshold.txt",
+                b"body",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("publish across the fold threshold");
+        writer
+            .wait_for_fold(&namespace_id)
+            .await
+            .expect("writer fold settles");
+        runner.drain().await.expect("maintenance retry quiesces");
+
+        let status = maintenance
+            .get_namespace_diagnostics(&namespace_id)
+            .await
+            .expect("status after maintenance retry");
+        assert!(
+            status.current_manifest_no.is_some(),
+            "the maintenance retry should have published a manifest: {status:?}"
+        );
+        assert!(
+            status.wal_tail_segments < wal_tail_segment_threshold(),
+            "the maintenance retry should have bounded the tail: {status:?}"
+        );
+        assert_eq!(
+            failing.remaining(),
+            0,
+            "the one injected failure should have been consumed"
+        );
+        assert_eq!(
+            failing.attempts(),
+            2,
+            "only the failed writer attempt and successful runner retry should write a manifest"
+        );
+
+        writer.shutdown().await.expect("shut down writer");
+        runner.shutdown().await.expect("shut down runner");
+    });
+}
+
+#[test]
 fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");

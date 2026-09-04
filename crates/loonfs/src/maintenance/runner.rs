@@ -159,7 +159,7 @@ impl MaintenanceHandle {
                     }
                 }
             }
-            MaintenanceHint::WalFolded { namespace_id } => {
+            MaintenanceHint::WalFoldFinished { namespace_id } => {
                 for id in inner.registry.job_ids() {
                     if inner
                         .registry

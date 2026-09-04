@@ -96,10 +96,10 @@ impl WriterBits {
         }
     }
 
-    pub(crate) fn notify_after_fold(&self, namespace_id: &NamespaceId) {
+    pub(crate) fn notify_fold_finished(&self, namespace_id: &NamespaceId) {
         self.send_maintenance_hint(
             namespace_id,
-            MaintenanceHint::WalFolded {
+            MaintenanceHint::WalFoldFinished {
                 namespace_id: namespace_id.clone(),
             },
         );

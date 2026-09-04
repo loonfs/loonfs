@@ -1960,7 +1960,68 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         )));
         assert!(hints.iter().any(|hint| matches!(
             hint,
-            MaintenanceHint::WalFolded { namespace_id: folded } if folded == &namespace_id
+            MaintenanceHint::WalFoldFinished { namespace_id: folded } if folded == &namespace_id
+        )));
+    }
+    writer.shutdown().await.expect("shut down writer");
+}
+
+#[tokio::test]
+async fn a_failed_fold_notifies_maintenance_when_the_attempt_finishes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let failing = Arc::new(FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::family(DurableObjectFamily::MetadataManifest),
+        OperationClass::Put,
+        InjectedError::PermissionDenied("injected manifest write failure".to_owned()),
+    ));
+    let namespace_id = NamespaceId::parse("failed-fold-hint").expect("valid namespace id");
+    let hints = Arc::new(Mutex::new(Vec::new()));
+    let writer = crate::FsWriter::builder_with_store(failing.clone())
+        .writer_id("writer-a")
+        .maintenance_hint_observer({
+            let hints = Arc::clone(&hints);
+            move |hint| hints.lock().expect("hint log").push(hint)
+        })
+        .build()
+        .await
+        .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
+    append_wal_segments(
+        failing.as_ref(),
+        &namespace_id,
+        CHECKPOINT_AT_WAL_SEGMENTS - 1,
+        &MutationContext {
+            writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("seed the WAL tail below the fold threshold");
+
+    failing.fail_next(1);
+    writer
+        .publisher()
+        .submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("cross-threshold", "docs")),
+        )
+        .await
+        .expect("publish across the fold threshold");
+    writer
+        .wait_for_fold(&namespace_id)
+        .await
+        .expect("settle the failed fold");
+
+    assert_eq!(failing.attempts(), 1);
+    {
+        let hints = hints.lock().expect("hint log");
+        assert!(hints.iter().any(|hint| matches!(
+            hint,
+            MaintenanceHint::WalFoldFinished { namespace_id: folded } if folded == &namespace_id
         )));
     }
     writer.shutdown().await.expect("shut down writer");

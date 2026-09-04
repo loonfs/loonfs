@@ -157,7 +157,7 @@ pub trait MaintenanceJob: Send + Sync + 'static {
         false
     }
 
-    /// Returns whether a successful WAL fold should nudge this job.
+    /// Returns whether a finished WAL-fold attempt should nudge this job.
     fn should_run_after_fold(&self) -> bool {
         false
     }
