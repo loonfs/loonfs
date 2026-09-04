@@ -2,8 +2,8 @@
 
 `loonfs-grep` implements LoonFS's optional gram index. Each namespace stores
 its index under `namespaces/{namespace_id}/extensions/grep/`. A server or
-maintenance process registers the grep job with a writer. Grep never scans
-the store to discover namespaces.
+maintenance process registers the grep job with a maintenance registry. Grep
+never scans the store to discover namespaces.
 
 A server can run the job with its other maintenance work. A separate process
 can maintain namespaces named on the command line:

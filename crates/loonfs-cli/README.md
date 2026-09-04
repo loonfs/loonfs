@@ -644,7 +644,7 @@ Behavior notes
 
   Embedded profiles do not run continuous maintenance. Run
   `loonfs maintenance run --namespaces <ns>` for ongoing maintenance,
-  or `loonfs maintenance step` for one step. Without maintenance, the
-  WAL tail grows and reads become slower. Servers maintain the namespaces
-  they use automatically.
+  or `loonfs maintenance step` for one step. Live writers fold their own WAL
+  tails; explicit maintenance handles inactive namespaces and the other jobs.
+  Servers maintain the namespaces they use automatically by default.
 ```

@@ -313,7 +313,7 @@ should land together.
 
 ## Queries
 
-Search is the first resident of the reserved `query/v0` profile
+Search is the first resident of the reserved `query/v0` API group
 (`docs/specs/api.md`), and a query needs both halves of the
 capability contract: the deployment advertises the serving
 feature, and the namespace's verified grep root shows the index

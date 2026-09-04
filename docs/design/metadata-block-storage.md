@@ -131,7 +131,7 @@ Two kinds of numbers appear above, with different contracts:
   compression and base segments target 65,536 rows; readers take
   whatever the descriptor and index describe, so both can be retuned
   without a format change.
-- **Reorganization budgets are writer-side defaults.** One step merges at
+- **Reorganization budgets are maintenance defaults.** One step merges at
   most 8 complete runs and decodes at most 131,072 row payloads or 64 MiB of
   SST data blocks. It weighs a few more runs than it merges when it has to
   start above a base run that no longer fits. A manifest publish is the only

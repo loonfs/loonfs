@@ -1591,7 +1591,7 @@ checkpoint instead of replaying from an obsolete cursor.
 
 Durable attribution fields describe the recorded event. Inode rows use `created_by`; file revisions, commit receipts, and WAL commits use `committed_by`; tombstones and active deletions use `deleted_by`; and attribute revisions use `updated_by`.
 
-Maintenance jobs record their writer as `writer_id`, matching the namespace head. Only compaction leases store this value for a job.
+Streaming compaction leases record the maintenance actor as `writer_id`, independently of the namespace head's writer. No other maintenance job stores this value.
 
 The commit fingerprint preimage in section 3.3.1 describes the commit request rather than a durable record. It uses `actor_kind` and `actor_id`, matching `CommitRequest.actor`.
 
