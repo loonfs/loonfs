@@ -1055,6 +1055,10 @@ candidate under `no_reference_manifest`.
 
 #### Deleting, retaining, and reclaiming
 
+The launch contract provides no purge operation or guarantee for previously
+published file content. Such content may remain indefinitely, including after
+namespace deletion. Deletion ends access; it does not promise physical erasure.
+
 Two horizons decide when a namespace actually gets smaller, and they are
 independent.
 

@@ -17,7 +17,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{genesis_next_inode_id, MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
-use loonfs_api::wire::control::{genesis_commit_id, HeadState, ManifestRef, MetadataRootState};
+use loonfs_api::wire::control::{genesis_commit_id, HeadState, ManifestRef};
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestKind,
     NamespaceManifestPayload, NAMESPACE_MANIFEST_FORMAT_VERSION,
@@ -39,18 +39,6 @@ pub(crate) use super::tests::inspection_materialization::{
     load_manifest_materialization_for_inspection,
     load_manifest_metadata_state_for_inspection_from_manifest,
 };
-
-pub(super) fn ensure_root_matches_manifest(
-    namespace_id: &NamespaceId,
-    root: &MetadataRootState,
-    manifest: &NamespaceManifestEnvelope,
-) -> crate::error::Result<()> {
-    ensure_manifest_reference_matches(
-        &format!("metadata root for namespace `{namespace_id}`"),
-        &root.manifest,
-        manifest,
-    )
-}
 
 /// Verifies every coordinate by which a durable control object binds one
 /// immutable manifest.
@@ -174,21 +162,7 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
             base_state: bootstrap_metadata_state(genesis_created_at_ms),
         });
     };
-    let segments = load_verified_manifest_segments(
-        store,
-        segment_cache,
-        &manifest.owner_namespace_id,
-        &manifest.manifest_object_id,
-    )
-    .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-    })?;
-    ensure_manifest_reference_matches(
-        &format!("namespace `{namespace_id}` metadata basis"),
-        manifest,
-        segments.manifest(),
-    )?;
+    let segments = load_manifest_segments(store, segment_cache, manifest).await?;
     let manifest_head_seq = segments.manifest().payload.head_seq;
     Ok(LoadedMetadataBasis {
         identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), manifest_head_seq),
@@ -218,9 +192,37 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Loads the current manifest's verified segment descriptors without fetching
-/// metadata segment row payloads or constructing `MetadataState`.
-pub(crate) async fn load_verified_manifest_segments<'a, S: ObjectStore + ?Sized>(
+/// Loads a durable manifest reference and verifies every field before exposing its segments.
+pub(crate) async fn load_manifest_segments<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    segment_cache: Option<&'a MetadataSegmentCache>,
+    reference: &ManifestRef,
+) -> crate::error::Result<VerifiedMetadataSegments<'a, S>> {
+    let segments = load_manifest_segments_for_inspection(
+        store,
+        segment_cache,
+        &reference.owner_namespace_id,
+        &reference.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
+    ensure_manifest_reference_matches(
+        &format!(
+            "namespace `{}` manifest reference",
+            reference.owner_namespace_id
+        ),
+        reference,
+        segments.manifest(),
+    )?;
+    Ok(segments)
+}
+
+/// Inspects an object by ID, validating its envelope and segment descriptors.
+/// This does not verify a root or checkpoint reference. Authoritative reads
+/// and publication paths must use `load_manifest_segments` instead.
+pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,

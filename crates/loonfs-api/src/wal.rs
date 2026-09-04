@@ -41,7 +41,7 @@ impl WalEnvelopeKind {
 ///
 /// See [standard mutation operations](../../../docs/specs/format.md#35-standard-mutation-operations).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WalDelta {
     /// Introduces an inode whose identity and kind remain fixed for its lifetime.
     CreateInode {
@@ -139,6 +139,7 @@ pub enum WalDelta {
 ///
 /// See [logical commits](../../../docs/specs/format.md#33-logical-commits-sequence-numbers-and-visibility).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalCommitDelta {
     /// Zero-based request-operation position used to attribute one or more resulting deltas.
     pub semantic_op_index: u32,
@@ -150,6 +151,7 @@ pub struct WalCommitDelta {
 ///
 /// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalCommitPayload {
     /// Namespace-wide commit position; segment records must cover their range contiguously.
     pub seq: ChangeSeq,
@@ -175,6 +177,7 @@ pub struct WalCommitPayload {
 ///
 /// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalSegmentPayload {
     /// Namespace this segment belongs to; recovery rejects cross-namespace content.
     pub namespace_id: NamespaceId,
@@ -201,6 +204,7 @@ pub struct WalSegmentPayload {
 /// [`encode_wal_segment_envelope_zstd`] and validated only by
 /// [`decode_wal_segment_envelope_zstd`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalSegmentEnvelope {
     /// Durable-family discriminator checked before payload decoding.
     pub kind: WalEnvelopeKind,
@@ -240,9 +244,10 @@ impl WalSegmentEnvelope {
 /// Durable layout of a WAL segment object (before zstd compression): the
 /// envelope fields plus the payload as an opaque CBOR byte string.
 /// `payload_checksum` covers exactly those bytes, so integrity verification
-/// never depends on re-encoding the payload with this build's schema and a
-/// payload with unknown additive fields still verifies.
+/// never depends on re-encoding the payload with this build's schema. Unknown
+/// payload fields are rejected after checksum verification.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WalSegmentDocument {
     kind: String,
     format_version: u32,

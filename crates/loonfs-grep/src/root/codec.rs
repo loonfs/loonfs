@@ -7,8 +7,8 @@
 use super::error::GrepEnvelopeCodecError;
 use super::state::{GrepManifestState, GrepRootPointer};
 use loonfs_api::wire::envelope::{
-    decode_json_envelope, decode_strict_json_envelope, encode_json_envelope, json_payload_checksum,
-    verify_kind, DecodedJsonEnvelope,
+    decode_json_envelope, encode_json_envelope, json_payload_checksum, verify_kind,
+    DecodedJsonEnvelope,
 };
 
 /// Durable kind string for a grep root-pointer envelope.
@@ -105,7 +105,7 @@ pub fn encode_grep_root(envelope: &GrepRootEnvelope) -> Result<Vec<u8>, GrepEnve
 /// would erase what this binary does not understand.
 pub fn decode_grep_root(bytes: &[u8]) -> Result<GrepRootEnvelope, GrepEnvelopeCodecError> {
     let decoded: DecodedJsonEnvelope<GrepRootPointer> =
-        decode_strict_json_envelope(bytes, GREP_ROOT_FORMAT_VERSION, |found| {
+        decode_json_envelope(bytes, GREP_ROOT_FORMAT_VERSION, |found| {
             verify_kind(GREP_ROOT_KIND, found)
         })?;
     Ok(GrepRootEnvelope {
@@ -131,9 +131,7 @@ pub fn encode_grep_manifest(
 
 /// Decodes only the current manifest format and verifies it.
 ///
-/// Manifests are immutable, so additive fields are tolerated: nothing
-/// rewrites these bytes, and a reader that drops what it cannot name loses
-/// nothing durable.
+/// Unknown fields are rejected because indexing and compaction write successor manifests.
 pub fn decode_grep_manifest(bytes: &[u8]) -> Result<GrepManifestEnvelope, GrepEnvelopeCodecError> {
     let decoded: DecodedJsonEnvelope<GrepManifestState> =
         decode_json_envelope(bytes, GREP_MANIFEST_FORMAT_VERSION, |found| {

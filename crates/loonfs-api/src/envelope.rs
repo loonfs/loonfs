@@ -158,16 +158,8 @@ pub fn verify_checksum_fresh(
 /// directly readable JSON while `payload_checksum` covers the exact
 /// fragment bytes as stored.
 #[derive(Serialize, Deserialize)]
-struct JsonEnvelopeDocument {
-    kind: String,
-    format_version: u32,
-    payload_checksum: String,
-    payload: Box<RawValue>,
-}
-
-#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StrictJsonEnvelopeDocument {
+struct JsonEnvelopeDocument {
     kind: String,
     format_version: u32,
     payload_checksum: String,
@@ -217,7 +209,7 @@ pub struct DecodedJsonEnvelope<T> {
 }
 
 /// Decodes one JSON-bodied envelope, then checks its kind, version, checksum,
-/// and payload.
+/// and payload. Unknown envelope fields are rejected for every durable family.
 ///
 /// `classify_kind` lets a family with a kind registry report unknown kinds
 /// distinctly from mismatched ones; families with one kind pass
@@ -227,31 +219,13 @@ pub fn decode_json_envelope<T: DeserializeOwned>(
     supported_version: u32,
     classify_kind: impl FnOnce(&str) -> Result<(), EnvelopeCodecError>,
 ) -> Result<DecodedJsonEnvelope<T>, EnvelopeCodecError> {
+    let probe: EnvelopeProbe = serde_json::from_slice(bytes)
+        .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
+    classify_kind(&probe.kind)?;
+    verify_version(&probe.kind, probe.format_version, supported_version)?;
     let document: JsonEnvelopeDocument = serde_json::from_slice(bytes)
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
-    classify_kind(&document.kind)?;
-    verify_version(&document.kind, document.format_version, supported_version)?;
     decode_json_envelope_payload(document)
-}
-
-/// Immutable envelope families tolerate unknown fields, while mutable control-object envelopes
-/// reject them. A tolerant read followed by rewrite would erase fields the current binary does
-/// not understand.
-pub fn decode_strict_json_envelope<T: DeserializeOwned>(
-    bytes: &[u8],
-    supported_version: u32,
-    classify_kind: impl FnOnce(&str) -> Result<(), EnvelopeCodecError>,
-) -> Result<DecodedJsonEnvelope<T>, EnvelopeCodecError> {
-    let document: StrictJsonEnvelopeDocument = serde_json::from_slice(bytes)
-        .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
-    classify_kind(&document.kind)?;
-    verify_version(&document.kind, document.format_version, supported_version)?;
-    decode_json_envelope_payload(JsonEnvelopeDocument {
-        kind: document.kind,
-        format_version: document.format_version,
-        payload_checksum: document.payload_checksum,
-        payload: document.payload,
-    })
 }
 
 fn decode_json_envelope_payload<T: DeserializeOwned>(

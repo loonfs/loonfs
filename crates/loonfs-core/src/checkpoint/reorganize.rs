@@ -12,7 +12,7 @@ use super::block_fetch::load_segment_index_for_reorganization;
 use super::compaction_lease::{group_lease_state, GroupLeaseState};
 use super::error::ManifestLoadError;
 use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after, next_run_no_after};
-use super::load::load_verified_manifest_segments;
+use super::load::load_manifest_segments;
 use super::publish::{
     manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
@@ -162,16 +162,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { delta_runs: 0 },
         ));
     };
-    let segments = load_verified_manifest_segments(
-        store,
-        None,
-        namespace_id,
-        &root.manifest.manifest_object_id,
-    )
-    .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-    })?;
+    let segments = load_manifest_segments(store, None, &root.manifest).await?;
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(&previous.payload);
@@ -326,17 +317,7 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     let Some(root) = snapshot.root else {
         return Ok(false);
     };
-    let segments = load_verified_manifest_segments(
-        store,
-        segment_cache,
-        namespace_id,
-        &root.state.manifest.manifest_object_id,
-    )
-    .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-    })?;
-    super::load::ensure_root_matches_manifest(namespace_id, &root.state, segments.manifest())?;
+    let segments = load_manifest_segments(store, segment_cache, &root.state.manifest).await?;
     Ok(manifest_has_reorganization_work(
         &segments.manifest().payload,
         segments.scan_runs.as_ref(),

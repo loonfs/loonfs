@@ -22,7 +22,8 @@ use super::error::ManifestLoadError;
 use super::frozen_floor::{bind_survives_frozen_floor, unbindings_at_or_below_floor};
 use super::load::{
     append_rows_to_metadata, head_from_manifest, load_manifest_materialization_for_inspection,
-    load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_segments,
+    load_manifest_metadata_state_for_inspection_from_manifest,
+    load_manifest_segments_for_inspection,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::record::load_checkpoint_record;
@@ -482,7 +483,7 @@ pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>
     let staging_prefix = loonfs_objectstore::keys::metadata_compaction_prefix(namespace_id);
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
     let staged: BTreeSet<String> =
-        load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
             .await
             .expect("load the published manifest")
             .manifest()

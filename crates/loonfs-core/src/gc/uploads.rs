@@ -11,7 +11,7 @@
 
 use super::budget::PassBudget;
 use super::live_set::LiveSet;
-use crate::checkpoint::{load_verified_manifest_segments, ManifestLoadFailureClass};
+use crate::checkpoint::{load_manifest_segments_for_inspection, ManifestLoadFailureClass};
 use crate::context::MutationContext;
 use crate::control_update::{
     load_upload_session_state, try_update_upload_session, CasAttempt, UploadSessionUpdate,
@@ -341,28 +341,32 @@ pub(super) async fn collect_referenced_content<S: ObjectStore + ?Sized>(
         if !budget.try_charge() {
             return Ok(CollectedReferences::Deferred);
         }
-        let segments =
-            match load_verified_manifest_segments(store, None, namespace_id, manifest_object_id)
-                .await
-            {
-                Ok(segments) => segments,
-                Err(error) => match error.failure_class() {
-                    ManifestLoadFailureClass::Store => {
-                        tracing::warn!(
-                            namespace_id = %namespace_id,
-                            manifest_object_id = %manifest_object_id,
-                            error = %error,
-                            "a content-reference manifest did not read; retaining completed content"
-                        );
-                        return Ok(CollectedReferences::Unavailable);
-                    }
-                    ManifestLoadFailureClass::Corrupt => {
-                        return Err(CoreError::NamespaceCorrupt(format!(
-                            "a content-reference manifest does not load: {error}"
-                        )));
-                    }
-                },
-            };
+        let segments = match load_manifest_segments_for_inspection(
+            store,
+            None,
+            namespace_id,
+            manifest_object_id,
+        )
+        .await
+        {
+            Ok(segments) => segments,
+            Err(error) => match error.failure_class() {
+                ManifestLoadFailureClass::Store => {
+                    tracing::warn!(
+                        namespace_id = %namespace_id,
+                        manifest_object_id = %manifest_object_id,
+                        error = %error,
+                        "a content-reference manifest did not read; retaining completed content"
+                    );
+                    return Ok(CollectedReferences::Unavailable);
+                }
+                ManifestLoadFailureClass::Corrupt => {
+                    return Err(CoreError::NamespaceCorrupt(format!(
+                        "a content-reference manifest does not load: {error}"
+                    )));
+                }
+            },
+        };
         let mut lower_bound = lookup_keys::REVISION_ROW_PREFIX.to_owned();
         let upper_bound = string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX);
         loop {

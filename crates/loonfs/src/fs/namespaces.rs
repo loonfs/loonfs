@@ -80,7 +80,8 @@ impl FsWriter {
     /// spec, "Tombstones and deletion"). Commits acknowledged before the
     /// swap stay committed; reads, writes, forks, and re-creation of the id
     /// fail with `namespace_deleted` afterward. Deletion does not reclaim
-    /// storage; reclamation is explicit garbage collection.
+    /// published content. Garbage collection can release derived metadata and
+    /// upload-owned content, but there is no published-content purge guarantee.
     ///
     /// Sequenced as a barrier through the publication service: mutations
     /// admitted before the delete publish first, and mutations admitted

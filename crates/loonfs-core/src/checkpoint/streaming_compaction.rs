@@ -25,7 +25,7 @@ use super::frozen_floor::{
     bind_survives_frozen_floor, unbinding_at_or_below_floor, unbindings_at_or_below_floor,
     BindingGeneration,
 };
-use super::load::load_verified_manifest_segments;
+use super::load::load_manifest_segments;
 use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
 use super::reorganize::{
     group_run_descriptors, write_replacement_manifest, MergePlacement, ReplacementOutput,
@@ -363,11 +363,9 @@ pub enum MetadataCompactionJobOutcome {
 /// rebuilt run in with one manifest publication.
 ///
 /// This is what the maintenance runner spawns from the spec a step planned.
-/// Nothing durable records that the job is running, so every way it can end
-/// short of publishing — cancellation, a snapshot that moved, a lost race, an
-/// error — costs the work it did and nothing else: the old manifest stays
-/// valid, the staged segments stay invisible, and a later step plans the group
-/// again.
+/// A durable lease protects staged output until publication or cleanup. If
+/// the job stops before publication, the old manifest stays valid, staged
+/// segments stay invisible, and a later step may plan the group again.
 pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -533,14 +531,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         else {
             return Ok(MetadataCompactionJobOutcome::Abandoned);
         };
-        let segments = load_verified_manifest_segments(
-            store,
-            None,
-            namespace_id,
-            &root.manifest.manifest_object_id,
-        )
-        .await
-        .map_err(manifest_load_failure)?;
+        let segments = load_manifest_segments(store, None, &root.manifest).await?;
         if snapshot_segment_keys(&segments, spec).as_ref() != Some(snapshot_keys) {
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
@@ -638,10 +629,9 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
-    load_verified_manifest_segments(store, None, namespace_id, &root.manifest.manifest_object_id)
+    load_manifest_segments(store, None, &root.manifest)
         .await
         .map(Some)
-        .map_err(manifest_load_failure)
 }
 
 /// The object keys the spec's runs hold for its group, or `None` when the

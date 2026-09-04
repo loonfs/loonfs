@@ -336,7 +336,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .await
         .expect("load metadata root")
         .state;
-    let referenced_segment_count = load_verified_manifest_segments(
+    let referenced_segment_count = load_manifest_segments_for_inspection(
         &store,
         None,
         &namespace_id,
@@ -414,7 +414,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .await
         .expect("load metadata root")
         .state;
-    let segments = load_verified_manifest_segments(
+    let segments = load_manifest_segments_for_inspection(
         &store,
         None,
         &namespace_id,
@@ -479,7 +479,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         .await
         .expect("load metadata root")
         .state;
-    let segments = load_verified_manifest_segments(
+    let segments = load_manifest_segments_for_inspection(
         &setup_store,
         None,
         &namespace_id,
@@ -2016,9 +2016,10 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     super::reorganize::ReorganizationSelection,
 ) {
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
-    let segments = load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
-        .await
-        .expect("load manifest segments");
+    let segments =
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
+            .await
+            .expect("load manifest segments");
     let group = super::reorganize::select_family_group(
         store,
         namespace_id,
