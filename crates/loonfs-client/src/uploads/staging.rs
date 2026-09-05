@@ -58,7 +58,7 @@ pub trait PutFileJournal: Send + Sync {
     fn commit_prepared(&self, request: &CommitRequest) -> std::io::Result<()>;
 }
 
-/// Optional state for resuming and recording a multipart upload.
+/// Optional multipart resume state and a journal for the complete PUT attempt.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct UploadContinuity<'a> {
     pub(crate) resume: Option<&'a MultipartUploadResume>,

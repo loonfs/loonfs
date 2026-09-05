@@ -1100,10 +1100,10 @@ fn resume_journal(
 ///
 /// An interruption between the last part and the commit leaves a session
 /// the server already completed: the object is assembled and admitted, and
-/// only the commit is missing. Asking the session what became of it is one
-/// round trip and saves the whole transfer. Any other answer — still open,
-/// aborted, or gone — leaves this to the ordinary upload, which the
-/// recorded parts make cheap anyway.
+/// only the commit request is missing. A completed session supplies its content
+/// and proof in one round trip. An open session resumes from recorded parts;
+/// lookup and completion errors remain visible. Prepared requests skip this
+/// lookup entirely.
 async fn commit_a_finished_upload(
     context: &CommandContext,
     spec: &NamespacePath,

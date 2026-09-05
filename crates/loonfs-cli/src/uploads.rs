@@ -22,12 +22,14 @@ struct UploadState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum UploadProgress {
     Uploading {
         multipart: Option<MultipartUploadResume>,
     },
-    Prepared(Box<CommitRequest>),
+    Prepared {
+        request: Box<CommitRequest>,
+    },
 }
 
 /// File properties used to detect changes before resuming an upload.
@@ -96,14 +98,17 @@ impl UploadJournal {
         options: &PutFileOptions,
     ) -> io::Result<Self> {
         let parent = path.parent().expect("journal has a directory");
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(|error| journal_error(&path, error))?;
         let ownership = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(path.with_extension("lock"))?;
-        if !fs4::fs_std::FileExt::try_lock_exclusive(&ownership)? {
+            .open(path.with_extension("lock"))
+            .map_err(|error| journal_error(&path, error))?;
+        if !fs4::fs_std::FileExt::try_lock_exclusive(&ownership)
+            .map_err(|error| journal_error(&path, error))?
+        {
             return Err(journal_error(
                 &path,
                 "another command owns this PUT attempt",
@@ -123,7 +128,7 @@ impl UploadJournal {
                 if recorded.source != source {
                     return Err(journal_error(
                         &path,
-                        "source file changed; resolve this attempt before starting another",
+                        "source file changed; use a new --commit-id or remove this journal to start another attempt",
                     ));
                 }
                 let commit_id = recorded
@@ -135,9 +140,9 @@ impl UploadJournal {
                 let mut requested = options.clone();
                 requested.commit.commit_id.get_or_insert(commit_id);
                 if requested != recorded.options {
-                    return Err(journal_error(&path, "PUT options changed; resume with the original actor, message, and overwrite guards"));
+                    return Err(journal_error(&path, "PUT options changed; resume with the original options or use a new --commit-id for another attempt"));
                 }
-                if let UploadProgress::Prepared(request) = &recorded.progress {
+                if let UploadProgress::Prepared { request } = &recorded.progress {
                     if !request_matches_options(request, &recorded.options) {
                         return Err(journal_error(
                             &path,
@@ -179,14 +184,14 @@ impl UploadJournal {
     pub(crate) fn resume(&self) -> Option<MultipartUploadResume> {
         match &self.lock().progress {
             UploadProgress::Uploading { multipart } => multipart.clone(),
-            UploadProgress::Prepared(_) => None,
+            UploadProgress::Prepared { .. } => None,
         }
     }
 
     /// A saved request is replayed directly, even after its upload session expires.
     pub(crate) fn prepared_request(&self) -> Option<CommitRequest> {
         match &self.lock().progress {
-            UploadProgress::Prepared(request) => Some((**request).clone()),
+            UploadProgress::Prepared { request } => Some((**request).clone()),
             UploadProgress::Uploading { .. } => None,
         }
     }
@@ -284,11 +289,13 @@ impl PutFileJournal for UploadJournal {
         }
         self.update(|progress| match progress {
             UploadProgress::Uploading { .. } => {
-                *progress = UploadProgress::Prepared(Box::new(request.clone()));
+                *progress = UploadProgress::Prepared {
+                    request: Box::new(request.clone()),
+                };
                 Ok(())
             }
-            UploadProgress::Prepared(saved) if **saved == *request => Ok(()),
-            UploadProgress::Prepared(_) => {
+            UploadProgress::Prepared { request: saved } if **saved == *request => Ok(()),
+            UploadProgress::Prepared { .. } => {
                 Err(self.error("the prepared commit request cannot change"))
             }
         })
