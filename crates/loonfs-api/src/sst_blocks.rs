@@ -717,7 +717,8 @@ mod tests {
 
     #[test]
     fn decoded_byte_accounting_includes_closed_and_open_blocks() {
-        let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::new(512).unwrap());
+        let mut builder =
+            SegmentBlocksBuilder::new(NonZeroUsize::new(512).expect("nonzero block target"));
         for index in 0..17 {
             let (key, filter, row) = inode_row(index);
             builder.push(&key, &filter, &row).expect("encode row");
