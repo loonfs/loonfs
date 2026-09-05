@@ -104,9 +104,8 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         // Whoever wrote the head owns the id. A caller retrying after a
         // lost acknowledgment gets the same answer as a caller who lost the
         // race outright, and the namespace it names is complete and usable
-        // either way — the old flow's `namespace_partial`, which named a
-        // namespace nobody could use, is gone. `allow_existing` is how a
-        // caller says "create it if it is not there", including on a retry.
+        // either way. `allow_existing` means "create it if it is not there",
+        // including on a retry.
         NamespaceHeadInstall::Exists if allow_existing => {}
         NamespaceHeadInstall::Exists => {
             return Err(BootstrapNamespaceError::NamespaceAlreadyExists {

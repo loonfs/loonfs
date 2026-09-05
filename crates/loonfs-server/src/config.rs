@@ -2040,9 +2040,7 @@ root = "/tmp/loonfs-server"
 
     #[test]
     fn unknown_config_tables_fail_decode() {
-        // Pre-release rule: no compatibility courtesies. An unrecognized
-        // table — including any removed one — fails through the config's
-        // own strict parsing, with no special-cased guidance.
+        // Unknown tables fail through the config's strict parsing.
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
