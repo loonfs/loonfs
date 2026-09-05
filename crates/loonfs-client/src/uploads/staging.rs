@@ -40,7 +40,8 @@ pub struct MultipartUploadResume {
 ///
 /// The client calls these methods synchronously after opening the session and
 /// after each successful part upload. Implementations may persist this data
-/// before the next network request starts.
+/// before the next network request starts. A journal error stops the upload;
+/// the server session remains available for resumption or explicit abort.
 pub trait MultipartUploadJournal: Send + Sync {
     /// Records a newly opened session and its required part size and checksum algorithm.
     fn began(
@@ -48,9 +49,9 @@ pub trait MultipartUploadJournal: Send + Sync {
         upload_id: &UploadId,
         part_size_bytes: u64,
         checksum_algorithm: ChecksumAlgorithm,
-    );
+    ) -> std::io::Result<()>;
     /// Records a part after it has been uploaded successfully.
-    fn part_completed(&self, part: &CompletedUploadPart);
+    fn part_completed(&self, part: &CompletedUploadPart) -> std::io::Result<()>;
 }
 
 /// Optional state for resuming and recording a multipart upload.
@@ -480,7 +481,8 @@ impl Client {
     /// One pass computes part checksums and the final object checksum while
     /// reading the payload. The total size does not need to be known first.
     ///
-    /// A session that fails partway is aborted rather than left open.
+    /// Errors leave the session open so the caller can resume or explicitly
+    /// abort it. Session expiry reclaims uploads the caller abandons.
     async fn stage_via_multipart(
         &self,
         namespace_id: &NamespaceId,
@@ -512,12 +514,16 @@ impl Client {
                     return Err(negotiated_a_different_upload_mode());
                 };
                 if let Some(journal) = continuity.journal {
-                    journal.began(&upload_id, part_size_bytes, checksum_algorithm);
+                    journal
+                        .began(&upload_id, part_size_bytes, checksum_algorithm)
+                        .map_err(|error| {
+                            ClientError::Io(format!("recording upload `{upload_id}`: {error}"))
+                        })?;
                 }
                 (upload_id, part_size_bytes, checksum_algorithm)
             }
         };
-        let uploaded = match self
+        let uploaded = self
             .upload_every_part(
                 namespace_id,
                 &upload_id,
@@ -526,15 +532,7 @@ impl Client {
                 checksum_algorithm,
                 continuity,
             )
-            .await
-        {
-            Ok(uploaded) => uploaded,
-            Err(error) => {
-                // Abort best-effort and preserve the original upload error.
-                let _ = self.abort_upload(namespace_id, &upload_id).await;
-                return Err(error);
-            }
-        };
+            .await?;
         if uploaded.parts.is_empty() {
             // Providers cannot assemble zero parts, so use the proxied empty
             // upload path instead.
@@ -613,7 +611,9 @@ impl Client {
                 let uploaded = self.upload_wave(namespace_id, upload_id, wave).await?;
                 if let Some(journal) = continuity.journal {
                     for part in &uploaded {
-                        journal.part_completed(part);
+                        journal.part_completed(part).map_err(|error| {
+                            ClientError::Io(format!("recording upload `{upload_id}`: {error}"))
+                        })?;
                     }
                 }
                 parts.extend(uploaded);
