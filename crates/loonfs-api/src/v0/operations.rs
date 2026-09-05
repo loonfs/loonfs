@@ -18,14 +18,17 @@ pub struct ApiError {
     pub code: String,
     /// The capability feature key for a `not_supported` error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub feature: Option<String>,
     /// Human-readable error message.
     pub message: String,
     /// The invalid JSON Pointer, parameter name, CLI flag, or CLI argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub param: Option<String>,
     /// The request correlation ID also sent in the `x-request-id` response header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub request_id: Option<String>,
     /// The optional machine-readable context for the error code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,9 +50,11 @@ pub struct ErrorDetails {
     pub committed_seq: Option<ChangeSeq>,
     /// The fingerprint of the mutation that landed under `commit_id`, present with `committed_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub committed_fingerprint: Option<String>,
     /// The index of the failed operation in the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub operation_index: Option<u32>,
     /// Epoch the failing writer session held when it was displaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,9 +70,11 @@ pub struct ErrorDetails {
     pub active_writer: Option<WriterId>,
     /// The Unix-millisecond time when the current writer acquired its epoch, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_acquired_at_ms: Option<u64>,
     /// Maximum writer sessions admitted by the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_writer_sessions: Option<usize>,
     /// Inode the failed precondition or operation targeted.
     #[serde(
@@ -75,6 +82,7 @@ pub struct ErrorDetails {
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
     )]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub inode_id: Option<InodeId>,
     /// The request expected the path to contain this inode.
     #[serde(
@@ -82,6 +90,7 @@ pub struct ErrorDetails {
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
     )]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_inode_id: Option<InodeId>,
     /// The path actually contained this inode.
     #[serde(
@@ -89,6 +98,7 @@ pub struct ErrorDetails {
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
     )]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_inode_id: Option<InodeId>,
     /// Revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,6 +230,7 @@ pub struct DestinationGuard {
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
     )]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_inode_id: Option<InodeId>,
     /// With `replace` behavior and an inode guard, the required content revision.
     #[serde(
@@ -371,6 +382,7 @@ pub enum FilesystemOperation {
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
         )]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
         /// With `replace` behavior and an inode guard, the request requires this content revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -419,6 +431,7 @@ pub enum FilesystemOperation {
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
         )]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
     },
     /// Delete an inode if its current binding matches.
@@ -520,6 +533,7 @@ pub enum FilesystemOperation {
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
         )]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
         /// The attribute revision that must still be current before the update.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -624,6 +638,7 @@ pub struct ListFileRevisionsResponse {
     pub revisions: Vec<FileRevision>,
     /// Opaque cursor for the next page, if more revisions are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
@@ -708,6 +723,7 @@ pub struct Checkpoint {
     pub created_at_ms: u64,
     /// The automatic release time in Unix milliseconds, or `None` until an explicit release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expires_at_ms: Option<u64>,
     /// Sequence covered by the checkpoint's pinned basis.
     pub checkpoint_seq: ChangeSeq,
@@ -764,6 +780,7 @@ pub struct ListCheckpointsResponse {
     pub checkpoints: Vec<Checkpoint>,
     /// Opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
@@ -777,6 +794,7 @@ pub struct ListSnapshotsResponse {
     pub snapshots: Vec<SnapshotSummary>,
     /// Opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
@@ -957,10 +975,12 @@ pub struct GcResponse {
     pub budget_exhausted: bool,
     /// The opaque resume token for remaining candidates in the same namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
     /// The earliest known reclamation time for an upload session inspected by this
     /// pass, in Unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,
 }
 
@@ -1288,6 +1308,7 @@ pub struct StoreProbeCheckResult {
     pub outcome: StoreProbeCheckOutcome,
     /// The expected and actual behavior for a failed check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
 }
 

@@ -28,7 +28,15 @@ use loonfs_api::{
 
 /// Builds the static OpenAPI document for the v0 HTTP API.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
-    <LoonfsOpenApi as utoipa::OpenApi>::openapi()
+    let mut document = <LoonfsOpenApi as utoipa::OpenApi>::openapi();
+    loonfs_api::v0::openapi::register(
+        &mut document
+            .components
+            .as_mut()
+            .expect("HTTP components")
+            .schemas,
+    );
+    document
 }
 
 #[derive(utoipa::OpenApi)]
