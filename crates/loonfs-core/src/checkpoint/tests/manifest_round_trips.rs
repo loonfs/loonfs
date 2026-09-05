@@ -212,6 +212,29 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .await
         .expect("bootstrap");
 
+    let genesis = super::super::load::load_basis_metadata_segments(
+        &store,
+        None,
+        &crate::namespace::basis::MetadataBasis::Genesis,
+        context.now_ms,
+    )
+    .await
+    .expect("load genesis without a manifest");
+    assert!(genesis.segments.manifest.is_none());
+    let head = load_head_object(&store, &namespace_id)
+        .await
+        .expect("head")
+        .state;
+    assert_eq!(genesis.replay_head(&head), head);
+    for family in CHECKPOINT_ROW_FAMILIES {
+        assert!(genesis
+            .segments
+            .scan_prefix(family, "")
+            .await
+            .expect("empty scan")
+            .is_empty());
+    }
+
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -230,6 +253,18 @@ async fn manifest_round_trip_supports_empty_namespace() {
     assert!(CheckpointId::parse(record.checkpoint_id.as_str()).is_ok());
     assert_eq!(record.manifest.manifest_head_seq, ChangeSeq(0));
     assert_eq!(record.manifest.manifest_no, ManifestNo(1));
+    let published =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(1))
+            .await
+            .expect("first manifest is valid");
+    assert_eq!(published.manifest.payload.next_run_no, RunNo(1));
+    assert_eq!(published.manifest.payload.runs.len(), 1);
+    assert_eq!(published.manifest.payload.runs[0].run_no, RunNo(0));
+    assert_eq!(published.manifest.payload.runs[0].tier, RunTier::Base);
+    assert!(metadata_states_equivalent(
+        &published.metadata_state,
+        &genesis.base_state
+    ));
 }
 
 #[tokio::test]

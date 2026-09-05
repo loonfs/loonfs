@@ -198,10 +198,8 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
 #[cfg(test)]
 mod tests {
     use super::super::cache::MetadataSegmentBlockKind;
-    use super::super::load::genesis_basis_manifest;
     use super::*;
     use loonfs_api::wire::sst_blocks::{decode_filter_block, SegmentBlocksBuilder};
-    use loonfs_api::NamespaceId;
 
     fn key(kind: MetadataSegmentBlockKind, offset: u64) -> MetadataSegmentCacheKey {
         MetadataSegmentCacheKey {
@@ -238,12 +236,12 @@ mod tests {
     }
 
     fn manifest_block() -> DecodedMetadataSegmentBlock {
-        let namespace_id = NamespaceId::parse("memo").expect("namespace id");
+        let manifest = loonfs_api::wire::manifest::decode_namespace_manifest_json(include_bytes!(
+            "../../../loonfs-api/tests/golden/namespace_manifest.v4.json"
+        ))
+        .expect("valid manifest fixture");
         DecodedMetadataSegmentBlock::Manifest {
-            manifest: (
-                Arc::new(genesis_basis_manifest(&namespace_id)),
-                Arc::new(Vec::new()),
-            ),
+            manifest: (Arc::new(manifest), Arc::new(Vec::new())),
             decoded_bytes: 1,
         }
     }

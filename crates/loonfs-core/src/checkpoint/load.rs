@@ -15,14 +15,11 @@ use super::scan::VerifiedMetadataSegments;
 use super::validate::{validate_manifest, validate_namespace_manifest};
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
-use crate::namespace::basis::{genesis_next_inode_id, MetadataBasis, MetadataBasisIdentity};
+use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
-use loonfs_api::wire::control::{genesis_commit_id, HeadState, ManifestRef};
-use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestKind,
-    NamespaceManifestPayload, NAMESPACE_MANIFEST_FORMAT_VERSION,
-};
-use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, RunNo, WriterEpoch};
+use loonfs_api::wire::control::{HeadState, ManifestRef};
+use loonfs_api::wire::manifest::{decode_namespace_manifest_json, NamespaceManifestEnvelope};
+use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -96,36 +93,6 @@ pub(crate) fn ensure_manifest_reference_matches(
     )))
 }
 
-/// The genesis basis: one root-inode row and no metadata files.
-///
-/// A created namespace publishes no manifest, so reads before its first
-/// flush replay the WAL over this synthesized state. The object id is a
-/// sentinel that no generator produces and that nothing ever writes; it
-/// exists because the manifest payload shape requires one.
-const GENESIS_MANIFEST_OBJECT_ID: &str = "man_00000000000000000000-0000000000000000";
-
-pub(super) fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceManifestEnvelope {
-    NamespaceManifestEnvelope {
-        kind: NamespaceManifestKind::NamespaceManifest,
-        format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
-        payload_checksum: String::new(),
-        payload: NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_no: ManifestNo(0),
-            manifest_object_id: ManifestObjectId::parse(GENESIS_MANIFEST_OBJECT_ID)
-                .expect("genesis manifest object id is valid"),
-            head_seq: ChangeSeq(0),
-            head_commit_id: genesis_commit_id(),
-            base_seq: ChangeSeq(0),
-            writer_epoch: WriterEpoch(0),
-            next_inode_id: genesis_next_inode_id(),
-            next_run_no: RunNo(0),
-            retention_floor_seq: ChangeSeq(0),
-            runs: Vec::new(),
-        },
-    }
-}
-
 /// A verified basis with its identity, segments, and in-memory base rows.
 pub(crate) struct LoadedMetadataBasis<'a, S: ObjectStore + ?Sized> {
     pub(crate) identity: MetadataBasisIdentity,
@@ -133,6 +100,27 @@ pub(crate) struct LoadedMetadataBasis<'a, S: ObjectStore + ?Sized> {
     /// Rows the basis contributes outside any segment: the genesis root inode,
     /// and nothing at all once a manifest exists.
     pub(crate) base_state: MetadataState,
+}
+
+impl<S: ObjectStore + ?Sized> LoadedMetadataBasis<'_, S> {
+    /// Reconstructs the head from which this basis replays its WAL tail.
+    pub(crate) fn replay_head(&self, current_head: &HeadState) -> HeadState {
+        match self.identity.basis() {
+            MetadataBasis::Genesis => {
+                let mut head = HeadState::initial(
+                    current_head.namespace_id.clone(),
+                    current_head.content_store_id.clone(),
+                    current_head.created_at_ms,
+                );
+                head.writer = current_head.writer.clone();
+                head.status = current_head.status;
+                head
+            }
+            MetadataBasis::Manifest(_) => {
+                head_from_manifest(current_head, self.segments.manifest())
+            }
+        }
+    }
 }
 
 /// Loads the segments referenced by a resolved basis.
@@ -145,19 +133,13 @@ pub(crate) struct LoadedMetadataBasis<'a, S: ObjectStore + ?Sized> {
 pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
-    namespace_id: &NamespaceId,
     basis: &MetadataBasis,
     genesis_created_at_ms: u64,
 ) -> crate::error::Result<LoadedMetadataBasis<'a, S>> {
     let Some(manifest) = basis.manifest() else {
-        let segments =
-            VerifiedMetadataSegments::synthesized(store, genesis_basis_manifest(namespace_id));
         return Ok(LoadedMetadataBasis {
-            identity: MetadataBasisIdentity::from_verified_basis(
-                basis.clone(),
-                segments.manifest().payload.head_seq,
-            ),
-            segments,
+            identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), ChangeSeq(0)),
+            segments: VerifiedMetadataSegments::empty(store),
             base_state: bootstrap_metadata_state(genesis_created_at_ms),
         });
     };

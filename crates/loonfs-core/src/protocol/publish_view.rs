@@ -3,9 +3,7 @@
 //! publishers.
 
 use crate::checkpoint::VerifiedMetadataSegments;
-use crate::checkpoint::{
-    head_from_manifest, load_basis_metadata_segments, LoadedMetadataBasis, MetadataSegmentCache,
-};
+use crate::checkpoint::{load_basis_metadata_segments, LoadedMetadataBasis, MetadataSegmentCache};
 use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result, StoreFailureClass};
@@ -179,14 +177,9 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     }
     ensure_writer_not_fenced(&head, &acquired_writer)?;
     let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
-    let loaded_basis = load_basis_metadata_segments(
-        store,
-        segment_cache,
-        namespace_id,
-        &loaded.basis,
-        head.created_at_ms,
-    )
-    .await?;
+    let loaded_basis =
+        load_basis_metadata_segments(store, segment_cache, &loaded.basis, head.created_at_ms)
+            .await?;
     let key = PublishProjectionKey {
         namespace_id: namespace_id.clone(),
         head: HeadAnchor {
@@ -228,7 +221,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     key: PublishProjectionKey,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<PublishTailProjection> {
-    let manifest_head = head_from_manifest(head, loaded_basis.segments.manifest());
+    let manifest_head = loaded_basis.replay_head(head);
     let wal_chain = load_wal_chain(
         store,
         WalChainLoadRequest {

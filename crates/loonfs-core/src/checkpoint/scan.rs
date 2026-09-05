@@ -57,22 +57,14 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         self.store
     }
 
-    /// Wraps a manifest that was synthesized rather than loaded: the
-    /// genesis basis of a namespace that has published none. It names no
-    /// metadata files, so no scan it backs ever reaches the store, and its
-    /// object key is never read or written.
-    pub(crate) fn synthesized(store: &'a S, manifest: NamespaceManifestEnvelope) -> Self {
-        debug_assert!(
-            manifest.payload.runs.is_empty(),
-            "a synthesized manifest must name no durable metadata files"
-        );
-        let scan_runs = Arc::new(Vec::new());
+    /// Genesis has no manifest and no durable metadata rows to scan.
+    pub(crate) fn empty(store: &'a S) -> Self {
         Self {
             store,
             segment_cache: None,
             manifest_object_key: String::new(),
-            manifest: Some(Arc::new(manifest)),
-            scan_runs,
+            manifest: None,
+            scan_runs: Arc::new(Vec::new()),
             block_memo: SessionBlockMemo::default(),
         }
     }

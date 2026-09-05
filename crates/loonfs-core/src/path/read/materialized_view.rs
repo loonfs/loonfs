@@ -4,8 +4,8 @@
 use super::current_files::resolve_visible_inode;
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
 use crate::checkpoint::{
-    head_from_manifest, load_basis_metadata_segments, MetadataSegmentCache,
-    VerifiedMetadataSegments, WalTailProjectionCache, WalTailProjectionCacheKey,
+    load_basis_metadata_segments, MetadataSegmentCache, VerifiedMetadataSegments,
+    WalTailProjectionCache, WalTailProjectionCacheKey,
 };
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError, Result};
@@ -186,13 +186,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let loaded_basis = load_basis_metadata_segments(
             store,
             load_context.segment_cache,
-            namespace_id,
             basis,
             head.created_at_ms,
         )
         .await?;
+        let manifest_head = loaded_basis.replay_head(&head);
         let segments = loaded_basis.segments;
-        let manifest_head = head_from_manifest(&head, segments.manifest());
         let anchor = ReadAnchor {
             head_seq: head.seq,
             manifest_no,
