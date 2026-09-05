@@ -2,7 +2,7 @@
 //! and the bounded, resumable sweep.
 
 use super::budget::PassBudget;
-use super::compaction_staging::{CompactionLeases, GroupLeaseSweep};
+use super::compaction_staging::CompactionLeases;
 use super::config::{GcConfig, GcPolicy};
 use super::cursor::{cursor_after, CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
@@ -109,8 +109,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     };
 
     // A pass exists only after root collection succeeds. From here on it is
-    // the one owner of every mutable sweep concern, including cleanup owed by
-    // an early budget stop or error.
+    // the one owner of every mutable sweep concern, including the budget and cursor.
     let upload_sweep = UploadSweepContext::new(
         store,
         namespace_id,
@@ -139,9 +138,8 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
 /// One initialized garbage-collection pass.
 ///
 /// These fields share a lifecycle rather than merely sharing a call site:
-/// candidate decisions mutate the verifier, reference memo, lease claim,
-/// budget, cursor, and report together, and [`Self::run`] settles all of them
-/// exactly once.
+/// candidate decisions mutate the verifier, reference memo, lease observations,
+/// budget, cursor, and report together.
 struct GcPass<'a, S: ?Sized> {
     store: &'a S,
     namespace_id: &'a NamespaceId,
@@ -170,19 +168,16 @@ enum PassEnd {
 pub(super) const COMPACTION_LEASE_STAGE_UNITS: u64 = MetadataFamilyGroup::ALL.len() as u64;
 
 impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
-    /// Runs and settles the pass. Lease cleanup deliberately happens before
-    /// the walk result is propagated, so no error or budget return can bypass
-    /// a claimed compaction lease.
+    /// Runs the pass. Group slots stay in place and are replaced by CAS, so a
+    /// paused collector can never delete a newer job's lease.
     async fn run(mut self) -> Result<GcResponse> {
-        let walked = self.walk_candidates().await;
-        let leases_finished = self.leases.finish(self.store).await;
-        leases_finished?;
-        self.finish_report(walked?)
+        let end = self.walk_candidates().await?;
+        self.finish_report(end)
     }
 
     async fn walk_candidates(&mut self) -> Result<PassEnd> {
         // The compaction lease stage reads one lease per family group and
-        // settles them after the walk. Every pass pays for those reads here,
+        // keeps terminal group slots for the next CAS. Every pass pays for those reads here,
         // whether or not it reaches the stage, so the budget bounds the pass
         // and a pass that cannot cover the stage decides nothing.
         if self.budget.remaining() < COMPACTION_LEASE_STAGE_UNITS {
@@ -228,11 +223,6 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
                 // retains its session instead of pinning the cursor forever.
                 self.budget.charge();
                 self.position = Some(cursor_after(self.namespace_id, family, key));
-            }
-            if family == CandidateFamily::CompactionStaging {
-                self.leases.staging_finished();
-                self.leases.finish(self.store).await?;
-                self.sweep_compaction_leases().await?;
             }
         }
         Ok(PassEnd::Complete)
@@ -330,6 +320,9 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
     }
 
     async fn process_compaction_staging(&mut self, key: &str) -> Result<()> {
+        if key.ends_with("/protection.json") {
+            return self.process_compaction_output_protection(key).await;
+        }
         if self.sweep.degraded {
             self.report.retain(RetainedReason::DegradedRoots);
             return Ok(());
@@ -344,13 +337,13 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
             .owner_of(self.store, self.namespace_id, key, self.mutation.now_ms)
             .await?
         {
-            Some(CompactionPrefixOwner::LiveJob) => {
+            Some(CompactionPrefixOwner::Protected) => {
                 self.report.retain(RetainedReason::WithinGraceWindow);
             }
             None => {
                 self.report.retain(RetainedReason::UnrecognizedKey);
             }
-            Some(CompactionPrefixOwner::ThisCollector | CompactionPrefixOwner::NoOne) => {
+            Some(CompactionPrefixOwner::Fenced | CompactionPrefixOwner::Unclaimed) => {
                 if key.ends_with(".sst.zst")
                     && self
                         .sweep_aged(key, METADATA_COMPACTION_STAGING_GRACE_MS)
@@ -363,29 +356,37 @@ impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
         Ok(())
     }
 
-    async fn sweep_compaction_leases(&mut self) -> Result<()> {
-        for group in MetadataFamilyGroup::ALL {
-            if self.sweep.degraded {
-                if self.leases.contains_group(group) {
-                    self.report.retain(RetainedReason::DegradedRoots);
-                }
-                continue;
-            }
-            match self
-                .leases
-                .sweep_group_lease(self.store, self.namespace_id, group, self.mutation.now_ms)
+    /// Output protection stays readable until no output remains. In particular,
+    /// a newer collector must not remove the protection an older one still needs.
+    async fn process_compaction_output_protection(&mut self, key: &str) -> Result<()> {
+        use loonfs_objectstore::layout::parse_object_key;
+        let parsed = parse_object_key(key).expect("recognized output protection");
+        let job_id = loonfs_api::MetadataCompactionId::parse(parsed.identifier().expect("job id"))
+            .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
+        let Some(loaded) =
+            crate::checkpoint::load_output_protection(self.store, self.namespace_id, &job_id)
                 .await?
-            {
-                Some(GroupLeaseSweep::Delete { object_key }) => {
-                    self.delete_key(&object_key).await?
-                }
-                Some(GroupLeaseSweep::Retain) => {
-                    self.report.retain(RetainedReason::WithinGraceWindow);
-                }
-                None => {}
-            }
+        else {
+            return Ok(());
+        };
+        if self.mutation.now_ms <= loaded.state.expires_at_ms {
+            self.report.retain(RetainedReason::WithinGraceWindow);
+            return Ok(());
         }
-        Ok(())
+        let prefix = format!(
+            "{}segments/",
+            key.strip_suffix("protection.json")
+                .expect("protection suffix")
+        );
+        let mut outputs = self.store.list_prefix_from_stream(&prefix, None);
+        match outputs.next().await {
+            Some(Ok(_)) => {
+                self.report.retain(RetainedReason::Referenced);
+                Ok(())
+            }
+            Some(Err(error)) => Err(CoreError::store(&prefix, &error)),
+            None => self.delete_key(key).await,
+        }
     }
 
     async fn process_missing_basis_checkpoint(&mut self, key: &str) -> Result<()> {

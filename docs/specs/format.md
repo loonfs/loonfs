@@ -93,7 +93,8 @@ The required durable object families and standard key patterns are:
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user, fork target, or snapshot). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
 | **Compaction staging** | Immutable | Holds segments written by a streaming compaction before publication. The descriptor stores the job id used to derive this key. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
-| **Compaction leases** | Mutable lifecycle | Record ownership of one family group's active compaction output. A job creates or takes over and refreshes an `active` lease. Garbage collection may change an expired lease to terminal `reaping` before reclaiming the named job's output. | `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json` |
+| **Compaction leases** | Mutable group slot | An `active` lease owns a running job's output. `completed` and `reaping` jobs release the group. Slots are replaced by CAS and never deleted. | `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json` |
+| **Compaction output protection** | Mutable deadline | Before each publication attempt, a job records its lease deadline beside the sealed output. This record remains until the output prefix is empty. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/protection.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
@@ -338,7 +339,7 @@ practical.
 
 Six control-object kinds are registered: `wal_head`, `wal_floor`,
 `metadata_root`, `checkpoint_record`, `upload_session`, and
-`compaction_lease`. A control-object envelope carrying any other kind string
+`compaction_lease`, and `compaction_output_protection`. A control-object envelope carrying any other kind string
 is rejected, not skipped.
 
 The WAL floor and the metadata root are the only control objects that carry
@@ -1886,7 +1887,8 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
-| Compaction lease | `compaction_lease` | JSON, uncompressed | 2 |
+| Compaction lease | `compaction_lease` | JSON, uncompressed | 3 |
+| Compaction output protection | `compaction_output_protection` | JSON, uncompressed | 1 |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -2294,7 +2296,7 @@ because that makes "the newest at the floor" arbitrary and the drop unsafe.
 
 A rebuild that cannot fit within one bounded maintenance pass runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
 
-The separate prefix prevents GC from treating unfinished output as abandoned metadata. Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json`, and an `active` unexpired or `reaping` lease excludes every other job for that group. A job acquires a missing lease with create-if-absent before its first output object, or takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and expiry fields. Garbage collection changes an expired `active` lease to terminal `reaping` with compare-and-swap before reclaiming output belonging to the job id the lease names. A group lease never protects objects written by another job id. Collection passes are shorter than `METADATA_COMPACTION_LEASE_EXPIRY_MS`, so a pass does not mistake a lease that it observed as live for one that expired during the pass. A published manifest references the segments in place, so publication does not move them. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
+Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json`. An unexpired `active` lease excludes another job for that group. An expired, `completed`, or `reaping` slot can be replaced with one compare-and-swap; the old job's refresh then fails. Before each publication attempt, the job confirms its current lease deadline at `metadata/compactions/{job_id}/protection.json`. No output is written after this record is created. After the final publication attempt, the group slot becomes `completed`. The protection record remains until the job's output prefix is empty. An older collector therefore retains its protection even after a newer job takes over the group. A published manifest references the segments in place. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
 
 The rules a rebuild applies are the same however it runs them. A bounded
 merge holds every row of its window and decides them together. A streaming
@@ -2542,7 +2544,7 @@ publishing CAS) — under these rules:
    while it runs and at the top of every finalization attempt. Creation and
    every refresh store the job's current time plus
    `METADATA_COMPACTION_LEASE_EXPIRY_MS` in `expires_at_ms`. An `active`
-   unexpired or `reaping` lease excludes every other job for the group.
+   unexpired lease excludes every other job for the group.
 
    The lease is a fence, not a timestamp. An expired lease alone proves
    nothing — the job may be resuming from a long stall — so a pass claims one
@@ -2556,16 +2558,29 @@ publishing CAS) — under these rules:
                              pass's to reclaim
    ```
 
-   `reaping` is terminal. Nothing returns a lease to `active`, so a job that
-   lost ownership never regains it, and a `reaping` lease a later pass finds
-   means an unfinished reap to carry on with.
+   `reaping` fences that job permanently. The group slot can be replaced by
+   a new job with a new identity; a replaced job never regains ownership.
 
-   A published job stops refreshing and leaves its final lease in place; it
-   never deletes it. Deleting it would open the hole the lease exists to
-   close: a pass that collected its live set before the publication would find
-   output objects far older than any grace window and no lease saying who
-   owns them. The fresh lease covers that pass, a later pass reads a root that
-   already references the objects, and that pass removes the expired lease.
+   Before each root publication attempt, after refreshing the group lease,
+   the job confirms an output-protection record at
+   `metadata/compactions/{job_id}/protection.json`. It contains `namespace_id`,
+   `job_id`, and `expires_at_ms`, and its deadline only advances by CAS. No
+   output writes follow the first protection record. Confirming protection
+   before the root CAS also covers a crash immediately after publication.
+
+   After the final publication attempt, the job changes its group slot to
+   `completed` by CAS, immediately admitting the next job. A failed completion
+   write leaves the group held until expiry; a lost CAS cannot change a newer
+   job's claim. Output protection is already independent of that slot.
+
+   GC checks output protection before the group slot. A deadline at or after
+   the pass's fixed clock retains the output. An expired deadline still
+   requires the normal group-lease ownership check: a publisher may have
+   refreshed its group lease and be about to extend output protection.
+   GC removes protection only after its deadline and after the output prefix
+   is empty. Thus a newer collector cannot erase the protection needed by
+   one paused before publication. Removing the record may take one additional
+   pass after the last output is removed.
 
    A pass reads the seven group lease keys once and decides one staged object
    as follows. An object the manifest references is live, like every other
@@ -2591,16 +2606,13 @@ publishing CAS) — under these rules:
    at the top of an attempt cannot have its prefix claimed before that
    attempt's root compare-and-swap.
 
-   Deletion processes a claimed job's staged prefix before its group lease,
-   for the same reason deletion runs data before records everywhere else: a
-   pass that stops in between leaves a `reaping` lease saying the reap is
-   unfinished, rather than nothing at all. A pass also claims and deletes an
-   expired `active` lease after confirming its named job has no staged object
-   left.
+   Group slots are never deleted by GC. They stay available for replacement
+   by CAS, which prevents a paused collector from deleting a newer job's
+   lease. This retains at most one small slot per family group.
 
    The lease is a mutable control object and decodes strictly like every
-   other. A lease that does not decode, or whose namespace or group disagrees
-   with its key, fails the pass and is reported: nothing else reads the object,
+   other. A lease that does not decode, or whose namespace, group, job identity, or terminal status disagrees
+   with its location, fails the pass and is reported: nothing else reads the object,
    so believing a corrupt one would keep its named job's output alive forever
    and nothing would ever say why. Every other rule — the reference anchor,
    delete-time re-verification, degraded roots — applies here exactly as it

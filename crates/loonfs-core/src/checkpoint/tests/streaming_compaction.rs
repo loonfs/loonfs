@@ -1034,9 +1034,9 @@ async fn held_group_leases_are_skipped_and_an_expired_lease_is_available() {
     else {
         panic!("expected another group to merge, got {:?}", reaping.outcome);
     };
-    assert_ne!(
+    assert_eq!(
         reaping_group, group,
-        "the reaping lease excludes its family group"
+        "a fenced job does not hold its family group"
     );
 
     write_active_lease(&expired_store, &namespace_id, &spec, 0).await;
@@ -2265,7 +2265,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
 // -------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_when_it_publishes() {
+async fn a_job_keeps_published_output_under_its_own_prefix() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2305,7 +2305,11 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
         "every object a job writes belongs to that job's prefix: {staged:?}"
     );
     assert!(
-        !staged.is_empty() && staged.iter().all(|key| referenced.contains(key)),
+        !staged.is_empty()
+            && staged
+                .iter()
+                .filter(|key| key.ends_with(".sst.zst"))
+                .all(|key| referenced.contains(key)),
         "the manifest must name every segment the job published"
     );
     assert!(
@@ -2314,8 +2318,7 @@ async fn a_job_claims_its_prefix_while_it_runs_and_leaves_the_claim_standing_whe
             .await
             .expect("head the group lease")
             .is_some(),
-        "a published job leaves its final lease standing for the pass that has not seen the new \
-         root yet"
+        "a completed group slot remains available for the next job's CAS"
     );
 }
 
@@ -2432,7 +2435,7 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
     .expect("claim the expired prefix");
     assert_eq!(
         owner,
-        CompactionPrefixOwner::ThisCollector,
+        CompactionPrefixOwner::Fenced,
         "an expired lease is claimed, and only the winner may reap the prefix"
     );
 
@@ -2564,7 +2567,7 @@ async fn exactly_one_of_a_refresh_and_a_reaping_claim_wins() {
     );
     assert_eq!(
         claimed.expect("claim the prefix"),
-        CompactionPrefixOwner::LiveJob,
+        CompactionPrefixOwner::Protected,
         "and the claim behind it is refused, so exactly one of the two won"
     );
 
@@ -2580,7 +2583,7 @@ async fn exactly_one_of_a_refresh_and_a_reaping_claim_wins() {
         )
         .await
         .expect("claim the prefix"),
-        CompactionPrefixOwner::ThisCollector
+        CompactionPrefixOwner::Fenced
     );
     assert_eq!(
         lease.refresh(&store).await.expect("refresh the lease"),
@@ -3901,4 +3904,109 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
     assert!(untouched.is_subset(&referenced));
     let after = current_metadata_state(&store, &namespace).await;
     assert!(metadata_states_equivalent(&before, &after));
+}
+
+#[tokio::test]
+async fn completed_output_protection_does_not_hold_the_group() {
+    use super::super::compaction_lease::{load_output_protection, LeaseAcquire};
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let first =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let second =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let timer = StdMonotonicTimer::default();
+    let mut lease = test_lease(&store, &namespace_id, &first, &timer).await;
+    let before = load_group_lease(&store, &namespace_id, first.group())
+        .await
+        .expect("load group")
+        .expect("held group");
+    lease
+        .protect_output(&store)
+        .await
+        .expect("protect sealed output");
+    lease.complete(&store).await.expect("complete job");
+    let protected = load_output_protection(&store, &namespace_id, first.job_id())
+        .await
+        .expect("load protection")
+        .expect("protection exists");
+    assert_eq!(protected.state.expires_at_ms, before.state.expires_at_ms);
+    let acquired = CompactionLease::acquire(
+        &store,
+        &namespace_id,
+        &second,
+        &test_context().writer_id,
+        test_context().now_ms,
+        &timer,
+    )
+    .await
+    .expect("acquire next job");
+    assert!(
+        matches!(acquired, LeaseAcquire::Acquired(_)),
+        "completion must not wait for expiry"
+    );
+    assert_eq!(
+        lease.refresh(&store).await.expect("old lease is fenced"),
+        LeaseHold::Fenced
+    );
+    assert_eq!(
+        load_output_protection(&store, &namespace_id, first.job_id())
+            .await
+            .expect("old output protection")
+            .expect("still present")
+            .state,
+        protected.state
+    );
+}
+
+#[tokio::test]
+async fn output_protection_is_durable_before_the_root_cas() {
+    use super::super::compaction_lease::load_output_protection;
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let gated = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(loonfs_objectstore::keys::metadata_root(&namespace_id)),
+        OperationClass::CompareAndSwap,
+    );
+    gated.block_next();
+    let context = test_context();
+    let cancellation = MetadataCompactionCancellation::default();
+    let (result, ()) = tokio::join!(
+        run_metadata_compaction_job(
+            &gated,
+            &namespace_id,
+            &context,
+            &spec,
+            small_segment_policy(),
+            &cancellation
+        ),
+        async {
+            gated.wait_until_blocked().await;
+            let protection = load_output_protection(&store, &namespace_id, spec.job_id())
+                .await
+                .expect("protection read")
+                .expect("protected before publication");
+            let group = load_group_lease(&store, &namespace_id, spec.group())
+                .await
+                .expect("group read")
+                .expect("active group");
+            assert_eq!(protection.state.expires_at_ms, group.state.expires_at_ms);
+            assert_eq!(
+                group.state.status,
+                loonfs_api::wire::control::CompactionLeaseStatus::Active {}
+            );
+            gated.release();
+        }
+    );
+    assert!(matches!(
+        result.expect("publish"),
+        MetadataCompactionJobOutcome::Published { .. }
+    ));
 }

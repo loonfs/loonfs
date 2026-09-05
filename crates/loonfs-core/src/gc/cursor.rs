@@ -62,7 +62,11 @@ impl CandidateFamily {
         match self {
             Self::WalSegments => family == DurableObjectFamily::WalSegment,
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
-            Self::CompactionStaging => family == DurableObjectFamily::MetadataCompactionStaging,
+            Self::CompactionStaging => matches!(
+                family,
+                DurableObjectFamily::MetadataCompactionStaging
+                    | DurableObjectFamily::CompactionOutputProtection
+            ),
             Self::Manifests => matches!(manifest_object_id_of(key), Some(Ok(_))),
             Self::Checkpoints => family == DurableObjectFamily::CheckpointRecord,
             Self::UploadSessions => family == DurableObjectFamily::UploadSession,

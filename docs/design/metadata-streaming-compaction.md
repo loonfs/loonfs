@@ -103,7 +103,7 @@ The planner tries to execute an eligible prefix within the step's row, byte, and
 
 `MetadataCompactionPolicy::SizeTiered` is the automatic policy. `CompactImmediately` bypasses size thresholds for an explicit request, while retaining the input limit. Explicit compaction performs one window per call and may require repeated calls to drain a backlog. Small workloads consolidate promptly. For large workloads, delaying a base rewrite reduces write amplification but leaves obsolete metadata until enough newer data accumulates or an operator requests compaction.
 
-The bounded pass reports `compaction_required`; the `metadata_compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order and reads each selected group's lease by key, skipping an `active` unexpired or `reaping` lease while unrelated groups remain available. Runner shutdown cancels running jobs.
+The bounded pass reports `compaction_required`; the `metadata_compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order and reads each selected group's lease by key, skipping an `active` unexpired lease while unrelated groups remain available. Runner shutdown cancels running jobs.
 
 Runs published after the snapshot was captured are not part of the compaction input. Final publication preserves those runs.
 
@@ -159,17 +159,17 @@ Step budgets therefore price the selected logical input, and a step-contained me
 
 ## Job leases and garbage collection
 
-Each family group has one lease at `metadata/compaction_leases/{group}.json`, and its payload names the job whose output under `metadata/compactions/{job_id}/segments/` it protects. An `active` unexpired or `reaping` group lease excludes every other job for that group.
+Each family group has one lease at `metadata/compaction_leases/{group}.json`, and its payload names the job whose output under `metadata/compactions/{job_id}/segments/` it protects. An `active` unexpired group lease excludes every other job for that group.
 
 The lease records the job ID, namespace ID, writer ID, status, start time, and absolute expiry. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
 
-The job creates a missing lease with `active` status and create-if-absent semantics before writing the first output segment. It takes over an expired `active` lease with one compare-and-swap that replaces the job, writer, start, and expiry fields; a held unexpired or `reaping` lease supersedes the new job. Every refresh uses compare-and-swap with the ETag returned by the preceding lease write and stores the current time plus the 25-minute lease lifetime in `expires_at_ms`. Refreshes occur every five minutes while the job runs and at the start of every finalization attempt. Readers compare their current time directly with `expires_at_ms`; the lifetime constant is only the writer's policy.
+The job creates a missing lease with `active` status and create-if-absent semantics before writing the first output segment. It takes over an expired or terminal lease with one compare-and-swap that replaces the job, writer, start, and expiry fields; a held unexpired active lease supersedes the new job. Every refresh uses compare-and-swap with the ETag returned by the preceding lease write and stores the current time plus the 25-minute lease lifetime in `expires_at_ms`. Refreshes occur every five minutes while the job runs and at the start of every finalization attempt. Readers compare their current time directly with `expires_at_ms`; the lifetime constant is only the writer's policy.
 
 Garbage collection reads the seven group lease keys once per namespace per pass and maps each named job to its lease. A fresh active lease keeps only that job's objects regardless of age. For an expired active lease, the collector uses compare-and-swap to change the status to `reaping`. If a concurrent refresh wins, the collector retains the job's objects. If the collector wins, the job's next refresh fails, the job returns a fenced outcome without publishing, and its unreferenced objects become eligible for collection. The `reaping` status is terminal, so a later pass can continue an interrupted cleanup without repeating the ownership decision.
 
 A missing lease or a lease naming another job provides no ownership claim. An invalid lease fails the pass. Unreferenced objects in that prefix become eligible after a staging grace period derived from the lease expiry and the normal publication grace. Unrecognized keys under the compaction prefix are retained because ownership cannot be established safely.
 
-After publication, the job stops refreshing but leaves its final active lease in place. This also delays another streaming window for that group until the lease expires (currently up to 25 minutes); a large backlog can require several such windows. This protects the output from a collection pass that captured its live references before the manifest update. After the lease expires, a later pass reads the updated manifest, retains the referenced output segments, claims the lease, and deletes it after processing the named job's prefix. Failed, cancelled, abandoned, superseded, and fenced jobs leave unreferenced output that is eventually collected.
+Before each publication attempt, the job confirms its refreshed lease deadline in `metadata/compactions/{job_id}/protection.json`. This is a separate control record containing namespace, job ID, and expiry; it is created only after output writing ends and updated by CAS. Confirming it before root publication covers a crash immediately after publication. After the final attempt, the job changes its group slot to `completed`, allowing the next job immediately. GC checks the protection deadline before group ownership, and removes that record only after its deadline and after the output prefix is empty. Group slots remain in place and are only replaced by CAS, so a paused collector cannot delete a newer job's claim. A failed completion write may leave the group held until expiry.
 
 ## Finalization
 
@@ -222,4 +222,4 @@ The implementation is validated with the following tests:
 
 Durable resume may be added later if measured restart cost justifies the additional state. Resume state would be owned by the compactor and would record completed segment boundaries without changing the reader-visible namespace manifest. The job lease is not resume state and never records progress.
 
-The built-in job defaults to two concurrent compactions per process; `MetadataCompactionJob::max_concurrent` sets another limit. Each family group has its own durable lease. A completed job retains that lease until expiry to protect its published output from an older GC scan, so another window for that group may wait.
+The built-in job defaults to two concurrent compactions per process; `MetadataCompactionJob::max_concurrent` sets another limit. Each family group has its own durable lease. A completed job retains its separate output protection and immediately releases the group for another window.

@@ -1,0 +1,1 @@
+{"kind":"compaction_lease","format_version":3,"payload_checksum":"sha256:86ea3d6d5e619228124bd05e629e1315b4ee8fb5ada7ea504246a626e4fb3802","payload":{"job_id":"cmp_0123456789abcdef0123456789abcdef","namespace_id":"demo","group":"bindings","writer_id":"writer-1","status":{"kind":"completed"},"started_at_ms":1000,"expires_at_ms":1503000}}

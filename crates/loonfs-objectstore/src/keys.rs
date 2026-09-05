@@ -109,6 +109,14 @@ pub fn metadata_compaction_lease(namespace_id: &NamespaceId, group: MetadataFami
     format!("namespaces/{namespace_id}/metadata/compaction_leases/{group}.json")
 }
 
+/// Builds the publication-protection key beside one job's sealed output.
+pub fn metadata_compaction_output_protection(
+    namespace_id: &NamespaceId,
+    job_id: &MetadataCompactionId,
+) -> String {
+    format!("namespaces/{namespace_id}/metadata/compactions/{job_id}/protection.json")
+}
+
 /// Extracts the family group from a current-format compaction lease key.
 pub fn metadata_compaction_lease_group_from_key(key: &str) -> Option<MetadataFamilyGroup> {
     parse_metadata_compaction_lease_group(key)
@@ -156,7 +164,8 @@ pub fn content_blob(content_store_id: &ContentStoreId, content_id: &ContentId) -
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_prefix,
+        checkpoint_record, content_blob, metadata_compaction_lease,
+        metadata_compaction_output_protection, metadata_compaction_prefix,
         metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
         metadata_segment_object_key, upload_session, wal_floor, wal_head, wal_segment,
         wal_segment_id_from_key, wal_segment_prefix,
@@ -297,6 +306,10 @@ mod tests {
             (
                 "Compaction leases",
                 metadata_compaction_lease(&namespace_id(), MetadataFamilyGroup::Bindings),
+            ),
+            (
+                "Compaction output protection",
+                metadata_compaction_output_protection(&namespace_id(), &metadata_compaction_id()),
             ),
             (
                 "Upload sessions",

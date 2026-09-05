@@ -33,17 +33,20 @@ pub enum ControlObjectKind {
     /// Marks one streaming metadata compaction's output as owned by a job
     /// that is still running.
     CompactionLease,
+    /// Protects sealed compaction output across publication and later group owners.
+    CompactionOutputProtection,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::WalHead,
         Self::WalFloor,
         Self::MetadataRoot,
         Self::CheckpointRecord,
         Self::UploadSession,
         Self::CompactionLease,
+        Self::CompactionOutputProtection,
     ];
 
     /// Durable format version for this control object kind.
@@ -59,7 +62,8 @@ impl ControlObjectKind {
             Self::MetadataRoot => 1,
             Self::CheckpointRecord => 1,
             Self::UploadSession => 1,
-            Self::CompactionLease => 2,
+            Self::CompactionLease => 3,
+            Self::CompactionOutputProtection => 1,
         }
     }
 
@@ -72,6 +76,7 @@ impl ControlObjectKind {
             Self::CheckpointRecord => "checkpoint_record",
             Self::UploadSession => "upload_session",
             Self::CompactionLease => "compaction_lease",
+            Self::CompactionOutputProtection => "compaction_output_protection",
         }
     }
 
@@ -152,6 +157,9 @@ pub enum CompactionLeaseStatus {
     /// The braces make serde reject a stray field; a unit variant would
     /// silently accept and discard one.
     Active {},
+    /// The job has finished every output write and publication attempt. The
+    /// group is available; the output protection record retains its deadline.
+    Completed {},
     /// Garbage collection owns the prefix and the job is fenced.
     Reaping {},
 }
@@ -160,6 +168,7 @@ impl fmt::Display for CompactionLeaseStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Active {} => "active",
+            Self::Completed {} => "completed",
             Self::Reaping {} => "reaping",
         })
     }
@@ -192,6 +201,22 @@ pub struct MetadataCompactionLeaseState {
     pub started_at_ms: u64,
     /// Unix-millisecond expiry written when the job creates or refreshes the
     /// lease, and the only input to whether an `active` lease has expired.
+    pub expires_at_ms: u64,
+}
+
+/// Protects a job's sealed output from collectors predating publication.
+///
+/// The job extends this deadline before each root publication attempt. It
+/// writes no further output after creating this record. GC removes the record
+/// only after its deadline and after the output prefix is empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionOutputProtectionState {
+    /// Namespace that owns the output.
+    pub namespace_id: NamespaceId,
+    /// Job whose sealed output is protected.
+    pub job_id: MetadataCompactionId,
+    /// Last publication lease deadline; collectors use their fixed pass clock.
     pub expires_at_ms: u64,
 }
 
