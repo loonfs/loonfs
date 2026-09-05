@@ -138,7 +138,7 @@ impl Harness {
         let home_dir = temp_dir.path().join("home");
         fs::create_dir_all(&home_dir).expect("create temp home");
         Self {
-            config_path: home_dir.join(".loonfs").join("config.toml"),
+            config_path: home_dir.join(".config").join("loonfs").join("config.toml"),
             home_dir,
             temp_dir,
         }

@@ -74,10 +74,6 @@ pub(crate) fn run_config_command(
             data: CommandData::ConfigPath {
                 path: config_path.display().to_string(),
                 source: location.source,
-                preferred_path: location
-                    .preferred_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
             },
         }),
         ConfigCommand::Show => {

@@ -123,11 +123,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             committed_seq,
             commit_id,
         } => human_path_move(output.kind, from, to, *committed_seq, commit_id),
-        CommandData::ConfigPath {
-            path,
-            source,
-            preferred_path,
-        } => human_config_path(path, *source, preferred_path.as_deref()),
+        CommandData::ConfigPath { path, source } => human_config_path(path, *source),
         CommandData::ConfigShow { config } => human_config_show(config),
         CommandData::ConfigShowDegraded { error, config_toml } => {
             human_config_show_degraded(error, config_toml)
@@ -405,15 +401,12 @@ fn human_path_move(
     }
 }
 
-fn human_config_path(path: &str, source: ConfigSource, preferred_path: Option<&str>) -> String {
-    let chosen = match (source, preferred_path) {
-        (ConfigSource::Flag, _) => "from --config".to_owned(),
-        (ConfigSource::Env, _) => "from LOONFS_CONFIG".to_owned(),
-        (ConfigSource::Xdg, _) => "from XDG_CONFIG_HOME".to_owned(),
-        (ConfigSource::Legacy, Some(preferred)) => {
-            format!("legacy location; move it to {preferred} once convenient")
-        }
-        (ConfigSource::Legacy, None) => "default location".to_owned(),
+fn human_config_path(path: &str, source: ConfigSource) -> String {
+    let chosen = match source {
+        ConfigSource::Flag => "from --config",
+        ConfigSource::Env => "from LOONFS_CONFIG",
+        ConfigSource::Xdg => "from XDG_CONFIG_HOME",
+        ConfigSource::Default => "default location",
     };
     format!("{path} ({chosen})")
 }

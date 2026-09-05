@@ -39,8 +39,6 @@ pub(crate) fn absolute_env_path(name: &str) -> Option<PathBuf> {
 const CONFIG_FILE_NAME: &str = "config.toml";
 /// Directory under `$XDG_CONFIG_HOME`.
 const XDG_CONFIG_SUBDIR: &str = "loonfs";
-/// Directory under `$HOME`, where installs predating XDG support live.
-const LEGACY_CONFIG_SUBDIR: &str = ".loonfs";
 
 /// Recovery instructions appended to config-load errors.
 ///
@@ -276,7 +274,7 @@ fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError
 
 /// How [`resolve_config_location`] chose the file, so `config path` answers
 /// both "which file" and "why that one". The serialized spellings are the
-/// `--json` surface: `flag`, `env`, `xdg`, `legacy`.
+/// `--json` surface: `flag`, `env`, `xdg`, `default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ConfigSource {
@@ -286,26 +284,19 @@ pub(crate) enum ConfigSource {
     Env,
     /// `$XDG_CONFIG_HOME/loonfs/config.toml`.
     Xdg,
-    /// `~/.loonfs/config.toml`.
-    Legacy,
+    /// `$HOME/.config/loonfs/config.toml`.
+    Default,
 }
 
 /// The one config file this invocation reads and writes.
 pub(crate) struct ConfigLocation {
     pub path: PathBuf,
     pub source: ConfigSource,
-    /// Where the file belongs now. Set only while a legacy file is in use
-    /// because `XDG_CONFIG_HOME` is set and holds no config yet.
-    pub preferred_path: Option<PathBuf>,
 }
 
 impl ConfigLocation {
     fn at(path: PathBuf, source: ConfigSource) -> Self {
-        Self {
-            path,
-            source,
-            preferred_path: None,
-        }
+        Self { path, source }
     }
 }
 
@@ -325,36 +316,26 @@ pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocat
     default_config_location()
 }
 
-/// Returns the default config location.
-///
-/// An absolute `XDG_CONFIG_HOME` selects the XDG path. Otherwise the legacy
-/// `~/.loonfs/config.toml` path is used. During migration, an existing legacy
-/// file remains active until a file exists at the XDG path.
+/// Selects `$XDG_CONFIG_HOME/loonfs/config.toml` when the variable is
+/// absolute, otherwise `$HOME/.config/loonfs/config.toml`. File existence
+/// never changes which location is selected.
 fn default_config_location() -> Result<ConfigLocation, CliError> {
-    let legacy = legacy_config_path();
-    let Some(xdg_dir) = absolute_env_path("XDG_CONFIG_HOME") else {
-        let path = legacy.ok_or_else(|| {
-            CliError::invalid_config(format!(
-                "unable to determine the home directory; name the config file with \
-                 `--config <path>` or `{CONFIG_PATH_ENV}=<path>`"
-            ))
-        })?;
-        return Ok(ConfigLocation::at(path, ConfigSource::Legacy));
+    let (directory, source) = match absolute_env_path("XDG_CONFIG_HOME") {
+        Some(directory) => (directory, ConfigSource::Xdg),
+        None => {
+            let home = absolute_env_path("HOME").ok_or_else(|| {
+                CliError::invalid_config(format!(
+                    "unable to determine the home directory; name the config file with \
+                     `--config <path>` or `{CONFIG_PATH_ENV}=<path>`"
+                ))
+            })?;
+            (home.join(".config"), ConfigSource::Default)
+        }
     };
-    let xdg_path = xdg_dir.join(XDG_CONFIG_SUBDIR).join(CONFIG_FILE_NAME);
-    match legacy.filter(|path| !xdg_path.exists() && path.exists()) {
-        Some(legacy_path) => Ok(ConfigLocation {
-            path: legacy_path,
-            source: ConfigSource::Legacy,
-            preferred_path: Some(xdg_path),
-        }),
-        None => Ok(ConfigLocation::at(xdg_path, ConfigSource::Xdg)),
-    }
-}
-
-fn legacy_config_path() -> Option<PathBuf> {
-    let home = absolute_env_path("HOME")?;
-    Some(home.join(LEGACY_CONFIG_SUBDIR).join(CONFIG_FILE_NAME))
+    Ok(ConfigLocation::at(
+        directory.join(XDG_CONFIG_SUBDIR).join(CONFIG_FILE_NAME),
+        source,
+    ))
 }
 
 pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {

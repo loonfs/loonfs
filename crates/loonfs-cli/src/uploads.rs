@@ -10,8 +10,6 @@ use std::sync::Mutex;
 
 /// Directory under `$XDG_STATE_HOME`.
 const XDG_STATE_SUBDIR: &str = "loonfs";
-/// Legacy state directory under `$HOME`.
-const LEGACY_STATE_SUBDIR: &str = ".loonfs/state";
 /// Per-upload journal directory.
 const UPLOADS_SUBDIR: &str = "uploads";
 
@@ -190,14 +188,18 @@ impl MultipartUploadJournal for UploadJournal {
 }
 
 /// Where per-upload records live: `$XDG_STATE_HOME/loonfs/uploads` when that
-/// variable names an absolute directory, and `~/.loonfs/state/uploads`
+/// variable names an absolute directory, and `$HOME/.local/state/loonfs/uploads`
 /// otherwise — the same order, and the same reasoning, as the config file's.
 fn uploads_dir() -> Option<PathBuf> {
     if let Some(state_home) = absolute_env_path("XDG_STATE_HOME") {
         return Some(state_home.join(XDG_STATE_SUBDIR).join(UPLOADS_SUBDIR));
     }
     let home = absolute_env_path("HOME")?;
-    Some(home.join(LEGACY_STATE_SUBDIR).join(UPLOADS_SUBDIR))
+    Some(
+        home.join(".local/state")
+            .join(XDG_STATE_SUBDIR)
+            .join(UPLOADS_SUBDIR),
+    )
 }
 
 #[cfg(test)]

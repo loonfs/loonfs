@@ -447,7 +447,7 @@ fn config_resolution_message(location: &crate::config::ConfigLocation) -> String
     match location.source {
         ConfigSource::Flag => format!("resolved {} from --config", location.path.display()),
         ConfigSource::Env => format!("resolved {} from LOONFS_CONFIG", location.path.display()),
-        ConfigSource::Xdg | ConfigSource::Legacy => {
+        ConfigSource::Xdg | ConfigSource::Default => {
             format!("defaulted to {}", location.path.display())
         }
     }

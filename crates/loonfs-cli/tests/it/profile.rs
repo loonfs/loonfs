@@ -207,43 +207,37 @@ root = "{}"
 }
 
 #[test]
-fn config_resolution_prefers_the_flag_then_the_environment_then_xdg_then_legacy() {
+fn config_resolution_is_independent_of_file_existence() {
     let harness = Harness::new();
     harness.write_cli_config(MINIMAL_CONFIG);
-    let legacy_path = harness.config_path.display().to_string();
+    let default_path = harness.config_path.display().to_string();
 
     let xdg_home = harness.temp_dir.path().join("xdg");
     let xdg_path = xdg_home.join("loonfs").join("config.toml");
     let named_path = harness.temp_dir.path().join("named.toml");
     let flagged_path = harness.temp_dir.path().join("flagged.toml");
 
-    // Without XDG the legacy path is simply the default, with nothing to
-    // migrate to.
     let default = json_data(&harness.run(&["--json", "config", "path"]));
-    assert_eq!(default["path"], legacy_path);
-    assert_eq!(default["source"], "legacy");
-    assert!(default["preferred_path"].is_null(), "{default}");
+    assert_eq!(default["path"], default_path);
+    assert_eq!(default["source"], "default");
 
-    // XDG set but holding no config: the existing legacy file keeps
-    // working, and the answer names where it belongs.
-    let migrating = json_data(&harness.run_with_env(
-        &[("XDG_CONFIG_HOME", &xdg_home)],
-        &["--json", "config", "path"],
-    ));
-    assert_eq!(migrating["path"], legacy_path);
-    assert_eq!(migrating["source"], "legacy");
-    assert_eq!(migrating["preferred_path"], xdg_path.display().to_string());
-
-    // A config at the preferred path wins as soon as one exists there.
-    fs::create_dir_all(xdg_path.parent().expect("xdg config dir")).expect("create xdg config dir");
-    fs::write(&xdg_path, MINIMAL_CONFIG).expect("write xdg config");
-    let xdg = json_data(&harness.run_with_env(
-        &[("XDG_CONFIG_HOME", &xdg_home)],
-        &["--json", "config", "path"],
-    ));
-    assert_eq!(xdg["path"], xdg_path.display().to_string());
-    assert_eq!(xdg["source"], "xdg");
-    assert!(xdg["preferred_path"].is_null(), "{xdg}");
+    // Even an existing old file cannot override the selected XDG location.
+    let old_path = harness.home_dir.join(".loonfs").join("config.toml");
+    fs::create_dir_all(old_path.parent().expect("old config directory")).expect("directory");
+    fs::write(&old_path, MINIMAL_CONFIG).expect("old config");
+    for exists in [false, true] {
+        if exists {
+            fs::create_dir_all(xdg_path.parent().expect("xdg directory")).expect("directory");
+            fs::write(&xdg_path, MINIMAL_CONFIG).expect("xdg config");
+        }
+        let xdg = json_data(&harness.run_with_env(
+            &[("XDG_CONFIG_HOME", &xdg_home)],
+            &["--json", "config", "path"],
+        ));
+        assert_eq!(xdg["path"], xdg_path.display().to_string());
+        assert_eq!(xdg["source"], "xdg");
+        assert!(xdg.get("preferred_path").is_none());
+    }
 
     // The environment beats both defaults, by being spelled rather than by
     // the file it names existing.
@@ -301,7 +295,7 @@ fn config_path_answers_while_the_config_file_is_unreadable() {
         json_data(&path)["path"],
         harness.config_path.display().to_string()
     );
-    assert_eq!(json_data(&path)["source"], "legacy");
+    assert_eq!(json_data(&path)["source"], "default");
 
     // The human line carries both answers: the file, and why that file.
     let human = harness.run(&["config", "path"]);
