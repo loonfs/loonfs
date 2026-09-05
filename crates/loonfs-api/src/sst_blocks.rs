@@ -55,6 +55,7 @@ pub(crate) const ZSTD_LEVEL: i32 = 3;
 /// Where one stored section lives inside a segment object, and how to
 /// verify it: the CRC32C of the stored bytes and their decoded length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlockHandle {
     /// Zero-based byte offset of the section within its immutable segment object.
     pub offset: u64,
@@ -68,6 +69,7 @@ pub struct BlockHandle {
 
 /// One index entry: the last row key of a data block plus its handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SegmentIndexEntry {
     /// Greatest row key in `block`, used to binary-search candidate blocks.
     pub last_row_key: String,

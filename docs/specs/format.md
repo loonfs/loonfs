@@ -35,13 +35,12 @@ meant to send:
   request, at every level of nesting.
 - **HTTP response bodies tolerate them**, so a client keeps working against a
   server newer than itself.
-- **Immutable, never-rewritten durable families tolerate them**, at every
-  level of nesting, for the same reason: nothing rewrites them, so nothing
-  can erase a field it did not understand.
-- **Mutable control-object envelopes and payloads reject them**, because a
-  reader that tolerated an unknown field would erase it on the next
-  read-modify-write and still report a successful guarded update
-  (section 1.7).
+- **All authoritative durable envelopes and records reject them**, at every
+  level of nesting. This includes immutable manifests, WAL records, metadata
+  rows, and grep state: folding and compaction re-encode their contents into
+  successor objects, so a reader must not accept fields it cannot preserve.
+  New durable meaning requires a supported family format version; an older
+  binary refuses newer data rather than silently dropping it.
 - **`ContentRef`, `Checksum`, and `ActorRef` are closed shapes.** They reject
   unknown fields wherever they appear, in request bodies and in durable rows
   alike, because the same types decode request bodies. They evolve only by
@@ -351,17 +350,11 @@ plus `METADATA_COMPACTION_LEASE_EXPIRY_MS` when it creates or refreshes the
 lease. Readers compare their current time directly with that stored instant;
 they do not apply the writer's lifetime policy again.
 
-Mutable control-object decoders reject unknown fields in both the envelope and
-the complete nested payload. Otherwise, an older binary could tolerate a
-newer field, erase it during read-modify-write, and still report a successful
-guarded update. All six registered kinds use that strict decoder; immutable
-WAL segments, metadata segments, namespace manifests, grep segments, and grep
-manifests remain tolerant of additive fields.
-
-WAL segment pointers in immutable segments may contain unknown fields. The
-same pointers in the mutable head may not. The head uses strict decoders for
-`visible_wal_tip` and `recent_segments` so a guarded rewrite cannot discard
-unknown data.
+Every durable decoder rejects unknown fields in its envelope and complete
+nested payload. Mutable updates, WAL folding, and compaction all write
+successor state; none may silently discard a field an older binary did not
+understand. WAL pointers therefore use the same strict decoder in the head
+and in immutable segments. New fields require a supported family version.
 
 A durable object that references a namespace manifest stores this shape under `manifest`:
 
@@ -2007,9 +2000,8 @@ mismatches without fallback, and validate namespace, status, fold,
 run-allocation, and segment invariants at every boundary. A manifest
 load additionally requires the loaded envelope's `payload_checksum` to equal
 what the pointer promised, which is the same binding a metadata root holds
-over its namespace manifest. The mutable
-root-pointer decoder rejects unknown envelope and payload fields; the
-immutable manifest decoder tolerates additive fields.
+over its namespace manifest. Both root pointers and immutable manifests reject
+unknown envelope and payload fields, including nested state and descriptors.
 
 The nested `index` object holds what every phase has — the in-progress
 `reorganize` state and the `next_run_no` allocator — while each phase's own
@@ -2307,9 +2299,10 @@ moves only when an operator requests an explicit retention advance.
 
 ### 6.4 Garbage collection
 
-Delete is tombstone-first. Garbage collection is the separate process that
-eventually reclaims content or metadata that is no longer reachable and no
-longer protected by retention policy. GC and floor advancement are the only
+Delete is tombstone-first. Garbage collection reclaims unreachable metadata
+and content still owned by upload-session records under the rules below.
+There is no general sweep or purge guarantee for previously published content;
+content may remain indefinitely after file or namespace deletion. GC and floor advancement are the only
 consumers of listing, and nothing sweeps by default: a pass runs only through
 the maintenance endpoint or an explicit maintenance-step opt-in.
 

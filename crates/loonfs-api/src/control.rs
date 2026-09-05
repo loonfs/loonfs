@@ -301,10 +301,8 @@ pub struct CheckpointRecordState {
 
 /// Links one accepted WAL segment identity to its verified sequence range.
 ///
-/// Pointers in immutable WAL segments accept unknown fields. The mutable head
-/// uses a strict decoder for the same shape so a rewrite cannot discard data.
-/// Both decoders reject a pointer whose `segment_id` does not encode its
-/// `start_seq`.
+/// Every stored pointer rejects unknown fields and verifies that its
+/// `segment_id` encodes `start_seq`.
 ///
 /// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -329,6 +327,7 @@ impl<'de> Deserialize<'de> for WalSegmentPointer {
     {
         /// Stored fields before validating the segment position.
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct StoredWalSegmentPointer {
             segment_id: WalSegmentId,
             start_seq: ChangeSeq,
@@ -361,27 +360,6 @@ pub(crate) fn validate_wal_segment_start_seq(
     ))
 }
 
-/// Strict WAL pointer shape used only while decoding the mutable head.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictWalSegmentPointer {
-    segment_id: WalSegmentId,
-    start_seq: ChangeSeq,
-    end_seq: ChangeSeq,
-    payload_checksum: String,
-}
-
-impl From<StrictWalSegmentPointer> for WalSegmentPointer {
-    fn from(pointer: StrictWalSegmentPointer) -> Self {
-        Self {
-            segment_id: pointer.segment_id,
-            start_seq: pointer.start_seq,
-            end_seq: pointer.end_seq,
-            payload_checksum: pointer.payload_checksum,
-        }
-    }
-}
-
 /// Applies the shared position check after strict decoding.
 fn validated_wal_segment_pointer<E>(pointer: WalSegmentPointer) -> Result<WalSegmentPointer, E>
 where
@@ -391,33 +369,18 @@ where
     Ok(pointer)
 }
 
-/// Decodes the head's visible WAL tip without accepting unknown fields.
-fn strict_wal_segment_pointer<'de, D>(
-    deserializer: D,
-) -> Result<Option<WalSegmentPointer>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<StrictWalSegmentPointer>::deserialize(deserializer)?
-        .map(|pointer| validated_wal_segment_pointer(pointer.into()))
-        .transpose()
-}
-
 /// Decodes the head's predecessor hints without accepting unknown fields.
-fn strict_wal_segment_pointers<'de, D>(deserializer: D) -> Result<Vec<WalSegmentPointer>, D::Error>
+fn deserialize_recent_segments<'de, D>(deserializer: D) -> Result<Vec<WalSegmentPointer>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let pointers = Vec::<StrictWalSegmentPointer>::deserialize(deserializer)?;
+    let pointers = Vec::<WalSegmentPointer>::deserialize(deserializer)?;
     if pointers.len() > RECENT_SEGMENTS_LIMIT {
         return Err(serde::de::Error::custom(format_args!(
             "head `recent_segments` exceeds {RECENT_SEGMENTS_LIMIT} entries"
         )));
     }
-    pointers
-        .into_iter()
-        .map(|pointer| validated_wal_segment_pointer(pointer.into()))
-        .collect()
+    Ok(pointers)
 }
 
 /// Who most recently acquired the writer epoch, and when.
@@ -526,11 +489,7 @@ pub struct HeadState {
     /// First namespace-scoped inode identity available for allocation.
     pub next_inode_id: InodeId,
     /// Accepted tip of the visible WAL chain, or `None` before the first commit.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "strict_wal_segment_pointer"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
     /// Bounded newest-first predecessor accelerator below `visible_wal_tip`.
     /// Chain links remain the only history authority — any disagreement
@@ -538,7 +497,7 @@ pub struct HeadState {
     /// from GC.
     /// An empty list is written as `[]`. A head that omits the field fails
     /// to decode.
-    #[serde(deserialize_with = "strict_wal_segment_pointers")]
+    #[serde(deserialize_with = "deserialize_recent_segments")]
     pub recent_segments: Vec<WalSegmentPointer>,
     /// Whether the namespace is active or terminally deleted. Every head
     /// writes it, and a head that omits it fails to decode.
@@ -1118,7 +1077,7 @@ pub fn decode_control_object<T>(
 where
     T: DeserializeOwned,
 {
-    let decoded = crate::envelope::decode_strict_json_envelope(
+    let decoded = crate::envelope::decode_json_envelope(
         bytes,
         expected_kind.format_version(),
         // The kind registry reports unknown kinds distinctly from

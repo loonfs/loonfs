@@ -72,8 +72,8 @@ pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
-    head_from_manifest, load_basis_metadata_segments, load_namespace_manifest_envelope,
-    load_namespace_manifest_envelope_if_present, load_verified_manifest_segments,
+    head_from_manifest, load_basis_metadata_segments, load_manifest_segments_for_inspection,
+    load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present,
     LoadedMetadataBasis,
 };
 #[cfg(test)]

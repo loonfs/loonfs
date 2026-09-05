@@ -201,7 +201,7 @@ fn malformed_varint(error: SstBlockCodecError) -> IndexGramsCodecError {
 /// One row of a gram index segment. Kind-tagged so a later released format
 /// version can define additional row kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IndexRow {
     GramPostings {
         gram: Gram,

@@ -148,6 +148,7 @@ pub enum RunTier {
 ///
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetadataRunRef {
     /// Run identity allocated by the manifest.
     pub run_no: RunNo,
@@ -163,6 +164,7 @@ pub struct MetadataRunRef {
 ///
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetadataSegmentRef {
     /// Namespace that stores the segment. This may be a fork source.
     pub owner_namespace_id: NamespaceId,
@@ -206,7 +208,7 @@ pub struct MetadataSegmentRef {
 ///
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MetadataRow {
     /// Establishes one inode's immutable identity and kind.
     Inode(InodeRecord),
@@ -237,6 +239,7 @@ pub enum MetadataRow {
 
 /// One inode's immutable identity and creation metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InodeRecord {
     /// Namespace-scoped inode identity allocated by the publishing writer.
     pub inode_id: InodeId,
@@ -254,6 +257,7 @@ pub struct InodeRecord {
 
 /// One generation of a directory name binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirentryBindRecord {
     /// Directory in which the name was bound.
     pub parent_inode_id: InodeId,
@@ -271,6 +275,7 @@ pub struct DirentryBindRecord {
 
 /// One event that retires an exact directory-binding generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirentryUnbindRecord {
     /// Directory that held the targeted binding.
     pub parent_inode_id: InodeId,
@@ -292,6 +297,7 @@ pub struct DirentryUnbindRecord {
 
 /// One immutable content revision for a file inode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RevisionRecord {
     /// File inode whose history contains the revision.
     pub inode_id: InodeId,
@@ -313,6 +319,7 @@ pub struct RevisionRecord {
 
 /// One event that changes whether a root inode has an active subtree tombstone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubtreeTombstoneRecord {
     /// Inode whose rooted subtree the event governs.
     pub root_inode_id: InodeId,
@@ -330,6 +337,7 @@ pub struct SubtreeTombstoneRecord {
 
 /// One current-state row for a recoverable deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActiveDeletionRecord {
     /// Subtree root the deletion covers.
     pub root_inode_id: InodeId,
@@ -352,6 +360,7 @@ impl ActiveDeletionRecord {
 
 /// One durable commit idempotency receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitReceiptRecord {
     /// Caller idempotency key whose later reuse is checked against this row.
     pub commit_id: CommitId,
@@ -370,6 +379,7 @@ pub struct CommitReceiptRecord {
 
 /// One inode's complete attribute map at one revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttributesRevisionRecord {
     /// Inode whose attributes this revision states.
     pub inode_id: InodeId,
@@ -394,11 +404,10 @@ pub struct AttributesRevisionRecord {
 ///
 /// Shared by the tombstone row and the WAL delta that revokes one, so a
 /// revoke names its target in the same spelling everywhere.
-///
-/// This type appears only in immutable data, so it accepts unknown fields.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
+#[serde(deny_unknown_fields)]
 pub struct TombstoneGeneration {
     /// Commit sequence that published the event.
     pub seq: ChangeSeq,
@@ -410,9 +419,8 @@ pub struct TombstoneGeneration {
 ///
 /// Tombstones retain this binding after the corresponding unbind row may be
 /// collected. Undelete uses it to restore the original parent and name.
-///
-/// This type appears only in immutable data, so it accepts unknown fields.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeletedDirentry {
     /// Directory that held the binding.
     pub parent_inode_id: InodeId,
@@ -423,10 +431,8 @@ pub struct DeletedDirentry {
 }
 
 /// Tombstone-row event vocabulary (format spec, "Tombstones and deletion").
-///
-/// This type appears only in immutable rows, so it accepts unknown fields.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TombstoneRowAction {
     /// The subtree rooted at the row's inode is deleted.
     Set {
@@ -448,7 +454,7 @@ pub enum TombstoneRowAction {
 /// suppress restored entries. Reorganization later removes the cancelled
 /// pair.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActiveDeletionRowAction {
     /// The deletion is recoverable; these are the fields the trash entry
     /// renders, denormalized so a page needs no per-entry join.
@@ -970,6 +976,7 @@ pub mod lookup_keys {
 ///
 /// See [manifest publication](../../../docs/specs/format.md#61-manifest-publication-and-checkpoint-verification).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NamespaceManifestPayload {
     /// Namespace whose materialized state this manifest describes.
     pub namespace_id: NamespaceId,
@@ -1004,6 +1011,7 @@ pub struct NamespaceManifestPayload {
 /// [`encode_namespace_manifest_json`] and validated only by
 /// [`decode_namespace_manifest_json`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NamespaceManifestEnvelope {
     /// Durable-family discriminator checked before payload decoding.
     pub kind: NamespaceManifestKind,

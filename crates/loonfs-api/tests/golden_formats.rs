@@ -14,12 +14,9 @@
 //! - If a fixture stops decoding, the current reader can no longer read bytes
 //!   another implementation of the same format version wrote — a
 //!   compatibility break once that format is deployed.
-//! - Additive payload fields in immutable families must keep decoding
-//!   (`*_tolerates_additive_*`), at every level of nesting. Mutable control
-//!   objects reject unknown fields so an older reader cannot erase them
-//!   during a guarded rewrite. `ContentRef`, `Checksum`, and `ActorRef` are
-//!   closed shapes: they reject unknown fields everywhere, because the same
-//!   types decode HTTP request bodies.
+//! - Every durable family rejects unknown fields at every nesting level.
+//!   Compaction and WAL folding write successor records, so permissive
+//!   decoding could erase a field introduced by an unsupported writer.
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordState,
@@ -1621,32 +1618,32 @@ fn wal_decode_rejects_tampered_payload_bytes_as_checksum_mismatch() {
 }
 
 #[test]
-fn wal_decode_tolerates_additive_payload_fields() {
-    // Simulate a same-format-version writer that added a payload field: the
-    // payload bytes change (and so does their checksum), but readers that do
-    // not know the field must still decode the segment.
+fn wal_decode_rejects_unknown_payload_fields() {
+    // A valid checksum does not authorize unknown payload fields.
     let envelope = sample_wal_envelope();
     let document = wal_document_with_payload_edit(&envelope, with_future_field);
 
-    let decoded = decode_wal_segment_envelope_zstd(&document)
-        .expect("additive payload fields must remain readable");
-    assert_eq!(decoded.payload, envelope.payload);
+    let error = decode_wal_segment_envelope_zstd(&document)
+        .expect_err("unknown durable fields must be rejected");
+    assert!(matches!(error, EnvelopeCodecError::PayloadDecode(message)
+        if message.contains("unknown field") && message.contains("field_from_the_future")));
 }
 
 #[test]
-fn wal_decode_tolerates_an_additive_field_inside_the_predecessor_pointer() {
+fn wal_decode_rejects_unknown_predecessor_fields() {
     let envelope = sample_wal_envelope();
     let document = wal_document_with_payload_edit(&envelope, |payload| {
         with_future_field(cbor_entry(payload, "prev_visible_segment"));
     });
 
-    let decoded = decode_wal_segment_envelope_zstd(&document)
-        .expect("an additive field inside the predecessor pointer must remain readable");
-    assert_eq!(decoded.payload, envelope.payload);
+    let error = decode_wal_segment_envelope_zstd(&document)
+        .expect_err("unknown durable fields must be rejected");
+    assert!(matches!(error, EnvelopeCodecError::PayloadDecode(message)
+        if message.contains("unknown field") && message.contains("field_from_the_future")));
 }
 
 #[test]
-fn wal_decode_tolerates_additive_fields_inside_tombstone_deltas() {
+fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
     let envelope = wal_envelope_with_deltas(vec![
         WalCommitDelta {
             semantic_op_index: 0,
@@ -1678,9 +1675,10 @@ fn wal_decode_tolerates_additive_fields_inside_tombstone_deltas() {
         with_future_field(cbor_entry(commit_delta(payload, 1), "target"));
     });
 
-    let decoded = decode_wal_segment_envelope_zstd(&document)
-        .expect("additive fields inside a delta must remain readable");
-    assert_eq!(decoded.payload, envelope.payload);
+    let error = decode_wal_segment_envelope_zstd(&document)
+        .expect_err("unknown durable fields must be rejected");
+    assert!(matches!(error, EnvelopeCodecError::PayloadDecode(message)
+        if message.contains("unknown field") && message.contains("field_from_the_future")));
 }
 
 #[test]
@@ -1797,26 +1795,53 @@ fn namespace_manifest_v2_rejects_missing_frozen_base_delta_merges() {
 }
 
 #[test]
-fn namespace_manifest_decode_tolerates_additive_payload_fields() {
+fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
     let envelope = sample_manifest_envelope();
     let encoded = encode_namespace_manifest_json(&envelope).expect("manifest");
-    let mut document: serde_json::Value =
-        serde_json::from_slice(&encoded).expect("decode document");
-    document["payload"]["field_from_the_future"] = serde_json::Value::from(true);
-    let future_payload =
-        serde_json::to_string(&document["payload"]).expect("encode future payload");
-    document["payload_checksum"] =
-        serde_json::Value::from(sha256_digest(future_payload.as_bytes()));
-    // Rebuild the document so the embedded payload bytes are exactly the
-    // bytes the checksum was computed over.
-    let future_document = format!(
-        "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
-        document["kind"], document["format_version"], document["payload_checksum"], future_payload,
-    );
+    for path in [
+        "",
+        "/runs/0",
+        "/runs/0/segments/0",
+        "/runs/0/segments/0/index_block",
+        "/runs/0/segments/0/filter_block",
+    ] {
+        let mut document: serde_json::Value = serde_json::from_slice(&encoded).expect("document");
+        document["payload"]
+            .pointer_mut(path)
+            .expect("fixture object")["field_from_the_future"] = serde_json::Value::from(true);
+        let payload = serde_json::to_string(&document["payload"]).expect("payload");
+        let checksum = serde_json::to_string(&sha256_digest(payload.as_bytes())).expect("checksum");
+        let future_document = format!(
+            "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
+            document["kind"], document["format_version"], checksum, payload,
+        );
+        let error = decode_namespace_manifest_json(future_document.as_bytes())
+            .expect_err("unknown durable fields must be rejected");
+        assert!(
+            matches!(error, EnvelopeCodecError::PayloadDecode(message)
+            if message.contains("unknown field") && message.contains("field_from_the_future")),
+            "path {path}"
+        );
+    }
+}
 
-    let decoded = decode_namespace_manifest_json(future_document.as_bytes())
-        .expect("additive payload fields must remain readable");
-    assert_eq!(decoded.payload, envelope.payload);
+#[test]
+fn immutable_envelopes_reject_unknown_fields() {
+    let mut manifest =
+        encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
+    assert_eq!(manifest.pop(), Some(b'}'));
+    manifest.extend_from_slice(br#", "field_from_the_future": true}"#);
+    assert!(matches!(decode_namespace_manifest_json(&manifest),
+        Err(EnvelopeCodecError::EnvelopeDecode(message)) if message.contains("field_from_the_future")));
+
+    let encoded = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
+    let mut document: ciborium::Value =
+        ciborium::de::from_reader(encoded.as_slice()).expect("document");
+    with_future_field(&mut document);
+    let mut future = Vec::new();
+    ciborium::ser::into_writer(&document, &mut future).expect("encode document");
+    assert!(matches!(decode_wal_segment_envelope_zstd(&rezstd(&future)),
+        Err(EnvelopeCodecError::EnvelopeDecode(message)) if message.contains("field_from_the_future")));
 }
 
 // ---------------------------------------------------------------------------
@@ -2381,13 +2406,6 @@ fn assert_row_is_corrupt(row: &ciborium::Value, why: &str) -> String {
 }
 
 /// Decodes a row after applying an edit to its CBOR representation.
-fn decode_edited_row(row: &ciborium::Value, why: &str) -> MetadataRow {
-    let mut encoded = Vec::new();
-    ciborium::ser::into_writer(row, &mut encoded).expect("encode edited row");
-    ciborium::de::from_reader::<MetadataRow, _>(encoded.as_slice())
-        .unwrap_or_else(|error| panic!("{why}, but the row failed to decode: {error}"))
-}
-
 #[test]
 fn tombstone_rows_reject_a_partial_deleted_direntry() {
     for missing in ["parent_inode_id", "name_key", "display_name"] {
@@ -2403,7 +2421,7 @@ fn tombstone_rows_reject_a_partial_deleted_direntry() {
 }
 
 #[test]
-fn tombstone_rows_tolerate_additive_fields_at_every_level() {
+fn tombstone_rows_reject_unknown_fields_at_every_level() {
     let expected = sample_tombstone_set_row();
     let paths: [&[&str]; 3] = [
         &["generation"],
@@ -2418,19 +2436,16 @@ fn tombstone_rows_tolerate_additive_fields_at_every_level() {
             target = cbor_entry(target, key);
         }
         with_future_field(target);
-        assert_eq!(
-            decode_edited_row(
-                &row,
-                "an immutable row tolerates a field it does not define"
-            ),
-            expected,
-            "the unknown field under {path:?} changed the decoded row"
+        let refusal = assert_row_is_corrupt(&row, "unknown durable fields must be rejected");
+        assert!(
+            refusal.contains("field_from_the_future"),
+            "{path:?}: {refusal}"
         );
     }
 }
 
 #[test]
-fn tombstone_revoke_rows_ignore_a_deleted_direntry() {
+fn tombstone_revoke_rows_reject_a_deleted_direntry() {
     let expected = sample_tombstone_revoke_row();
     let mut row = row_cbor(&expected);
     cbor_map_of(cbor_entry(&mut row, "action")).push((
@@ -2438,10 +2453,8 @@ fn tombstone_revoke_rows_ignore_a_deleted_direntry() {
         sample_deleted_direntry_cbor(),
     ));
 
-    assert_eq!(
-        decode_edited_row(&row, "a revoke tolerates a field it does not define"),
-        expected
-    );
+    let refusal = assert_row_is_corrupt(&row, "a revoke carries no deleted direntry");
+    assert!(refusal.contains("deleted_direntry"), "{refusal}");
 }
 
 #[test]
@@ -2459,7 +2472,7 @@ fn tombstone_rows_reject_flat_binding_fields() {
         "a tombstone states its generation as one value",
     );
     assert!(
-        refusal.contains("missing field `generation`"),
+        refusal.contains("unknown field `tombstone_seq`"),
         "unexpected refusal: {refusal}"
     );
     let refusal = assert_row_is_corrupt(
@@ -2467,7 +2480,8 @@ fn tombstone_rows_reject_flat_binding_fields() {
         "a `set` states its binding, even when it has none",
     );
     assert!(
-        refusal.contains("missing field `deleted_direntry`"),
+        refusal.contains("missing field `deleted_direntry`")
+            || refusal.contains("unknown field `parent_inode_id`"),
         "unexpected refusal: {refusal}"
     );
 }
@@ -2491,7 +2505,8 @@ fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
     let refusal =
         assert_row_is_corrupt(&row, "a `listed` states its binding, even when it has none");
     assert!(
-        refusal.contains("missing field `deleted_direntry`"),
+        refusal.contains("missing field `deleted_direntry`")
+            || refusal.contains("unknown field `parent_inode_id`"),
         "unexpected refusal: {refusal}"
     );
 }
@@ -2693,4 +2708,23 @@ fn sst_block_index_entry_schema_matches_golden_bytes() {
     let decoded: Vec<SegmentIndexEntry> =
         ciborium::de::from_reader(encoded.as_slice()).expect("decode index entries");
     assert_eq!(decoded, entries);
+}
+
+#[test]
+fn every_metadata_row_rejects_unknown_fields() {
+    use loonfs_api::wire::sst_blocks::decode_data_block;
+    let built = sample_segment_blocks();
+    for entry in sample_segment_index(&built) {
+        let block = decode_data_block(segment_section(&built.bytes, &entry.block), &entry.block)
+            .expect("decode fixture block");
+        for row in block.rows {
+            let mut encoded = row_cbor(&row);
+            with_future_field(&mut encoded);
+            let refusal = assert_row_is_corrupt(&encoded, "every durable row is strict");
+            assert!(
+                refusal.contains("field_from_the_future"),
+                "{row:?}: {refusal}"
+            );
+        }
+    }
 }

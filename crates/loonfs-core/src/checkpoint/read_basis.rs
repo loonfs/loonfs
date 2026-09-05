@@ -2,9 +2,7 @@
 
 use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
-use super::load::{
-    ensure_manifest_reference_matches, head_from_manifest, load_verified_manifest_segments,
-};
+use super::load::{head_from_manifest, load_manifest_segments};
 use super::record::load_checkpoint_record;
 use super::scan::VerifiedMetadataSegments;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -48,25 +46,16 @@ pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore 
     record: CheckpointRecordState,
 ) -> Result<PinnedCheckpointBasis<'a, S>> {
     let checkpoint_id = &record.checkpoint_id;
-    let namespace_id = &record.namespace_id;
-    let segments = load_verified_manifest_segments(
-        store,
-        segment_cache,
-        namespace_id,
-        &record.manifest.manifest_object_id,
-    )
-    .await
-    .map_err(|error| match error {
-        ManifestLoadError::MissingManifest { object_key } => CoreError::CheckpointUnavailable(
-            format!("checkpoint `{checkpoint_id}` pins manifest `{object_key}`, which is gone"),
-        ),
-        other => CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(other)),
-    })?;
-    ensure_manifest_reference_matches(
-        &format!("checkpoint `{checkpoint_id}` basis"),
-        &record.manifest,
-        segments.manifest(),
-    )?;
+    let segments = load_manifest_segments(store, segment_cache, &record.manifest)
+        .await
+        .map_err(|error| match error {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+                ManifestLoadError::MissingManifest { object_key },
+            )) => CoreError::CheckpointUnavailable(format!(
+                "checkpoint `{checkpoint_id}` pins manifest `{object_key}`, which is gone"
+            )),
+            other => other,
+        })?;
     Ok(PinnedCheckpointBasis {
         manifest: record.manifest,
         segments,

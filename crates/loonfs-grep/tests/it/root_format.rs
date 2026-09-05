@@ -101,20 +101,32 @@ fn the_manifest_status_is_a_kind_tagged_object() {
 }
 
 #[test]
-fn immutable_manifest_decoder_reads_frozen_bytes_with_additive_fields() {
-    let additive = edited_document(ACTIVE_MANIFEST_FIXTURE, UNKNOWN_ENVELOPE_FIELD, |payload| {
-        payload["future_root"] = serde_json::Value::from(true);
-        payload["status"]["future_status"] = serde_json::Value::from("ignored");
-        payload["index"]["future_index"] = serde_json::Value::from(17);
-        payload["segments"][0]["future_segment"] = serde_json::Value::from("ignored");
-    });
-
-    let decoded = decode_grep_manifest(&additive).expect("decode additive manifest fixture");
-
-    assert_eq!(
-        decoded.manifest_state(),
-        &sample_active_manifest(ChangeSeq(11), 5)
-    );
+fn manifest_decoder_rejects_unknown_fields_at_every_level() {
+    let envelope = edited_document(ACTIVE_MANIFEST_FIXTURE, UNKNOWN_ENVELOPE_FIELD, |_| {});
+    assert!(matches!(
+        decode_grep_manifest(&envelope),
+        Err(GrepEnvelopeCodecError::Envelope(
+            EnvelopeCodecError::EnvelopeDecode(_)
+        ))
+    ));
+    for path in [
+        "",
+        "/status",
+        "/index",
+        "/segments/0",
+        "/segments/0/index_block",
+    ] {
+        let edited = edited_document(ACTIVE_MANIFEST_FIXTURE, "", |payload| {
+            payload.pointer_mut(path).expect("fixture object")["field_from_the_future"] =
+                serde_json::Value::from(true);
+        });
+        assert!(
+            matches!(decode_grep_manifest(&edited),
+            Err(GrepEnvelopeCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message)))
+                if message.contains("field_from_the_future")),
+            "path {path}"
+        );
+    }
 }
 
 #[test]

@@ -540,7 +540,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> VerifiedMetadataSegments<'a, S> {
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
-    load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
+    load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
         .await
         .expect("load the current manifest's segments")
 }
@@ -3665,4 +3665,178 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         manifest_before,
         "and nothing may be published"
     );
+}
+
+fn mismatched_references(reference: &ManifestRef) -> Vec<(&'static str, ManifestRef)> {
+    let mut number = reference.clone();
+    number.manifest_no = ManifestNo(reference.manifest_no.0 + 1);
+    let mut sequence = reference.clone();
+    sequence.manifest_head_seq = ChangeSeq(reference.manifest_head_seq.0 - 1);
+    let mut checksum = reference.clone();
+    checksum.manifest_payload_checksum = format!("sha256:{}", "0".repeat(64));
+    vec![
+        ("manifest_no", number),
+        ("manifest_head_seq", sequence),
+        ("manifest_payload_checksum", checksum),
+    ]
+}
+
+async fn replace_root_reference(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    reference: ManifestRef,
+) -> Bytes {
+    use loonfs_api::wire::control::{encode_control_state, ControlObjectKind};
+    let mut root = load_metadata_root_object(store, namespace_id)
+        .await
+        .expect("load root")
+        .state;
+    root.manifest = reference;
+    let bytes = Bytes::from(
+        encode_control_state(ControlObjectKind::MetadataRoot, &root).expect("encode root"),
+    );
+    store
+        .put_overwrite(&metadata_root(namespace_id), bytes.clone())
+        .await
+        .expect("replace root reference");
+    bytes
+}
+
+fn assert_reference_corrupt(error: CoreError, field: &str) {
+    assert!(
+        matches!(&error, CoreError::NamespaceCorrupt(message) if message.contains(field)),
+        "expected corrupt {field}, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn compaction_rejects_mismatched_manifest_references_before_writing() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let root = load_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("root")
+        .state;
+    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    super::super::load::load_manifest_segments(&store, Some(&cache), &root.manifest)
+        .await
+        .expect("warm manifest cache");
+
+    for (field, reference) in mismatched_references(&root.manifest) {
+        let error = super::super::load::load_manifest_segments(&store, Some(&cache), &reference)
+            .await
+            .err()
+            .expect("cache hits must verify the reference too");
+        assert_reference_corrupt(error, field);
+        let corrupted = replace_root_reference(&store, &namespace_id, reference).await;
+        let recording = RecordingStore::new(store.clone(), KeyPredicate::any());
+        let error = load_current_projection(&recording, &namespace_id)
+            .await
+            .expect_err("ordinary reads must reject the reference");
+        assert_reference_corrupt(error, field);
+        for max_bytes in [usize::MAX, 1] {
+            let error = reorganize_metadata_step(
+                &recording,
+                &namespace_id,
+                &test_context(),
+                MetadataLsmPolicy {
+                    max_delta_runs: NonZeroUsize::MIN,
+                    max_decoded_input_bytes_per_step: NonZeroUsize::new(max_bytes)
+                        .expect("nonzero budget"),
+                    ..MetadataLsmPolicy::default()
+                },
+                FrozenBasePolicy::default(),
+            )
+            .await
+            .expect_err("bounded merges and full-job planning must reject the reference");
+            assert_reference_corrupt(error, field);
+        }
+        let error = run_metadata_compaction_job(
+            &recording,
+            &namespace_id,
+            &test_context(),
+            &spec,
+            MetadataLsmPolicy::default(),
+            &MetadataCompactionCancellation::default(),
+        )
+        .await
+        .expect_err("job startup must reject the reference");
+        assert_reference_corrupt(error, field);
+        assert_eq!(
+            recording.counts().puts,
+            0,
+            "no output or lease may be written"
+        );
+        assert_eq!(recording.counts().compare_and_swaps, 0);
+        assert_eq!(
+            store
+                .get(&metadata_root(&namespace_id), None)
+                .await
+                .expect("read root"),
+            Some(corrupted),
+        );
+    }
+}
+
+#[tokio::test]
+async fn compaction_finalization_rechecks_the_complete_manifest_reference() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let spec =
+        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
+    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let result = run_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("build staged output");
+    let timer = StdMonotonicTimer::default();
+    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
+    let root = load_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("root")
+        .state;
+    for (field, reference) in mismatched_references(&root.manifest) {
+        let corrupted = replace_root_reference(&store, &namespace_id, reference).await;
+        let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
+        let recording = RecordingStore::new(
+            store.clone(),
+            KeyPredicate::new(move |key| key != lease_key),
+        );
+        let error = finalize_metadata_compaction(
+            &recording,
+            &namespace_id,
+            &spec,
+            &snapshot_keys,
+            result.clone(),
+            &MetadataCompactionCancellation::default(),
+            &mut lease,
+        )
+        .await
+        .expect_err("finalization must reject an inconsistent reference");
+        assert_reference_corrupt(error, field);
+        assert_eq!(
+            recording.counts().puts,
+            0,
+            "no replacement manifest may be written"
+        );
+        assert_eq!(
+            store
+                .get(&metadata_root(&namespace_id), None)
+                .await
+                .expect("read root"),
+            Some(corrupted),
+            "finalization must not replace the inconsistent root",
+        );
+    }
 }

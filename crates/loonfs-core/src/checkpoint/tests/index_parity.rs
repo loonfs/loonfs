@@ -186,7 +186,7 @@ async fn load_perturbed_manifest(
     write_namespace_manifest(store, &envelope)
         .await
         .expect("write perturbed manifest");
-    load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
+    load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
         .await
         .map(|_| ())
 }
@@ -260,9 +260,10 @@ async fn current_manifest(
     namespace_id: &NamespaceId,
 ) -> NamespaceManifestEnvelope {
     let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
-    let segments = load_verified_manifest_segments(store, None, namespace_id, &manifest_object_id)
-        .await
-        .expect("load the current manifest's segments");
+    let segments =
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
+            .await
+            .expect("load the current manifest's segments");
     segments.manifest().clone()
 }
 
@@ -662,7 +663,9 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
-    match load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id).await {
+    match load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
+        .await
+    {
         Err(ManifestLoadError::RunManifestMismatch { .. }) => {}
         Err(other) => panic!("expected run manifest mismatch, got {other:?}"),
         Ok(_) => panic!("tampered descriptor counts must not load"),
@@ -1321,7 +1324,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
 
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     let segments =
-        load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
             .await
             .expect("the rewritten manifest should load");
     for row in &inode_rows {
@@ -1361,7 +1364,7 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         .expect("create checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     let segments =
-        load_verified_manifest_segments(&store, None, &namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
             .await
             .expect("load segments");
     let payload = segments.manifest().payload.clone();

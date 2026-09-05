@@ -53,7 +53,7 @@ impl GrepRootPointer {
 /// target and progress. An active index records how far indexing has
 /// progressed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrepIndexStatus {
     /// Initial materialization is walking the checkpointed file set.
     Backfilling {
@@ -88,9 +88,7 @@ pub enum GrepIndexStatus {
     },
     /// Grep indexing and queries are disabled for this namespace.
     ///
-    /// The braces spell this status the same way as the other two and as
-    /// every durable control object's status. A manifest is immutable, so
-    /// this decoder still tolerates fields it does not know.
+    /// This closed status carries no phase-specific state.
     Disabled {},
 }
 
@@ -133,6 +131,7 @@ impl From<&GrepIndexStatus> for loonfs_api::v0::GrepIndexLifecycle {
 
 /// Resumable state for one partitioned segment reorganize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrepReorganizeState {
     /// Fixed input snapshot retained until the completing root swap.
     pub snapshot_segment_ids: Vec<IndexSegmentId>,
@@ -152,6 +151,7 @@ pub struct GrepReorganizeState {
 /// indexing. Shared state therefore lives here, while phase-specific state
 /// lives in [`GrepIndexStatus`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrepIndexState {
     /// One in-progress partitioned reorganize, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +211,7 @@ impl ChangeFeedResume {
 
 /// Query-visible descriptor for one immutable grep segment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrepSegmentRef {
     pub segment_id: IndexSegmentId,
     pub run_no: RunNo,
@@ -238,6 +239,7 @@ pub struct GrepSegmentRef {
 /// Fields stay private so every constructed or decoded manifest passes the
 /// inexpensive reorganize/segment and run-allocation checks in [`Self::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrepManifestState {
     namespace_id: NamespaceId,
     status: GrepIndexStatus,

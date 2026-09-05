@@ -237,7 +237,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         flatten_manifest_segments(segments),
     )
     .await;
-    let verified = load_verified_manifest_segments(&store, None, &namespace_id, &manifest)
+    let verified = load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest)
         .await
         .expect("load manifest segments");
 
