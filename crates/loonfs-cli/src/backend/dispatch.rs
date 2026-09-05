@@ -529,7 +529,7 @@ impl ResolvedTarget {
                 let Some(journal) = journal else {
                     return Ok(target.client.put_file_stream(spec, source, options).await?);
                 };
-                let resume = journal.resume();
+                let resume = journal.resume().map_err(CliError::io)?;
                 Ok(target
                     .client
                     .put_file_stream_resumable(spec, source, options, journal, resume.as_ref())

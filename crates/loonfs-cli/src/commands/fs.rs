@@ -27,6 +27,7 @@ use crate::config::ConfigLocation;
 use crate::error::CliError;
 use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
+use crate::resolve::ResolvedTarget;
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
@@ -1022,9 +1023,10 @@ pub(super) async fn put_payload(
 ) -> Result<CommitResponse, CliError> {
     // Resume only multipart uploads backed by a file that can be reopened.
     // Streams cannot be read again after an interruption.
-    let journal = payload
-        .resumable_source()
-        .and_then(|local_path| resume_journal(context, spec, local_path));
+    let journal = match (&context.target, payload.resumable_source()) {
+        (ResolvedTarget::Remote(_), Some(path)) => Some(resume_journal(context, spec, path)?),
+        _ => None,
+    };
     if let Some(journal) = journal.as_ref() {
         if let Some(committed) =
             commit_a_finished_upload(context, spec, options, journal, progress).await?
@@ -1049,24 +1051,24 @@ pub(super) async fn put_payload(
                 .await
         }
     };
-    if result.is_ok() {
+    if let Ok(committed) = &result {
         // The record exists to survive an interruption, and this upload was
         // not interrupted.
         if let Some(journal) = journal.as_ref() {
-            journal.forget();
+            forget_committed_upload(journal, committed)?;
         }
     }
     result
 }
 
-/// The record an interrupted upload of this payload would have left, or
-/// nothing when there is nowhere to keep one.
+/// Opens the journal for a resumable remote file upload.
 fn resume_journal(
     context: &CommandContext,
     spec: &NamespacePath,
     local_path: &Path,
-) -> Option<UploadJournal> {
-    let source = SourceIdentity::of(local_path).ok()?;
+) -> Result<UploadJournal, CliError> {
+    let source =
+        SourceIdentity::of(local_path).map_err(|error| CliError::io_for_path(local_path, error))?;
     UploadJournal::for_upload(
         &context.profile_name,
         context.namespace().as_str(),
@@ -1074,6 +1076,7 @@ fn resume_journal(
         local_path,
         source,
     )
+    .map_err(CliError::io)
 }
 
 /// Commits an upload whose bytes all landed before it was interrupted,
@@ -1092,16 +1095,13 @@ async fn commit_a_finished_upload(
     journal: &UploadJournal,
     progress: &ProgressReporter,
 ) -> Result<Option<CommitResponse>, CliError> {
-    let Some(resume) = journal.resume() else {
+    let Some(resume) = journal.resume().map_err(CliError::io)? else {
         return Ok(None);
     };
-    let Ok(status) = context
+    let status = context
         .target
         .get_upload(context.namespace(), &resume.upload_id)
-        .await
-    else {
-        return Ok(None);
-    };
+        .await?;
     let UploadSessionStatus::Completed {
         content_ref,
         content_token,
@@ -1116,10 +1116,21 @@ async fn commit_a_finished_upload(
         .target
         .commit_completed_upload(spec, content_ref, content_token, options)
         .await;
-    if result.is_ok() {
-        journal.forget();
-    }
-    Ok(Some(result?))
+    let committed = result?;
+    forget_committed_upload(journal, &committed)?;
+    Ok(Some(committed))
+}
+
+fn forget_committed_upload(
+    journal: &UploadJournal,
+    committed: &CommitResponse,
+) -> Result<(), CliError> {
+    journal.forget().map_err(|error| {
+        CliError::io_error(format!(
+        "file commit `{}` succeeded at sequence {}, but its journal could not be removed: {error}",
+        committed.commit_id, committed.committed_seq,
+    ))
+    })
 }
 
 fn put_file_options(

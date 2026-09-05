@@ -358,13 +358,15 @@ impl MultipartUploadJournal for RecordingJournal {
         upload_id: &UploadId,
         part_size_bytes: u64,
         checksum_algorithm: ChecksumAlgorithm,
-    ) {
+    ) -> std::io::Result<()> {
         *self.began.lock().expect("journal lock") =
             Some((upload_id.clone(), part_size_bytes, checksum_algorithm));
+        Ok(())
     }
 
-    fn part_completed(&self, part: &CompletedUploadPart) {
+    fn part_completed(&self, part: &CompletedUploadPart) -> std::io::Result<()> {
         self.parts.lock().expect("journal lock").push(part.clone());
+        Ok(())
     }
 }
 
@@ -405,10 +407,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
             first.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
         }
     }
-    // The signing request for the third wave never lands, and the abort
-    // that follows a failed session does not either. Retry is off so each
-    // is one attempt and the script stays exactly this long.
-    first.push(Outcome::TransportFailure);
+    // A failed signing request leaves the session open. No abort is sent.
     first.push(Outcome::TransportFailure);
     let transport = test_transport::script(first);
     let interrupted = client_without_retry()
@@ -910,4 +909,55 @@ async fn an_unsized_source_frames_its_body_chunked() {
         !head.contains("content-length"),
         "a body of unknown length cannot declare one: {head}"
     );
+}
+
+struct FailingJournal {
+    fail_at_begin: bool,
+}
+
+impl MultipartUploadJournal for FailingJournal {
+    fn began(&self, _: &UploadId, _: u64, _: ChecksumAlgorithm) -> std::io::Result<()> {
+        if self.fail_at_begin {
+            Err(std::io::Error::other("journal disk full"))
+        } else {
+            Ok(())
+        }
+    }
+    fn part_completed(&self, _: &CompletedUploadPart) -> std::io::Result<()> {
+        Err(std::io::Error::other("journal disk full"))
+    }
+}
+
+#[tokio::test]
+async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() {
+    for fail_at_begin in [true, false] {
+        let mut script = vec![capabilities(true), begin_multipart()];
+        if !fail_at_begin {
+            script.push(signed_parts(1, 4));
+            for number in 1..=4 {
+                script.push(Outcome::PartAccepted(format!("etag-{number}")));
+            }
+        }
+        let expected_attempts = script.len();
+        let transport = test_transport::script(script);
+        let bytes = vec![0; TEST_PART_BYTES as usize * 5];
+        let error = client_without_retry()
+            .put_file_stream_resumable(
+                &spec(),
+                PayloadSource::stream(
+                    futures::stream::once(async move { Ok(Bytes::from(bytes)) }).boxed(),
+                ),
+                &PutFileOptions::new(loonfs_test_support::test_actor()),
+                &FailingJournal { fail_at_begin },
+                None,
+            )
+            .await
+            .expect_err("journal error");
+        assert!(matches!(error, ClientError::Io(message) if message.contains("journal disk full")));
+        assert_eq!(
+            transport.attempts(),
+            expected_attempts,
+            "no subsequent wave, completion, commit, or abort may be sent"
+        );
+    }
 }
