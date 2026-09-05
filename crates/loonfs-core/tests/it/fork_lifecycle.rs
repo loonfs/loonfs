@@ -806,7 +806,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         decode_namespace_manifest_json(&manifest_bytes).expect("decode source manifest");
     manifest.payload.runs.iter_mut().for_each(|run| {
         run.segments
-            .retain(|descriptor| descriptor.family != MetadataRowFamily::RevisionsByInodeDesc);
+            .retain(|descriptor| descriptor.family != MetadataRowFamily::DirentryChildBinds);
     });
     let manifest = NamespaceManifestEnvelope::from_payload(manifest.payload)
         .expect("rebuild manifest checksum");

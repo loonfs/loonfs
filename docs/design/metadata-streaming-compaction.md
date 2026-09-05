@@ -10,7 +10,7 @@ This design adds a background streaming compaction for oversized metadata family
 
 ## Problem
 
-Metadata reorganization works on family groups because some families must remain consistent with related indexes. For example, bindings must be processed with the child-binding index, and revisions must be processed with the revisions-by-inode index.
+Metadata reorganization works on family groups because some families must remain consistent with related indexes. For example, bindings must be processed with the child-binding index. File revisions use a single family ordered newest first within each inode.
 
 Each maintenance pass limits the number of runs, decoded rows, and decoded bytes that it may process. The decoded-row limit is currently 131,072 rows. A bottom-anchored merge cannot run when its selected family group exceeds these limits.
 
@@ -125,7 +125,7 @@ Rows are processed as follows:
 - Forward binding rows are grouped by binding generation. The operator holds at most one bind row until the matching unbind rows arrive, and it retains one generation identity to validate the parent-and-name slot.
 - Reverse child-binding rows are resolved against the same below-floor unbound generations, reached by one of two routes because their key order differs from the forward binding family. The next section says which route and why.
 
-Bindings and revisions have secondary indexes that must remain equivalent to their canonical families. The executor computes order-independent digests for the canonical and index rows selected for output, and a mismatch fails the merge before publication. This is the only index-parity check either path makes. It covers the rows a merge wrote rather than the rows it read, so it states that the two families dropped in lockstep and not only that their inputs matched.
+The child-binding index must remain equivalent to the parent-and-name binding family. The executor computes order-independent digests for the canonical and index rows selected for output, and a mismatch fails the merge before publication. This is the only index-parity check either path makes. It covers the rows a merge wrote rather than the rows it read, so it states that the two families dropped in lockstep and not only that their inputs matched.
 
 Every metadata row key identifies one row, and nothing downstream re-establishes that: reads concatenate runs rather than deduplicating them, and the segment writer rejects a descending key but not a repeated one. The executor therefore holds the last input row key it saw for each family and requires the next one to be strictly greater. An equal key is namespace corruption and names the family and the key; a smaller key is an internal error against the merge itself. The check runs over the merge's input, so it sees a duplicate that retention would have dropped, one split across two runs, and one split across two segments. It is separate from the digests and catches a different fault: a duplicate present in both families of an index pair leaves both multisets equal, so the digests pass it.
 

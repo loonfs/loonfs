@@ -15,7 +15,7 @@ use super::super::scan::{
 };
 use super::super::validate::{
     validate_direntry_child_bind_index, validate_manifest_materialization_ranges,
-    validate_revision_by_inode_desc_index,
+    validate_revision_rows_have_unique_keys,
 };
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use futures::future::try_join_all;
@@ -163,7 +163,6 @@ where
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
     let mut revision_rows = Vec::new();
-    let mut revision_by_inode_desc_rows = Vec::new();
     for family_segments in ordered {
         let mut loaded_segments = Vec::with_capacity(family_segments.segments.len());
         for chunk in family_segments.segments.chunks(MAX_MAINTENANCE_SEGMENT_IO) {
@@ -189,9 +188,6 @@ where
                 MetadataRowFamily::Revisions => {
                     revision_rows.extend(rows.iter().cloned());
                 }
-                MetadataRowFamily::RevisionsByInodeDesc => {
-                    revision_by_inode_desc_rows.extend(rows.iter().cloned());
-                }
                 _ => {}
             }
             append_rows_to_metadata(
@@ -208,11 +204,7 @@ where
         &direntry_bind_rows,
         &direntry_child_bind_rows,
     )?;
-    validate_revision_by_inode_desc_index(
-        manifest_object_key,
-        &revision_rows,
-        &revision_by_inode_desc_rows,
-    )
+    validate_revision_rows_have_unique_keys(manifest_object_key, &revision_rows)
 }
 
 #[cfg(test)]
@@ -299,9 +291,6 @@ pub(crate) fn append_rows_to_metadata(
             MetadataRowFamily::Revisions => metadata_state.push_revision(
                 row_decode::revision_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
-            MetadataRowFamily::RevisionsByInodeDesc => {
-                row_decode::revision_from_manifest_row(row.clone()).map_err(mismatch)?;
-            }
             MetadataRowFamily::Tombstones => metadata_state.push_subtree_tombstone(
                 row_decode::tombstone_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),

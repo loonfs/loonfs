@@ -112,8 +112,7 @@ delta count fell below the normal trigger. Once the batch is drained, later
 delta runs are strictly newer than the base and the ordinary trigger applies
 again.
 
-The two secondary-index families fold together with their canonical family
-({bindings, child bindings} and {revisions, revisions-by-inode}). Every
+Directory bindings fold together with their child-binding index. Every
 selected input is a complete logical run, so row-level parity is validated
 over exactly the subset being replaced without materializing or cloning the
 unselected family.

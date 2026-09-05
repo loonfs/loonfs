@@ -13,9 +13,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Version 2: an uncompressed JSON envelope document carrying the payload as
+/// An uncompressed JSON envelope document carrying the payload as
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
-pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 2;
+pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 3;
 
 /// Identifies the durable payload family carried by a namespace-manifest envelope.
 ///
@@ -50,10 +50,8 @@ pub enum MetadataRowFamily {
     DirentryChildBinds,
     /// Stores immutable events that retire exact historical bindings.
     DirentryUnbinds,
-    /// Stores file revisions in their canonical durable ordering.
+    /// Stores file revisions newest-first within each inode.
     Revisions,
-    /// Re-indexes file revisions for newest-first per-inode reads.
-    RevisionsByInodeDesc,
     /// Stores set and revoke events used to determine active subtree tombstones.
     Tombstones,
     /// Names the deletions that are recoverable right now, derived from the
@@ -74,7 +72,7 @@ pub enum MetadataRowFamily {
 pub enum MetadataFamilyGroup {
     /// Directory bindings, their child index, and unbinds.
     Bindings,
-    /// File revisions and their newest-first index.
+    /// File revisions.
     Revisions,
     /// Inodes.
     Inodes,
@@ -121,10 +119,7 @@ impl MetadataFamilyGroup {
                 MetadataRowFamily::DirentryChildBinds,
                 MetadataRowFamily::DirentryUnbinds,
             ],
-            Self::Revisions => &[
-                MetadataRowFamily::Revisions,
-                MetadataRowFamily::RevisionsByInodeDesc,
-            ],
+            Self::Revisions => &[MetadataRowFamily::Revisions],
             Self::Inodes => &[MetadataRowFamily::Inodes],
             Self::Tombstones => &[MetadataRowFamily::Tombstones],
             Self::ActiveDeletions => &[MetadataRowFamily::ActiveDeletions],
@@ -497,7 +492,6 @@ impl MetadataRowFamily {
             Self::DirentryChildBinds => lookup_keys::DIRENTRY_CHILD_BIND_ROW_PREFIX,
             Self::DirentryUnbinds => lookup_keys::DIRENTRY_UNBIND_ROW_PREFIX,
             Self::Revisions => lookup_keys::REVISION_ROW_PREFIX,
-            Self::RevisionsByInodeDesc => lookup_keys::REVISION_BY_INODE_DESC_ROW_PREFIX,
             Self::Tombstones => lookup_keys::TOMBSTONE_ROW_PREFIX,
             Self::ActiveDeletions => lookup_keys::ACTIVE_DELETION_ROW_PREFIX,
             Self::CommitReceipts => lookup_keys::COMMIT_RECEIPT_ROW_PREFIX,
@@ -548,7 +542,6 @@ impl MetadataRow {
                 MetadataRowFamily::Inodes
                 | MetadataRowFamily::DirentryUnbinds
                 | MetadataRowFamily::Revisions
-                | MetadataRowFamily::RevisionsByInodeDesc
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
@@ -563,30 +556,12 @@ impl MetadataRow {
                 record.unbind_seq,
                 record.unbind_delta_index,
             ),
-            Self::FileRevision(record) => match family {
-                MetadataRowFamily::Revisions => Some(lookup_keys::revision_row_key(
-                    record.inode_id,
-                    record.revision_no,
-                    record.delta_index,
-                )),
-                MetadataRowFamily::RevisionsByInodeDesc => {
-                    Some(lookup_keys::revision_by_inode_desc_row_key(
-                        record.inode_id,
-                        record.revision_no,
-                        record.committed_seq,
-                        record.delta_index,
-                    ))
-                }
-                MetadataRowFamily::Inodes
-                | MetadataRowFamily::DirentryBinds
-                | MetadataRowFamily::DirentryChildBinds
-                | MetadataRowFamily::DirentryUnbinds
-                | MetadataRowFamily::Tombstones
-                | MetadataRowFamily::ActiveDeletions
-                | MetadataRowFamily::CommitReceipts
-                | MetadataRowFamily::Attributes => None,
-            }
-            .expect("a file revision row should use a revision family"),
+            Self::FileRevision(record) => lookup_keys::revision_row_key(
+                record.inode_id,
+                record.revision_no,
+                record.committed_seq,
+                record.delta_index,
+            ),
             Self::Tombstone(record) => {
                 lookup_keys::tombstone_row_key(record.root_inode_id, record.generation)
             }
@@ -622,7 +597,6 @@ impl MetadataRow {
                 MetadataRowFamily::Inodes
                 | MetadataRowFamily::DirentryUnbinds
                 | MetadataRowFamily::Revisions
-                | MetadataRowFamily::RevisionsByInodeDesc
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
@@ -632,21 +606,7 @@ impl MetadataRow {
             Self::DirentryUnbind(record) => {
                 lookup_keys::direntry_unbind_probe(record.parent_inode_id, record.name_key.as_str())
             }
-            Self::FileRevision(record) => match family {
-                MetadataRowFamily::Revisions => Some(lookup_keys::revision_probe(record.inode_id)),
-                MetadataRowFamily::RevisionsByInodeDesc => {
-                    Some(lookup_keys::revision_by_inode_desc_probe(record.inode_id))
-                }
-                MetadataRowFamily::Inodes
-                | MetadataRowFamily::DirentryBinds
-                | MetadataRowFamily::DirentryChildBinds
-                | MetadataRowFamily::DirentryUnbinds
-                | MetadataRowFamily::Tombstones
-                | MetadataRowFamily::ActiveDeletions
-                | MetadataRowFamily::CommitReceipts
-                | MetadataRowFamily::Attributes => None,
-            }
-            .expect("a file revision row should use a revision family"),
+            Self::FileRevision(record) => lookup_keys::revision_probe(record.inode_id),
             Self::Tombstone(record) => lookup_keys::tombstone_probe(record.root_inode_id),
             // The family is only ever range-scanned in key order, never
             // probed for one deletion, so the filter key is the row key.
@@ -676,13 +636,12 @@ pub mod lookup_keys {
     /// Prefix for inode row keys.
     pub const INODE_ROW_PREFIX: &str = "inode-";
 
-    /// Prefix for canonical revision row keys.
+    /// Prefix for revision row keys.
     pub const REVISION_ROW_PREFIX: &str = "revision-";
 
     pub(super) const DIRENTRY_BIND_ROW_PREFIX: &str = "direntry-bind-";
     pub(super) const DIRENTRY_CHILD_BIND_ROW_PREFIX: &str = "direntry-child-bind-";
     pub(super) const DIRENTRY_UNBIND_ROW_PREFIX: &str = "direntry-unbind-";
-    pub(super) const REVISION_BY_INODE_DESC_ROW_PREFIX: &str = "revision-by-inode-desc-";
     pub(super) const TOMBSTONE_ROW_PREFIX: &str = "tombstone-";
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
     pub(super) const ATTRIBUTE_ROW_PREFIX: &str = "attribute-";
@@ -890,48 +849,27 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the Bloom filter probe for an inode's canonical revisions.
+    /// Builds the Bloom filter probe for an inode's revisions.
     pub fn revision_probe(inode_id: InodeId) -> String {
         format!("{REVISION_ROW_PREFIX}{:020}", inode_id.0)
     }
 
-    /// Builds a canonical revision row key.
-    pub fn revision_row_key(
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        delta_index: u32,
-    ) -> String {
-        format!(
-            "{}-{:020}-{delta_index:010}",
-            revision_probe(inode_id),
-            revision_no.0
-        )
-    }
-
-    /// Builds the Bloom filter probe for an inode's newest-first revisions.
-    pub fn revision_by_inode_desc_probe(inode_id: InodeId) -> String {
-        format!("{REVISION_BY_INODE_DESC_ROW_PREFIX}{:020}", inode_id.0)
-    }
-
     /// Builds the prefix for an inode's newest-first revisions.
-    pub fn revision_by_inode_desc_prefix(inode_id: InodeId) -> String {
-        format!("{}-", revision_by_inode_desc_probe(inode_id))
+    pub fn revision_prefix(inode_id: InodeId) -> String {
+        format!("{}-", revision_probe(inode_id))
     }
 
-    /// Builds a prefix for one revision in the newest-first index.
-    pub fn revision_by_inode_desc_revision_prefix(
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> String {
+    /// Builds a prefix for one revision number within an inode.
+    pub fn revision_number_prefix(inode_id: InodeId, revision_no: RevisionNo) -> String {
         format!(
             "{}{:020}-",
-            revision_by_inode_desc_prefix(inode_id),
+            revision_prefix(inode_id),
             u64::MAX - revision_no.0
         )
     }
 
-    /// Builds a row key for the newest-first revision index.
-    pub fn revision_by_inode_desc_row_key(
+    /// Builds a newest-first revision row key.
+    pub fn revision_row_key(
         inode_id: InodeId,
         revision_no: RevisionNo,
         committed_seq: ChangeSeq,
@@ -939,7 +877,7 @@ pub mod lookup_keys {
     ) -> String {
         format!(
             "{}{:020}-{:010}",
-            revision_by_inode_desc_revision_prefix(inode_id, revision_no),
+            revision_number_prefix(inode_id, revision_no),
             u64::MAX - committed_seq.0,
             u32::MAX - delta_index
         )
@@ -1335,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_row_key_supports_newest_first_inode_index() {
+    fn revision_row_key_orders_newest_first_within_each_inode() {
         let row = super::MetadataRow::FileRevision(super::RevisionRecord {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
@@ -1353,11 +1291,7 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::Revisions),
-            "revision-00000000000000000042-00000000000000000007-0000000003"
-        );
-        assert_eq!(
-            row.row_key_for_family(MetadataRowFamily::RevisionsByInodeDesc),
-            "revision-by-inode-desc-00000000000000000042-18446744073709551608-18446744073709551603-4294967292"
+            "revision-00000000000000000042-18446744073709551608-18446744073709551603-4294967292"
         );
     }
 
@@ -1431,7 +1365,7 @@ mod tests {
                 b"row key prefix sample",
             ),
         });
-        let rows: [(MetadataRowFamily, super::MetadataRow); 10] = [
+        let rows: [(MetadataRowFamily, super::MetadataRow); 9] = [
             (
                 MetadataRowFamily::Inodes,
                 super::MetadataRow::Inode(super::InodeRecord {
@@ -1458,8 +1392,7 @@ mod tests {
                     unbind_delta_index: 0,
                 }),
             ),
-            (MetadataRowFamily::Revisions, revision.clone()),
-            (MetadataRowFamily::RevisionsByInodeDesc, revision),
+            (MetadataRowFamily::Revisions, revision),
             (
                 MetadataRowFamily::Tombstones,
                 super::MetadataRow::Tombstone(super::SubtreeTombstoneRecord {
@@ -1544,7 +1477,7 @@ mod tests {
                     }),
                 ),
                 (
-                    MetadataRowFamily::RevisionsByInodeDesc,
+                    MetadataRowFamily::Revisions,
                     super::MetadataRow::FileRevision(super::RevisionRecord {
                         inode_id: InodeId(42),
                         revision_no: crate::RevisionNo(7),

@@ -231,8 +231,6 @@ fn validate_run_index_parity(
         let ordered = ordered_manifest_segments(object_key, &run.segments)?;
         let mut direntry_bind_rows = 0u64;
         let mut direntry_child_bind_rows = 0u64;
-        let mut revision_rows = 0u64;
-        let mut revision_by_inode_desc_rows = 0u64;
         for family_segments in ordered {
             let rows = family_segments
                 .segments
@@ -242,9 +240,8 @@ fn validate_run_index_parity(
             match family_segments.family {
                 MetadataRowFamily::DirentryBinds => direntry_bind_rows = rows,
                 MetadataRowFamily::DirentryChildBinds => direntry_child_bind_rows = rows,
-                MetadataRowFamily::Revisions => revision_rows = rows,
-                MetadataRowFamily::RevisionsByInodeDesc => revision_by_inode_desc_rows = rows,
-                MetadataRowFamily::Inodes
+                MetadataRowFamily::Revisions
+                | MetadataRowFamily::Inodes
                 | MetadataRowFamily::DirentryUnbinds
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
@@ -257,15 +254,6 @@ fn validate_run_index_parity(
                 object_key: object_key.to_owned(),
                 message: format!(
                     "metadata run `{}` has {direntry_bind_rows} direntry bind rows but {direntry_child_bind_rows} child-bind index rows",
-                    run.run_no
-                ),
-            });
-        }
-        if revision_rows != revision_by_inode_desc_rows {
-            return Err(ManifestLoadError::RunManifestMismatch {
-                object_key: object_key.to_owned(),
-                message: format!(
-                    "metadata run `{}` has {revision_rows} revision rows but {revision_by_inode_desc_rows} revision index rows",
                     run.run_no
                 ),
             });
@@ -393,60 +381,21 @@ pub(super) fn validate_direntry_child_bind_index(
     Ok(())
 }
 
-/// [`validate_direntry_child_bind_index`] for the revision pair, and
-/// test-only for the same reason.
 #[cfg(test)]
-pub(super) fn validate_revision_by_inode_desc_index(
+pub(super) fn validate_revision_rows_have_unique_keys(
     object_key: &str,
-    revision_rows: &[MetadataRow],
-    revision_by_inode_desc_rows: &[MetadataRow],
-) -> Result<(), ManifestLoadError> {
-    validate_revision_rows_have_unique_keys(
-        object_key,
-        MetadataRowFamily::Revisions,
-        revision_rows,
-    )?;
-    validate_revision_rows_have_unique_keys(
-        object_key,
-        MetadataRowFamily::RevisionsByInodeDesc,
-        revision_by_inode_desc_rows,
-    )?;
-
-    let mut revision_rows = revision_rows.iter().collect::<Vec<_>>();
-    let mut revision_by_inode_desc_rows = revision_by_inode_desc_rows.iter().collect::<Vec<_>>();
-    revision_rows.sort_by_cached_key(|row| revision_logical_key(row));
-    revision_by_inode_desc_rows.sort_by_cached_key(|row| revision_logical_key(row));
-
-    if revision_rows != revision_by_inode_desc_rows {
-        return Err(ManifestLoadError::RevisionIndexMismatch {
-            object_key: object_key.to_owned(),
-        });
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-fn validate_revision_rows_have_unique_keys(
-    object_key: &str,
-    family: MetadataRowFamily,
     rows: &[MetadataRow],
 ) -> Result<(), ManifestLoadError> {
     let mut seen = BTreeSet::new();
     for row in rows {
-        let row_key = revision_logical_key(row);
+        let row_key = row.row_key_for_family(MetadataRowFamily::Revisions);
         if !seen.insert(row_key.clone()) {
             return Err(ManifestLoadError::DuplicateRevisionRow {
                 object_key: object_key.to_owned(),
-                family,
+                family: MetadataRowFamily::Revisions,
                 row_key,
             });
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn revision_logical_key(row: &MetadataRow) -> String {
-    row.row_key_for_family(MetadataRowFamily::Revisions)
 }

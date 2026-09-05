@@ -99,8 +99,6 @@ pub enum ManifestLoadError {
         family: MetadataRowFamily,
         row_key: String,
     },
-    #[error("namespace manifest `{object_key}` revision index does not match canonical revisions")]
-    RevisionIndexMismatch { object_key: String },
 }
 
 impl ManifestLoadError {
@@ -121,8 +119,7 @@ impl ManifestLoadError {
             | Self::SegmentCodec { .. }
             | Self::SegmentDescriptorMismatch { .. }
             | Self::SegmentRowKindMismatch { .. }
-            | Self::DuplicateRevisionRow { .. }
-            | Self::RevisionIndexMismatch { .. } => ManifestLoadFailureClass::Corrupt,
+            | Self::DuplicateRevisionRow { .. } => ManifestLoadFailureClass::Corrupt,
         }
     }
 }

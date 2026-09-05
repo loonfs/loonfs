@@ -1532,10 +1532,13 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         &bounded.metadata_state,
         &unbounded.metadata_state
     ));
-    assert_eq!(
-        manifest_run_shape(&bounded.manifest),
-        manifest_run_shape(&unbounded.manifest)
-    );
+    // Independent family groups may finish in a different order when their
+    // sizes differ. Compare the resulting shapes without the publication order.
+    let mut bounded_shape = manifest_run_shape(&bounded.manifest);
+    let mut unbounded_shape = manifest_run_shape(&unbounded.manifest);
+    bounded_shape.sort();
+    unbounded_shape.sort();
+    assert_eq!(bounded_shape, unbounded_shape);
     assert!(delta_runs(&bounded.manifest).is_empty());
 
     let later_commit = CommitId::parse("bounded-convergence-later").expect("commit id");
