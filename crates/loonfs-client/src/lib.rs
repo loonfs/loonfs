@@ -80,9 +80,7 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 
 pub use downloads::{DirectDownloadStream, DownloadOptions};
 pub use namespace_path::NamespacePath;
-pub use uploads::staging::{
-    MultipartUploadJournal, MultipartUploadResume, STREAMING_PUT_MIN_BYTES,
-};
+pub use uploads::staging::{MultipartUploadResume, PutFileJournal, STREAMING_PUT_MIN_BYTES};
 
 /// Async HTTP client for LoonFS.
 ///
@@ -110,6 +108,11 @@ pub struct Client {
 }
 
 impl Client {
+    /// The configured server URL, without a trailing slash.
+    pub fn server_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Creates a client, validating the config exactly as
     /// [`ClientConfig::load`] does — direct Rust construction cannot bypass
     /// validation.

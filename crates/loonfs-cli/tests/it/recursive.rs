@@ -160,6 +160,10 @@ fn a_recursive_put_streams_a_large_file_over_the_remote_transport() {
         .map(|entries| {
             entries
                 .map(|entry| entry.expect("dir entry").path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "json")
+                })
                 .collect()
         })
         .unwrap_or_default();

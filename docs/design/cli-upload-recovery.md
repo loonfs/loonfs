@@ -1,40 +1,49 @@
 # CLI upload recovery
 
-Remote uploads of large local files keep multipart progress in
-`$XDG_STATE_HOME/loonfs/uploads`, or `$HOME/.local/state/loonfs/uploads`.
-The journal key includes the profile, namespace, remote path, and canonical
-local path. Local path bytes are encoded without lossy Unicode conversion.
-Embedded uploads and standard-input streams do not create multipart journals.
+File-backed remote PUTs keep recovery records in `$XDG_STATE_HOME/loonfs/uploads`,
+or `$HOME/.local/state/loonfs/uploads`. The key includes the profile, server URL,
+namespace, remote path, canonical local path, and any explicit commit ID. Local
+path bytes are encoded without lossy Unicode conversion. Embedded uploads and
+standard-input streams do not use these records.
 
-The record contains the upload ID, part geometry, checksum algorithm, accepted
-parts, and source file length and full-precision modification time. Only a
-missing record means a new upload. An unreadable or malformed record, unavailable
-source metadata, or changed source stops the command with an error. Records are
-preserved for inspection; remove the named journal to explicitly start again.
-There is no reader for earlier development journal layouts.
+Before opening an upload, the CLI saves the chosen commit ID, actor, message,
+overwrite guards, source length, and full-precision modification time. The record
+has two states: uploading, with optional multipart progress; and prepared, with
+the complete commit request. A resumed command uses the saved options. Changed
+source metadata or options, an unreadable record, or malformed JSON stops the
+command and preserves the record. Source checks compare metadata, not a full
+file hash; the saved request always refers to the original uploaded content.
 
-Each update writes and syncs a temporary file in the journal directory before
-atomically replacing the record. Unix hosts also sync the directory after
-replacement or removal. The in-memory record advances only after persistence
-succeeds. A failed update therefore leaves the preceding record recoverable,
-although a failure after rename can mean that the new record already landed.
-Temporary files are removed when their owners are dropped.
+The client's `PutFileJournal` records multipart geometry and accepted parts, then
+records the complete commit request before submission for every transport.
+Callback failures stop the operation before its next request. A prepared request
+includes its original content reference and proof; the CLI resends it directly
+through `create_commit`, without reopening the upload or reconciling new content
+against the earlier commit. Durable commit receipts can resolve a lost response
+even after the upload session has disappeared. If the request never committed and
+its proof expired, the server rejects it; recovery does not silently create a new
+attempt. Client calls without a journal still use the existing convenience retry
+reconciliation.
 
-The client's `MultipartUploadJournal` callbacks return I/O errors. Failure to
-record the session prevents part uploads; failure to record an accepted part
-prevents the next wave, completion, and file commit. Accepted parts missing from
-the last saved record may be uploaded again safely. Journal failures include the
-server upload ID and the local record path in the error.
+Each update writes and syncs a private temporary file in the journal directory,
+then atomically replaces the record. Unix hosts also sync the directory after
+replacement or removal. In-memory progress changes only after persistence
+succeeds. A failure after rename can mean the new record already landed.
 
-Transfer errors leave the multipart session open. The caller can resume it or
-explicitly abort it; abandoned sessions wait for expiry and garbage collection.
-This costs temporary storage compared with aborting immediately after an error,
-but preserves accepted parts after a recoverable failure. No partially uploaded
-file becomes visible.
+An exclusive sidecar-file lock spans the entire command. A competing command
+fails immediately. The lock file remains after completion so an already-open
+file descriptor cannot bypass ownership when a record is replaced or removed.
+The OS releases ownership when the process exits.
 
-A completed upload can be committed without transferring its content again.
-Successful file commits remove their journal; if removal fails, the error names
-the successful commit and its sequence so the outcome is clear. Journal progress
-does not yet preserve the complete file-commit request or coordinate concurrent
-commands targeting the same journal. Retaining that request and exclusive journal
-ownership are follow-up work for exact PUT retries.
+Ordinary attempts remove their record after acknowledgement. Explicit commit
+IDs retain the prepared request so later invocations with the same ID can replay
+it without another upload. These records and the small lock files consume local
+storage until deliberately removed; receipt retention on the server still limits
+how long a commit can be replayed. Removing a record abandons its local recovery
+information. Cleanup errors after a successful commit name its ID and sequence.
+
+All file-backed remote PUTs pay for durable local writes, including small files.
+Transfer errors preserve multipart sessions for resume or explicit abort;
+abandoned sessions wait for expiry and GC. This uses temporary storage but keeps
+accepted parts after a recoverable failure. Partially uploaded files never become
+visible.

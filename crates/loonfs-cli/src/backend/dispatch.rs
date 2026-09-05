@@ -508,9 +508,8 @@ impl ResolvedTarget {
     /// Writes a file from a source stream with bounded memory use.
     ///
     /// Each profile opens the source in the form its transport requires.
-    /// `progress` counts bytes read from the source. Remote multipart uploads
-    /// use `journal` to resume interrupted sessions; embedded and proxied
-    /// uploads do not need it.
+    /// `progress` counts bytes read from the source. Remote file uploads use
+    /// `journal` to retain their final commit request and any multipart progress.
     pub(crate) async fn put_file_stream(
         &self,
         spec: &NamespacePath,
@@ -529,7 +528,7 @@ impl ResolvedTarget {
                 let Some(journal) = journal else {
                     return Ok(target.client.put_file_stream(spec, source, options).await?);
                 };
-                let resume = journal.resume().map_err(CliError::io)?;
+                let resume = journal.resume();
                 Ok(target
                     .client
                     .put_file_stream_resumable(spec, source, options, journal, resume.as_ref())
@@ -550,6 +549,18 @@ impl ResolvedTarget {
         }
     }
 
+    /// Replays the exact request retained before an interrupted remote PUT.
+    pub(crate) async fn replay_file_commit(
+        &self,
+        namespace_id: &NamespaceId,
+        request: &loonfs_api::v0::CommitRequest,
+    ) -> Result<CommitResponse, CliError> {
+        match self {
+            Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
+            Self::Remote(target) => Ok(target.client.create_commit(namespace_id, request).await?),
+        }
+    }
+
     /// Commits content an upload session already completed, moving no bytes.
     pub(crate) async fn commit_completed_upload(
         &self,
@@ -557,12 +568,13 @@ impl ResolvedTarget {
         content_ref: ContentRef,
         content_token: Option<loonfs_api::v0::ContentToken>,
         options: &PutFileOptions,
+        journal: &UploadJournal,
     ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target
                 .client
-                .commit_completed_upload(spec, content_ref, content_token, options)
+                .commit_completed_upload(spec, content_ref, content_token, options, Some(journal))
                 .await?),
         }
     }

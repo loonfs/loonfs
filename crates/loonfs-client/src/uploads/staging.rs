@@ -23,7 +23,8 @@ const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
 /// client retains the upload id, part size, and accepted part metadata.
 /// Missing entries are safely re-uploaded; incorrect entries cause completion
 /// to fail.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MultipartUploadResume {
     /// Upload session ID returned by the server.
     pub upload_id: UploadId,
@@ -36,13 +37,13 @@ pub struct MultipartUploadResume {
     pub parts: Vec<CompletedUploadPart>,
 }
 
-/// Saves direct multipart upload progress so an interrupted upload can resume.
+/// Saves upload progress and the exact file commit request before submission.
 ///
-/// The client calls these methods synchronously after opening the session and
-/// after each successful part upload. Implementations may persist this data
-/// before the next network request starts. A journal error stops the upload;
-/// the server session remains available for resumption or explicit abort.
-pub trait MultipartUploadJournal: Send + Sync {
+/// Multipart transfers record session geometry and completed parts. Every
+/// transport records its final commit request, including the chosen commit ID
+/// and content proof. A journal error stops the operation before the next
+/// request; uploaded content remains available for recovery or expiry cleanup.
+pub trait PutFileJournal: Send + Sync {
     /// Records a newly opened session and its required part size and checksum algorithm.
     fn began(
         &self,
@@ -52,13 +53,16 @@ pub trait MultipartUploadJournal: Send + Sync {
     ) -> std::io::Result<()>;
     /// Records a part after it has been uploaded successfully.
     fn part_completed(&self, part: &CompletedUploadPart) -> std::io::Result<()>;
+    /// Persists the complete request before any attempt to submit its commit.
+    /// Replay this value with [`Client::create_commit`] after an interruption.
+    fn commit_prepared(&self, request: &CommitRequest) -> std::io::Result<()>;
 }
 
 /// Optional state for resuming and recording a multipart upload.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct UploadContinuity<'a> {
     pub(crate) resume: Option<&'a MultipartUploadResume>,
-    pub(crate) journal: Option<&'a dyn MultipartUploadJournal>,
+    pub(crate) journal: Option<&'a dyn PutFileJournal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

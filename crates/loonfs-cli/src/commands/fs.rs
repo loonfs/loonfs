@@ -1009,9 +1009,8 @@ async fn commit_put(
 
 /// Uploads one file and commits it at `spec`.
 ///
-/// Small payloads are buffered. Large payloads and streams are uploaded in
-/// chunks with bounded memory. Multipart uploads from files can resume after
-/// an interruption.
+/// Remote files retain their upload progress and final commit request. Embedded
+/// writes buffer small files and stream large files with bounded memory.
 ///
 /// Recursive uploads share `progress` across their files.
 pub(super) async fn put_payload(
@@ -1021,13 +1020,29 @@ pub(super) async fn put_payload(
     options: &PutFileOptions,
     progress: &Arc<ProgressReporter>,
 ) -> Result<CommitResponse, CliError> {
-    // Resume only multipart uploads backed by a file that can be reopened.
-    // Streams cannot be read again after an interruption.
-    let journal = match (&context.target, payload.resumable_source()) {
-        (ResolvedTarget::Remote(_), Some(path)) => Some(resume_journal(context, spec, path)?),
+    // File-backed remote PUTs retain their exact request across interruptions.
+    let journal = match (&context.target, payload.file_path()) {
+        (ResolvedTarget::Remote(remote), Some(path)) => Some(resume_journal(
+            context,
+            remote.client.server_url(),
+            spec,
+            path,
+            options,
+        )?),
         _ => None,
     };
+    let retained_options = journal.as_ref().map(UploadJournal::options);
+    let options = retained_options.as_ref().unwrap_or(options);
     if let Some(journal) = journal.as_ref() {
+        if let Some(request) = journal.prepared_request() {
+            progress.phase("committing");
+            let committed = context
+                .target
+                .replay_file_commit(context.namespace(), &request)
+                .await?;
+            acknowledge_committed_upload(journal, &committed)?;
+            return Ok(committed);
+        }
         if let Some(committed) =
             commit_a_finished_upload(context, spec, options, journal, progress).await?
         {
@@ -1038,13 +1053,13 @@ pub(super) async fn put_payload(
         // A payload small enough to hold travels as one request, so there is
         // no midpoint to report: it is read, and then the commit is all
         // that is left.
-        Some(path) => {
+        Some(path) if journal.is_none() => {
             let bytes = read_whole_file(path).await?;
             progress.advance(bytes.len() as u64);
             progress.phase("committing");
             context.target.put_file_bytes(spec, &bytes, options).await
         }
-        None => {
+        _ => {
             context
                 .target
                 .put_file_stream(spec, payload, options, progress, journal.as_ref())
@@ -1052,10 +1067,8 @@ pub(super) async fn put_payload(
         }
     };
     if let Ok(committed) = &result {
-        // The record exists to survive an interruption, and this upload was
-        // not interrupted.
         if let Some(journal) = journal.as_ref() {
-            forget_committed_upload(journal, committed)?;
+            acknowledge_committed_upload(journal, committed)?;
         }
     }
     result
@@ -1064,17 +1077,20 @@ pub(super) async fn put_payload(
 /// Opens the journal for a resumable remote file upload.
 fn resume_journal(
     context: &CommandContext,
+    server_url: &str,
     spec: &NamespacePath,
     local_path: &Path,
+    options: &PutFileOptions,
 ) -> Result<UploadJournal, CliError> {
     let source =
         SourceIdentity::of(local_path).map_err(|error| CliError::io_for_path(local_path, error))?;
     UploadJournal::for_upload(
         &context.profile_name,
-        context.namespace().as_str(),
-        spec.absolute_path().as_str(),
+        server_url,
+        spec,
         local_path,
         source,
+        options,
     )
     .map_err(CliError::io)
 }
@@ -1095,7 +1111,7 @@ async fn commit_a_finished_upload(
     journal: &UploadJournal,
     progress: &ProgressReporter,
 ) -> Result<Option<CommitResponse>, CliError> {
-    let Some(resume) = journal.resume().map_err(CliError::io)? else {
+    let Some(resume) = journal.resume() else {
         return Ok(None);
     };
     let status = context
@@ -1114,18 +1130,18 @@ async fn commit_a_finished_upload(
     progress.phase("committing");
     let result = context
         .target
-        .commit_completed_upload(spec, content_ref, content_token, options)
+        .commit_completed_upload(spec, content_ref, content_token, options, journal)
         .await;
     let committed = result?;
-    forget_committed_upload(journal, &committed)?;
+    acknowledge_committed_upload(journal, &committed)?;
     Ok(Some(committed))
 }
 
-fn forget_committed_upload(
+fn acknowledge_committed_upload(
     journal: &UploadJournal,
     committed: &CommitResponse,
 ) -> Result<(), CliError> {
-    journal.forget().map_err(|error| {
+    journal.acknowledge().map_err(|error| {
         CliError::io_error(format!(
         "file commit `{}` succeeded at sequence {}, but its journal could not be removed: {error}",
         committed.commit_id, committed.committed_seq,
