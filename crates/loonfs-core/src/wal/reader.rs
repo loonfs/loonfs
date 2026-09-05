@@ -117,24 +117,28 @@ struct WalkedChain {
     /// How many `get` requests the load issued, prefetch included. A request
     /// that failed or missed counts, because the round trip happened; a
     /// segment the prefetch delivered is not counted again when consumed.
+    #[cfg(test)]
     fetches: usize,
     limit_reached: bool,
 }
 
 /// Result of loading a WAL chain with a fetch limit.
 ///
-/// `requests_issued` counts all segment-body requests, including prefetches,
-/// misses, and failed requests. It never exceeds the supplied limit.
+/// Request counts include prefetches, misses, and failures, and never exceed
+/// the supplied limit. Tests inspect counts to verify the bound.
 pub(crate) enum WalChainLoad {
     /// The whole chain was read inside the fetch limit.
     Complete {
         chain: ValidatedWalChain,
+        #[cfg(test)]
         requests_issued: usize,
     },
     /// The load stopped at the fetch limit. The chain it walked is partial,
-    /// so it is dropped rather than returned, but the requests it spent
-    /// getting there are reported so the caller can charge for them.
-    LimitReached { requests_issued: usize },
+    /// so it is dropped rather than returned.
+    LimitReached {
+        #[cfg(test)]
+        requests_issued: usize,
+    },
 }
 
 impl WalChainLoad {
@@ -162,11 +166,13 @@ pub(crate) async fn load_wal_chain<S: ObjectStore + ?Sized>(
     let walked = walk_chain(store, &request).await?;
     if walked.limit_reached {
         Ok(WalChainLoad::LimitReached {
+            #[cfg(test)]
             requests_issued: walked.fetches,
         })
     } else {
         Ok(WalChainLoad::Complete {
             chain: finish_chain(&request, walked.segments)?,
+            #[cfg(test)]
             requests_issued: walked.fetches,
         })
     }
@@ -181,6 +187,7 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
     let Some((mut pointer, stop_after_seq)) = request.tip_and_stop()? else {
         return Ok(WalkedChain {
             segments: Vec::new(),
+            #[cfg(test)]
             fetches: 0,
             limit_reached: false,
         });
@@ -223,6 +230,7 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
                 {
                     return Ok(WalkedChain {
                         segments: Vec::new(),
+                        #[cfg(test)]
                         fetches,
                         limit_reached: true,
                     });
@@ -261,6 +269,7 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
     reversed.reverse();
     Ok(WalkedChain {
         segments: reversed,
+        #[cfg(test)]
         fetches,
         limit_reached: false,
     })
@@ -382,4 +391,29 @@ pub(crate) fn count_visible_wal_tail_segments(
 /// fully counted.
 fn pointer_reaches_base(pointer: &WalSegmentPointer, stop_after_seq: ChangeSeq) -> bool {
     pointer.start_seq.0.saturating_sub(1) <= stop_after_seq.0
+}
+
+/// Loads one linked segment for a durable backwards scan. Both its pointer
+/// and internal commit sequence are verified before the caller marks it.
+pub(crate) async fn load_retained_segment<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    pointer: &WalSegmentPointer,
+) -> Result<ValidatedWalSegment, WalChainLoadError> {
+    let object_key = wal_segment(namespace_id, &pointer.segment_id);
+    let bytes = store
+        .get(&object_key, None)
+        .await
+        .map_err(|error| WalChainLoadError::ReadWal {
+            object_key: object_key.clone(),
+            message: error.public_message().into_owned(),
+        })?
+        .ok_or_else(|| WalChainLoadError::MissingWalObject {
+            object_key: object_key.clone(),
+        })?;
+    let envelope = decode_wal_segment_envelope_zstd(&bytes)
+        .map_err(|error| WalSegmentError::Codec(error.to_string()))?;
+    validate_pointer_matches_envelope(pointer, &object_key, &envelope)?;
+    validate_wal_segment_for_replay(namespace_id, envelope.payload().base_head_seq, &envelope)?;
+    Ok(ValidatedWalSegment::new(object_key, envelope))
 }

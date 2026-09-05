@@ -1,21 +1,26 @@
 //! Mark-and-sweep garbage collection (format spec, "Garbage collection").
 //!
-//! Garbage collection does not coordinate with readers or writers. Grace
-//! periods, delete-time reference checks, and retain-on-error behavior protect
-//! concurrent publications and pinned reads. Collection only runs when
-//! explicitly requested or scheduled.
+//! Collectors share one durable run per namespace. A fixed clock, complete
+//! on-disk marking, and terminal pin lifecycles protect concurrent writers
+//! and readers while small budgets resume across hosts. Collection runs only
+//! when explicitly requested or scheduled.
 
 mod budget;
 mod compaction_staging;
 mod config;
 mod cursor;
 mod fork_checkpoints;
-mod live_set;
+mod mark;
+mod mark_index;
+mod mark_table;
 mod reap;
+mod references;
 mod run;
+mod sweep;
 #[cfg(test)]
 mod tests;
 mod uploads;
+mod validate;
 
 pub use budget::PassBudget;
 pub use config::GcConfig;

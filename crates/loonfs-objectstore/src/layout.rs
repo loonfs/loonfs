@@ -25,6 +25,10 @@ pub enum DurableObjectFamily {
     MetadataCompactionLease,
     /// Classifies the publication-protection record beside sealed job output.
     CompactionOutputProtection,
+    /// Classifies the namespace collector's durable progress.
+    GcRun,
+    /// Classifies an immutable page of a sorted GC mark table.
+    GcMarkPage,
     /// Classifies a mutable checkpoint lifecycle record.
     CheckpointRecord,
     /// Classifies a mutable upload-session lifecycle record.
@@ -70,6 +74,18 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             None,
             Some(content_id),
         )),
+        ["namespaces", namespace, "gc", "run.json"] => {
+            Some(parsed(DurableObjectFamily::GcRun, Some(namespace), None))
+        }
+        ["namespaces", namespace, "gc", "runs", run_id, "tables", _, page]
+            if page.ends_with(".json") =>
+        {
+            Some(parsed(
+                DurableObjectFamily::GcMarkPage,
+                Some(namespace),
+                Some(run_id),
+            ))
+        }
         ["namespaces", namespace, "wal", "head.json"] => {
             Some(parsed(DurableObjectFamily::WalHead, Some(namespace), None))
         }

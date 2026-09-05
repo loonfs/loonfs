@@ -1,23 +1,14 @@
 //! Work limits for a garbage-collection pass.
 
-/// Limits object-store work performed by one garbage-collection pass.
+/// Limits durable work steps in one invocation. A source step reads one
+/// root, checkpoint (including fork probes and its basis), anchor candidate,
+/// or WAL segment. A merge step writes at most 512 entries. A revision step
+/// reads one data block, and a sweep step decides one candidate.
 ///
-/// One unit is charged for:
-///
-/// * the namespace control snapshot: head, metadata root, and retention floor
-///   read concurrently;
-/// * one checkpoint record read while marking, plus two more for the fork
-///   target head and its possible metadata-root probe;
-/// * one manifest opened, whether to mark its segments or by the content
-///   reference scan;
-/// * one page of revision rows read out of an opened manifest;
-/// * each request used to read the retained WAL chain, including failed
-///   requests;
-/// * one enumerated candidate key, decided — the original meaning of
-///   `max_objects`.
-///
-/// Prefix listings are not charged. This is a coarse upper bound on store
-/// operations, not a cost model.
+/// Listing, progress CAS, and mark-table lookups are supporting work rather
+/// than separate units. Source decoding is bounded by the existing manifest,
+/// WAL, and data-block formats; this is not a literal count of HTTP requests.
+/// A budget of one always permits one resumable step.
 #[derive(Debug)]
 pub struct PassBudget {
     max_objects: Option<u64>,
@@ -50,12 +41,6 @@ impl PassBudget {
         self.spent = self.spent.saturating_add(1);
     }
 
-    /// Returns the number of charged units.
-    #[cfg(test)]
-    pub(super) fn spent(&self) -> u64 {
-        self.spent
-    }
-
     /// Reserves one unit, returning `false` if the budget is exhausted.
     pub(super) fn try_charge(&mut self) -> bool {
         if self.exhausted() {
@@ -63,10 +48,5 @@ impl PassBudget {
         }
         self.charge();
         true
-    }
-
-    /// Charges several units for completed work.
-    pub(super) fn charge_block(&mut self, units: u64) {
-        self.spent = self.spent.saturating_add(units);
     }
 }

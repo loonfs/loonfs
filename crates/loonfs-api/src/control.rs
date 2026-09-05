@@ -35,11 +35,13 @@ pub enum ControlObjectKind {
     CompactionLease,
     /// Protects sealed compaction output across publication and later group owners.
     CompactionOutputProtection,
+    /// Coordinates bounded, resumable marking and sweeping.
+    GcRun,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::WalHead,
         Self::WalFloor,
         Self::MetadataRoot,
@@ -47,6 +49,7 @@ impl ControlObjectKind {
         Self::UploadSession,
         Self::CompactionLease,
         Self::CompactionOutputProtection,
+        Self::GcRun,
     ];
 
     /// Durable format version for this control object kind.
@@ -57,13 +60,14 @@ impl ControlObjectKind {
     /// a raw JSON fragment whose checksum covers its exact bytes.
     pub const fn format_version(self) -> u32 {
         match self {
-            Self::WalHead => 1,
+            Self::WalHead => 2,
             Self::WalFloor => 1,
             Self::MetadataRoot => 1,
             Self::CheckpointRecord => 1,
             Self::UploadSession => 1,
             Self::CompactionLease => 3,
             Self::CompactionOutputProtection => 1,
+            Self::GcRun => 1,
         }
     }
 
@@ -77,6 +81,7 @@ impl ControlObjectKind {
             Self::UploadSession => "upload_session",
             Self::CompactionLease => "compaction_lease",
             Self::CompactionOutputProtection => "compaction_output_protection",
+            Self::GcRun => "gc_run",
         }
     }
 

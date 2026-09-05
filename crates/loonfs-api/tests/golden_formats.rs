@@ -622,17 +622,17 @@ fn head_status_rejects_unknown_fields_as_corruption() {
 #[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(
-        "control_wal_head.v1.json",
+        "control_wal_head.v2.json",
         ControlObjectKind::WalHead,
         sample_head_state(),
     );
     check_control_golden(
-        "control_namespace_head.deleted.v1.json",
+        "control_namespace_head.deleted.v2.json",
         ControlObjectKind::WalHead,
         sample_deleted_head_state(),
     );
     check_control_golden(
-        "control_namespace_head.fork.v1.json",
+        "control_namespace_head.fork.v2.json",
         ControlObjectKind::WalHead,
         sample_fork_head_state(),
     );
@@ -885,8 +885,8 @@ fn control_objects_match_golden_bytes() {
 #[test]
 fn every_durable_status_is_a_kind_tagged_object() {
     let fixtures = [
-        "control_wal_head.v1.json",
-        "control_namespace_head.deleted.v1.json",
+        "control_wal_head.v2.json",
+        "control_namespace_head.deleted.v2.json",
         "control_checkpoint_record.v1.json",
         "control_checkpoint_record_released.v1.json",
         "control_upload_session.v1.json",
@@ -923,7 +923,7 @@ fn every_mutable_control_payload_rejects_unknown_fields_as_corruption() {
         payload["field_from_the_future"] = serde_json::Value::from(true);
     };
     assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v1.json",
+        "control_wal_head.v2.json",
         ControlObjectKind::WalHead,
         add_unknown,
     );
@@ -953,7 +953,7 @@ fn every_mutable_control_payload_rejects_unknown_fields_as_corruption() {
         add_unknown,
     );
     assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_namespace_head.fork.v1.json",
+        "control_namespace_head.fork.v2.json",
         ControlObjectKind::WalHead,
         add_unknown,
     );
@@ -981,20 +981,20 @@ fn compaction_leases_reject_the_retired_refresh_instant_field() {
 #[test]
 fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
     assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v1.json",
+        "control_wal_head.v2.json",
         ControlObjectKind::WalHead,
         |payload| payload["writer"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     // Both head pointer fields must reject data that a rewrite would drop.
     assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v1.json",
+        "control_wal_head.v2.json",
         ControlObjectKind::WalHead,
         |payload| {
             payload["visible_wal_tip"]["field_from_the_future"] = serde_json::Value::from(true);
         },
     );
     assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v1.json",
+        "control_wal_head.v2.json",
         ControlObjectKind::WalHead,
         |payload| {
             // The fixture has no predecessor hints, so add one based on the
@@ -1005,7 +1005,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         },
     );
     assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_namespace_head.fork.v1.json",
+        "control_namespace_head.fork.v2.json",
         ControlObjectKind::WalHead,
         |payload| payload["fork_basis"]["field_from_the_future"] = serde_json::Value::from(true),
     );
@@ -1157,7 +1157,7 @@ fn upload_sessions_reject_an_untagged_or_incomplete_status() {
 #[test]
 fn mutable_control_enums_fail_closed_on_unknown_variants() {
     assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v1.json",
+        "control_wal_head.v2.json",
         ControlObjectKind::WalHead,
         |payload| payload["status"] = serde_json::Value::from("future_status"),
     );
@@ -1338,7 +1338,7 @@ fn upload_sessions_reject_a_zero_multipart_part_size() {
 #[test]
 fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
     let mut document: serde_json::Value =
-        serde_json::from_slice(&read_golden("control_wal_head.v1.json"))
+        serde_json::from_slice(&read_golden("control_wal_head.v2.json"))
             .expect("decode control fixture");
     document["field_from_the_future"] = serde_json::Value::from(true);
     let edited = serde_json::to_vec(&document).expect("encode edited envelope");
@@ -2762,4 +2762,181 @@ fn compaction_output_protection_rejects_unknown_payload_fields() {
         ControlObjectKind::CompactionOutputProtection,
         |payload| payload["unknown"] = serde_json::json!(true),
     );
+}
+
+#[test]
+fn gc_progress_and_mark_pages_match_golden_bytes() {
+    use loonfs_api::wire::gc::*;
+    let run_id = loonfs_api::GcRunId::parse("gcr_0123456789abcdef0123456789abcdef").expect("run");
+    let table = GcMarkTable {
+        table_id: loonfs_api::GcMarkTableId::parse("gct_0123456789abcdef0123456789abcdef")
+            .expect("table"),
+        page_count: 1,
+        entry_count: 1,
+    };
+    let roots = GcRoots {
+        content_store_id: content_store_id(),
+        namespace_deleted: false,
+        degraded: false,
+        anchor: GcReferenceAnchor::Manifest {
+            head_seq: ChangeSeq(4),
+        },
+    };
+    let index = GcMarkIndex {
+        levels: vec![Some(table.clone())],
+        merge: None,
+    };
+    let phases = [
+        ("starting", GcPhase::Starting {}),
+        (
+            "marking",
+            GcPhase::Marking {
+                work: Box::new(GcMarkWork {
+                    roots: roots.clone(),
+                    index: index.clone(),
+                    source: GcMarkSource::Checkpoints { last_key: None },
+                    floor_seq: ChangeSeq(4),
+                    wal_tip: None,
+                }),
+            },
+        ),
+        (
+            "revisions",
+            GcPhase::Revisions {
+                roots: roots.clone(),
+                objects: table.clone(),
+                position: GcMarkPosition::default(),
+                block_no: 0,
+                content: GcMarkIndex::default(),
+            },
+        ),
+        (
+            "sealing",
+            GcPhase::Sealing {
+                roots: roots.clone(),
+                index,
+            },
+        ),
+        (
+            "sweeping",
+            GcPhase::Sweeping {
+                roots,
+                table: table.clone(),
+                family: GcCandidateFamily::WalSegments,
+                last_key: None,
+            },
+        ),
+        ("cleaning", GcPhase::Cleaning { last_key: None }),
+        ("complete", GcPhase::Complete {}),
+    ];
+    for (step_no, (name, phase)) in phases.into_iter().enumerate() {
+        check_control_golden(
+            &format!("control_gc_run.{name}.v1.json"),
+            ControlObjectKind::GcRun,
+            GcRunState {
+                namespace_id: namespace_id(),
+                gc_run_id: run_id.clone(),
+                step_no: step_no as u64,
+                started_at_ms: 1_000_000,
+                grace_window_ms: 600_000,
+                phase,
+            },
+        );
+    }
+    let page = GcMarkPage {
+        namespace_id: namespace_id(),
+        gc_run_id: run_id,
+        table_id: table.table_id,
+        page_no: 0,
+        entries: vec![GcMarkEntry {
+            key: "content/con_0123456789abcdef0123456789abcdef".to_owned(),
+            value: GcMarkValue::Content {},
+        }],
+    };
+    let encoded = encode_gc_mark_page(page.clone()).expect("encode");
+    assert_matches_golden("gc_mark_page.v1.json", encoded.as_bytes());
+    let bytes = std::fs::read(golden_path("gc_mark_page.v1.json")).expect("fixture");
+    assert_eq!(
+        decode_gc_mark_page(&bytes).expect("decode").into_payload(),
+        page
+    );
+}
+
+#[test]
+fn gc_progress_rejects_unknown_fields_inside_progress_and_merge_state() {
+    use loonfs_api::wire::gc::*;
+    let bytes = std::fs::read(golden_path("control_gc_run.marking.v1.json")).expect("fixture");
+    let state: GcRunState = decode_control_object(&bytes, ControlObjectKind::GcRun)
+        .expect("decode")
+        .into_payload();
+    let original = serde_json::to_value(state).expect("payload");
+    for path in [
+        "",
+        "/phase",
+        "/phase/work",
+        "/phase/work/roots",
+        "/phase/work/roots/anchor",
+        "/phase/work/source",
+        "/phase/work/index",
+        "/phase/work/index/levels/0",
+    ] {
+        let mut payload = original.clone();
+        payload
+            .pointer_mut(path)
+            .expect("path")
+            .as_object_mut()
+            .expect("object")
+            .insert("unexpected".to_owned(), serde_json::json!(true));
+        let encoded =
+            loonfs_api::wire::control::encode_control_state(ControlObjectKind::GcRun, &payload)
+                .expect("encode");
+        assert!(
+            decode_control_object::<GcRunState>(&encoded, ControlObjectKind::GcRun).is_err(),
+            "unknown field at {path}"
+        );
+    }
+    let merge = GcMarkMerge {
+        inputs: [
+            GcMarkTable {
+                table_id: loonfs_api::GcMarkTableId::generate(),
+                page_count: 1,
+                entry_count: 1,
+            },
+            GcMarkTable {
+                table_id: loonfs_api::GcMarkTableId::generate(),
+                page_count: 1,
+                entry_count: 1,
+            },
+        ],
+        positions: [GcMarkPosition::default(); 2],
+        output: GcMarkTable {
+            table_id: loonfs_api::GcMarkTableId::generate(),
+            page_count: 0,
+            entry_count: 0,
+        },
+        output_level: 1,
+    };
+    let mut value = serde_json::to_value(merge).expect("merge");
+    value["positions"][0]["unexpected"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<GcMarkMerge>(value).is_err());
+}
+
+#[test]
+fn gc_mark_pages_reject_wrong_order_oversize_and_unknown_entries() {
+    use loonfs_api::wire::gc::*;
+    let bytes = std::fs::read(golden_path("gc_mark_page.v1.json")).expect("fixture");
+    let page = decode_gc_mark_page(&bytes).expect("page").into_payload();
+    let mut duplicate = page.clone();
+    duplicate.entries.push(duplicate.entries[0].clone());
+    assert!(encode_gc_mark_page(duplicate).is_err());
+    assert!(decode_gc_mark_page(&vec![0; GC_MARK_PAGE_MAX_BYTES + 1]).is_err());
+    let mut payload = serde_json::to_value(page).expect("payload");
+    payload["entries"][0]["value"]["unexpected"] = serde_json::json!(true);
+    let encoded = loonfs_api::wire::envelope::encode_json_envelope(
+        GC_MARK_PAGE_KIND,
+        GC_MARK_PAGE_VERSION,
+        payload,
+    )
+    .expect("encode");
+    assert!(decode_gc_mark_page(encoded.as_bytes()).is_err());
 }

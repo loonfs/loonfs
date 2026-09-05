@@ -97,6 +97,8 @@ The required durable object families and standard key patterns are:
 | **Compaction output protection** | Mutable deadline | Before each publication attempt, a job records its lease deadline beside the sealed output. This record remains until the output prefix is empty. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/protection.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
+| **GC run** | Mutable CAS | Coordinates marking and sweeping across calls and hosts; one active run per namespace. | `namespaces/{namespace_id}/gc/run.json` |
+| **GC mark pages** | Immutable | Sorted, checksummed reference tables and intermediate merge output. | `namespaces/{namespace_id}/gc/runs/{gc_run_id}/tables/{table_id}/{page_no:020}.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
@@ -339,7 +341,7 @@ practical.
 
 Six control-object kinds are registered: `wal_head`, `wal_floor`,
 `metadata_root`, `checkpoint_record`, `upload_session`, and
-`compaction_lease`, and `compaction_output_protection`. A control-object envelope carrying any other kind string
+`compaction_lease`, `compaction_output_protection`, and `gc_run`. A control-object envelope carrying any other kind string
 is rejected, not skipped.
 
 The WAL floor and the metadata root are the only control objects that carry
@@ -1889,6 +1891,8 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
 | Compaction lease | `compaction_lease` | JSON, uncompressed | 3 |
 | Compaction output protection | `compaction_output_protection` | JSON, uncompressed | 1 |
+| GC run | `gc_run` | JSON, uncompressed | 1 |
+| GC mark page | `gc_mark_page` | JSON, uncompressed | 1 |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -2345,10 +2349,14 @@ content may remain indefinitely after file or namespace deletion. GC and floor a
 consumers of listing, and nothing sweeps by default: a pass runs only through
 the maintenance endpoint or an explicit maintenance-step opt-in.
 
-A pass reads the namespace head first. An absent head means the namespace
-does not exist, so there is nothing to collect and nothing to ignore.
+Before reserving a new collection, a collector verifies the namespace head.
+An absent head means there is nothing to collect. WAL-head format version 2
+also gates this GC protocol: a version-1 collector must refuse the head
+before it can delete anything. The head payload is unchanged, but the
+collection coordination required to interpret its references has changed.
+There is no mixed-protocol collection or compatibility fallback.
 
-v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
+GC uses resumable listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, the seven point-read compaction lease
 keys, and the `metadata/manifests/`, `metadata/segments/`,
 `metadata/compactions/`, `checkpoints/`, and `wal/segments/` collections. A live manifest roots every object key its
@@ -2420,12 +2428,20 @@ publishing CAS) — under these rules:
    next pass needs.
 2. **Floor is necessary, not sufficient.** Being below `wal/floor.json` only
    nominates an object for deletion.
-3. **Delete-time re-verification.** Immediately before deleting, GC re-lists
-   `checkpoints/`, re-reads the root, head, and floor, and drops from the
-   batch anything reachable from that fresh root set. Candidate selection
-   may be arbitrarily stale; deletion may not. On large batches the
-   re-verification repeats at least every bounded number of deletion
-   decisions, so no deletion consults an arbitrarily stale root set.
+3. **One reserved run, one fixed clock.** Collectors reserve `gc/run.json`
+   by create-if-absent or CAS of a completed run **before** reading the root,
+   head, and floor snapshot. Every collector joins this run. Its
+   `started_at_ms` and grace policy remain fixed through all pauses and
+   host changes. No candidate is deleted until its complete reference index
+   has been sealed. Every readable checkpoint record in a live namespace
+   protects its basis, including released records; only the later sweep can
+   remove those records. Release is terminal and IDs are never reused.
+   Consequently a new valid pin transfers references from the captured root
+   or an already protected pin. A new immutable publication is protected by
+   the fixed cutoff and publication budgets; streaming compaction uses the
+   independent protection in rule 12. An arbitrarily paused older collector
+   retains these same protections and cannot advance a newer run's CAS state.
+   Mutable candidate lifecycles are still inspected when swept.
 4. Roots: `metadata/root.json`; the reference manifest R (rule 1); active
    checkpoint records whose owner still
    stands — a user or snapshot pin until its expiry passes, a fork pin until
@@ -2615,7 +2631,7 @@ publishing CAS) — under these rules:
    with its location, fails the pass and is reported: nothing else reads the object,
    so believing a corrupt one would keep its named job's output alive forever
    and nothing would ever say why. Every other rule — the reference anchor,
-   delete-time re-verification, degraded roots — applies here exactly as it
+   the complete run index, degraded roots — applies here exactly as it
    applies to `metadata/segments/`.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
@@ -2630,9 +2646,63 @@ names it. A released record is deleted once its `released_at_ms` is a grace wind
 because release is terminal, no second state is needed between deciding to
 delete and deleting, and a crash between the release CAS and the delete
 leaves a record the next pass reaps unconditionally.
-The intended end-state remains tracked deletion derived from manifest
-predecessor diffs, with the listing sweep demoted to a low-frequency
-backstop.
+The collector persists the following state in the `gc_run` JSON control
+family, version 1. The common fields are `namespace_id`, `gc_run_id`,
+`step_no`, `started_at_ms`, `grace_window_ms`, and a tagged `phase`:
+
+- `starting`: reservation exists; the control snapshot has not been captured.
+- `marking`: the fixed root summary, source cursor, retained WAL pointer and
+  floor, and a sorted mark index. Source scans visit the owned root,
+  checkpoints, anchor-generation discovery, that generation's candidates,
+  and retained WAL. A generation uses inclusive first/last keys rather than
+  a growing list of candidates.
+- `revisions`: the sealed object table, one entry/block position, and a
+  separate content index. Each immutable revision segment is read once per
+  run, one validated data block at a time. Shared descriptors use the
+  tightest protected manifest sequence bound.
+- `sealing`: merge the content index and object table into one complete table.
+- `sweeping`: that table, the small retention summary, candidate family, and
+  exclusive last-decided key. Data families precede checkpoint and upload
+  records.
+- `cleaning`: exclusive last-decided scratch key. Only recognized mark pages
+  are removed, including abandoned pages from older runs.
+- `complete`: the next caller without this run's token may replace the record
+  by CAS and begin another run.
+
+The `gc_mark_page` JSON family, version 1, stores immutable sorted pages at
+`gc/runs/{gc_run_id}/tables/{table_id}/{page_no:020}.json`. Run IDs use `gcr_`
+and table IDs use `gct_`, each followed by 32 lowercase hex digits. The payload
+contains `namespace_id`, `gc_run_id`, `table_id`, `page_no`, and `entries`.
+Pages contain 1–512 strictly increasing keys and at most 8 MiB of encoded
+bytes. The shared envelope checksums the exact payload bytes. A table
+reference contains its ID, page count, and entry count; every nonfinal page
+is full. Readers validate envelope, identity, extent, page size/order, and
+key/value correspondence. Missing or invalid pages fail collection, never
+answer "not referenced."
+
+Entry keys distinguish object references (`object/` followed by the full
+object key), content IDs (`content/`), revision-segment tasks (`revision/`),
+and missing manifest or checkpoint-basis observations (`missing-manifest/`
+and `missing-basis/`). Tagged values preserve their meaning. Manifest marks
+carry the complete verified manifest reference; revision tasks carry the
+segment descriptor and sequence bound. Equal keys must agree, except that
+identical revision descriptors combine by taking the smaller sequence bound.
+
+The index holds at most one table per binary merge level and one pending
+two-table merge. Each merge saves two input positions and the output extent;
+only a confirmed immutable page write followed by progress CAS advances those
+positions. A lost or ambiguous write cannot turn partial marking into sweep
+permission. Complete tables support binary-search lookup with a cache bounded
+by 64 pages and 16 MiB of encoded page bytes. Memory also includes the source
+manifest, WAL object, or metadata block being decoded; it does not grow with
+the total number of namespace roots or content IDs.
+
+This chooses extra temporary I/O for simple bounded merges: construction
+writes O(N log N) entries and retains intermediate tables until cleanup.
+An old worker can leave an unreferenced page after cleanup; a later run
+reaps it. The singleton run record itself stays in place, preventing deletion
+and recreation races. No marks, roots, or scan positions are trusted from
+client continuation tokens.
 
 ### 6.5 Control-object cleanup
 

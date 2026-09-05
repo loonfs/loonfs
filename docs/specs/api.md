@@ -813,33 +813,30 @@ run lost its compaction lease. `superseded` means every publication attempt lost
 the metadata-root race.
 
 For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the run uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window, `max_objects` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
-`max_objects` bounds the whole pass, from its first read to its last, and
-not only the candidates it enumerates. Building the live root set spends it
-too: the head and metadata root together, the retention floor, each
-checkpoint record, each live manifest, each manifest the pass ages to find
-its reference manifest, and each retained WAL segment, read
-once, while marking. A WAL segment request the store fails is charged like
-one it serves, so a flaky store spends the budget faster than the retained
-chain is long. Every pass then charges the compaction lease stage, one unit
-per metadata family group, before it decides any candidate and whether or
-not it reaches that stage; a budget that cannot cover it stops there.
-Deciding whether a completed session's content
-is still referenced then spends it again on each live manifest and the
-revision rows inside it. A pass that runs out partway through that scan skips
-completed-content reclamation for the rest of the invocation: the session is
-retained, `content_reclamation_deferred` is set, and the sweep goes on
-through every other candidate under the usual budget. Deletion only ever
-follows a complete collection, so a partial one decides nothing. A budget
-too small for the roots themselves does nothing at all. It reports
-`budget_exhausted` alongside `content_reclamation_deferred`, deletes
-nothing, and returns the cursor it was given byte for byte. A budget that
-covers the roots and no more behaves the same way, except that it did
-finish marking, so it does not set `content_reclamation_deferred`. Any pass
-that stops without deciding a candidate returns its submitted cursor
-unchanged, and a caller that loops on `next_cursor` should stop when the
-token it gets back is the token it sent. A budget above the roots but below
-the reference scan on top of them keeps completed content rather than
-reclaiming it, and a pass with room for the whole scan collects it later.
+`max_objects` limits durable work steps in one invocation: one source object
+(including a checkpoint's fork probes and basis), one merge page, one revision
+data block, or one sweep candidate. Listing, progress writes, and reference
+lookups are supporting work, so this is not a literal count of provider
+requests. The minimum budget is one; even that budget eventually completes
+marking, content-reference collection, and sweeping across calls.
+
+The server saves progress in one run per namespace. Calls without a cursor
+join an active run; after it completes, another call without a cursor starts a
+new one. A continuation token identifies the namespace, run, and last reported
+progress number. Its progress number is informational: clients cannot select
+a scan position or supply references. Older tokens for the active run resume
+its latest saved position. A token for a replaced run returns `invalid_request`.
+
+The run keeps its original clock and grace policy across calls and hosts.
+Changing the caller's clock or grace override while resuming cannot make more
+objects old enough for that run to delete. Marking completes before any
+candidate is swept. While a budget interrupts marking,
+`content_reclamation_deferred` and `budget_exhausted` are true and
+`next_cursor` points to the saved work. Every committed step changes the
+reported progress number. Responses contain counts for that invocation;
+concurrent calls can overlap attempts, so counts are operational summaries,
+not an exactly-once deletion ledger.
+
 Step-driven GC defaults `max_objects` to 1024 and returns any `next_cursor`
 for a later step rather than looping internally. Nothing sweeps unless `gc`
 is present.

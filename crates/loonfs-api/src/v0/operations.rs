@@ -848,10 +848,12 @@ pub struct GcRequest {
     /// server's advertised safety floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// The maximum objects this pass may inspect, or `None` to run to completion.
+    /// Maximum durable GC work steps in this call, or `None` to finish the run.
+    /// Even a budget of one saves progress through marking and sweeping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_objects: Option<u64>,
-    /// The opaque `next_cursor` returned by an earlier pass for the same namespace.
+    /// The opaque `next_cursor` returned by an earlier call for this namespace.
+    /// Omitting it joins any active run; scan positions remain server-owned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
@@ -973,7 +975,7 @@ pub struct GcResponse {
     pub content_reclamation_deferred: bool,
     /// Whether the pass reached `max_objects` before completion.
     pub budget_exhausted: bool,
-    /// The opaque resume token for remaining candidates in the same namespace.
+    /// The opaque run token for remaining marking, sweeping, or cleanup work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
