@@ -7,7 +7,8 @@ use super::super::compaction_lease::{
     claim_group_lease, load_group_lease, CompactionLease, CompactionPrefixOwner, LeaseHold,
 };
 use super::super::reorganize::{
-    group_run_descriptors, select_reorganization_input, FrozenBasePolicy, ReorganizationPlan,
+    group_run_descriptors, select_reorganization_input, MetadataCompactionPolicy,
+    ReorganizationPlan,
 };
 use super::super::row::manifest_row_commit_seq;
 use super::super::runs::MetadataFamilyGroup;
@@ -583,12 +584,12 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
             ..MetadataLsmPolicy::default()
         },
         frozen_floor_seq,
-        &FrozenBasePolicy::default(),
+        &MetadataCompactionPolicy::CompactImmediately,
     )
     .await
     .expect("plan the group");
     match selection.plan {
-        ReorganizationPlan::FullCompaction(spec) => spec,
+        ReorganizationPlan::StreamingCompaction(spec) => spec,
         _ => panic!("a group no budget admits must plan as a streaming compaction"),
     }
 }
@@ -841,7 +842,7 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
         namespace_id,
         &test_context(),
         fold_everything_policy(),
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("fold the group whole");
@@ -873,7 +874,7 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
         group,
         fold_everything_policy(),
         floor_seq,
-        &FrozenBasePolicy::default(),
+        &MetadataCompactionPolicy::default(),
     )
     .await
     .expect("plan under generous budgets");
@@ -892,11 +893,11 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
             ..MetadataLsmPolicy::default()
         },
         floor_seq,
-        &FrozenBasePolicy::default(),
+        &MetadataCompactionPolicy::default(),
     )
     .await
     .expect("plan under budgets nothing fits");
-    let ReorganizationPlan::FullCompaction(spec) = starved.plan else {
+    let ReorganizationPlan::StreamingCompaction(spec) = starved.plan else {
         panic!("a group no window fits must plan as a streaming compaction");
     };
     assert!(
@@ -933,7 +934,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
         &namespace_id,
         &test_context(),
         starving_policy(),
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("budgeted step");
@@ -993,7 +994,7 @@ async fn held_group_leases_are_skipped_and_an_expired_lease_is_available() {
         &namespace_id,
         &context,
         policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("step with active lease");
@@ -1022,7 +1023,7 @@ async fn held_group_leases_are_skipped_and_an_expired_lease_is_available() {
         &namespace_id,
         &context,
         policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("step with reaping lease");
@@ -1044,7 +1045,7 @@ async fn held_group_leases_are_skipped_and_an_expired_lease_is_available() {
         &namespace_id,
         &context,
         policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("step with expired lease");
@@ -1065,7 +1066,7 @@ async fn held_group_leases_are_skipped_and_an_expired_lease_is_available() {
 }
 
 #[tokio::test]
-async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
+async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1098,7 +1099,7 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
             &namespace_id,
             &context,
             policy,
-            FrozenBasePolicy::Amortized,
+            MetadataCompactionPolicy::SizeTiered,
         )
         .await
         .expect("maintenance pass");
@@ -1131,9 +1132,8 @@ async fn sustained_delta_runs_cannot_postpone_a_blocked_groups_job() {
         "the job must start while delta runs keep arriving"
     );
     assert_eq!(
-        delta_merges_over_the_frozen_base,
-        super::super::reorganize::DELTA_MERGES_OVER_A_FROZEN_BASE,
-        "the group merges deltas over its frozen base exactly that many times before the job"
+        delta_merges_over_the_frozen_base, 0,
+        "small runs are immediately eligible regardless of prior merge counts"
     );
 }
 
@@ -1159,7 +1159,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             &namespace_id,
             &context,
             policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("maintenance pass");
@@ -1206,7 +1206,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             &namespace_id,
             &context,
             policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("maintenance pass");
@@ -1538,7 +1538,7 @@ async fn a_repeated_revision_row_key_is_refused() {
         group,
         fold_everything_policy(),
         floor_seq,
-        &FrozenBasePolicy::default(),
+        &MetadataCompactionPolicy::default(),
     )
     .await
     .expect("plan the group")
@@ -1961,7 +1961,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
         group,
         fold_everything_policy(),
         floor_seq,
-        &FrozenBasePolicy::default(),
+        &MetadataCompactionPolicy::default(),
     )
     .await
     .expect("plan the group")
@@ -2662,7 +2662,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         group,
         small_segment_policy(),
         floor_seq,
-        &FrozenBasePolicy::default(),
+        &MetadataCompactionPolicy::default(),
     )
     .await
     .expect("plan the group")
@@ -2981,7 +2981,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             &namespace_id,
             &context,
             policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("maintenance pass");
@@ -3138,7 +3138,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
             namespace_id,
             context,
             policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("maintenance pass");
@@ -3745,7 +3745,7 @@ async fn compaction_rejects_mismatched_manifest_references_before_writing() {
                         .expect("nonzero budget"),
                     ..MetadataLsmPolicy::default()
                 },
-                FrozenBasePolicy::default(),
+                MetadataCompactionPolicy::default(),
             )
             .await
             .expect_err("bounded merges and full-job planning must reject the reference");
@@ -3835,4 +3835,61 @@ async fn compaction_finalization_rechecks_the_complete_manifest_reference() {
             "finalization must not replace the inconsistent root",
         );
     }
+}
+
+#[tokio::test]
+async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(dir.path()).expect("store");
+    let namespace = NamespaceId::parse("backlog").expect("namespace");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..20 {
+        write_file_bytes(
+            &store,
+            &namespace,
+            &format!("/file-{index}.txt"),
+            b"data",
+            &context,
+            None,
+        )
+        .await
+        .expect("write");
+        create_checkpoint(&store, &namespace, &context)
+            .await
+            .expect("flush");
+    }
+    let before = current_metadata_state(&store, &namespace).await;
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    assert_eq!(
+        spec.input_runs(),
+        super::super::reorganize::MAX_COMPACTION_INPUT_RUNS
+    );
+    let snapshot = snapshot_keys_now(&store, &namespace, &spec).await;
+    let untouched = referenced_segment_keys(&store, &namespace)
+        .await
+        .difference(&snapshot)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(!untouched.is_empty());
+    let result = run_compaction(
+        &store,
+        &namespace,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("merge");
+    assert!(
+        result.peak_resident_blocks <= 2 * 2 * spec.input_runs(),
+        "two blocks per iterator, at most two families per cluster"
+    );
+    publish_streaming_compaction(&store, &namespace, &spec, &snapshot, &result).await;
+    let referenced = referenced_segment_keys(&store, &namespace).await;
+    assert!(untouched.is_subset(&referenced));
+    let after = current_metadata_state(&store, &namespace).await;
+    assert!(metadata_states_equivalent(&before, &after));
 }

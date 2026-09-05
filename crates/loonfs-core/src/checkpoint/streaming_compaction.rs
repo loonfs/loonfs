@@ -85,10 +85,7 @@ pub struct MetadataCompactionSpec {
     /// prefix.
     job_id: MetadataCompactionId,
     group: MetadataFamilyGroup,
-    /// Every run the group held when the plan was made, by run number. That
-    /// is bottom-anchored by construction — a run the group holds cannot sort
-    /// below the whole of itself — which is what makes the job's drops
-    /// visibility-preserving.
+    /// A contiguous window of at most eight runs, in oldest-first order.
     inputs: Vec<RunNo>,
     /// Rows those runs hold for the group, from their descriptors. What the
     /// job reports it is about to read; the rows it writes are fewer by
@@ -106,6 +103,10 @@ impl MetadataCompactionSpec {
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
     ) -> Self {
+        assert!(
+            !inputs.is_empty() && inputs.len() <= super::reorganize::MAX_COMPACTION_INPUT_RUNS,
+            "a compaction plan must have bounded, nonempty input"
+        );
         Self {
             job_id: MetadataCompactionId::generate(),
             group,
@@ -560,7 +561,6 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             previous,
             surviving,
             ReplacementOutput {
-                group: spec.group(),
                 segments: result.output_segments.clone(),
                 placement: spec.placement,
             },
@@ -917,9 +917,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         cluster: &RetentionCluster,
         control: &mut MergeControl<'_, '_>,
     ) -> Result<Option<MetadataCompactionJobOutcome>> {
-        // The descriptors are cloned out of the snapshot rather than borrowed
-        // from it: an iterator outlives every other borrow the merge takes, and
-        // a cluster opens one per run per family, which is a handful.
+        // One iterator per input run and family. The planner caps run fan-in;
+        // each iterator advances through that run's segments sequentially.
         let mut iterators = Vec::new();
         for run in self.snapshot.scan_runs.iter() {
             for family in cluster.families {

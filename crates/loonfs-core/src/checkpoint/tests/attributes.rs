@@ -299,7 +299,6 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         writer_epoch: loonfs_api::WriterEpoch(1),
         next_inode_id: InodeId(64),
         next_run_no: RunNo(1),
-        frozen_base_delta_merges: Default::default(),
         retention_floor_seq: ChangeSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),

@@ -9,9 +9,9 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CreateCheckpointOptions, CreateNamespaceOptions, FrozenBasePolicy, FsMaintenance, FsWriter,
-    MetadataCompactionOutcome, MoveOptions, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
-    RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
+    CreateCheckpointOptions, CreateNamespaceOptions, FsMaintenance, FsWriter,
+    MetadataCompactionOutcome, MetadataCompactionPolicy, MoveOptions, NamespaceId, PutFileOptions,
+    ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
@@ -362,7 +362,7 @@ async fn bindings_runs<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available() {
+async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_in() {
     let temp_dir = tempdir().expect("tempdir");
     let (writer, standalone, scheduled, recorder) = manual_deployment(temp_dir.path()).await;
     let explicit = namespace_id("explicit");
@@ -378,39 +378,19 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
         sustained_writes(&writer, &standalone, namespace).await;
     }
 
-    // The amortized step, under the same budget and namespace shape,
-    // publishes the delta merge. That proves the merge was available.
+    // A small group is eligible immediately, even when its rows require a job.
     let response = scheduled
         .run_maintenance(&automatic, metadata_request())
         .await
-        .expect("run an amortized step");
+        .expect("plan automatic compaction");
     let metadata = match response {
         RunMaintenanceResponse::Metadata(metadata) => Some(metadata),
         _ => None,
     }
-    .expect("a metadata request should return a metadata response");
+    .expect("metadata response");
     assert_eq!(
         metadata.reorganize,
-        ReorganizeStepOutcome::UnitPublished,
-        "an amortizing planner takes the delta merge above the frozen base"
-    );
-    let response = scheduled
-        .run_maintenance(&automatic, metadata_request())
-        .await
-        .expect("run the second amortized step");
-    let metadata = match response {
-        RunMaintenanceResponse::Metadata(metadata) => Some(metadata),
-        _ => None,
-    }
-    .expect("a metadata request should return a metadata response");
-    assert_eq!(metadata.reorganize, ReorganizeStepOutcome::UnitPublished);
-    assert_eq!(
-        current_manifest_payload(&store, &automatic)
-            .await
-            .frozen_base_delta_merges
-            .get(&BINDINGS),
-        Some(&2),
-        "the manifest records both delta merges over the frozen base"
+        ReorganizeStepOutcome::CompactionRequired
     );
 
     writer.shutdown().await.expect("shut down the first writer");
@@ -428,16 +408,16 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
     let response = fresh_scheduled
         .run_maintenance(&automatic, metadata_request())
         .await
-        .expect("run the third step through the fresh handle");
+        .expect("replan after restart");
     let metadata = match response {
         RunMaintenanceResponse::Metadata(metadata) => Some(metadata),
         _ => None,
     }
-    .expect("a metadata request should return a metadata response");
+    .expect("metadata response");
     assert_eq!(
         metadata.reorganize,
         ReorganizeStepOutcome::CompactionRequired,
-        "the fresh handle reads the manifest count and requests full compaction on the third step"
+        "the same durable run sizes produce the same plan after restart"
     );
     fresh_writer
         .shutdown()
@@ -465,13 +445,16 @@ async fn explicit_compaction_runs_the_job_while_a_delta_merge_is_still_available
     let (runs_after, rows_after) = bindings_runs(&store, &explicit).await;
     assert_eq!(
         runs_after.len(),
-        1,
-        "the rebuilt group is left with one run, got {runs_after:?}"
+        runs_before.len() - 8 + 1,
+        "one job replaces eight inputs and preserves the rest, got {runs_after:?}"
     );
     assert_eq!(
-        runs_after.iter().next().expect("the group holds one run").1,
-        RunTier::Base,
-        "and that run is the group's base"
+        runs_after
+            .iter()
+            .filter(|(_, tier)| *tier == RunTier::Base)
+            .count(),
+        1,
+        "the group retains exactly one base"
     );
     assert!(
         rows_after < rows_before,
@@ -517,7 +500,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
             &namespace,
             crate::MetadataMaintenanceOptions {
                 max_wal_tail_segments: std::num::NonZeroU64::MIN,
-                frozen_base: FrozenBasePolicy::CompactImmediately,
+                compaction_policy: MetadataCompactionPolicy::CompactImmediately,
             },
         )
         .await

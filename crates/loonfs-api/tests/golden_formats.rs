@@ -332,10 +332,6 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
         writer_epoch: WriterEpoch(3),
         next_inode_id: InodeId(10),
         next_run_no: RunNo(1),
-        frozen_base_delta_merges: std::collections::BTreeMap::from([(
-            MetadataFamilyGroup::Bindings,
-            2,
-        )]),
         retention_floor_seq: ChangeSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
@@ -497,7 +493,7 @@ fn assert_wal_segment_is_corrupt(payload: WalSegmentPayload) -> String {
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("encode");
-    assert_matches_golden("namespace_manifest.v3.json", &encoded);
+    assert_matches_golden("namespace_manifest.v4.json", &encoded);
     let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
@@ -506,7 +502,7 @@ fn namespace_manifest_matches_golden_bytes() {
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v3.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v4.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
 }
@@ -1733,7 +1729,7 @@ fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    for version in [1, 2, 7] {
+    for version in [1, 2, 3, 7] {
         document["format_version"] = serde_json::Value::from(version);
         let wrong_version = serde_json::to_vec(&document).expect("encode document");
         let err = decode_namespace_manifest_json(&wrong_version)
@@ -1743,7 +1739,7 @@ fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
                 err,
                 EnvelopeCodecError::UnsupportedFormatVersion {
                     found,
-                    supported: 3,
+                    supported: 4,
                     ..
                 } if found == version
             ),
@@ -1765,31 +1761,6 @@ fn namespace_manifest_decode_rejects_tampered_payload_as_checksum_mismatch() {
     assert!(
         matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
         "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn namespace_manifest_v3_rejects_missing_frozen_base_delta_merges() {
-    let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
-    let mut document: serde_json::Value =
-        serde_json::from_slice(&encoded).expect("decode document");
-    document["payload"]
-        .as_object_mut()
-        .expect("manifest payload object")
-        .remove("frozen_base_delta_merges");
-    let payload = serde_json::to_string(&document["payload"]).expect("encode payload");
-    document["payload_checksum"] = serde_json::Value::from(sha256_digest(payload.as_bytes()));
-    let missing_field = format!(
-        "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
-        document["kind"], document["format_version"], document["payload_checksum"], payload,
-    );
-
-    let error = decode_namespace_manifest_json(missing_field.as_bytes())
-        .expect_err("a v2 manifest requires its counter map");
-    assert!(
-        matches!(&error, EnvelopeCodecError::PayloadDecode(message)
-            if message.contains("missing field `frozen_base_delta_merges`")),
-        "unexpected error: {error}"
     );
 }
 

@@ -15,7 +15,7 @@ may cross the byte target, and a row larger than an injected target is written a
 one segment. Output therefore stays proportional to the byte target plus one row,
 with bounded row-count overhead for filters and indexes. Flushes upload segments
 sequentially within each family, trading some upload concurrency for smaller buffers.
-This output bound does not by itself bound the number of merge input streams.
+Both execution paths select at most eight runs. Each family iterator advances through one run's segments sequentially, so decoded input buffering is bounded by fan-in rather than total history.
 
 ## Problem
 
@@ -48,7 +48,7 @@ Merges above the base can continue reducing delta-run count, but they cannot app
 
 ## One engine, two orchestrations
 
-Both reorganization paths merge with the same code. A maintenance pass runs it synchronously over the window its budgets selected, and a background job runs it over every run a group holds. The merge itself does not know which one is driving it: it reads sorted iterators, applies the retention operators, writes segments, and reports what it wrote. Rows are dropped when, and only when, the merge placement is base-tier, which is the same rule that decides the output level.
+Both reorganization paths merge with the same code. A maintenance pass runs it synchronously over the window its budgets selected, and a background job runs it over a selected window that exceeds the step's row or byte budget. The merge itself does not know which one is driving it: it reads sorted iterators, applies the retention operators, writes segments, and reports what it wrote. Rows are dropped when, and only when, the merge placement is base-tier, which is the same rule that decides the output level.
 
 The two orchestrations exist because the work has two shapes. A step-contained merge is the frequent small case. It is bounded by the step's input budgets, it publishes inside the step that ran it, and paying for a lease, a staging prefix, a registry entry, and an admission permit on every one of them would be pure overhead. One call does one unit of work and either publishes it or reports that there was nothing to do.
 
@@ -58,7 +58,7 @@ One thing inside the merge follows the same split, and only one: how a reverse b
 
 ## Compaction flow
 
-Normal bounded merges remain the preferred path. Streaming compaction is selected when a family group has repeatedly required work while its bottom-anchored merge cannot fit within one maintenance pass.
+Normal bounded merges remain the preferred path. Streaming compaction is selected when an eligible window exceeds the step's row or byte budget. Both paths have the same eight-run input limit.
 
 The complete operation has five stages:
 
@@ -95,13 +95,13 @@ Manifest validation enforces the resulting layout:
 
 Planning produces either a bounded merge or a `MetadataCompactionSpec`. The compaction specification records the job ID, family group, exact input descriptors, output identity, and retention floor. These values do not change during the job.
 
-A group with an oversized base may still have delta runs that fit within a bounded merge. Always choosing that merge can prevent full compaction when writes continuously create more delta runs. Starting full compaction as soon as the base exceeds the budget would cause the opposite problem: the complete base would be reread for every small batch of delta runs.
+The planner uses stored object bytes from the manifest's block handles. These measure the data that a rewrite must read and write; decoded bytes separately limit the work of a synchronous step. No scheduling counters are stored in the manifest.
 
-The planner balances these cases with the manifest's record of how many delta merges have published above each frozen base. It may publish two bounded delta merges for a group. After the second merge, planning selects full compaction even when another delta merge is available.
+For each family group, candidates are ordered base first and then oldest delta first. The planner chooses the oldest eligible contiguous window of at most eight runs. A window is eligible when its oldest run is at most 8 MiB, or newer runs in the window total at least one quarter of that oldest run's stored bytes. The same rule applies to bases and large deltas. A delta-only window must contain at least two runs; a lone oldest delta may be promoted to establish a base.
 
-The count is stored in the namespace manifest for each `MetadataFamilyGroup`. It is cleared after successful full compaction or after a bottom-anchored merge becomes possible.
+The planner tries to execute an eligible prefix within the step's row, byte, and run budgets. If none fits, a streaming job executes the selected window. A large backlog therefore takes several publications; no background job opens an unbounded number of input streams. Windows never cross an unselected gap, and only a window beginning at the group's oldest run may apply retention. An ineligible group cannot prevent another group from being selected.
 
-Callers provide a `FrozenBasePolicy` when planning. The `metadata` job uses `Amortized`, which reads the manifest's per-group count. `FsMaintenance::compact_metadata` uses `CompactImmediately` because the caller explicitly requested full compaction.
+`MetadataCompactionPolicy::SizeTiered` is the automatic policy. `CompactImmediately` bypasses size thresholds for an explicit request, while retaining the input limit. Explicit compaction performs one window per call and may require repeated calls to drain a backlog. Small workloads consolidate promptly. For large workloads, delaying a base rewrite reduces write amplification but leaves obsolete metadata until enough newer data accumulates or an operator requests compaction.
 
 The bounded pass reports `compaction_required`; the `metadata_compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order and reads each selected group's lease by key, skipping an `active` unexpired or `reaping` lease while unrelated groups remain available. Runner shutdown cancels running jobs.
 
@@ -113,6 +113,7 @@ This is the engine both paths run. Each family is read through a sorted iterator
 
 The following resources have explicit limits, and they bound both paths:
 
+- At most eight input runs, with two decoded blocks per iterator and at most two families in a retention cluster.
 - Decoded input blocks held by each iterator.
 - Concurrent object-store fetches.
 - The decoded-block cache used by reverse-index point lookups.
@@ -144,7 +145,7 @@ The executor reports its peak retained-row count. Resource tests use heavily reu
 
 A reverse child-binding row is keyed by child while the unbind that retires its binding is keyed by parent, so no grouping of the merged stream holds the two together. Both paths decide such a row with the same rule against the same set of below-floor unbound generations. They build that set differently, because their resource contracts differ.
 
-A background job reads the unbinds of one binding out of its snapshot, one bloom-filtered point lookup per reverse row at or below the floor, behind a bounded decoded-block cache. A job has no bound on the group it rebuilds, so it must not hold a set that grows with that group.
+A background job reads the unbinds of one binding out of its snapshot, one bloom-filtered point lookup per reverse row at or below the floor, behind a bounded decoded-block cache. A job has no bound on the total rows in its selected runs, so it must not hold a set that grows with that group.
 
 A merge inside a maintenance pass collects the below-floor unbound generations while the forward binding cluster streams the unbind family, and the reverse cluster consults that set. The set holds one generation identity per below-floor unbind row in the window, so it is capped by the same row and decoded-byte budgets that capped the window, and it costs no reads at all.
 
@@ -168,7 +169,7 @@ Garbage collection reads the seven group lease keys once per namespace per pass 
 
 A missing lease or a lease naming another job provides no ownership claim. An invalid lease fails the pass. Unreferenced objects in that prefix become eligible after a staging grace period derived from the lease expiry and the normal publication grace. Unrecognized keys under the compaction prefix are retained because ownership cannot be established safely.
 
-After publication, the job stops refreshing but leaves its final active lease in place. This protects the output from a collection pass that captured its live references before the manifest update. After the lease expires, a later pass reads the updated manifest, retains the referenced output segments, claims the lease, and deletes it after processing the named job's prefix. Failed, cancelled, abandoned, superseded, and fenced jobs leave unreferenced output that is eventually collected.
+After publication, the job stops refreshing but leaves its final active lease in place. This also delays another streaming window for that group until the lease expires (currently up to 25 minutes); a large backlog can require several such windows. This protects the output from a collection pass that captured its live references before the manifest update. After the lease expires, a later pass reads the updated manifest, retains the referenced output segments, claims the lease, and deletes it after processing the named job's prefix. Failed, cancelled, abandoned, superseded, and fenced jobs leave unreferenced output that is eventually collected.
 
 ## Finalization
 
