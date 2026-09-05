@@ -921,14 +921,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// the same group concurrently.
     pub async fn reorganize_metadata(
         &self,
-        frozen_base: crate::checkpoint::FrozenBasePolicy,
+        compaction_policy: crate::checkpoint::MetadataCompactionPolicy,
     ) -> Result<crate::checkpoint::MetadataReorganizeReport> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
             self.metadata_lsm_policy(),
-            frozen_base,
+            compaction_policy,
         )
         .await
     }

@@ -86,8 +86,8 @@ pub use loonfs_core::{
     delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
     select_next_iterator, write_segments_in_waves, BootstrapNamespaceError, CheckpointFile,
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState,
-    DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, FileContentStream,
-    FrozenBasePolicy, GcConfig, GcCursorKeyspace, GraceAge, MetadataCompactionJobOutcome,
+    DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig,
+    GcCursorKeyspace, GraceAge, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
     MetadataViewError, NamespaceGcCursor, PassBudget, SegmentBlockLoader, SegmentRowIterator,
     StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };

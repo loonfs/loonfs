@@ -158,8 +158,8 @@ pub mod publish {
 pub use checkpoint::{
     ensure_metadata_publication_budget, fold_wal_tail, next_run_no_after, refill_iterators,
     select_next_iterator, write_segments_in_waves, CheckpointFile, CheckpointFilesPage,
-    CheckpointFilesPageCursor, CheckpointPageCursor, FrozenBasePolicy,
-    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
+    CheckpointFilesPageCursor, CheckpointPageCursor, MetadataCompactionCancellation,
+    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataCompactionSpec,
     MetadataFamilyGroup, MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader,
     SegmentRowIterator,
 };

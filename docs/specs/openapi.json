@@ -2631,7 +2631,7 @@
         "type": "object"
       },
       "MetadataCompactionOutcomeBoundedMergePublished": {
-        "description": "The planner chose a bounded merge and this run published it; no full compaction was needed.",
+        "description": "The selected window fit a bounded step and this run published it.",
         "properties": {
           "outcome": {
             "enum": [
@@ -2676,7 +2676,7 @@
         "type": "object"
       },
       "MetadataCompactionOutcomeNotNeeded": {
-        "description": "No family group has outgrown a bounded reorganization step and nothing was published.",
+        "description": "No eligible family group was available and nothing was published.",
         "properties": {
           "outcome": {
             "enum": [
@@ -2691,7 +2691,7 @@
         "type": "object"
       },
       "MetadataCompactionOutcomePublished": {
-        "description": "The rebuilt group replaced its snapshot in a published manifest.",
+        "description": "The selected run window was replaced in a published manifest.",
         "properties": {
           "input_bytes": {
             "description": "Input bytes read by the compaction.",

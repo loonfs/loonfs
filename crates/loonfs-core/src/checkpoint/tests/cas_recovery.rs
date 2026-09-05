@@ -763,7 +763,6 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         writer_epoch: materialization_before.head.writer_epoch,
         next_inode_id: materialization_before.head.next_inode_id,
         next_run_no: RunNo(1),
-        frozen_base_delta_merges: Default::default(),
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),

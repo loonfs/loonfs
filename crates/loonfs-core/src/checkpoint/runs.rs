@@ -48,6 +48,8 @@ pub(super) struct MetadataRunManifest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MetadataLsmPolicy {
     pub max_delta_runs: NonZeroUsize,
+    /// Runs up to this stored-byte size may merge without a size ratio.
+    pub small_run_bytes: NonZeroUsize,
     pub max_rows_per_segment: NonZeroUsize,
     /// Decoded data-byte target; the last row may cross it.
     pub target_segment_bytes: NonZeroUsize,
@@ -62,6 +64,7 @@ pub(crate) struct MetadataLsmPolicy {
 impl Default for MetadataLsmPolicy {
     fn default() -> Self {
         Self {
+            small_run_bytes: const { NonZeroUsize::new(8 * 1024 * 1024).unwrap() },
             max_delta_runs: const { NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_DELTA_RUNS).unwrap() },
             max_rows_per_segment: const {
                 NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT).unwrap()

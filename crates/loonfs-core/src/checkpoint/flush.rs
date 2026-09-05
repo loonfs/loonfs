@@ -486,7 +486,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         writer_epoch: projection.head.writer_epoch,
         next_inode_id: projection.head.next_inode_id,
         next_run_no,
-        frozen_base_delta_merges: previous_manifest.payload.frozen_base_delta_merges.clone(),
         retention_floor_seq: projection.floor_seq,
         runs,
     })

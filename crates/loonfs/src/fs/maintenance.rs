@@ -280,7 +280,12 @@ impl FsMaintenance {
         let status = self.load_maintenance_status(namespace_id, false).await?;
         let flush = options.flush_is_due(status.wal_tail_segments);
         let response = self
-            .flush_then_reorganize(namespace_id, flush, status.head_seq, options.frozen_base)
+            .flush_then_reorganize(
+                namespace_id,
+                flush,
+                status.head_seq,
+                options.compaction_policy,
+            )
             .await?;
         tracing::debug!(
             wal_tail_segments_before = status.wal_tail_segments,
@@ -322,7 +327,7 @@ impl FsMaintenance {
         namespace_id: &NamespaceId,
         flush: bool,
         observed_head_seq: ChangeSeq,
-        frozen_base: loonfs_core::FrozenBasePolicy,
+        compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<MetadataMaintenanceResponse> {
         let wal_flush = if flush {
             match self.run_wal_flush(namespace_id).await {
@@ -346,7 +351,9 @@ impl FsMaintenance {
         } else {
             WalFlushStepOutcome::NotNeeded
         };
-        let reorganize = self.run_reorganization(namespace_id, frozen_base).await?;
+        let reorganize = self
+            .run_reorganization(namespace_id, compaction_policy)
+            .await?;
         Ok(MetadataMaintenanceResponse {
             namespace_id: namespace_id.clone(),
             wal_flush,
@@ -361,10 +368,13 @@ impl FsMaintenance {
     async fn run_reorganization(
         &self,
         namespace_id: &NamespaceId,
-        frozen_base: loonfs_core::FrozenBasePolicy,
+        compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<ReorganizeStepOutcome> {
         Ok(
-            match self.reorganize_once(namespace_id, frozen_base).await? {
+            match self
+                .reorganize_once(namespace_id, compaction_policy)
+                .await?
+            {
                 ReorganizationStep::Concluded(outcome) => outcome,
                 ReorganizationStep::CompactionPlanned(_) => {
                     ReorganizeStepOutcome::CompactionRequired
@@ -378,18 +388,15 @@ impl FsMaintenance {
     ///
     /// A bounded step reports a planned job; [`Self::compact_metadata`] runs it.
     ///
-    /// `frozen_base` is what the caller wants done about a group whose base
-    /// no bounded window can reach. It is the one thing the two paths
-    /// genuinely disagree about, so it is a parameter rather than something
-    /// read back out of this handle.
+    /// Explicit compaction bypasses automatic size thresholds.
     async fn reorganize_once(
         &self,
         namespace_id: &NamespaceId,
-        frozen_base: loonfs_core::FrozenBasePolicy,
+        compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<ReorganizationStep> {
         let report = self
             .engine(namespace_id)
-            .reorganize_metadata(frozen_base)
+            .reorganize_metadata(compaction_policy)
             .await
             .map_err(RuntimeError::Core)?;
         Ok(ReorganizationStep::Concluded(match report.outcome {
@@ -462,7 +469,7 @@ impl FsMaintenance {
         let spec = match self
             .reorganize_once(
                 namespace_id,
-                loonfs_core::FrozenBasePolicy::CompactImmediately,
+                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
             )
             .await?
         {
@@ -758,7 +765,7 @@ impl FsMaintenance {
             namespace_id,
             basis.has_unflushed_wal_tail,
             basis.head_seq,
-            loonfs_core::FrozenBasePolicy::CompactImmediately,
+            loonfs_core::MetadataCompactionPolicy::CompactImmediately,
         )
         .await
     }

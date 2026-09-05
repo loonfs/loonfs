@@ -6,9 +6,9 @@
 //!
 //! Every successful merge publishes a new manifest. Interrupted or losing
 //! publications leave unreferenced output for garbage collection.
-//! [`FrozenBasePolicy`] decides when a blocked base requires full compaction.
+//! [`MetadataCompactionPolicy`] decides when input sizes warrant a merge.
 
-use super::block_fetch::load_segment_index_for_reorganization;
+use super::block_fetch::{load_segment_index_for_reorganization, segment_object_len};
 use super::compaction_lease::{group_lease_state, GroupLeaseState};
 use super::error::ManifestLoadError;
 use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after, next_run_no_after};
@@ -37,30 +37,21 @@ use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
-/// Delta merges allowed over a frozen base before full compaction.
-pub(super) const DELTA_MERGES_OVER_A_FROZEN_BASE: u32 = 2;
+/// Maximum run fan-in for either execution path. Larger groups are merged in
+/// several publications, keeping decoded input blocks independent of history size.
+pub(super) const MAX_COMPACTION_INPUT_RUNS: usize = 8;
 
-/// How planning treats a family group whose base run is frozen.
-///
-/// Selects immediate or amortized compaction for a frozen base.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum FrozenBasePolicy {
-    /// Merge newer delta runs before requesting a full compaction.
+/// A large run is rewritten only after newer input reaches one quarter its size.
+const COMPACTION_SIZE_RATIO: u64 = 4;
+
+/// How much input must accumulate before a run is worth rewriting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MetadataCompactionPolicy {
+    /// Consolidate small runs and merge large runs as newer data accumulates.
     #[default]
-    Amortized,
-    /// Request full compaction as soon as the base is blocked.
+    SizeTiered,
+    /// Ignore size ratios for an explicit compaction request. Input fan-in stays bounded.
     CompactImmediately,
-}
-
-impl FrozenBasePolicy {
-    /// Whether a blocked bottom-anchored window goes straight to the job
-    /// rather than taking the delta merge above it.
-    fn compact_a_frozen_base(&self, delta_merges: u32) -> bool {
-        match self {
-            Self::Amortized => delta_merges >= DELTA_MERGES_OVER_A_FROZEN_BASE,
-            Self::CompactImmediately => true,
-        }
-    }
 }
 
 /// What one reorganization step did.
@@ -85,10 +76,8 @@ pub enum MetadataReorganizeOutcome {
         /// True when this merge ran above a frozen base.
         bottom_anchored_merge_blocked: bool,
     },
-    /// No oldest-first subset that would make progress fits the hard
-    /// per-step input budgets, so the group is rebuilt by a streaming
-    /// compaction over every run it holds. The step publishes nothing and
-    /// hands the plan back; starting the job is the runtime's.
+    /// The selected window exceeds the step's row or byte budget. A background
+    /// job merges it with the same bounded fan-in; this step publishes nothing.
     CompactionPlanned {
         group: MetadataFamilyGroup,
         spec: MetadataCompactionSpec,
@@ -130,11 +119,18 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
-    frozen_base: FrozenBasePolicy,
+    compaction_policy: MetadataCompactionPolicy,
 ) -> Result<MetadataReorganizeReport> {
     let timer = StdMonotonicTimer::default();
-    reorganize_metadata_step_with_timer(store, namespace_id, context, policy, frozen_base, &timer)
-        .await
+    reorganize_metadata_step_with_timer(
+        store,
+        namespace_id,
+        context,
+        policy,
+        compaction_policy,
+        &timer,
+    )
+    .await
 }
 
 pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>(
@@ -142,7 +138,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
-    frozen_base: FrozenBasePolicy,
+    compaction_policy: MetadataCompactionPolicy,
     timer: &dyn MonotonicTimer,
 ) -> Result<MetadataReorganizeReport> {
     // The publication budget covers the whole unit: measurement starts
@@ -166,14 +162,23 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(&previous.payload);
-    if !manifest_has_reorganization_work(&previous.payload, segments.scan_runs.as_ref(), policy) {
+    if compaction_policy != MetadataCompactionPolicy::CompactImmediately
+        && !manifest_has_reorganization_work(&previous.payload, segments.scan_runs.as_ref(), policy)
+    {
         return Ok(report(
             namespace_id,
             MetadataReorganizeOutcome::NotNeeded { delta_runs },
         ));
     }
-    let Some(group) =
-        select_family_group(store, namespace_id, &previous.payload, context.now_ms).await?
+    let Some(group) = select_family_group(
+        store,
+        namespace_id,
+        &previous.payload,
+        context.now_ms,
+        compaction_policy,
+        policy,
+    )
+    .await?
     else {
         // Delta runs exist but hold no rows (empty families), or the only group
         // with rows is the one a job is rebuilding; nothing to fold here.
@@ -182,18 +187,19 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { delta_runs },
         ));
     };
-    let selection = select_reorganization_input(&segments, group, policy, floor_seq, &frozen_base)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
+    let selection =
+        select_reorganization_input(&segments, group, policy, floor_seq, &compaction_policy)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
     if let Some(bottom) = selection.group_bottom_over_budget {
         report_group_bottom_over_budget(namespace_id, group, &bottom, policy);
     }
     let bottom_anchored_merge_blocked = selection.bottom_anchored_merge_blocked;
     let input = match selection.plan {
         ReorganizationPlan::BoundedMerge(input) => input,
-        ReorganizationPlan::FullCompaction(spec) => {
+        ReorganizationPlan::StreamingCompaction(spec) => {
             return Ok(report(
                 namespace_id,
                 MetadataReorganizeOutcome::CompactionPlanned { group, spec },
@@ -245,7 +251,6 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         previous,
         surviving,
         ReplacementOutput {
-            group,
             segments: merged.output_segments,
             placement: input.placement,
         },
@@ -325,22 +330,14 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     ))
 }
 
-/// What one reorganization step should do for the group it selected.
-///
-/// The two arms are the two shapes of work, not two levels of urgency: a
-/// bounded merge is one step's worth of merging that ends in a publication,
-/// and a full compaction is a background job over the whole group that no
-/// budget paces. The planner decides between them once, from the same run
-/// list, so no caller has to rediscover which case it is in.
+/// One selected window, executed inside the step or by a leased background job.
 pub(super) enum ReorganizationPlan {
     /// The group has no runs.
     Nothing,
     /// A window of complete runs fits one step's budgets and makes progress.
     BoundedMerge(ReorganizationInput),
-    /// No window that makes progress fits the budgets, so the group is
-    /// rebuilt by a streaming compaction over every run it holds. The step
-    /// reports the plan and reads no further; the runtime starts the job.
-    FullCompaction(MetadataCompactionSpec),
+    /// The selected window exceeds the step's row or byte budget.
+    StreamingCompaction(MetadataCompactionSpec),
 }
 
 pub(super) struct ReorganizationInput {
@@ -423,10 +420,7 @@ pub(super) struct ReorganizationSelection {
     /// What the step should do.
     pub(super) plan: ReorganizationPlan,
     pub(super) group_bottom_over_budget: Option<OverBudgetRun>,
-    /// True when the window starting at the group's oldest run could not
-    /// reach a delta run inside the budgets. The group's base is frozen while
-    /// that holds, and only a streaming compaction unfreezes it, so this is
-    /// what the manifest records to decide when to stop merging deltas over it.
+    /// True when this selection leaves the base alone, or it exceeds the step budget.
     pub(super) bottom_anchored_merge_blocked: bool,
 }
 
@@ -455,141 +449,150 @@ fn over_budget_run(
     }
 }
 
-/// Selects bounded merge input or plans a full compaction for one family
-/// group.
-///
-/// Base runs sort before delta runs, with older runs first in each tier. The
-/// selector tries a window from the oldest run, then a delta-only window. It
-/// never skips a delta run. If neither bounded window can make progress, it
-/// plans a full compaction.
-///
-/// Indexes are read before row data so each run either fits the row and byte
-/// budgets completely or is excluded.
+fn group_candidates(
+    runs: &[MetadataRunManifest],
+    group: MetadataFamilyGroup,
+) -> Vec<&MetadataRunManifest> {
+    runs_in_fold_order(
+        runs.iter()
+            .filter(|run| run_has_group_rows(run, group))
+            .collect(),
+    )
+}
+
+/// Select the oldest eligible contiguous window. Never mix rows across an
+/// unselected gap: a base merge may drop history only when it includes a prefix.
+/// Sizes come from the manifest's block handles, so planning needs no data reads.
+fn select_merge_window(
+    candidates: &[&MetadataRunManifest],
+    group: MetadataFamilyGroup,
+    policy: MetadataCompactionPolicy,
+    small_run_bytes: u64,
+) -> Option<std::ops::Range<usize>> {
+    for start in 0..candidates.len() {
+        let end = candidates.len().min(start + MAX_COMPACTION_INPUT_RUNS);
+        if window_is_eligible(
+            &candidates[start..end],
+            group,
+            start == 0,
+            policy,
+            small_run_bytes,
+        ) {
+            return Some(start..end);
+        }
+    }
+    None
+}
+
+fn window_is_eligible(
+    runs: &[&MetadataRunManifest],
+    group: MetadataFamilyGroup,
+    bottom_anchored: bool,
+    policy: MetadataCompactionPolicy,
+    small_run_bytes: u64,
+) -> bool {
+    let Some((oldest, newer)) = runs.split_first() else {
+        return false;
+    };
+    if newer.is_empty() {
+        // Promoting the only delta establishes a base without rewriting it later
+        // just to change its tier. A lone base has nothing to merge.
+        return bottom_anchored
+            && (oldest.tier == RunTier::Delta
+                || policy == MetadataCompactionPolicy::CompactImmediately);
+    }
+    let stored_bytes = |run: &&MetadataRunManifest| {
+        group_run_descriptors(run, group)
+            .map(segment_object_len)
+            .sum::<u64>()
+    };
+    let oldest_bytes = stored_bytes(oldest);
+    policy == MetadataCompactionPolicy::CompactImmediately
+        || oldest_bytes <= small_run_bytes
+        || newer
+            .iter()
+            .map(stored_bytes)
+            .sum::<u64>()
+            .saturating_mul(COMPACTION_SIZE_RATIO)
+            >= oldest_bytes
+}
+
+/// Choose input by size first, then choose how to execute it. A background job
+/// has the same run limit as a bounded merge; it only relaxes total rows and bytes.
 pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     group: MetadataFamilyGroup,
     policy: MetadataLsmPolicy,
     frozen_floor_seq: ChangeSeq,
-    frozen_base: &FrozenBasePolicy,
+    compaction_policy: &MetadataCompactionPolicy,
 ) -> std::result::Result<ReorganizationSelection, ManifestLoadError> {
-    let frozen_base_delta_merges = segments
-        .manifest()
-        .payload
-        .frozen_base_delta_merges
-        .get(&group)
-        .copied()
-        .unwrap_or(0);
-    let candidates = runs_in_fold_order(
-        segments
-            .scan_runs
-            .iter()
-            .filter(|run| run_has_group_rows(run, group))
-            .collect(),
-    );
-    let candidate_count = candidates.len();
-    let head_seq = segments.manifest().payload.head_seq;
-    let budgets = ReorganizationBudgets {
-        rows: u64::try_from(policy.max_decoded_input_rows_per_step.get())
-            .expect("a usize input row budget should fit in u64"),
-        bytes: u64::try_from(policy.max_decoded_input_bytes_per_step.get())
-            .expect("a usize input byte budget should fit in u64"),
-        runs: policy.max_input_runs_per_step.get(),
-    };
-    // Base-tier runs sort first, so this is the index of the oldest delta
-    // candidate, and starting there is what skips a base run the budgets
-    // cannot admit. A group has at most one base run, so this is one place
-    // and the only alternative to the bottom.
-    let first_delta_candidate = candidates
-        .iter()
-        .take_while(|run| run.tier == RunTier::Base)
-        .count();
-    let delta_only_start = (first_delta_candidate > 0 && first_delta_candidate < candidate_count)
-        .then_some(first_delta_candidate);
-    // Reading a run's decoded byte total costs its index sections, so each
-    // candidate's total is read at most once however many windows weigh it.
-    let mut decoded_bytes_by_candidate = vec![None::<u64>; candidate_count];
-    let mut group_bottom_over_budget = None;
-    let mut bottom_anchored_merge_blocked = false;
-
-    for window_start in std::iter::once(0).chain(delta_only_start) {
-        // Reaching a window above the bottom means the bottom-anchored one
-        // made no progress, so the group's base is frozen and its retention
-        // has stopped. A delta merge still helps — it keeps the run count
-        // down while the base waits — but only the job unfreezes the base, and
-        // under sustained writes there is always another pair of delta runs to
-        // merge. So the caller's policy decides whether to take that merge
-        // once more or to go to the job now.
-        if window_start > 0 && frozen_base.compact_a_frozen_base(frozen_base_delta_merges) {
-            break;
-        }
-        let Some(window) = weigh_window(
-            segments,
-            &candidates,
-            group,
-            window_start,
-            budgets,
-            &mut decoded_bytes_by_candidate,
-        )
-        .await?
-        else {
-            continue;
-        };
-        if window_start == 0 {
-            group_bottom_over_budget = window.over_budget;
-        }
-
-        // A bottom-anchored merge makes progress when it moves at least one
-        // delta run into the base tier. A delta-only merge must combine at least
-        // two runs; rewriting one delta run would not reduce pending work.
-        let bottom_anchored = window_start == 0;
-        let makes_progress = if bottom_anchored {
-            window.runs.iter().any(|run| run.tier == RunTier::Delta)
-        } else {
-            window.runs.len() > 1
-        };
-        if !makes_progress {
-            bottom_anchored_merge_blocked |= bottom_anchored;
-            continue;
-        }
-        let run_nos = window.runs.iter().map(|run| run.run_no).collect();
-        let placement = merge_placement(bottom_anchored, &window.runs, head_seq);
+    let candidates = group_candidates(segments.scan_runs.as_ref(), group);
+    let Some(range) = select_merge_window(
+        &candidates,
+        group,
+        *compaction_policy,
+        policy.small_run_bytes.get() as u64,
+    ) else {
         return Ok(ReorganizationSelection {
-            plan: ReorganizationPlan::BoundedMerge(ReorganizationInput {
-                runs: window.runs,
-                run_nos,
-                merged_delta_rows: window.merged_delta_rows,
-                decoded_rows: window.decoded_rows,
-                decoded_bytes: window.decoded_bytes,
-                placement,
-            }),
-            group_bottom_over_budget,
-            bottom_anchored_merge_blocked,
+            plan: ReorganizationPlan::Nothing,
+            group_bottom_over_budget: None,
+            bottom_anchored_merge_blocked: false,
         });
-    }
-
-    // Nothing above got taken. Either no window makes progress inside the
-    // budgets — the bottom-anchored window cannot reach a delta run, so
-    // retention for the group has stopped, and the delta runs above the bottom
-    // are down to one or blocked as well — or the delta merge was available
-    // and the policy says this group has taken enough of them. Both end the
-    // same way: a streaming compaction takes the whole group. Its input is
-    // every run the group holds, which is bottom-anchored by construction, so
-    // its output is the group's base run and it may drop what the floor
-    // allows.
-    let plan = if candidates.is_empty() {
-        ReorganizationPlan::Nothing
+    };
+    let selected = &candidates[range.clone()];
+    let budgets = ReorganizationBudgets {
+        rows: policy.max_decoded_input_rows_per_step.get() as u64,
+        bytes: policy.max_decoded_input_bytes_per_step.get() as u64,
+        runs: policy
+            .max_input_runs_per_step
+            .get()
+            .min(MAX_COMPACTION_INPUT_RUNS),
+    };
+    let window = weigh_window(segments, selected, group, budgets).await?;
+    let bottom_anchored = range.start == 0;
+    let group_bottom_over_budget = if bottom_anchored {
+        window.over_budget
     } else {
-        ReorganizationPlan::FullCompaction(MetadataCompactionSpec::new(
+        None
+    };
+    let bottom_anchored_merge_blocked = !bottom_anchored || group_bottom_over_budget.is_some();
+    let bounded_runs = window.runs.iter().collect::<Vec<_>>();
+    let plan = if window_is_eligible(
+        &bounded_runs,
+        group,
+        bottom_anchored,
+        *compaction_policy,
+        policy.small_run_bytes.get() as u64,
+    ) && (window.runs.len() > 1
+        || selected.len() == 1
+        || window.runs[0].tier == RunTier::Delta)
+    {
+        let placement = merge_placement(
+            bottom_anchored,
+            &window.runs,
+            segments.manifest().payload.head_seq,
+        );
+        ReorganizationPlan::BoundedMerge(ReorganizationInput {
+            run_nos: window.runs.iter().map(|run| run.run_no).collect(),
+            runs: window.runs,
+            merged_delta_rows: window.merged_delta_rows,
+            decoded_rows: window.decoded_rows,
+            decoded_bytes: window.decoded_bytes,
+            placement,
+        })
+    } else {
+        let runs = selected
+            .iter()
+            .map(|run| (*run).clone())
+            .collect::<Vec<_>>();
+        ReorganizationPlan::StreamingCompaction(MetadataCompactionSpec::new(
             group,
-            candidates.iter().map(|run| run.run_no).collect(),
-            candidates
-                .iter()
+            runs.iter().map(|run| run.run_no).collect(),
+            runs.iter()
                 .flat_map(|run| group_run_descriptors(run, group))
-                .map(|descriptor| descriptor.row_count)
+                .map(|d| d.row_count)
                 .sum(),
-            MergePlacement::Base {
-                output_seq: head_seq,
-            },
+            merge_placement(bottom_anchored, &runs, segments.manifest().payload.head_seq),
             frozen_floor_seq,
         ))
     };
@@ -619,13 +622,8 @@ async fn weigh_window<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     candidates: &[&MetadataRunManifest],
     group: MetadataFamilyGroup,
-    start: usize,
     budgets: ReorganizationBudgets,
-    decoded_bytes_by_candidate: &mut [Option<u64>],
-) -> std::result::Result<Option<WeighedWindow>, ManifestLoadError> {
-    if start >= candidates.len() {
-        return Ok(None);
-    }
+) -> std::result::Result<WeighedWindow, ManifestLoadError> {
     let mut window = WeighedWindow {
         runs: Vec::new(),
         merged_delta_rows: 0,
@@ -633,8 +631,7 @@ async fn weigh_window<S: ObjectStore + ?Sized>(
         decoded_bytes: 0,
         over_budget: None,
     };
-    for index in start..candidates.len().min(start + budgets.runs) {
-        let run = candidates[index];
+    for (index, run) in candidates.iter().take(budgets.runs).enumerate() {
         let run_rows = group_run_descriptors(run, group)
             .map(|descriptor| descriptor.row_count)
             .sum::<u64>();
@@ -644,14 +641,7 @@ async fn weigh_window<S: ObjectStore + ?Sized>(
             }
             break;
         }
-        let run_bytes = match decoded_bytes_by_candidate[index] {
-            Some(bytes) => bytes,
-            None => {
-                let bytes = decoded_group_run_bytes(segments, run, group).await?;
-                decoded_bytes_by_candidate[index] = Some(bytes);
-                bytes
-            }
-        };
+        let run_bytes = decoded_group_run_bytes(segments, run, group).await?;
         if window.decoded_bytes.saturating_add(run_bytes) > budgets.bytes {
             if index == 0 {
                 window.over_budget = Some(over_budget_run(run, run_rows, Some(run_bytes)));
@@ -663,19 +653,12 @@ async fn weigh_window<S: ObjectStore + ?Sized>(
         }
         window.decoded_rows = window.decoded_rows.saturating_add(run_rows);
         window.decoded_bytes = window.decoded_bytes.saturating_add(run_bytes);
-        window.runs.push(run.clone());
+        window.runs.push((*run).clone());
     }
-    Ok(Some(window))
+    Ok(window)
 }
 
-/// Reports that the oldest run in a family group exceeds one step's input
-/// budget.
-///
-/// Bounded steps may continue merging newer delta runs. When no bounded merge
-/// can make the required progress, maintenance plans a streaming compaction
-/// of the complete group. This is normal adaptive behavior, so it reports at
-/// debug; the case that never resolves — no compaction runner — has its own
-/// warning where the job would have started.
+/// Reports the row or byte budget that requires a streaming job.
 fn report_group_bottom_over_budget(
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
@@ -693,9 +676,7 @@ fn report_group_bottom_over_budget(
         max_decoded_input_rows_per_step = policy.max_decoded_input_rows_per_step.get(),
         max_decoded_input_bytes_per_step = policy.max_decoded_input_bytes_per_step.get(),
         "the oldest metadata run in this family group no longer fits one reorganization step; \
-         steps merge the newer runs above it into one delta run, and once that merge has \
-         nothing left to take, a background streaming compaction rebuilds the whole group and \
-         reclaims its rows",
+         eligible windows run as streaming jobs with bounded input fan-in",
     );
 }
 
@@ -731,12 +712,18 @@ fn manifest_has_reorganization_work(
     policy: MetadataLsmPolicy,
 ) -> bool {
     let has_group_rows = !ranked_family_groups(payload).is_empty();
-    (delta_run_count(payload) >= policy.max_delta_runs.get() && has_group_rows)
-        || manifest_has_partial_reorganization(runs)
-        || payload
-            .frozen_base_delta_merges
-            .values()
-            .any(|count| *count >= DELTA_MERGES_OVER_A_FROZEN_BASE)
+    let triggered = (delta_run_count(payload) >= policy.max_delta_runs.get() && has_group_rows)
+        || manifest_has_partial_reorganization(runs);
+    triggered
+        && REORGANIZE_FAMILY_GROUPS.into_iter().any(|group| {
+            select_merge_window(
+                &group_candidates(runs, group),
+                group,
+                MetadataCompactionPolicy::SizeTiered,
+                policy.small_run_bytes.get() as u64,
+            )
+            .is_some()
+        })
 }
 
 fn run_has_group_rows(run: &MetadataRunManifest, group: MetadataFamilyGroup) -> bool {
@@ -778,7 +765,7 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
 /// in group order. `None` when no available group has delta rows.
 ///
 /// Groups under unexpired active or reaping leases are skipped. A job's
-/// snapshot is every run its group held, while merges of other groups leave
+/// snapshot contains its selected runs, while merges of other groups leave
 /// those descriptors unchanged.
 ///
 /// Without it the excluded group would win every step for as long as the job
@@ -790,8 +777,22 @@ pub(super) async fn select_family_group<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     payload: &NamespaceManifestPayload,
     now_ms: u64,
+    compaction_policy: MetadataCompactionPolicy,
+    policy: MetadataLsmPolicy,
 ) -> Result<Option<MetadataFamilyGroup>> {
+    let runs = super::runs::runs_in_reorganization_order(payload);
     for group in ranked_family_groups(payload) {
+        let candidates = group_candidates(&runs, group);
+        if select_merge_window(
+            &candidates,
+            group,
+            compaction_policy,
+            policy.small_run_bytes.get() as u64,
+        )
+        .is_none()
+        {
+            continue;
+        }
         if group_lease_state(store, namespace_id, group, now_ms).await? != GroupLeaseState::Held {
             return Ok(Some(group));
         }
@@ -823,7 +824,6 @@ fn group_delta_rows(payload: &NamespaceManifestPayload, group: MetadataFamilyGro
 }
 
 pub(super) struct ReplacementOutput {
-    pub(super) group: MetadataFamilyGroup,
     pub(super) segments: Vec<MetadataSegmentRef>,
     pub(super) placement: MergePlacement,
 }
@@ -845,7 +845,6 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
         next_run_no_after(previous.payload.next_run_no)?
     };
     let mut runs = surviving;
-    let mut frozen_base_delta_merges = previous.payload.frozen_base_delta_merges.clone();
     if !output.segments.is_empty() {
         runs.push(MetadataRunRef {
             run_no: previous.payload.next_run_no,
@@ -853,15 +852,6 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
             tier: output.placement.output_tier(),
             segments: output.segments,
         });
-        match output.placement {
-            MergePlacement::Base { .. } => {
-                frozen_base_delta_merges.remove(&output.group);
-            }
-            MergePlacement::Delta { .. } => {
-                let count = frozen_base_delta_merges.entry(output.group).or_default();
-                *count = count.saturating_add(1);
-            }
-        }
     }
     let base_seq = runs
         .iter()
@@ -885,7 +875,6 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
         writer_epoch: previous.payload.writer_epoch,
         next_inode_id: previous.payload.next_inode_id,
         next_run_no,
-        frozen_base_delta_merges,
         retention_floor_seq,
         runs,
     })
@@ -897,4 +886,100 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_write_failure)?;
     Ok(manifest)
+}
+
+#[cfg(test)]
+mod planning_tests {
+    use super::super::runs::{runs_in_reorganization_order, MetadataFamilySegments};
+    use super::*;
+    use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
+
+    // The planner only reads descriptors. Give valid descriptor shapes arbitrary
+    // stored lengths to exercise GiB-scale layouts without allocating their data.
+    fn runs(sizes: &[u64]) -> Vec<MetadataRunManifest> {
+        let manifest = decode_namespace_manifest_json(include_bytes!(
+            "../../../loonfs-api/tests/golden/namespace_manifest.v4.json"
+        ))
+        .expect("manifest fixture");
+        let mut template = runs_in_reorganization_order(&manifest.payload).remove(0);
+        template
+            .segments
+            .retain(|family| family.family == MetadataRowFamily::Inodes);
+        sizes
+            .iter()
+            .enumerate()
+            .map(|(index, size)| {
+                let mut run = template.clone();
+                run.run_no = RunNo(index as u64);
+                run.run_seq = ChangeSeq(index as u64);
+                run.tier = if index == 0 {
+                    RunTier::Base
+                } else {
+                    RunTier::Delta
+                };
+                let MetadataFamilySegments { segments, .. } = &mut run.segments[0];
+                segments[0].index_block.offset =
+                    *size - u64::from(segments[0].index_block.stored_len);
+                run
+            })
+            .collect()
+    }
+
+    fn window(
+        sizes_mib: &[u64],
+        policy: MetadataCompactionPolicy,
+    ) -> Option<std::ops::Range<usize>> {
+        let runs = runs(
+            &sizes_mib
+                .iter()
+                .map(|size| size * 1024 * 1024)
+                .collect::<Vec<_>>(),
+        );
+        select_merge_window(
+            &runs.iter().collect::<Vec<_>>(),
+            MetadataFamilyGroup::Inodes,
+            policy,
+            8 * 1024 * 1024,
+        )
+    }
+
+    #[test]
+    fn a_large_base_waits_for_proportionate_new_data() {
+        let policy = MetadataCompactionPolicy::SizeTiered;
+        assert_eq!(window(&[1024, 1, 1], policy), Some(1..3));
+        assert_eq!(window(&[1024, 2], policy), None);
+        assert_eq!(window(&[1024, 255], policy), None);
+        assert_eq!(window(&[1024, 256], policy), Some(0..2));
+        assert_eq!(
+            window(&[1024, 2], MetadataCompactionPolicy::CompactImmediately),
+            Some(0..2)
+        );
+    }
+
+    #[test]
+    fn a_large_delta_obeys_the_same_ratio_as_a_large_base() {
+        assert_eq!(
+            window(&[4096, 256, 1, 1], MetadataCompactionPolicy::SizeTiered),
+            Some(2..4)
+        );
+        assert_eq!(
+            window(&[4096, 256, 64], MetadataCompactionPolicy::SizeTiered),
+            Some(1..3)
+        );
+    }
+
+    #[test]
+    fn a_backlog_is_merged_in_contiguous_windows_with_bounded_fan_in() {
+        let policy = MetadataCompactionPolicy::SizeTiered;
+        assert_eq!(
+            window(&[1; 100], policy),
+            Some(0..MAX_COMPACTION_INPUT_RUNS)
+        );
+        let mut sizes = vec![4096];
+        sizes.extend([1; 100]);
+        assert_eq!(
+            window(&sizes, policy),
+            Some(1..1 + MAX_COMPACTION_INPUT_RUNS)
+        );
+    }
 }

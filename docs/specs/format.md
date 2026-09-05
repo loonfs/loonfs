@@ -1882,7 +1882,7 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Grep root pointer | `grep_root` | JSON, uncompressed | 1 |
 | Grep manifest | `grep_manifest` | JSON, uncompressed | 1 |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the grep manifest) |
-| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 3 |
+| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 4 |
 | Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
@@ -1934,7 +1934,7 @@ the run it writes for one family group. So `run_no` and `family` together name
 one family's segment list inside one run, and `segment_index` numbers that
 list from zero, once each, in the order the segments were written.
 
-The manifest's required `frozen_base_delta_merges` map records, per family group, how many delta merges have published above a frozen base since that base was last rebuilt. It is written as `{}` when no group has published such a merge.
+Compaction planning derives run sizes from the referenced objects' block handles. The manifest stores the current run layout, without scheduling counters or merge history.
 
 A run also carries `run_seq`, the namespace sequence it materialized through,
 and `tier`, which is either `delta` or `base`. A WAL flush writes a delta run,

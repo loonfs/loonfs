@@ -253,7 +253,7 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
             namespace_id,
             context,
             policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("reorganization step");
@@ -1294,7 +1294,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
             &namespace_id,
             &context,
             policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("reorganization step");
@@ -1377,7 +1377,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         &namespace_id,
         &context,
         tiny_byte_policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("budgeted step");
@@ -1408,7 +1408,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         &namespace_id,
         &context,
         policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("bounded step");
@@ -1479,7 +1479,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         &namespace_id,
         &context,
         bounded_policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("first bounded step");
@@ -1560,7 +1560,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         &namespace_id,
         &context,
         bounded_policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("below-trigger step");
@@ -1793,7 +1793,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
         &namespace_id,
         &context,
         policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("first unit");
@@ -1816,7 +1816,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
             &namespace_id,
             &context,
             policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("resumed unit");
@@ -1977,7 +1977,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         &context,
         fold_everything,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
         &overrun,
     )
     .await
@@ -1998,7 +1998,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         &context,
         fold_everything,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("in-budget retry folds the unit");
@@ -2028,6 +2028,8 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
         namespace_id,
         &segments.manifest().payload,
         0,
+        MetadataCompactionPolicy::default(),
+        policy,
     )
     .await
     .expect("read family-group leases")
@@ -2038,7 +2040,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
         group,
         policy,
         frozen_floor_seq,
-        &super::reorganize::FrozenBasePolicy::default(),
+        &super::reorganize::MetadataCompactionPolicy::default(),
     )
     .await
     .expect("select a reorganization input");
@@ -2084,6 +2086,7 @@ fn group_segment_object_keys(
 fn policy_that_cannot_fold_the_base(base_rows: u64) -> MetadataLsmPolicy {
     let row_budget = usize::try_from(base_rows).expect("test row counts are small") - 1;
     MetadataLsmPolicy {
+        small_run_bytes: NonZeroUsize::MIN,
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(row_budget)
             .expect("test row budget should be nonzero"),
@@ -2092,7 +2095,7 @@ fn policy_that_cannot_fold_the_base(base_rows: u64) -> MetadataLsmPolicy {
 }
 
 #[tokio::test]
-async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the_group() {
+async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2135,110 +2138,16 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     let bottom = selection
         .group_bottom_over_budget
         .expect("a base run over the budget must raise the alarm");
-    let input = bounded_merge(selection)
-        .expect("a group must keep finding work above a base run it cannot fold");
-    assert!(
-        matches!(
-            input.placement,
-            super::reorganize::MergePlacement::Delta { .. }
-        ),
-        "a window that starts above the base run must write a delta run, got {:?}",
-        input.placement
-    );
-    assert!(
-        input.runs.iter().all(|run| run.tier == RunTier::Delta),
-        "skipping the base leaves a delta-only merge, got {:?}",
-        input
-            .runs
-            .iter()
-            .map(|run| (run.run_seq, run.tier))
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        input.runs.len() > 1,
-        "a merge must consume more than one run to reduce the count"
-    );
-    let base_before = group_base_runs(&before.manifest, group.families());
-    let [group_base] = &base_before[..] else {
-        panic!("the group must hold exactly one base run");
+    let super::reorganize::ReorganizationPlan::StreamingCompaction(spec) = selection.plan else {
+        panic!("comparable input sizes warrant a base rewrite");
     };
-    assert_eq!(bottom.run_no, group_base.run_no);
-    assert_eq!(bottom.run_seq, group_base.run_seq);
-    assert_eq!(bottom.tier, RunTier::Base);
     assert_eq!(bottom.rows, base_rows);
-
-    // Repeated steps keep merging what fits. While they do, the base run
-    // stays exactly where it is, and stays one run.
-    let mut published = 0usize;
-    let mut compactions = 0usize;
-    let mut group_delta_run_counts =
-        vec![group_delta_runs(&before.manifest, group.families()).len()];
-    let mut delta_runs_when_the_compaction_was_planned = None;
-    for _ in 0..64 {
-        let report = super::reorganize_metadata_step(
-            &store,
-            &namespace_id,
-            &context,
-            policy,
-            FrozenBasePolicy::default(),
-        )
-        .await
-        .expect("reorganization step");
-        let current = load_manifest_materialization_for_inspection(
-            &store,
-            &namespace_id,
-            current_manifest_no(&store, &namespace_id).await,
-        )
-        .await
-        .expect("load the folded manifest");
-        assert_eq!(
-            group_base_runs(&current.manifest, group.families()).len(),
-            1,
-            "a merge above the base must not mint a second base run"
-        );
-        group_delta_run_counts.push(group_delta_runs(&current.manifest, group.families()).len());
-        match &report.outcome {
-            super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
-            super::MetadataReorganizeOutcome::Superseded => {
-                panic!("no concurrent publisher exists in this test")
-            }
-            // A group whose delta runs are down to one has nothing left to
-            // merge, and merging one run into itself is not progress. Only a
-            // rebuild of the whole group moves it on, and that is the job the
-            // step plans. This budget starves more than one group, so the
-            // others are run too and the loop ends with nothing left to fold.
-            super::MetadataReorganizeOutcome::CompactionPlanned {
-                group: planned_group,
-                spec,
-            } => {
-                if *planned_group == group {
-                    let referenced = run_segment_object_keys(&current.manifest);
-                    assert!(
-                        base_segments
-                            .iter()
-                            .all(|segment_key| referenced.contains(segment_key)),
-                        "the base must still be untouched when the job is planned"
-                    );
-                    delta_runs_when_the_compaction_was_planned =
-                        Some(group_delta_runs(&current.manifest, group.families()).len());
-                    compactions += 1;
-                }
-                publish_planned_compaction(&store, &namespace_id, &context, policy, spec).await;
-            }
-            super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-        }
-    }
-    assert!(published > 0, "at least one unit must publish");
+    assert_eq!(bottom.tier, RunTier::Base);
     assert_eq!(
-        compactions, 1,
-        "the group must hand itself to one streaming compaction, ran {group_delta_run_counts:?}"
+        spec.input_runs(),
+        group_runs(&before.manifest, group.families()).len()
     );
-    assert_eq!(
-        delta_runs_when_the_compaction_was_planned,
-        Some(1),
-        "the delta runs must merge down to one before the job takes the group, ran \
-         {group_delta_run_counts:?}"
-    );
+    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
 
     let after = load_manifest_materialization_for_inspection(
         &store,
@@ -2253,7 +2162,7 @@ async fn a_base_run_over_the_step_budget_merges_the_delta_runs_then_compacts_the
     assert_eq!(
         group_runs(&after.manifest, group.families()).len(),
         1,
-        "the group must end in one run, ran {group_delta_run_counts:?}"
+        "the group must end in one run"
     );
     assert_eq!(group_base_runs(&after.manifest, group.families()).len(), 1);
     let remaining = run_segment_object_keys(&after.manifest);
@@ -2294,6 +2203,23 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         )
         .await
         .expect("seed file");
+    }
+    for index in 0..512 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/retained-{index}.txt"),
+            b"body",
+            &context,
+            None,
+        )
+        .await
+        .expect("grow the base");
+        if index % 64 == 63 {
+            create_checkpoint(&store, &namespace_id, &context)
+                .await
+                .expect("bound the WAL tail");
+        }
     }
     create_checkpoint(&store, &namespace_id, &context)
         .await
@@ -2376,7 +2302,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         &namespace_id,
         &context,
         policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("reorganization step");
@@ -2512,7 +2438,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     assert!(
         matches!(
             selection.plan,
-            super::reorganize::ReorganizationPlan::FullCompaction(_)
+            super::reorganize::ReorganizationPlan::StreamingCompaction(_)
         ),
         "no legal window exists; the selector must hand the group to a streaming compaction \
          rather than assemble one across the wide run"
@@ -2524,7 +2450,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         &namespace_id,
         &context,
         policy,
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("reorganization step");
@@ -2605,7 +2531,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 &namespace_id,
                 &context,
                 policy,
-                FrozenBasePolicy::default(),
+                MetadataCompactionPolicy::default(),
             )
             .await
             .expect("reorganization step");

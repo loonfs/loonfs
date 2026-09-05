@@ -15,7 +15,7 @@ use crate::checkpoint::tests::{
     create_checkpoint, load_current_projection, mutation_context, write_test_file,
     ManifestMetadataSource,
 };
-use crate::checkpoint::FrozenBasePolicy;
+use crate::checkpoint::MetadataCompactionPolicy;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
@@ -2054,7 +2054,7 @@ async fn fold_metadata<S: ObjectStore + ?Sized>(
             namespace_id,
             context,
             fold_policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("reorganize step");
@@ -2198,7 +2198,7 @@ async fn an_old_unpublished_manifest_cannot_replace_the_published_grace_anchor()
             max_delta_runs: NonZeroUsize::MIN,
             ..Default::default()
         },
-        FrozenBasePolicy::default(),
+        MetadataCompactionPolicy::default(),
     )
     .await
     .expect("publish one replacement manifest");
@@ -3356,7 +3356,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
             &namespace_id,
             &setup,
             fold_policy,
-            FrozenBasePolicy::default(),
+            MetadataCompactionPolicy::default(),
         )
         .await
         .expect("reorganize step");

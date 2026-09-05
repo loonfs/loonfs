@@ -1232,11 +1232,11 @@ pub struct MetadataCompactionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum MetadataCompactionOutcome {
-    /// No family group has outgrown a bounded reorganization step and nothing was published.
+    /// No eligible family group was available and nothing was published.
     NotNeeded,
-    /// The planner chose a bounded merge and this run published it; no full compaction was needed.
+    /// The selected window fit a bounded step and this run published it.
     BoundedMergePublished,
-    /// The rebuilt group replaced its snapshot in a published manifest.
+    /// The selected run window was replaced in a published manifest.
     Published {
         /// Manifest published by the compaction.
         manifest_no: ManifestNo,
