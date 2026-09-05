@@ -9,7 +9,7 @@
 
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::MetadataSegmentCache;
-use super::load::{head_from_manifest, load_basis_metadata_segments};
+use super::load::load_basis_metadata_segments;
 use super::publish::{
     manifest_ref_for, manifest_write_failure, publish_metadata_root, write_namespace_manifest,
     ManifestPublicationOutcome,
@@ -241,7 +241,6 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     let loaded_basis = load_basis_metadata_segments(
         store,
         segment_cache,
-        namespace_id,
         &snapshot.basis,
         snapshot.head.created_at_ms,
     )
@@ -266,7 +265,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         head: snapshot.head,
         basis: snapshot.basis,
         floor_seq,
-        manifest_segments: ProjectionManifestSegments::Loaded(loaded_basis.segments),
+        manifest_segments: loaded_basis.segments,
         tail_state: snapshot.tail_state,
     };
     // A fold publishes metadata without updating the namespace head.
@@ -286,25 +285,11 @@ fn flush_wal_response(namespace_id: &NamespaceId, basis: FlushedBasis) -> FlushW
     }
 }
 
-pub(super) enum ProjectionManifestSegments<'a, S: ObjectStore + ?Sized> {
-    Loaded(VerifiedMetadataSegments<'a, S>),
-}
-
-impl<'a, S: ObjectStore + ?Sized> std::ops::Deref for ProjectionManifestSegments<'a, S> {
-    type Target = VerifiedMetadataSegments<'a, S>;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Loaded(segments) => segments,
-        }
-    }
-}
-
 pub(super) struct RootProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: HeadState,
     pub(super) basis: MetadataBasis,
     pub(super) floor_seq: ChangeSeq,
-    pub(super) manifest_segments: ProjectionManifestSegments<'a, S>,
+    pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
     pub(super) tail_state: Arc<MetadataState>,
@@ -328,9 +313,9 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         ));
     }
     let loaded_basis =
-        load_basis_metadata_segments(store, None, namespace_id, &basis, head.created_at_ms).await?;
+        load_basis_metadata_segments(store, None, &basis, head.created_at_ms).await?;
+    let manifest_head = loaded_basis.replay_head(&head);
     let manifest_segments = loaded_basis.segments;
-    let manifest_head = head_from_manifest(&head, manifest_segments.manifest());
     let wal_chain = load_wal_chain(
         store,
         WalChainLoadRequest {
@@ -365,7 +350,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         head,
         basis,
         floor_seq,
-        manifest_segments: ProjectionManifestSegments::Loaded(manifest_segments),
+        manifest_segments,
         tail_state: Arc::new(replayed.resulting_metadata_state),
     })
 }
@@ -419,13 +404,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     manifest_object_id: ManifestObjectId,
 ) -> Result<NamespaceManifestEnvelope> {
     let head_seq = projection.head.seq;
-    let previous_manifest = projection.manifest_segments.manifest();
-
-    // The manifest that first names a run allocates its number. A flush writes
-    // at most one run, so it takes at most one number, and a flush that writes
-    // none leaves the allocator where the previous manifest left it.
-    let run_no = previous_manifest.payload.next_run_no;
-
     // A WAL flush keeps existing runs and writes the WAL delta as one new delta
     // run. Reorganization merges delta runs into the base separately.
     //
@@ -434,6 +412,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     // that sequence would carry. The namespace's first manifest is
     // therefore one complete base run over the whole projected state.
     let (base_seq, runs, next_run_no) = if matches!(projection.basis, MetadataBasis::Genesis) {
+        let run_no = RunNo(0);
         (
             head_seq,
             vec![MetadataRunRef {
@@ -453,6 +432,10 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             next_run_no_after(run_no)?,
         )
     } else {
+        let previous_manifest = projection.manifest_segments.manifest();
+        // The manifest that first names a run allocates its number. A flush
+        // takes one number for its delta, or none when the head is unchanged.
+        let run_no = previous_manifest.payload.next_run_no;
         let mut runs = previous_manifest.payload.runs.clone();
         let mut next_run_no = run_no;
         if previous_manifest.payload.head_seq < head_seq {

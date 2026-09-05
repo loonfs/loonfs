@@ -86,12 +86,6 @@ pub(crate) fn metadata_basis_without_root(head: &HeadState) -> MetadataBasis {
     }
 }
 
-/// The genesis head fields a synthesized basis replays from: sequence zero,
-/// the genesis commit, and the root inode already reserved.
-pub(crate) fn genesis_next_inode_id() -> loonfs_api::InodeId {
-    loonfs_api::FIRST_ALLOCATABLE_INODE_ID
-}
-
 /// The sequence a namespace's own history begins at: zero for a created
 /// namespace, the fork point for a fork target.
 pub(crate) fn namespace_birth_seq(head: &HeadState) -> ChangeSeq {
