@@ -1443,6 +1443,11 @@ The remaining fields appear in this order:
 | `undelete` | `inode_id`, `deletion_seq`, `path` |
 | `update_attributes` | `path`, `set`, `remove`, `expected_inode_id`, `expected_attributes_revision_no` |
 
+The encoding is UTF-8, with non-ASCII characters written directly. JSON
+quotes, backslashes, and control characters are escaped; slashes are not.
+Integers use decimal digits without leading zeroes, and sorted string keys
+use lexicographic UTF-8 order.
+
 Every listed field is present. Unset optional fields encode as `null`; default
 booleans and behaviors are explicit. Paths use their validated absolute form.
 Inode IDs use the numeric storage representation, not the public `ino_` string;

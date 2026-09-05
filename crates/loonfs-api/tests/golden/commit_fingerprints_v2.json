@@ -244,5 +244,18 @@
     },
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"copy_path\",\"from_path\":\"/docs/a\",\"to_path\":\"/docs/b\",\"behavior\":\"replace\",\"expected_destination_inode_id\":42,\"expected_destination_revision_no\":3}],\"message\":null}",
     "fingerprint": "v2:sha256:8e3237540702adc49cb03c4a75ca3e1aefbe6e6ecb2c90d4265eaa6dc58fb0d2"
+  },
+  {
+    "name": "unicode_and_json_escaping",
+    "operation": {
+      "kind": "update_attributes",
+      "path": "/café/report.txt",
+      "set": {
+        "z": "line\n\"two\"",
+        "a": "résumé 🍵"
+      }
+    },
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"update_attributes\",\"path\":\"/café/report.txt\",\"set\":{\"a\":\"résumé 🍵\",\"z\":\"line\\n\\\"two\\\"\"},\"remove\":[],\"expected_inode_id\":null,\"expected_attributes_revision_no\":null}],\"message\":null}",
+    "fingerprint": "v2:sha256:e010868fc8c948685283d5250fb0cdbd84556be7c63841a6c68a384eb452a4d7"
   }
 ]
