@@ -23,6 +23,8 @@ pub enum DurableObjectFamily {
     MetadataCompactionStaging,
     /// Classifies the mutable lease for one metadata family group.
     MetadataCompactionLease,
+    /// Classifies the publication-protection record beside sealed job output.
+    CompactionOutputProtection,
     /// Classifies a mutable checkpoint lifecycle record.
     CheckpointRecord,
     /// Classifies a mutable upload-session lifecycle record.
@@ -111,6 +113,13 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         {
             Some(parsed(
                 DurableObjectFamily::MetadataCompactionStaging,
+                Some(namespace),
+                Some(job_id),
+            ))
+        }
+        ["namespaces", namespace, "metadata", "compactions", job_id, "protection.json"] => {
+            Some(parsed(
+                DurableObjectFamily::CompactionOutputProtection,
                 Some(namespace),
                 Some(job_id),
             ))

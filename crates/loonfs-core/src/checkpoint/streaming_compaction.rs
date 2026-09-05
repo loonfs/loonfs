@@ -434,6 +434,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         }
         Err(stopped) => stopped,
     };
+    lease.complete(store).await?;
     log_metadata_compaction_outcome(namespace_id, spec, &outcome);
     Ok(outcome)
 }
@@ -567,6 +568,8 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             spec.frozen_floor_seq(),
         )
         .await?;
+
+        lease.protect_output(store).await?;
 
         // The last check before the swap that makes this output reader
         // truth. Everything above it is reads and objects nothing references.

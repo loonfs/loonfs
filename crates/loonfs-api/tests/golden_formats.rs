@@ -710,7 +710,7 @@ fn control_objects_match_golden_bytes() {
     // like every other family's so a field rename cannot silently change what
     // either party reads that claim out of.
     check_control_golden(
-        "control_compaction_lease.v2.json",
+        "control_compaction_lease.v3.json",
         ControlObjectKind::CompactionLease,
         MetadataCompactionLeaseState {
             job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
@@ -720,6 +720,30 @@ fn control_objects_match_golden_bytes() {
             writer_id: WriterId::parse("writer-1").expect("writer id"),
             status: CompactionLeaseStatus::Active {},
             started_at_ms: 1_000,
+            expires_at_ms: 1_503_000,
+        },
+    );
+    check_control_golden(
+        "control_compaction_completed_lease.v3.json",
+        ControlObjectKind::CompactionLease,
+        MetadataCompactionLeaseState {
+            job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
+                .expect("valid compaction id"),
+            namespace_id: namespace_id(),
+            group: MetadataFamilyGroup::Bindings,
+            writer_id: WriterId::parse("writer-1").expect("writer id"),
+            status: CompactionLeaseStatus::Completed {},
+            started_at_ms: 1_000,
+            expires_at_ms: 1_503_000,
+        },
+    );
+    check_control_golden(
+        "control_compaction_output_protection.v1.json",
+        ControlObjectKind::CompactionOutputProtection,
+        loonfs_api::wire::control::CompactionOutputProtectionState {
+            namespace_id: namespace_id(),
+            job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
+                .expect("job id"),
             expires_at_ms: 1_503_000,
         },
     );
@@ -866,7 +890,7 @@ fn every_durable_status_is_a_kind_tagged_object() {
         "control_checkpoint_record.v1.json",
         "control_checkpoint_record_released.v1.json",
         "control_upload_session.v1.json",
-        "control_compaction_lease.v2.json",
+        "control_compaction_lease.v3.json",
     ];
     for fixture in fixtures {
         let document: serde_json::Value =
@@ -924,7 +948,7 @@ fn every_mutable_control_payload_rejects_unknown_fields_as_corruption() {
         add_unknown,
     );
     assert_control_payload_edit_is_corrupt::<MetadataCompactionLeaseState>(
-        "control_compaction_lease.v2.json",
+        "control_compaction_lease.v3.json",
         ControlObjectKind::CompactionLease,
         add_unknown,
     );
@@ -940,7 +964,7 @@ fn compaction_leases_reject_the_retired_refresh_instant_field() {
     let retired_field = ["heart", "beat_at_ms"].concat();
     let field_for_edit = retired_field.clone();
     let message = assert_control_payload_edit_is_corrupt::<MetadataCompactionLeaseState>(
-        "control_compaction_lease.v2.json",
+        "control_compaction_lease.v3.json",
         ControlObjectKind::CompactionLease,
         move |payload| {
             let fields = payload.as_object_mut().expect("lease payload");
@@ -2727,4 +2751,15 @@ fn every_metadata_row_rejects_unknown_fields() {
             );
         }
     }
+}
+
+#[test]
+fn compaction_output_protection_rejects_unknown_payload_fields() {
+    assert_control_payload_edit_is_corrupt::<
+        loonfs_api::wire::control::CompactionOutputProtectionState,
+    >(
+        "control_compaction_output_protection.v1.json",
+        ControlObjectKind::CompactionOutputProtection,
+        |payload| payload["unknown"] = serde_json::json!(true),
+    );
 }

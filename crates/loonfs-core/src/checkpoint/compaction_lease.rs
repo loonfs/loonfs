@@ -4,9 +4,10 @@
 //! Garbage collection may claim an expired lease by changing it to `Reaping`.
 //! A failed refresh then prevents the job from publishing.
 //!
-//! Completed jobs leave the lease in place so a collection pass that started
-//! before publication cannot mistake old output for garbage. Malformed leases
-//! stop collection because ownership cannot be verified.
+//! Before publishing, a job records a protection deadline beside its sealed
+//! output. That record remains until every output object is gone, even after
+//! the group admits another job. Paused collectors keep their fixed clock.
+//! Malformed leases stop collection because ownership cannot be verified.
 
 use super::streaming_compaction::MetadataCompactionSpec;
 use crate::control_object::{
@@ -19,28 +20,25 @@ use crate::limits::{
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, CompactionLeaseStatus, ControlObjectKind, MetadataCompactionLeaseState,
+    encode_control_state, CompactionLeaseStatus, CompactionOutputProtectionState,
+    ControlObjectKind, MetadataCompactionLeaseState,
 };
 use loonfs_api::{MetadataCompactionId, MetadataFamilyGroup, NamespaceId, WriterId};
-use loonfs_objectstore::keys::metadata_compaction_lease;
+use loonfs_objectstore::keys::{metadata_compaction_lease, metadata_compaction_output_protection};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 /// Who owns the objects under one job's prefix, as a collector reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompactionPrefixOwner {
-    /// A job owns it: its lease is `Active` and unexpired, or it refreshed
-    /// out from under this pass's claim. Nothing about the objects' age
-    /// matters.
-    LiveJob,
-    /// This pass claimed the prefix, or found a claim someone else won. The
-    /// job that wrote the objects is fenced, so they are orphans — and the
-    /// lease is deleted after them, once nothing unreferenced is left under
-    /// the prefix.
-    ThisCollector,
+    /// A live job or publication deadline protects this output, regardless
+    /// of object age. A lost fencing CAS also retains output for this pass.
+    Protected,
+    /// This pass or another collector fenced the job. Unreferenced output
+    /// can be collected; the group slot remains available for replacement.
+    Fenced,
     /// There is no lease to own anything. Whatever sits under the prefix is
-    /// an ordinary unreferenced orphan and there is no claim to release
-    /// afterwards.
-    NoOne,
+    /// an ordinary unreferenced orphan.
+    Unclaimed,
 }
 
 /// Returns the current prefix owner, claiming its expired group lease when possible.
@@ -53,7 +51,7 @@ pub(crate) async fn claim_group_lease<S: ObjectStore + ?Sized>(
     now_ms: u64,
 ) -> Result<CompactionPrefixOwner> {
     let Some(loaded) = load_group_lease(store, namespace_id, group).await? else {
-        return Ok(CompactionPrefixOwner::NoOne);
+        return Ok(CompactionPrefixOwner::Unclaimed);
     };
     claim_loaded_group_lease(store, namespace_id, metadata_compaction_id, loaded, now_ms).await
 }
@@ -87,6 +85,29 @@ pub(crate) async fn load_group_lease<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Reads the sealed output's publication deadline independently of the group.
+pub(crate) async fn load_output_protection<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    job_id: &MetadataCompactionId,
+) -> Result<Option<crate::control_object::LoadedControl<CompactionOutputProtectionState>>> {
+    let loaded = load_control_object(
+        store,
+        metadata_compaction_output_protection(namespace_id, job_id),
+        ControlObjectKind::CompactionOutputProtection,
+        |state: &CompactionOutputProtectionState| {
+            expect_namespace(namespace_id, &state.namespace_id)?;
+            expect_identity_field("compaction job", job_id.as_str(), state.job_id.as_str())
+        },
+    )
+    .await;
+    match loaded {
+        Ok(loaded) => Ok(Some(loaded)),
+        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+        Err(error) => Err(CoreError::ControlObjectLoad(error)),
+    }
+}
+
 pub(crate) async fn claim_loaded_group_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -99,15 +120,19 @@ pub(crate) async fn claim_loaded_group_lease<S: ObjectStore + ?Sized>(
     let state = loaded.state;
     // A group lease protects only the staged objects written by the job id it names.
     if state.job_id != *metadata_compaction_id {
-        return Ok(CompactionPrefixOwner::NoOne);
+        return Ok(CompactionPrefixOwner::Unclaimed);
+    }
+    // Publication has ended. Its separate record protects older collectors.
+    if state.status == (CompactionLeaseStatus::Completed {}) {
+        return Ok(CompactionPrefixOwner::Unclaimed);
     }
     // Terminal: somebody already fenced this job, so the reap goes on from
     // wherever the pass that started it stopped.
     if state.status == (CompactionLeaseStatus::Reaping {}) {
-        return Ok(CompactionPrefixOwner::ThisCollector);
+        return Ok(CompactionPrefixOwner::Fenced);
     }
     if active_lease_is_unexpired(&state, now_ms) {
-        return Ok(CompactionPrefixOwner::LiveJob);
+        return Ok(CompactionPrefixOwner::Protected);
     }
 
     // Expired. Nothing is decided until the claim lands.
@@ -128,12 +153,12 @@ pub(crate) async fn claim_loaded_group_lease<S: ObjectStore + ?Sized>(
                 "a streaming metadata compaction lease expired; garbage collection claimed the \
                  group lease and the job that wrote it can no longer publish"
             );
-            Ok(CompactionPrefixOwner::ThisCollector)
+            Ok(CompactionPrefixOwner::Fenced)
         }
         // The job wrote the lease between this pass's read and its claim, so
         // the job is alive and owns its prefix. This pass keeps every object
         // under it.
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CompactionPrefixOwner::LiveJob),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CompactionPrefixOwner::Protected),
         // An ambiguous claim is left to a later collector, which reads the
         // lease afresh and finishes whatever landed.
         Err(error) => Err(CoreError::store(&object_key, &error)),
@@ -143,12 +168,10 @@ pub(crate) async fn claim_loaded_group_lease<S: ObjectStore + ?Sized>(
 /// Availability of one family group's deterministic lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GroupLeaseState {
-    /// No lease exists.
-    Free,
-    /// An unexpired job or a collector holds the lease.
+    /// No unexpired job owns the group.
+    Available,
+    /// An unexpired job holds the lease.
     Held,
-    /// The active lease may be taken over.
-    Expired,
 }
 
 /// Reads one family group's lease for planning.
@@ -159,17 +182,13 @@ pub(super) async fn group_lease_state<S: ObjectStore + ?Sized>(
     now_ms: u64,
 ) -> Result<GroupLeaseState> {
     let Some(loaded) = load_group_lease(store, namespace_id, group).await? else {
-        return Ok(GroupLeaseState::Free);
+        return Ok(GroupLeaseState::Available);
     };
-    Ok(
-        if active_lease_is_unexpired(&loaded.state, now_ms)
-            || loaded.state.status == (CompactionLeaseStatus::Reaping {})
-        {
-            GroupLeaseState::Held
-        } else {
-            GroupLeaseState::Expired
-        },
-    )
+    Ok(if active_lease_is_unexpired(&loaded.state, now_ms) {
+        GroupLeaseState::Held
+    } else {
+        GroupLeaseState::Available
+    })
 }
 
 fn active_lease_is_unexpired(state: &MetadataCompactionLeaseState, now_ms: u64) -> bool {
@@ -191,7 +210,7 @@ pub(super) enum LeaseHold {
 pub(super) enum LeaseAcquire<'a> {
     /// This job owns the lease.
     Acquired(CompactionLease<'a>),
-    /// Another job or a collector holds the lease.
+    /// Another unexpired job holds the lease.
     Held,
 }
 
@@ -227,7 +246,7 @@ impl<'a> CompactionLease<'a> {
         let loaded = load_group_lease(store, namespace_id, spec.group()).await?;
         let etag = match loaded {
             Some(loaded) => {
-                return Self::take_over_expired(
+                return Self::replace_available(
                     store,
                     loaded,
                     object_key,
@@ -245,7 +264,7 @@ impl<'a> CompactionLease<'a> {
                     else {
                         return Ok(LeaseAcquire::Held);
                     };
-                    return Self::take_over_expired(
+                    return Self::replace_available(
                         store,
                         loaded,
                         object_key,
@@ -264,7 +283,7 @@ impl<'a> CompactionLease<'a> {
                     if loaded.state == state {
                         loaded.etag
                     } else {
-                        return Self::take_over_expired(
+                        return Self::replace_available(
                             store,
                             loaded,
                             object_key,
@@ -289,7 +308,7 @@ impl<'a> CompactionLease<'a> {
         }))
     }
 
-    async fn take_over_expired<S: ObjectStore + ?Sized>(
+    async fn replace_available<S: ObjectStore + ?Sized>(
         store: &S,
         loaded: LoadedCompactionLease,
         object_key: String,
@@ -298,12 +317,10 @@ impl<'a> CompactionLease<'a> {
         timer: &'a dyn MonotonicTimer,
         started_monotonic_ms: u64,
     ) -> Result<LeaseAcquire<'a>> {
-        if active_lease_is_unexpired(&loaded.state, state.started_at_ms)
-            || loaded.state.status == (CompactionLeaseStatus::Reaping {})
-        {
+        if active_lease_is_unexpired(&loaded.state, state.started_at_ms) {
             return Ok(LeaseAcquire::Held);
         }
-        // Replacing the complete expired lease in one CAS fences the previous job's next refresh.
+        // Replacing the complete slot in one CAS fences the previous job's next refresh.
         let etag = match store
             .compare_and_swap(&object_key, &loaded.etag, encoded)
             .await
@@ -333,6 +350,74 @@ impl<'a> CompactionLease<'a> {
             started_monotonic_ms,
             next_refresh_monotonic_ms: started_monotonic_ms,
         }))
+    }
+
+    /// Confirms output protection before a root publication can make old output live.
+    /// No further output writes are permitted after the first call.
+    pub(super) async fn protect_output<S: ObjectStore + ?Sized>(&self, store: &S) -> Result<()> {
+        let key =
+            metadata_compaction_output_protection(&self.state.namespace_id, &self.state.job_id);
+        let existing =
+            load_output_protection(store, &self.state.namespace_id, &self.state.job_id).await?;
+        let state = CompactionOutputProtectionState {
+            namespace_id: self.state.namespace_id.clone(),
+            job_id: self.state.job_id.clone(),
+            expires_at_ms: existing
+                .as_ref()
+                .map_or(self.state.expires_at_ms, |loaded| {
+                    loaded.state.expires_at_ms.max(self.state.expires_at_ms)
+                }),
+        };
+        if existing
+            .as_ref()
+            .is_some_and(|loaded| loaded.state == state)
+        {
+            return Ok(());
+        }
+        let bytes = encode_control_state(ControlObjectKind::CompactionOutputProtection, &state)
+            .map(Bytes::from)
+            .map_err(|error| CoreError::Codec {
+                object_key: key.clone(),
+                message: error.to_string(),
+            })?;
+        let result = match existing {
+            Some(loaded) => store.compare_and_swap(&key, &loaded.etag, bytes).await,
+            None => store.put_if_absent(&key, bytes).await,
+        };
+        match result {
+            Ok(_) => Ok(()),
+            Err(
+                error @ (ObjectStoreError::PreconditionFailed { .. }
+                | ObjectStoreError::Transport { .. }),
+            ) => {
+                let confirmed =
+                    load_output_protection(store, &state.namespace_id, &state.job_id).await?;
+                if confirmed.is_some_and(|loaded| loaded.state == state) {
+                    Ok(())
+                } else {
+                    Err(CoreError::store(&key, &error))
+                }
+            }
+            Err(error) => Err(CoreError::store(&key, &error)),
+        }
+    }
+
+    /// Releases the group after the last publication attempt. The separate
+    /// output protection was confirmed before publication, so a pause here
+    /// cannot leave published output dependent on the group slot.
+    pub(super) async fn complete<S: ObjectStore + ?Sized>(&self, store: &S) -> Result<()> {
+        let mut completed = self.state.clone();
+        completed.status = CompactionLeaseStatus::Completed {};
+        match store
+            .compare_and_swap(&self.object_key, &self.etag, encode_lease(&completed)?)
+            .await
+        {
+            Ok(_)
+            | Err(
+                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::NotFound { .. },
+            ) => Ok(()),
+            Err(error) => Err(CoreError::store(&self.object_key, &error)),
+        }
     }
 
     /// The clock the job paces itself by. One clock for the job's refresh
