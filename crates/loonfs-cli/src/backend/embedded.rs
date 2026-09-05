@@ -1481,8 +1481,7 @@ mod tests {
 
         // More publishes than the WAL backpressure cap: the Enabled policy
         // must keep stepping the tail down so no write ever stalls on
-        // `maintenance_required` (each stall used to require a manual
-        // `loonfs maintenance metadata`).
+        // `maintenance_required`.
         for index in 0..140 {
             target
                 .backend

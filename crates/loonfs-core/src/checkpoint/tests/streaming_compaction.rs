@@ -2650,9 +2650,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     );
 
     // The same bounds hold for the same engine run inside a maintenance pass.
-    // The step's input budgets cap what a window may hold, but they say nothing
-    // about what merging it costs, and the old path read every row of the
-    // window into vectors.
+    // Input budgets and measured merge residency must both hold.
     let store = ConcurrencyWatchStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::metadata_segment(),

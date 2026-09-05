@@ -375,8 +375,8 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
     // Portability floor: names every target filesystem can hold. Windows
     // cannot materialize its reserved characters, trailing dots or spaces,
     // or its reserved device names, and an all-whitespace name is invisible
-    // in every listing. Rejecting here is free pre-release; loosening later
-    // is compatible, tightening later would strand stored names.
+    // in every listing. Enforce this before storing a name so it remains
+    // possible to materialize every accepted path on those filesystems.
     if let Some(character) = first_windows_reserved_character(value) {
         return Err(PathError::UnportableDisplayNameCharacter {
             display_name: value.to_owned(),
