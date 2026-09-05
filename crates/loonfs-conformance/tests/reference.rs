@@ -370,6 +370,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
             content_ref.clone(),
             content_token,
             &put_options(&request.actor, &request.commit_id),
+            None,
         )
         .await
         .expect("commit direct PUT");
@@ -524,6 +525,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
             first_content_ref,
             replayed.content_token().cloned(),
             &put_options(&request.actor, &request.commit_id),
+            None,
         )
         .await
         .expect("commit multipart upload");

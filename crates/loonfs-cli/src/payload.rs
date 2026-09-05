@@ -37,10 +37,10 @@ impl LocalPayload {
         }
     }
 
-    /// Returns a source that may be reopened to resume a multipart upload.
-    pub(crate) fn resumable_source(&self) -> Option<&Path> {
+    /// Returns a file that may be reopened after an interrupted PUT.
+    pub(crate) fn file_path(&self) -> Option<&Path> {
         match self {
-            Self::File { path, size_bytes } if *size_bytes >= STREAMING_PUT_MIN_BYTES => Some(path),
+            Self::File { path, .. } => Some(path),
             _ => None,
         }
     }

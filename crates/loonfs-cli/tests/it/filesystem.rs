@@ -2036,3 +2036,61 @@ fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
         assert_eq!(json_data(&tree)["destination"], "demo:/archive/docs");
     }
 }
+
+#[test]
+fn a_remote_put_replays_its_exact_request_after_the_upload_session_is_gone() {
+    let harness = Harness::new();
+    let server =
+        harness.start_external_server(harness.write_server_config("remote", "put-recovery"));
+    assert_success(&harness.run(&[
+        "profile",
+        "create",
+        "remote",
+        "default",
+        "--server-url",
+        &server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("payload");
+    fs::write(&payload, b"retained request").expect("source");
+    let args = [
+        "--json",
+        "put",
+        payload.to_str().expect("path"),
+        "/file",
+        "--commit-id",
+        "retained-put",
+    ];
+    let first = harness.run(&args);
+    assert_success(&first);
+    let uploads = harness
+        .store_root("remote")
+        .join("put-recovery/namespaces/demo/uploads");
+    let records = fs::read_dir(&uploads)
+        .expect("upload sessions")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("records");
+    assert!(!records.is_empty(), "the first call opened an upload");
+    for entry in records {
+        fs::remove_file(entry.path()).expect("expire session record");
+    }
+    let replay = harness.run(&args);
+    assert_success(&replay);
+    assert_eq!(
+        json_data(&replay)["commit_id"],
+        json_data(&first)["commit_id"]
+    );
+    assert_eq!(
+        json_data(&replay)["committed_seq"],
+        json_data(&first)["committed_seq"]
+    );
+    assert_eq!(
+        fs::read_dir(&uploads).expect("upload directory").count(),
+        0,
+        "replay never creates or reads an upload session"
+    );
+    assert_eq!(download(&harness, "/file", "readback"), b"retained request");
+}

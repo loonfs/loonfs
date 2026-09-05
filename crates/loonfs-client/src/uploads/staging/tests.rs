@@ -318,6 +318,7 @@ fn multipart_script(parts: u32, uploaded: ContentRef) -> Vec<Outcome> {
 struct RecordingJournal {
     began: Mutex<Option<(UploadId, u64, ChecksumAlgorithm)>>,
     parts: Mutex<Vec<CompletedUploadPart>>,
+    request: Mutex<Option<CommitRequest>>,
 }
 
 impl RecordingJournal {
@@ -352,7 +353,12 @@ impl RecordingJournal {
     }
 }
 
-impl MultipartUploadJournal for RecordingJournal {
+impl PutFileJournal for RecordingJournal {
+    fn commit_prepared(&self, request: &CommitRequest) -> std::io::Result<()> {
+        *self.request.lock().expect("journal lock") = Some(request.clone());
+        Ok(())
+    }
+
     fn began(
         &self,
         upload_id: &UploadId,
@@ -915,7 +921,11 @@ struct FailingJournal {
     fail_at_begin: bool,
 }
 
-impl MultipartUploadJournal for FailingJournal {
+impl PutFileJournal for FailingJournal {
+    fn commit_prepared(&self, _: &CommitRequest) -> std::io::Result<()> {
+        Err(std::io::Error::other("journal disk full"))
+    }
+
     fn began(&self, _: &UploadId, _: u64, _: ChecksumAlgorithm) -> std::io::Result<()> {
         if self.fail_at_begin {
             Err(std::io::Error::other("journal disk full"))
@@ -960,4 +970,94 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
             "no subsequent wave, completion, commit, or abort may be sent"
         );
     }
+}
+
+#[tokio::test]
+async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_upload() {
+    let bytes = payload(1_000);
+    let uploaded = content_ref(&bytes);
+    let proof = ContentToken {
+        content_ref: uploaded.clone(),
+        token: "saved-proof".to_owned(),
+    };
+    let (source, _) = watched_source(&bytes, 512);
+    let transport = test_transport::script(vec![
+        capabilities(false),
+        begin_proxied(),
+        json(&UploadContentResponse {
+            namespace_id: namespace_id(),
+            upload_id: upload_id(),
+            content_ref: uploaded.clone(),
+        }),
+        json(&UploadSession {
+            namespace_id: namespace_id(),
+            upload_id: upload_id(),
+            mode: UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Completed {
+                completed_at_ms: 1,
+                content_ref: uploaded.clone(),
+                content_token: Some(proof.clone()),
+            },
+        }),
+        Outcome::TransportFailure,
+    ]);
+    let journal = RecordingJournal::default();
+    let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+    options.commit.commit_id = Some(CommitId::parse("saved-put").expect("ID"));
+    options.commit.message = Some("original message".to_owned());
+    options.behavior = loonfs_api::DestinationBehavior::Replace;
+    options.expected_inode_id = Some(loonfs_api::InodeId(7));
+    options.expected_revision_no = Some(loonfs_api::RevisionNo(9));
+    client_without_retry()
+        .put_file_stream_resumable(&spec(), source, &options, &journal, None)
+        .await
+        .expect_err("lost acknowledgement");
+    assert_eq!(transport.attempts(), 5);
+    let saved = journal
+        .request
+        .lock()
+        .expect("journal")
+        .clone()
+        .expect("request saved before submission");
+    assert_eq!(Some(&saved.commit_id), options.commit.commit_id.as_ref());
+    assert_eq!(saved.actor, options.commit.actor);
+    assert_eq!(saved.message, options.commit.message);
+    assert_eq!(
+        saved.operations,
+        vec![FilesystemOperation::PutFile {
+            path: spec().absolute_path().clone(),
+            content_ref: uploaded,
+            behavior: options.behavior,
+            expected_inode_id: options.expected_inode_id,
+            expected_revision_no: options.expected_revision_no,
+        }]
+    );
+    assert_eq!(saved.content_tokens, vec![proof]);
+    drop(transport);
+    let transport = test_transport::script(vec![commit_landed()]);
+    client_without_retry()
+        .create_commit(&namespace_id(), &saved)
+        .await
+        .expect("replay exact request");
+    assert_eq!(transport.attempts(), 1);
+    assert!(transport.sent()[0].url.ends_with("/commits"));
+}
+
+#[tokio::test]
+async fn a_commit_journal_failure_prevents_submission_of_completed_content() {
+    let transport = test_transport::script(Vec::new());
+    let error = client_without_retry()
+        .commit_completed_upload(
+            &spec(),
+            content_ref(b"data"),
+            None,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+            Some(&FailingJournal {
+                fail_at_begin: false,
+            }),
+        )
+        .await
+        .expect_err("cannot save commit request");
+    assert!(error.to_string().contains("before submission"));
+    assert_eq!(transport.attempts(), 0);
 }

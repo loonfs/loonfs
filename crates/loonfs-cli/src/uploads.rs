@@ -1,37 +1,35 @@
-//! Local journals used to resume interrupted multipart uploads.
+//! Durable recovery records for file-backed remote PUT attempts.
 
 use crate::config::absolute_env_path;
-use loonfs_api::v0::CompletedUploadPart;
-use loonfs_api::{Checksum, ChecksumAlgorithm, UploadId};
-use loonfs_client::{MultipartUploadJournal, MultipartUploadResume};
+use loonfs_api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
+use loonfs_api::{Checksum, ChecksumAlgorithm, CommitId, UploadId};
+use loonfs_client::{MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions};
 use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Directory under `$XDG_STATE_HOME`.
 const XDG_STATE_SUBDIR: &str = "loonfs";
-/// Per-upload journal directory.
 const UPLOADS_SUBDIR: &str = "uploads";
 
-/// State required to resume one upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UploadState {
-    upload_id: UploadId,
-    part_size_bytes: u64,
-    checksum_algorithm: ChecksumAlgorithm,
-    parts: Vec<StatePart>,
     source: SourceIdentity,
+    options: PutFileOptions,
+    progress: UploadProgress,
 }
 
-/// A completed multipart upload part.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StatePart {
-    part_number: u32,
-    etag: String,
-    checksum: Checksum,
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum UploadProgress {
+    Uploading {
+        multipart: Option<MultipartUploadResume>,
+    },
+    Prepared {
+        request: Box<CommitRequest>,
+    },
 }
 
 /// File properties used to detect changes before resuming an upload.
@@ -58,94 +56,162 @@ impl SourceIdentity {
     }
 }
 
-/// Local journal for one upload.
+/// One PUT attempt, exclusively owned until this value is dropped.
 #[derive(Debug)]
 pub(crate) struct UploadJournal {
     path: PathBuf,
-    source: SourceIdentity,
-    /// Latest state, flushed after every change.
-    state: Mutex<Option<UploadState>>,
+    state: Mutex<UploadState>,
+    /// Explicit commit IDs retain their requests for subsequent invocations.
+    keep_after_ack: bool,
+    /// A stable sidecar inode prevents rename/removal from bypassing the lock.
+    _ownership: File,
 }
 
 impl UploadJournal {
-    /// Resolves the journal path. Missing state-directory configuration is an error.
     pub(crate) fn for_upload(
         profile: &str,
-        namespace: &str,
-        remote_path: &str,
+        server_url: &str,
+        spec: &NamespacePath,
         local_path: &Path,
         source: SourceIdentity,
+        options: &PutFileOptions,
     ) -> io::Result<Self> {
-        let local_path = local_path.canonicalize()?;
-        let key = Checksum::sha256(&serde_json::to_vec(&(
+        let key = journal_key(
             profile,
-            namespace,
-            remote_path,
-            local_path.as_os_str().as_encoded_bytes(),
-        ))?)
-        .value;
-        Ok(Self {
-            path: uploads_dir()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "upload journals require an absolute XDG_STATE_HOME or HOME",
-                    )
-                })?
-                .join(format!("{key}.json")),
-            source,
-            state: Mutex::new(None),
-        })
+            server_url,
+            spec,
+            local_path,
+            options.commit.commit_id.as_ref(),
+        )?;
+        let dir = uploads_dir().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "upload journals require an absolute XDG_STATE_HOME or HOME",
+            )
+        })?;
+        Self::open_at(dir.join(format!("{key}.json")), source, options)
     }
 
-    /// Loads an existing record. Only a missing file means there is no upload.
-    pub(crate) fn resume(&self) -> io::Result<Option<MultipartUploadResume>> {
-        let bytes = match std::fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(self.error(error)),
-        };
-        let recorded: UploadState =
-            serde_json::from_slice(&bytes).map_err(|error| self.error(error))?;
-        if recorded.source != self.source {
-            return Err(
-                self.error("source file changed; remove this journal to start a new upload")
-            );
+    fn open_at(
+        path: PathBuf,
+        source: SourceIdentity,
+        options: &PutFileOptions,
+    ) -> io::Result<Self> {
+        let parent = path.parent().expect("journal has a directory");
+        std::fs::create_dir_all(parent).map_err(|error| journal_error(&path, error))?;
+        let ownership = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("lock"))
+            .map_err(|error| journal_error(&path, error))?;
+        if !fs4::fs_std::FileExt::try_lock_exclusive(&ownership)
+            .map_err(|error| journal_error(&path, error))?
+        {
+            return Err(journal_error(
+                &path,
+                "another command owns this PUT attempt",
+            ));
         }
-        let resume = MultipartUploadResume {
-            upload_id: recorded.upload_id.clone(),
-            part_size_bytes: recorded.part_size_bytes,
-            checksum_algorithm: recorded.checksum_algorithm,
-            parts: recorded
-                .parts
-                .iter()
-                .map(|part| CompletedUploadPart {
-                    part_number: part.part_number,
-                    etag: part.etag.clone(),
-                    checksum: part.checksum.clone(),
-                })
-                .collect(),
+        let recorded = match std::fs::read(&path) {
+            Ok(bytes) => Some(
+                serde_json::from_slice::<UploadState>(&bytes)
+                    .map_err(|error| journal_error(&path, error))?,
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(journal_error(&path, error)),
         };
-        *self.lock() = Some(recorded);
-        Ok(Some(resume))
+        let is_new = recorded.is_none();
+        let state = match recorded {
+            Some(recorded) => {
+                if recorded.source != source {
+                    return Err(journal_error(
+                        &path,
+                        "source file changed; use a new --commit-id or remove this journal to start another attempt",
+                    ));
+                }
+                let commit_id = recorded
+                    .options
+                    .commit
+                    .commit_id
+                    .clone()
+                    .ok_or_else(|| journal_error(&path, "record has no commit ID"))?;
+                let mut requested = options.clone();
+                requested.commit.commit_id.get_or_insert(commit_id);
+                if requested != recorded.options {
+                    return Err(journal_error(&path, "PUT options changed; resume with the original options or use a new --commit-id for another attempt"));
+                }
+                if let UploadProgress::Prepared { request } = &recorded.progress {
+                    if !request_matches_options(request, &recorded.options) {
+                        return Err(journal_error(
+                            &path,
+                            "prepared request does not match its PUT options",
+                        ));
+                    }
+                }
+                recorded
+            }
+            None => {
+                let mut options = options.clone();
+                options
+                    .commit
+                    .commit_id
+                    .get_or_insert_with(CommitId::generate);
+                UploadState {
+                    source,
+                    options,
+                    progress: UploadProgress::Uploading { multipart: None },
+                }
+            }
+        };
+        let journal = Self {
+            path,
+            state: Mutex::new(state),
+            keep_after_ack: options.commit.commit_id.is_some(),
+            _ownership: ownership,
+        };
+        if is_new {
+            journal.flush(&journal.lock())?;
+        }
+        Ok(journal)
     }
 
-    /// Removes an acknowledged upload's record. Removal errors remain visible.
-    pub(crate) fn forget(&self) -> io::Result<()> {
+    pub(crate) fn options(&self) -> PutFileOptions {
+        self.lock().options.clone()
+    }
+
+    pub(crate) fn resume(&self) -> Option<MultipartUploadResume> {
+        match &self.lock().progress {
+            UploadProgress::Uploading { multipart } => multipart.clone(),
+            UploadProgress::Prepared { .. } => None,
+        }
+    }
+
+    /// A saved request is replayed directly, even after its upload session expires.
+    pub(crate) fn prepared_request(&self) -> Option<CommitRequest> {
+        match &self.lock().progress {
+            UploadProgress::Prepared { request } => Some((**request).clone()),
+            UploadProgress::Uploading { .. } => None,
+        }
+    }
+
+    /// Removes ordinary attempts after acknowledgement. Explicit IDs keep their
+    /// exact request so repeating the same command can replay it without uploading.
+    pub(crate) fn acknowledge(&self) -> io::Result<()> {
+        if self.keep_after_ack {
+            return Ok(());
+        }
         match std::fs::remove_file(&self.path) {
-            Ok(()) => self.sync_directory().map_err(|error| self.error(error))?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(self.error(error)),
+            Ok(()) => self.sync_directory().map_err(|error| self.error(error)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(self.error(error)),
         }
-        *self.lock() = None;
-        Ok(())
     }
 
-    /// Replace the record only after the complete new file reaches disk.
     fn flush(&self, state: &UploadState) -> io::Result<()> {
         let write = || -> io::Result<()> {
             let parent = self.path.parent().expect("journal has a directory");
-            std::fs::create_dir_all(parent)?;
             let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
             serde_json::to_writer(&mut temporary, state)?;
             temporary.flush()?;
@@ -158,55 +224,116 @@ impl UploadJournal {
 
     fn sync_directory(&self) -> io::Result<()> {
         #[cfg(unix)]
-        std::fs::File::open(self.path.parent().expect("journal has a directory"))?.sync_all()?;
+        File::open(self.path.parent().expect("journal has a directory"))?.sync_all()?;
         Ok(())
     }
 
     fn error(&self, error: impl std::fmt::Display) -> io::Error {
-        io::Error::other(format!("upload journal `{}`: {error}", self.path.display()))
+        journal_error(&self.path, error)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<UploadState>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, UploadState> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    fn update(&self, change: impl FnOnce(&mut UploadProgress) -> io::Result<()>) -> io::Result<()> {
+        let mut held = self.lock();
+        let mut next = held.clone();
+        change(&mut next.progress)?;
+        self.flush(&next)?;
+        *held = next;
+        Ok(())
+    }
 }
 
-impl MultipartUploadJournal for UploadJournal {
+impl PutFileJournal for UploadJournal {
     fn began(
         &self,
         upload_id: &UploadId,
         part_size_bytes: u64,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> io::Result<()> {
-        let state = UploadState {
-            upload_id: upload_id.clone(),
-            part_size_bytes,
-            checksum_algorithm,
-            parts: Vec::new(),
-            source: self.source.clone(),
-        };
-        self.flush(&state)?;
-        *self.lock() = Some(state);
-        Ok(())
+        self.update(|progress| match progress {
+            UploadProgress::Uploading { multipart } if multipart.is_none() => {
+                *multipart = Some(MultipartUploadResume {
+                    upload_id: upload_id.clone(),
+                    part_size_bytes,
+                    checksum_algorithm,
+                    parts: Vec::new(),
+                });
+                Ok(())
+            }
+            _ => {
+                Err(self.error("this PUT attempt already has an upload session or commit request"))
+            }
+        })
     }
 
     fn part_completed(&self, part: &CompletedUploadPart) -> io::Result<()> {
-        let mut held = self.lock();
-        let mut next = held
-            .as_ref()
-            .ok_or_else(|| self.error("no upload session was recorded"))?
-            .clone();
-        next.parts.push(StatePart {
-            part_number: part.part_number,
-            etag: part.etag.clone(),
-            checksum: part.checksum.clone(),
-        });
-        self.flush(&next)?;
-        *held = Some(next);
-        Ok(())
+        self.update(|progress| match progress {
+            UploadProgress::Uploading {
+                multipart: Some(resume),
+            } => {
+                resume.parts.push(part.clone());
+                Ok(())
+            }
+            _ => Err(self.error("no active multipart session was recorded")),
+        })
     }
+
+    fn commit_prepared(&self, request: &CommitRequest) -> io::Result<()> {
+        if !request_matches_options(request, &self.options()) {
+            return Err(self.error("prepared request does not match its PUT options"));
+        }
+        self.update(|progress| match progress {
+            UploadProgress::Uploading { .. } => {
+                *progress = UploadProgress::Prepared {
+                    request: Box::new(request.clone()),
+                };
+                Ok(())
+            }
+            UploadProgress::Prepared { request: saved } if **saved == *request => Ok(()),
+            UploadProgress::Prepared { .. } => {
+                Err(self.error("the prepared commit request cannot change"))
+            }
+        })
+    }
+}
+
+fn request_matches_options(request: &CommitRequest, options: &PutFileOptions) -> bool {
+    options.commit.commit_id.as_ref() == Some(&request.commit_id)
+        && options.commit.actor == request.actor
+        && options.commit.message == request.message
+        && matches!(request.operations.as_slice(), [FilesystemOperation::PutFile {
+            behavior, expected_inode_id, expected_revision_no, ..
+        }] if *behavior == options.behavior
+            && *expected_inode_id == options.expected_inode_id
+            && *expected_revision_no == options.expected_revision_no)
+}
+
+fn journal_error(path: &Path, error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(format!("upload journal `{}`: {error}", path.display()))
+}
+
+fn journal_key(
+    profile: &str,
+    server_url: &str,
+    spec: &NamespacePath,
+    local_path: &Path,
+    commit_id: Option<&CommitId>,
+) -> io::Result<String> {
+    let local_path = local_path.canonicalize()?;
+    Ok(Checksum::sha256(&serde_json::to_vec(&(
+        profile,
+        server_url,
+        spec.namespace(),
+        spec.absolute_path(),
+        local_path.as_os_str().as_encoded_bytes(),
+        commit_id,
+    ))?)
+    .value)
 }
 
 /// Where per-upload records live: `$XDG_STATE_HOME/loonfs/uploads` when that
@@ -234,25 +361,21 @@ mod tests {
             modified_ns: 7,
         }
     }
-
-    fn journal_at(path: &Path) -> UploadJournal {
-        UploadJournal {
-            path: path.to_owned(),
-            source: source(1024),
-            state: Mutex::new(None),
-        }
+    fn options() -> PutFileOptions {
+        PutFileOptions::new(loonfs_test_support::test_actor())
     }
-
+    fn open(path: &Path) -> UploadJournal {
+        UploadJournal::open_at(path.to_owned(), source(1024), &options()).expect("open journal")
+    }
     fn begin(journal: &UploadJournal) {
         journal
             .began(
                 &UploadId::parse("upl_00000000000000000000000000000001").expect("id"),
-                1024 * 1024,
+                1024,
                 ChecksumAlgorithm::Crc64nvme,
             )
             .expect("record session");
     }
-
     fn part(number: u32) -> CompletedUploadPart {
         CompletedUploadPart {
             part_number: number,
@@ -260,122 +383,199 @@ mod tests {
             checksum: Checksum::crc64nvme(format!("part-{number}").as_bytes()),
         }
     }
+    fn request(journal: &UploadJournal) -> CommitRequest {
+        let options = journal.options();
+        CommitRequest::single(
+            options.commit.commit_id.expect("chosen ID"),
+            options.commit.actor,
+            options.commit.message,
+            FilesystemOperation::PutFile {
+                path: loonfs_api::AbsolutePath::parse("/file").expect("path"),
+                content_ref: loonfs_test_support::ids::content_ref(b"data"),
+                behavior: options.behavior,
+                expected_inode_id: options.expected_inode_id,
+                expected_revision_no: options.expected_revision_no,
+            },
+        )
+    }
 
     #[test]
-    fn a_record_survives_repeated_interruptions_and_is_removed_after_acknowledgement() {
+    fn interruptions_preserve_the_commit_id_parts_and_exact_request() {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("upload.json");
-        let first = journal_at(&path);
-        assert!(first.resume().expect("read").is_none());
+        let first = open(&path);
+        let chosen = first.options();
+        assert!(chosen.commit.commit_id.is_some());
+        assert!(first.resume().is_none());
         begin(&first);
         first.part_completed(&part(1)).expect("first part");
-        let next = journal_at(&path);
-        let resumed = next.resume().expect("read").expect("session");
-        assert_eq!(resumed.parts, vec![part(1)]);
-        assert_eq!(resumed.part_size_bytes, 1024 * 1024);
-        assert_eq!(resumed.checksum_algorithm, ChecksumAlgorithm::Crc64nvme);
+        drop(first);
+        let next = open(&path);
+        assert_eq!(next.options(), chosen);
+        assert_eq!(next.resume().expect("session").parts, vec![part(1)]);
         next.part_completed(&part(2)).expect("second part");
+        drop(next);
+        let next = open(&path);
         assert_eq!(
-            journal_at(&path)
-                .resume()
-                .expect("read")
-                .expect("session")
-                .parts,
+            next.resume().expect("session").parts,
             vec![part(1), part(2)]
         );
-        next.forget().expect("remove acknowledged record");
-        assert!(next.resume().expect("read").is_none());
-        next.forget().expect("already absent");
+        let expected = request(&next);
+        let mut wrong_options = expected.clone();
+        wrong_options.message = Some("different intent".to_owned());
+        assert!(next.commit_prepared(&wrong_options).is_err());
+        assert!(next.prepared_request().is_none());
+        next.commit_prepared(&expected).expect("save commit");
+        drop(next);
+        let replay = open(&path);
+        assert!(replay.resume().is_none());
+        assert_eq!(replay.prepared_request(), Some(expected.clone()));
+        assert!(replay.part_completed(&part(3)).is_err());
+        let mut changed = expected;
+        changed.commit_id = CommitId::generate();
+        assert!(replay.commit_prepared(&changed).is_err());
+        replay.acknowledge().expect("acknowledged");
+        assert!(!path.exists());
+        replay.acknowledge().expect("already removed");
     }
 
     #[test]
-    fn malformed_and_unreadable_records_are_errors_and_are_preserved() {
+    fn explicit_commit_ids_keep_the_request_after_acknowledgement() {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("upload.json");
-        let journal = journal_at(&path);
-        std::fs::write(&path, b"{\"upload_id\":").expect("torn record");
-        assert!(journal
-            .resume()
-            .expect_err("invalid record")
-            .to_string()
-            .contains("upload.json"));
+        let mut options = options();
+        options.commit.commit_id = Some(CommitId::generate());
+        let journal =
+            UploadJournal::open_at(path.clone(), source(1024), &options).expect("journal");
+        let expected = request(&journal);
+        journal.commit_prepared(&expected).expect("record");
+        journal.acknowledge().expect("acknowledged");
+        drop(journal);
+        assert!(path.exists());
         assert_eq!(
-            std::fs::read(&path).expect("preserved record"),
-            b"{\"upload_id\":"
+            UploadJournal::open_at(path, source(1024), &options)
+                .expect("reopen")
+                .prepared_request(),
+            Some(expected)
         );
+    }
+
+    #[test]
+    fn only_one_command_can_own_an_attempt_even_after_its_record_is_removed() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("upload.json");
+        let journal = open(&path);
+        for removed in [false, true] {
+            if removed {
+                journal.acknowledge().expect("remove record");
+            }
+            assert!(
+                UploadJournal::open_at(path.clone(), source(1024), &options())
+                    .expect_err("owned")
+                    .to_string()
+                    .contains("another command")
+            );
+        }
+        drop(journal);
+        let reopened = open(&path);
+        assert!(reopened.resume().is_none());
+    }
+
+    #[test]
+    fn corrupt_unreadable_and_changed_records_are_preserved() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("upload.json");
+        std::fs::write(&path, b"{").expect("corrupt record");
+        assert!(UploadJournal::open_at(path.clone(), source(1024), &options()).is_err());
+        assert_eq!(std::fs::read(&path).expect("preserved"), b"{");
         std::fs::remove_file(&path).expect("remove fixture");
         std::fs::create_dir(&path).expect("unreadable record");
-        assert!(journal.resume().is_err());
-        assert!(journal.forget().is_err());
-    }
-
-    #[test]
-    fn a_changed_source_requires_an_explicit_new_upload() {
-        let dir = tempfile::tempdir().expect("directory");
-        let path = dir.path().join("upload.json");
-        let journal = journal_at(&path);
-        begin(&journal);
-        let mut changed = journal_at(&path);
-        changed.source = source(2048);
-        assert!(changed
-            .resume()
-            .expect_err("changed source")
+        assert!(UploadJournal::open_at(path.clone(), source(1024), &options()).is_err());
+        std::fs::remove_dir(&path).expect("remove fixture");
+        let original = open(&path).options();
+        assert!(
+            UploadJournal::open_at(path.clone(), source(2048), &options())
+                .expect_err("changed file")
+                .to_string()
+                .contains("source file changed")
+        );
+        let mut changed = options();
+        changed.commit.message = Some("different".to_owned());
+        assert!(UploadJournal::open_at(path.clone(), source(1024), &changed)
+            .expect_err("changed options")
             .to_string()
-            .contains("source file changed"));
-        assert!(path.exists());
+            .contains("PUT options changed"));
+        changed = options();
+        changed.commit.commit_id = Some(CommitId::generate());
+        assert!(UploadJournal::open_at(path.clone(), source(1024), &changed).is_err());
+        assert_eq!(open(&path).options(), original);
     }
 
     #[test]
-    fn a_failed_update_preserves_the_last_durable_parts() {
+    fn failed_updates_preserve_the_last_durable_state() {
         let dir = tempfile::tempdir().expect("directory");
         let parent = dir.path().join("uploads");
         let saved = dir.path().join("saved");
-        let journal = journal_at(&parent.join("upload.json"));
+        let path = parent.join("upload.json");
+        let journal = open(&path);
+        assert!(journal.part_completed(&part(1)).is_err());
         begin(&journal);
         journal.part_completed(&part(1)).expect("first part");
         std::fs::rename(&parent, &saved).expect("move directory");
-        std::fs::write(&parent, b"not a directory").expect("block journal writes");
+        std::fs::write(&parent, b"blocked").expect("block writes");
         assert!(journal.part_completed(&part(2)).is_err());
-        assert_eq!(journal.lock().as_ref().expect("state").parts.len(), 1);
-        std::fs::remove_file(&parent).expect("remove blocker");
-        std::fs::rename(&saved, &parent).expect("restore directory");
+        assert!(journal.commit_prepared(&request(&journal)).is_err());
         assert_eq!(
-            journal_at(&journal.path)
-                .resume()
-                .expect("read")
-                .expect("session")
-                .parts,
+            journal.resume().expect("original state").parts,
+            vec![part(1)]
+        );
+        std::fs::remove_file(&parent).expect("unblock");
+        std::fs::rename(&saved, &parent).expect("restore");
+        drop(journal);
+        assert_eq!(
+            open(&path).resume().expect("durable state").parts,
             vec![part(1)]
         );
     }
 
     #[test]
-    fn missing_session_state_cannot_silently_discard_a_part() {
-        let dir = tempfile::tempdir().expect("directory");
-        assert!(journal_at(&dir.path().join("upload.json"))
-            .part_completed(&part(1))
-            .is_err());
-    }
-
-    #[test]
-    fn the_journal_key_includes_both_endpoints_and_the_source_path() {
+    fn keys_include_the_server_paths_profile_and_explicit_commit_id() {
         let dir = tempfile::tempdir().expect("directory");
         let first = dir.path().join("file");
         let other = dir.path().join("other");
         std::fs::write(&first, b"data").expect("source");
         std::fs::write(&other, b"data").expect("source");
-        let path = |profile, namespace, remote, local: &Path| {
-            UploadJournal::for_upload(profile, namespace, remote, local, source(1024))
-                .expect("journal path")
-                .path
+        let spec = NamespacePath::parse("demo", "/file").expect("path");
+        let key = |profile, url, spec: &NamespacePath, file: &Path, id| {
+            journal_key(profile, url, spec, file, id).expect("key")
         };
-        let original = path("default", "demo", "/file", &first);
-        assert_eq!(original, path("default", "demo", "/file", &first));
+        let original = key("default", "https://one", &spec, &first, None);
+        assert_eq!(original, key("default", "https://one", &spec, &first, None));
         for candidate in [
-            path("other", "demo", "/file", &first),
-            path("default", "other", "/file", &first),
-            path("default", "demo", "/other", &first),
-            path("default", "demo", "/file", &other),
+            key("other", "https://one", &spec, &first, None),
+            key("default", "https://two", &spec, &first, None),
+            key(
+                "default",
+                "https://one",
+                &NamespacePath::parse("other", "/file").expect("path"),
+                &first,
+                None,
+            ),
+            key(
+                "default",
+                "https://one",
+                &NamespacePath::parse("demo", "/other").expect("path"),
+                &first,
+                None,
+            ),
+            key("default", "https://one", &spec, &other, None),
+            key(
+                "default",
+                "https://one",
+                &spec,
+                &first,
+                Some(&CommitId::generate()),
+            ),
         ] {
             assert_ne!(original, candidate);
         }

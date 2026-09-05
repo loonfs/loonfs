@@ -26,7 +26,8 @@ impl std::fmt::Display for AttributeInclusion {
 }
 
 /// Commit settings shared by every filesystem mutation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitOptions {
     /// Actor responsible for the commit, as supplied by the application.
     pub actor: ActorRef,
@@ -111,7 +112,8 @@ impl UpdateAttributesOptions {
 }
 
 /// Options for writing a file path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PutFileOptions {
     /// Create-only or replace-existing behavior.
     pub behavior: DestinationBehavior,

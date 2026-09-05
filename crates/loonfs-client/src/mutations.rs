@@ -65,7 +65,7 @@ impl Client {
         let staged = self
             .stage_bytes_as_content_ref(spec.namespace(), bytes)
             .await?;
-        self.commit_staged_file(spec, staged, options, ContentEvidence::Bytes(bytes))
+        self.commit_staged_file(spec, staged, options, ContentEvidence::Bytes(bytes), None)
             .await
     }
 
@@ -92,8 +92,10 @@ impl Client {
 
     /// Uploads a stream with optional multipart resume state.
     ///
-    /// For multipart uploads, `journal` records completed parts and `resume`
-    /// restores that state. Proxied and direct-PUT uploads ignore both values.
+    /// The journal records the complete commit request before submission for
+    /// every transport. Multipart uploads also record session geometry and parts.
+    /// Save the request and replay it with [`Self::create_commit`] after an
+    /// interruption; it carries the original content reference and commit ID.
     ///
     /// A resumed multipart attempt still receives the source from the
     /// beginning because the final checksum covers the complete object.
@@ -102,7 +104,7 @@ impl Client {
         spec: &NamespacePath,
         source: PayloadSource,
         options: &PutFileOptions,
-        journal: &dyn MultipartUploadJournal,
+        journal: &dyn PutFileJournal,
         resume: Option<&MultipartUploadResume>,
     ) -> Result<ApiCommitResponse> {
         self.put_file_stream_continuing(
@@ -136,6 +138,7 @@ impl Client {
             staged,
             options,
             ContentEvidence::ContentRef(&uploaded),
+            continuity.journal,
         )
         .await
     }
@@ -144,13 +147,14 @@ impl Client {
     ///
     /// Call [`Self::get_upload`] to recover the content reference and token.
     /// This method then commits the existing content without uploading it
-    /// again.
+    /// again. An optional journal saves the complete request before submission.
     pub async fn commit_completed_upload(
         &self,
         spec: &NamespacePath,
         content_ref: ContentRef,
         content_token: Option<ContentToken>,
         options: &PutFileOptions,
+        journal: Option<&dyn PutFileJournal>,
     ) -> Result<ApiCommitResponse> {
         let uploaded = content_ref.clone();
         let staged = StagedContent {
@@ -162,38 +166,44 @@ impl Client {
             staged,
             options,
             ContentEvidence::ContentRef(&uploaded),
+            journal,
         )
         .await
     }
 
-    /// Commits one staged payload at a path, reconciling a reused commit id
-    /// against what was just uploaded.
+    /// Saves an exact request when journaled. Unjournaled convenience calls
+    /// reconcile fresh content when a commit ID was already used.
     async fn commit_staged_file(
         &self,
         spec: &NamespacePath,
         staged: StagedContent,
         options: &PutFileOptions,
         uploaded: ContentEvidence<'_>,
+        journal: Option<&dyn PutFileJournal>,
     ) -> Result<ApiCommitResponse> {
         let commit_id = commit_id_or_generated(&options.commit);
-        let response = self
-            .create_commit(
-                spec.namespace(),
-                &CommitRequest {
-                    commit_id: commit_id.clone(),
-                    actor: options.commit.actor.clone(),
-                    message: options.commit.message.clone(),
-                    content_tokens: staged.content_token.into_iter().collect(),
-                    operations: vec![FilesystemOperation::PutFile {
-                        path: spec.absolute_path().clone(),
-                        content_ref: staged.content_ref,
-                        behavior: options.behavior,
-                        expected_inode_id: options.expected_inode_id,
-                        expected_revision_no: options.expected_revision_no,
-                    }],
-                },
-            )
-            .await;
+        let request = CommitRequest {
+            commit_id: commit_id.clone(),
+            actor: options.commit.actor.clone(),
+            message: options.commit.message.clone(),
+            content_tokens: staged.content_token.into_iter().collect(),
+            operations: vec![FilesystemOperation::PutFile {
+                path: spec.absolute_path().clone(),
+                content_ref: staged.content_ref,
+                behavior: options.behavior,
+                expected_inode_id: options.expected_inode_id,
+                expected_revision_no: options.expected_revision_no,
+            }],
+        };
+        if let Some(journal) = journal {
+            journal.commit_prepared(&request).map_err(|error| {
+                ClientError::Io(format!(
+                    "could not record file commit `{commit_id}` before submission: {error}"
+                ))
+            })?;
+            return self.create_commit(spec.namespace(), &request).await;
+        }
+        let response = self.create_commit(spec.namespace(), &request).await;
         match response {
             Ok(response) => Ok(response),
             Err(error) if error.code() == Some(ErrorCode::CommitIdReuseConflict) => {

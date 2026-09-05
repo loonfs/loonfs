@@ -167,6 +167,7 @@ impl Harness {
         command
             .env("HOME", &self.home_dir)
             .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_STATE_HOME")
             .env_remove("LOONFS_CONFIG")
             .env_remove("LOONFS_PROFILE")
             .env_remove("LOONFS_NAMESPACE")
@@ -191,6 +192,7 @@ impl Harness {
             .arg(&script)
             .env("HOME", &self.home_dir)
             .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_STATE_HOME")
             .env_remove("LOONFS_CONFIG")
             .env_remove("LOONFS_PROFILE")
             .env_remove("LOONFS_NAMESPACE")
