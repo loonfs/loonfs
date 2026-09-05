@@ -132,3 +132,12 @@ writer_id = "loonfs-server-local"
 kind = "local-fs"
 root = "./.loonfs-store"
 key_prefix = "local-demo"
+
+# Shared publication admission. Includes active requests, duplicate callers,
+# and namespace deletes. Full admission returns `commit_queue_full`.
+#[publication]
+#max_requests = 8192
+#max_requests_per_namespace = 1024
+#max_estimated_bytes = 67108864
+#max_estimated_bytes_per_namespace = 8388608
+#max_concurrent_publications = 8

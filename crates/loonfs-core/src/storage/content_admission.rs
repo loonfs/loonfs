@@ -57,6 +57,15 @@ pub struct PreparedContent {
 }
 
 impl PreparedContent {
+    pub(crate) fn estimated_payload_bytes(&self) -> usize {
+        self.namespace_id
+            .as_str()
+            .len()
+            .saturating_add(self.content_store_id.as_str().len())
+            .saturating_add(self.content_ref.content_id.as_str().len())
+            .saturating_add(self.content_ref.checksum.value.len())
+    }
+
     pub(crate) fn content_id(&self) -> &ContentId {
         &self.content_ref.content_id
     }

@@ -8,6 +8,8 @@
 //! admission and drains the queues through
 //! [`FsWriter::shutdown`](crate::FsWriter::shutdown).
 
+mod admission;
+
 use crate::fs::{ReadCore, WriterBits};
 use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
@@ -16,6 +18,7 @@ use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespaceSessionPolicy,
     RuntimeCacheConfig, RuntimeError,
 };
+use admission::{AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
@@ -109,10 +112,6 @@ pub struct WriterSessionStats {
     pub capacity: usize,
 }
 
-/// Maximum candidates queued for one namespace before admission reports
-/// `commit_queue_full`.
-const MAX_BATCH_CANDIDATES: usize = 1024;
-
 /// Registry of per-namespace publishers owned by one writer.
 ///
 /// Clones share the same publishers and worker tasks. Submit through the
@@ -141,6 +140,7 @@ pub struct PublisherRegistry {
 /// State shared by all publishers in this registry: admission status,
 /// publisher instances, retained projections, and contained panic count.
 struct RegistryShared {
+    admission: Arc<PublicationAdmission>,
     state: Mutex<RegistryState>,
     /// Publication, deletion, and namespace-close units whose panic a task
     /// survived. Tasks contain panics to keep the registry usable, so this —
@@ -338,9 +338,11 @@ impl PublisherRegistry {
         min_publish_interval: Duration,
         policy: NamespaceSessionPolicy,
         capacity: NonZeroUsize,
+        publication_limits: crate::PublicationLimits,
     ) -> Self {
         Self {
             shared: Arc::new(RegistryShared {
+                admission: Arc::new(PublicationAdmission::new(publication_limits)),
                 state: Mutex::new(RegistryState {
                     closed: false,
                     policy,
@@ -382,6 +384,15 @@ impl PublisherRegistry {
         namespace_id: NamespaceId,
         candidate: CommitCandidate,
     ) -> CommitResult {
+        let estimated_bytes = candidate.estimated_retained_bytes()?;
+        let permit = {
+            let mut state = self.shared.lock_state();
+            let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
+            publisher.check_admission(&publisher.lock_state())?;
+            self.shared
+                .admission
+                .acquire(&namespace_id, estimated_bytes)?
+        };
         submit_with_admission(
             &namespace_id,
             candidate,
@@ -389,7 +400,13 @@ impl PublisherRegistry {
             |commit_id, candidate, semantic_identity, waiter, enqueued_at| {
                 let mut state = self.shared.lock_state();
                 let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
-                publisher.admit(commit_id, candidate, semantic_identity, waiter, enqueued_at)
+                publisher.admit(
+                    commit_id,
+                    candidate,
+                    semantic_identity,
+                    AdmittedWaiter::new(waiter, &permit),
+                    enqueued_at,
+                )
             },
         )
         .await
@@ -454,15 +471,7 @@ impl PublisherRegistry {
                 max_writer_sessions: state.capacity.get(),
             });
         }
-        let publisher = NamespacePublisher::new(
-            namespace_id.clone(),
-            self.read_core.clone(),
-            self.writer.clone(),
-            Arc::downgrade(&self.shared),
-            self.runtime.clone(),
-            Arc::clone(&self.timer),
-            self.min_publish_interval,
-        );
+        let publisher = NamespacePublisher::new(namespace_id.clone(), self);
         state
             .publishers
             .insert(namespace_id.clone(), publisher.clone());
@@ -732,6 +741,7 @@ async fn finish_namespace_close(
 
 #[derive(Clone)]
 struct NamespacePublisher {
+    admission: Arc<PublicationAdmission>,
     namespace_id: NamespaceId,
     read_core: ReadCore,
     /// Weak for the same reason as the registry's reference: a publication
@@ -856,7 +866,7 @@ impl Drop for WaitingFold<'_> {
 
 struct PendingDelete {
     options: DeleteNamespaceOptions,
-    waiters: Vec<oneshot::Sender<DeleteResult>>,
+    waiters: Vec<AdmittedWaiter<DeleteResult>>,
 }
 
 enum WorkItem {
@@ -877,7 +887,7 @@ struct BatchCandidate {
 
 struct InFlightRequest {
     semantic_identity: CommitFingerprint,
-    waiters: Vec<oneshot::Sender<CommitResult>>,
+    waiters: Vec<AdmittedWaiter<CommitResult>>,
 }
 
 enum SubmissionAdmission {
@@ -895,20 +905,12 @@ enum SubmissionAdmission {
 }
 
 impl NamespacePublisher {
-    fn new(
-        namespace_id: NamespaceId,
-        read_core: ReadCore,
-        writer: Weak<WriterBits>,
-        shared: Weak<RegistryShared>,
-        runtime: Handle,
-        timer: Arc<dyn MonotonicTimer>,
-        min_publish_interval: Duration,
-    ) -> Self {
+    fn new(namespace_id: NamespaceId, registry: &PublisherRegistry) -> Self {
         let session = SharedWriterSessionState::default();
         Self {
             namespace_id,
-            read_core,
-            writer,
+            read_core: registry.read_core.clone(),
+            writer: registry.writer.clone(),
             state: Arc::new(Mutex::new(NamespacePublisherState {
                 queue: VecDeque::new(),
                 in_flight: HashMap::new(),
@@ -923,10 +925,11 @@ impl NamespacePublisher {
                 session: Arc::clone(&session),
             })),
             session,
-            shared,
-            runtime,
-            timer,
-            min_publish_interval,
+            shared: Arc::downgrade(&registry.shared),
+            runtime: registry.runtime.clone(),
+            timer: Arc::clone(&registry.timer),
+            min_publish_interval: registry.min_publish_interval,
+            admission: Arc::clone(&registry.shared.admission),
         }
     }
 
@@ -1025,12 +1028,22 @@ impl NamespacePublisher {
     /// still owns and publishes the request.
     #[cfg(test)]
     async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
+        self.check_admission(&self.lock_state())?;
+        let permit = self
+            .admission
+            .acquire(&self.namespace_id, candidate.estimated_retained_bytes()?)?;
         submit_with_admission(
             &self.namespace_id,
             candidate,
             self.timer.as_ref(),
             |commit_id, candidate, semantic_identity, waiter, enqueued_at| {
-                self.admit(commit_id, candidate, semantic_identity, waiter, enqueued_at)
+                self.admit(
+                    commit_id,
+                    candidate,
+                    semantic_identity,
+                    AdmittedWaiter::new(waiter, &permit),
+                    enqueued_at,
+                )
             },
         )
         .await
@@ -1041,7 +1054,7 @@ impl NamespacePublisher {
         commit_id: CommitId,
         candidate: CommitCandidate,
         semantic_identity: CommitFingerprint,
-        waiter: oneshot::Sender<CommitResult>,
+        waiter: AdmittedWaiter<CommitResult>,
         enqueued_at: u64,
     ) -> Result<SubmissionAdmission, CoreError> {
         let mut state = self.lock_state();
@@ -1063,10 +1076,6 @@ impl NamespacePublisher {
         }
 
         let queued = queued_candidates(&state);
-        if queued >= MAX_BATCH_CANDIDATES {
-            self.trace_enqueue(queued, "full");
-            return Err(CoreError::CommitQueueFull);
-        }
         let candidate = BatchCandidate {
             commit_id: commit_id.clone(),
             candidate,
@@ -1112,6 +1121,8 @@ impl NamespacePublisher {
         {
             let mut state = self.lock_state();
             self.check_admission(&state)?;
+            let permit = self.admission.acquire(&self.namespace_id, 0)?;
+            let sender = AdmittedWaiter::new(sender, &permit);
             match state.queue.back_mut() {
                 // A delete queued with the same options is the same request:
                 // both callers share its outcome. Different options ask for
@@ -1165,6 +1176,14 @@ impl NamespacePublisher {
             // namespace publishes immediately; requests arriving during a publish or
             // pacing interval form the next batch.
             self.await_cas_slot().await;
+            // Queue ownership and admission remain intact while another
+            // namespace uses the shared publication slots. No engine is held.
+            let _publication = self
+                .admission
+                .publications
+                .acquire()
+                .await
+                .expect("publication semaphore is never closed");
             let Some(item) = self.take_next_item() else {
                 return;
             };
@@ -1800,8 +1819,8 @@ async fn receive_delete(receiver: oneshot::Receiver<DeleteResult>) -> DeleteResu
 /// type.
 #[derive(Default)]
 struct QueuedWaiters {
-    commits: Vec<oneshot::Sender<CommitResult>>,
-    deletes: Vec<oneshot::Sender<DeleteResult>>,
+    commits: Vec<AdmittedWaiter<CommitResult>>,
+    deletes: Vec<AdmittedWaiter<DeleteResult>>,
 }
 
 /// Empties the queue and hands back every waiter it held. Called once the

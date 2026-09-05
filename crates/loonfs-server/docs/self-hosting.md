@@ -319,6 +319,28 @@ must keep more namespaces writable at once.
 cap; raise it only after accounting for the additional object-store and CPU
 work.
 
+Publication admission counts queued and active callers, including duplicate
+commits, conflicts, and namespace deletes. A caller that disconnects stays
+charged until its admitted work settles. Requests past a count or estimated
+byte limit receive `commit_queue_full`; admitted work waits for a shared
+publication slot. Each namespace has its own allowance so one busy tenant
+cannot consume the default host budget.
+
+```toml
+[publication]
+max_requests = 8192
+max_requests_per_namespace = 1024
+max_estimated_bytes = 67108864
+max_estimated_bytes_per_namespace = 8388608
+max_concurrent_publications = 8
+```
+
+These are the defaults; every value must be positive. The byte estimate counts
+request data, prepared proofs, and queue bookkeeping. It excludes allocator
+slack, HTTP request buffers, and the metadata/working copies a publication
+loads. Size process memory for those costs and the separate fold/cache limits
+too. Embedded hosts set the same limits with `FsWriterBuilder::publication_limits`.
+
 ## Optional local cache
 
 The local cache stores replaceable copies of metadata blocks. It is not
