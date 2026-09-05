@@ -2332,8 +2332,7 @@ async fn a_live_jobs_staged_output_survives_however_old_it_is() {
         namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
             .await;
 
-    // A day past the window the design used to apply here, with the job's
-    // lease refreshed a moment ago.
+    // Old staged output remains protected by a fresh job lease.
     let now_ms = now_after_newest_object(store.inner(), &namespace_id, 24 * 60 * 60 * 1000).await;
     write_compaction_lease(
         &store,

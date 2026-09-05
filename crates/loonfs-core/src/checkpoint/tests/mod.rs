@@ -612,8 +612,7 @@ fn group_runs(
 ///
 /// A group holds at most one: only a merge that starts at the group's oldest
 /// run writes a base run, and such a merge always replaces the one that was
-/// there. More than one is the fragmented base a merge above the base used to
-/// create, which manifest load now refuses.
+/// there. Manifest loading rejects multiple base runs for a group.
 fn group_base_runs(
     manifest: &NamespaceManifestEnvelope,
     group: &[ApiMetadataRowFamily],

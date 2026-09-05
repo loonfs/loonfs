@@ -4434,8 +4434,8 @@ mod direct_download {
     async fn a_payload_past_every_transport_is_refused_with_the_caps_named() {
         let temp_dir = tempdir().expect("tempdir");
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
-        // Reads only: neither write direction is on offer, which is the
-        // shape that used to push an oversized payload into the proxy.
+        // No direct upload transport is available. The proxy must enforce
+        // its size limit independently of the read transport.
         let transfers = DirectTransferIssuers {
             get: LoopbackIssuer::at(object_base_url),
             put: None,

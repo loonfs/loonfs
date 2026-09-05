@@ -743,8 +743,7 @@ struct IndexingStats {
 }
 
 /// The resume state collected by one worker step. Naming the two modes here
-/// prevents a backfill cursor from ever being paired with change-feed
-/// progress, which used to be possible in the flat unit record.
+/// prevents a backfill cursor from being paired with change-feed progress.
 enum CollectedProgress {
     Backfill {
         checkpoint_id: CheckpointId,

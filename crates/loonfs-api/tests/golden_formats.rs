@@ -2642,7 +2642,7 @@ fn sample_deleted_direntry_cbor() -> ciborium::Value {
     cbor_entry(cbor_entry(&mut set, "action"), "deleted_direntry").clone()
 }
 
-/// Spells the row's generation as the two loose fields it used to be.
+/// Moves generation fields out of their required nested object.
 fn with_flat_generation(mut row: ciborium::Value) -> ciborium::Value {
     let mut generation = cbor_entry(&mut row, "generation").clone();
     let seq = cbor_entry(&mut generation, "seq").clone();
@@ -2654,8 +2654,7 @@ fn with_flat_generation(mut row: ciborium::Value) -> ciborium::Value {
     row
 }
 
-/// Spells the deleted binding as the three loose row fields it used to be,
-/// leaving the `set` empty the way the old encoding left it.
+/// Moves binding fields out of `set` to test rejection of a malformed action.
 fn with_flat_binding(mut row: ciborium::Value) -> ciborium::Value {
     *cbor_entry(&mut row, "action") = ciborium::Value::Map(vec![(
         ciborium::Value::from("kind"),
