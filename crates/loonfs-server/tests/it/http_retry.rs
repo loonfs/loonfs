@@ -1009,7 +1009,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
                 // it structurally means a caller never parses the message.
                 let details = details.expect("a fenced error carries structured details");
                 assert_eq!(
-                    details.active_writer.as_deref(),
+                    details.active_writer.as_ref().map(|writer| writer.as_str()),
                     Some("loonfs-server-b"),
                     "attempt {attempt}"
                 );

@@ -358,7 +358,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         operation_index: Some(0),
         fenced_writer_epoch: Some(WriterEpoch::from(1)),
         active_writer_epoch: Some(WriterEpoch::from(2)),
-        active_writer: Some("writer".to_owned()),
+        active_writer: Some(loonfs_api::WriterId::parse("writer").expect("writer id")),
         active_acquired_at_ms: Some(1),
         inode_id: Some(InodeId(1)),
         expected_inode_id: Some(InodeId(2)),

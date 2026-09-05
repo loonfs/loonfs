@@ -1073,8 +1073,8 @@
             "type": "integer"
           },
           "active_writer": {
-            "description": "The writer ID recorded for the current epoch, when available.",
-            "type": "string"
+            "$ref": "#/components/schemas/WriterId",
+            "description": "The writer ID recorded for the current epoch, when available."
           },
           "active_writer_epoch": {
             "$ref": "#/components/schemas/WriterEpoch",
@@ -4191,6 +4191,10 @@
         "maximum": 9007199254740991,
         "minimum": 0,
         "type": "integer"
+      },
+      "WriterId": {
+        "description": "Stable writer label supplied by the embedding process.",
+        "type": "string"
       }
     },
     "securitySchemes": {

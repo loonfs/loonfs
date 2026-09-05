@@ -4,7 +4,7 @@ use super::ContentToken;
 use crate::{
     AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, BindingGeneration, ChangeSeq,
     CheckpointId, CommitId, ContentRef, DisplayName, InodeId, ManifestNo, NamespaceId, RevisionNo,
-    WriterEpoch,
+    WriterEpoch, WriterId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -61,7 +61,8 @@ pub struct ErrorDetails {
     pub active_writer_epoch: Option<WriterEpoch>,
     /// The writer ID recorded for the current epoch, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_writer: Option<String>,
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub active_writer: Option<WriterId>,
     /// The Unix-millisecond time when the current writer acquired its epoch, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_acquired_at_ms: Option<u64>,

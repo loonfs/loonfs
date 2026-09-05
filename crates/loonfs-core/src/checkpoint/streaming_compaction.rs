@@ -23,7 +23,7 @@ use super::error::ManifestLoadError;
 use super::flush::ensure_metadata_publication_budget;
 use super::frozen_floor::{
     bind_survives_frozen_floor, unbinding_at_or_below_floor, unbindings_at_or_below_floor,
-    BindingGeneration,
+    BindingIdentity,
 };
 use super::load::load_manifest_segments;
 use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
@@ -665,7 +665,7 @@ enum ReverseBindResolution {
     /// Probe the snapshot for each reverse row, with a bounded cache.
     PointProbeSnapshot,
     /// Use unbound generations collected from the bounded forward-bind input.
-    CollectedUnbinds(BTreeSet<BindingGeneration>),
+    CollectedUnbinds(BTreeSet<BindingIdentity>),
 }
 
 /// One set of families the engine merges and judges together, and how it

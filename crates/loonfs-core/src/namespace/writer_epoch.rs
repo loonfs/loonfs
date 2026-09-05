@@ -81,7 +81,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         Ok(HeadReplacement {
             next: Box::new(head_with_writer(head, next_epoch, context)?),
             outcome: AcquiredWriter {
-                writer_id: context.writer_id.to_string(),
+                writer_id: context.writer_id.clone(),
                 writer_epoch: next_epoch,
             },
         })
@@ -100,10 +100,7 @@ pub(crate) fn ensure_writer_not_fenced(
     Err(CoreError::WriterFenced(WriterFence {
         fenced_epoch: acquired_writer.writer_epoch,
         active_epoch: head.writer_epoch,
-        active_writer: head
-            .writer
-            .as_ref()
-            .map(|writer| writer.writer_id.to_string()),
+        active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
         active_acquired_at_ms: head.writer.as_ref().map(|writer| writer.acquired_at_ms),
     }))
 }
@@ -421,7 +418,7 @@ mod tests {
             .expect("takeover acquire");
 
         assert_eq!(acquired.writer_epoch, WriterEpoch(8));
-        assert_eq!(acquired.writer_id, "writer-b");
+        assert_eq!(acquired.writer_id.as_str(), "writer-b");
         let head = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
