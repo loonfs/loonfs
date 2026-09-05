@@ -337,10 +337,6 @@ pub(crate) enum CommandData {
         path: String,
         /// Which rule chose the path.
         source: ConfigSource,
-        /// Where the file belongs now, while a legacy file is in use only
-        /// because the preferred location holds none yet.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        preferred_path: Option<String>,
     },
     ConfigShow {
         config: CliConfig,

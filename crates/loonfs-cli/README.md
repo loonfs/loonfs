@@ -100,7 +100,7 @@ Config file location
     2. LOONFS_CONFIG=<path>
     3. $XDG_CONFIG_HOME/loonfs/config.toml, when XDG_CONFIG_HOME names an
        absolute directory
-    4. ~/.loonfs/config.toml
+    4. ~/.config/loonfs/config.toml
   Profile selection uses --profile, then LOONFS_PROFILE=<name>, then the
   configured default. Namespace selection uses --namespace, then
   LOONFS_NAMESPACE=<name>, then the profile default.
@@ -115,9 +115,9 @@ Config file location
   `loonfs config path` reads nothing, so it keeps answering while the file
   it names is unreadable.
 
-  While XDG_CONFIG_HOME is set but holds no config of its own, an existing
-  ~/.loonfs/config.toml stays in use and `loonfs config path` names the
-  preferred path to move it to.
+  File existence does not affect selection. An unset or relative
+  XDG_CONFIG_HOME uses the default in rule 4; an absolute XDG_CONFIG_HOME
+  selects rule 3 even before the file is created.
 
 Profile management
   loonfs profile create s3 <name> [s3-options]
@@ -515,7 +515,7 @@ Interrupted transfers
   An upload resumes only where the transfer had parts to lose: a remote
   profile's direct multipart upload of a file past 8 MiB. The parts that
   landed are recorded under $XDG_STATE_HOME/loonfs/uploads (or
-  ~/.loonfs/state/uploads when XDG_STATE_HOME is unset), and a rerun sends
+  ~/.local/state/loonfs/uploads when XDG_STATE_HOME is unset), and a rerun sends
   only the ones still missing — or, when the transfer had actually
   finished and only the commit was lost, commits what is already stored
   and sends nothing. A source that changed since the record was written
