@@ -32,6 +32,8 @@ pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_DELTA_RUNS: usize = 8;
 /// Target number of rows in one immutable segment.
 pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
+/// Target decoded data bytes in one metadata segment. A row is never split.
+pub const DEFAULT_TARGET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum number of runs read by one reorganization step.
 pub const DEFAULT_MAX_REORGANIZATION_INPUT_RUNS: usize = 8;
 /// Maximum number of decoded rows read by one reorganization step.
@@ -201,7 +203,9 @@ pub struct SegmentBlocksBuilder {
     /// segment's max row key. A block's first entry stores its key in full
     /// regardless, because a restart point always begins a block.
     previous_key: String,
-    finished_blocks: Vec<(String, Vec<u8>)>,
+    bytes: Vec<u8>,
+    index: Vec<SegmentIndexEntry>,
+    decoded_data_bytes: usize,
     filter_hashes: Vec<(u64, u64)>,
     row_count: u64,
     min_row_key: String,
@@ -222,7 +226,9 @@ impl SegmentBlocksBuilder {
             restarts: Vec::new(),
             entry_count: 0,
             previous_key: String::new(),
-            finished_blocks: Vec::new(),
+            bytes: Vec::new(),
+            index: Vec::new(),
+            decoded_data_bytes: 0,
             filter_hashes: Vec::new(),
             row_count: 0,
             min_row_key: String::new(),
@@ -274,39 +280,58 @@ impl SegmentBlocksBuilder {
         let mut row_bytes = Vec::new();
         ciborium::ser::into_writer(row, &mut row_bytes)
             .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
+        let previous_len = self.entries.len();
         write_varint(&mut self.entries, shared_len as u64);
         write_varint(&mut self.entries, suffix.len() as u64);
         self.entries.extend_from_slice(suffix);
         write_varint(&mut self.entries, row_bytes.len() as u64);
         self.entries.extend_from_slice(&row_bytes);
 
+        self.decoded_data_bytes += self.entries.len() - previous_len;
         self.entry_count += 1;
         self.row_count += 1;
         self.previous_key.clear();
         self.previous_key.push_str(row_key);
         if self.entries.len() >= self.target_block_bytes {
-            self.finish_data_block();
+            self.finish_data_block()?;
         }
         Ok(row_bytes)
     }
 
-    fn finish_data_block(&mut self) {
+    fn finish_data_block(&mut self) -> Result<(), SstBlockCodecError> {
         if self.entries.is_empty() {
-            return;
+            return Ok(());
         }
         let mut payload = std::mem::take(&mut self.entries);
         for restart in &self.restarts {
             payload.extend_from_slice(&restart.to_le_bytes());
         }
         payload.extend_from_slice(&(self.restarts.len() as u32).to_le_bytes());
+        self.decoded_data_bytes += (self.restarts.len() + 1) * 4;
         self.restarts.clear();
         self.entry_count = 0;
-        // The block copies the last row key it holds. Taking it would leave the
-        // builder without one, and the builder still needs it: as the prefix
-        // anchor inside the next block, as the order guard's floor across the
-        // boundary, and as the segment's max row key once every row is in.
-        self.finished_blocks
-            .push((self.previous_key.clone(), payload));
+        let block = append_section(&mut self.bytes, &payload, true)?;
+        self.index.push(SegmentIndexEntry {
+            last_row_key: self.previous_key.clone(),
+            block,
+        });
+        Ok(())
+    }
+
+    /// Number of rows accepted by this builder.
+    pub fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    /// Decoded data bytes accepted so far, including block restart tables.
+    /// The open block's pending restart table is included.
+    pub fn decoded_data_bytes(&self) -> usize {
+        self.decoded_data_bytes
+            + if self.entries.is_empty() {
+                0
+            } else {
+                (self.restarts.len() + 1) * 4
+            }
     }
 
     /// Encodes the remaining rows and assembles the object bytes.
@@ -314,17 +339,9 @@ impl SegmentBlocksBuilder {
         if self.row_count == 0 {
             return Err(SstBlockCodecError::EmptySegment);
         }
-        self.finish_data_block();
-
-        let mut bytes = Vec::new();
-        let mut index = Vec::with_capacity(self.finished_blocks.len());
-        for (last_row_key, payload) in std::mem::take(&mut self.finished_blocks) {
-            let block = append_section(&mut bytes, &payload, true)?;
-            index.push(SegmentIndexEntry {
-                last_row_key,
-                block,
-            });
-        }
+        self.finish_data_block()?;
+        let mut bytes = self.bytes;
+        let index = self.index;
 
         let filter_payload = build_filter_payload(&self.filter_hashes);
         let filter = append_section(&mut bytes, &filter_payload, false)?;
@@ -699,6 +716,33 @@ fn take_slice<'a>(
 mod tests {
     use super::*;
     use crate::{ChangeSeq, InodeId, InodeKind};
+
+    #[test]
+    fn decoded_byte_accounting_includes_closed_and_open_blocks() {
+        let mut builder =
+            SegmentBlocksBuilder::new(NonZeroUsize::new(512).expect("nonzero block target"));
+        for index in 0..17 {
+            let (key, filter, row) = inode_row(index);
+            builder.push(&key, &filter, &row).expect("encode row");
+        }
+        let decoded_bytes = builder.decoded_data_bytes();
+        assert_eq!(builder.row_count(), 17);
+        assert!(
+            !builder.index.is_empty(),
+            "completed blocks are already compressed"
+        );
+        let built = builder.finish().expect("finish segment");
+        let start = built.index.offset as usize;
+        let end = start + built.index.stored_len as usize;
+        let index = decode_index_block(&built.bytes[start..end], &built.index).expect("index");
+        assert_eq!(
+            decoded_bytes,
+            index
+                .iter()
+                .map(|entry| entry.block.decoded_len as usize)
+                .sum::<usize>(),
+        );
+    }
 
     fn inode_row(inode_id: u64) -> (String, String, MetadataRow) {
         let row = MetadataRow::Inode(crate::manifest::InodeRecord {

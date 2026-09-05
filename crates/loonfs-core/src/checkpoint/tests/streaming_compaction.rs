@@ -1879,7 +1879,10 @@ async fn install_synthetic_bindings_base(
             rows.sort_by_key(|row| row.row_key_for_family(family));
             rows
         },
-        rows_per_segment,
+        MetadataLsmPolicy {
+            max_rows_per_segment: rows_per_segment,
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await
     .expect("build the synthetic bindings run");

@@ -127,7 +127,8 @@ Two kinds of numbers appear above, with different contracts:
   evolves in place at version 1 before the first stable release; afterward,
   changing it requires a new owning format version.
 - **Sizes are writer-side defaults.** Data blocks target 64 KiB before
-  compression and base segments target 65,536 rows; readers take
+  compression and metadata segments target 8 MiB of decoded data or 65,536 rows,
+  whichever comes first. A segment may cross the byte target by its final row; readers take
   whatever the descriptor and index describe, so both can be retuned
   without a format change.
 - **Reorganization budgets are maintenance defaults.** One step merges at

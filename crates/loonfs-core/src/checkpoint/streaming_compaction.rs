@@ -11,13 +11,13 @@
 
 use super::block_fetch::segment_object_len;
 use super::build::MetadataSegmentDestination;
+use super::build::MetadataSegmentWriter;
 use super::cache::{MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_lease::{CompactionLease, LeaseAcquire, LeaseHold};
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping,
     MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
 };
-use super::compaction_output::MergeSegmentWriter;
 use super::compaction_retention::{KeptRow, RetentionRule};
 use super::error::ManifestLoadError;
 use super::flush::ensure_metadata_publication_budget;
@@ -936,10 +936,15 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 }
             }
         }
-        let mut writers: BTreeMap<MetadataRowFamily, MergeSegmentWriter> = cluster
+        let mut writers: BTreeMap<MetadataRowFamily, MetadataSegmentWriter> = cluster
             .families
             .iter()
-            .map(|family| (*family, MergeSegmentWriter::new(*family, self.destination)))
+            .map(|family| {
+                (
+                    *family,
+                    MetadataSegmentWriter::new(*family, self.destination),
+                )
+            })
             .collect();
 
         let floor_seq = self.frozen_floor_seq;
@@ -1006,24 +1011,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.write_row(kept, &mut writers).await?;
         }
 
-        for (family, writer) in writers {
-            let segments = match index_pair(self.group) {
-                Some((canonical, _)) if family == canonical => {
-                    writer
-                        .finish(self.store, &mut |encoded_row| {
-                            self.canonical_digest.fold(encoded_row);
-                        })
-                        .await?
-                }
-                Some((_, index)) if family == index => {
-                    writer
-                        .finish(self.store, &mut |encoded_row| {
-                            self.index_digest.fold(encoded_row);
-                        })
-                        .await?
-                }
-                _ => writer.finish(self.store, &mut |_| {}).await?,
-            };
+        for (_, writer) in writers {
+            let segments = writer.finish(self.store).await?;
             self.result.output_bytes = self
                 .result
                 .output_bytes
@@ -1075,7 +1064,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     async fn write_row(
         &mut self,
         (family, row): KeptRow,
-        writers: &mut BTreeMap<MetadataRowFamily, MergeSegmentWriter<'_>>,
+        writers: &mut BTreeMap<MetadataRowFamily, MetadataSegmentWriter<'_>>,
     ) -> Result<()> {
         *self
             .result
@@ -1086,28 +1075,16 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let writer = writers
             .get_mut(&family)
             .expect("a cluster writes only the families it merges");
-        writer.push(row);
         match index_pair(self.group) {
             Some((canonical, _)) if family == canonical => {
-                writer
-                    .roll_full_segments(self.store, self.policy, &mut |encoded_row| {
-                        self.canonical_digest.fold(encoded_row);
-                    })
-                    .await
+                writer.push(row, &mut |encoded| self.canonical_digest.fold(encoded))?;
             }
             Some((_, index)) if family == index => {
-                writer
-                    .roll_full_segments(self.store, self.policy, &mut |encoded_row| {
-                        self.index_digest.fold(encoded_row);
-                    })
-                    .await
+                writer.push(row, &mut |encoded| self.index_digest.fold(encoded))?;
             }
-            _ => {
-                writer
-                    .roll_full_segments(self.store, self.policy, &mut |_| {})
-                    .await
-            }
+            _ => writer.push(row, &mut |_| {})?,
         }
+        writer.roll_full_segments(self.store, self.policy).await
     }
 
     /// Remembers a below-floor unbind for the reverse pass, when the merge is

@@ -49,6 +49,8 @@ pub(super) struct MetadataRunManifest {
 pub(crate) struct MetadataLsmPolicy {
     pub max_delta_runs: NonZeroUsize,
     pub max_rows_per_segment: NonZeroUsize,
+    /// Decoded data-byte target; the last row may cross it.
+    pub target_segment_bytes: NonZeroUsize,
     /// Complete logical runs one reorganization step may inspect and merge.
     pub max_input_runs_per_step: NonZeroUsize,
     /// Row payloads one reorganization step may decode across its selected runs.
@@ -63,6 +65,10 @@ impl Default for MetadataLsmPolicy {
             max_delta_runs: const { NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_DELTA_RUNS).unwrap() },
             max_rows_per_segment: const {
                 NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT).unwrap()
+            },
+            target_segment_bytes: const {
+                NonZeroUsize::new(loonfs_api::wire::sst_blocks::DEFAULT_TARGET_SEGMENT_BYTES)
+                    .unwrap()
             },
             max_input_runs_per_step: const {
                 NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_RUNS).unwrap()

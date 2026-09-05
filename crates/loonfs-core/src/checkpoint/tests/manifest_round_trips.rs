@@ -834,7 +834,10 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         &store,
         &namespace_id,
         |family| manifest_rows_for_family(&materialization.metadata_state, family),
-        NonZeroUsize::MAX,
+        MetadataLsmPolicy {
+            max_rows_per_segment: NonZeroUsize::MAX,
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await
     .expect("write malformed run segments");
@@ -848,7 +851,10 @@ async fn manifest_run_rejects_rows_after_run_seq() {
                 first,
             )
         },
-        NonZeroUsize::MAX,
+        MetadataLsmPolicy {
+            max_rows_per_segment: NonZeroUsize::MAX,
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await
     .expect("write empty metadata run segments");

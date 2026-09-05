@@ -749,7 +749,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         &store,
         &namespace_id,
         &materialization_before.metadata_state,
-        MetadataLsmPolicy::default().max_rows_per_segment,
+        MetadataLsmPolicy::default(),
     )
     .await
     .expect("build metadata segments");

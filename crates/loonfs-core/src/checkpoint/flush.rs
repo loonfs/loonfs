@@ -445,7 +445,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                         store,
                         namespace_id,
                         &projection.tail_state,
-                        MetadataLsmPolicy::default().max_rows_per_segment,
+                        MetadataLsmPolicy::default(),
                     )
                     .await?,
                 ),
@@ -466,7 +466,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                         namespace_id,
                         previous_manifest.payload.head_seq,
                         &projection.tail_state,
-                        MetadataLsmPolicy::default().max_rows_per_segment,
+                        MetadataLsmPolicy::default(),
                     )
                     .await?,
                 ),

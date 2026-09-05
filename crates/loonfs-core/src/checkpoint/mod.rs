@@ -10,7 +10,6 @@ mod build;
 pub(crate) mod cache;
 mod compaction_lease;
 mod compaction_merge;
-mod compaction_output;
 mod compaction_retention;
 mod create;
 mod data_block_load;

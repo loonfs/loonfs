@@ -210,7 +210,10 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         &store,
         &namespace_id,
         &state,
-        NonZeroUsize::new(64).expect("segment row budget"),
+        MetadataLsmPolicy {
+            max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await
     .expect("build segments");
@@ -310,4 +313,54 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         .await
         .expect("write manifest");
     manifest_object_id
+}
+
+#[tokio::test]
+async fn wide_attribute_rows_roll_segments_by_bytes_and_preserve_every_row() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace = NamespaceId::parse("wide-rows").expect("namespace");
+    let value = "x".repeat(4_000);
+    let keys: Vec<String> = (0..16).map(|index| format!("key{index}")).collect();
+    let entries: Vec<(&str, &str)> = keys
+        .iter()
+        .map(|key| (key.as_str(), value.as_str()))
+        .collect();
+    let state = state_from_attributes(
+        (1..=30)
+            .map(|inode| attributes_record(InodeId(inode), 1, 1, &entries))
+            .collect(),
+    );
+    let expected = manifest_rows_for_family(&state, ApiMetadataRowFamily::Attributes);
+
+    for target_bytes in [1, 128 * 1024] {
+        let policy = MetadataLsmPolicy {
+            target_segment_bytes: NonZeroUsize::new(target_bytes).expect("target"),
+            ..MetadataLsmPolicy::default()
+        };
+        let families = build_manifest_segments(&store, &namespace, &state, policy)
+            .await
+            .expect("write byte-bounded segments");
+        let family = families
+            .iter()
+            .find(|family| family.family == ApiMetadataRowFamily::Attributes)
+            .expect("attribute family");
+        assert!(
+            family.segments.len() >= 10,
+            "byte target must roll well before the row limit"
+        );
+        let mut actual = Vec::new();
+        for descriptor in &family.segments {
+            assert!(descriptor.row_count > 0 && descriptor.row_count <= 3);
+            let rows = super::inspection_materialization::load_manifest_segment_rows(
+                &store,
+                ChangeSeq(1),
+                descriptor,
+            )
+            .await
+            .expect("read segment");
+            actual.extend(rows.rows().cloned());
+        }
+        assert_eq!(actual, expected);
+    }
 }
