@@ -2297,23 +2297,20 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     assert!(input.runs.len() > 1);
     let base_before = group_base_runs(&before.manifest, group.families());
 
-    let report = super::reorganize_metadata_step(
-        &store,
-        &namespace_id,
-        &context,
-        policy,
-        MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("reorganization step");
-    assert!(
-        matches!(
-            report.outcome,
-            super::MetadataReorganizeOutcome::UnitPublished { .. }
-        ),
-        "expected a published unit, got {:?}",
-        report.outcome
+    // The same window also remains a delta when its execution needs a job.
+    let job_policy = MetadataLsmPolicy {
+        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
+        ..policy
+    };
+    let (_, selection) = select_reorganization_window(&store, &namespace_id, job_policy).await;
+    let super::reorganize::ReorganizationPlan::StreamingCompaction(spec) = selection.plan else {
+        panic!("one byte cannot admit a synchronous merge");
+    };
+    assert_eq!(
+        spec.inputs(),
+        input.runs.iter().map(|run| run.run_no).collect::<Vec<_>>()
     );
+    publish_planned_compaction(&store, &namespace_id, &context, job_policy, &spec).await;
 
     let after = load_manifest_materialization_for_inspection(
         &store,
