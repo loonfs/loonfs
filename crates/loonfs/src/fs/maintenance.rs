@@ -296,17 +296,24 @@ impl FsMaintenance {
         Ok(response)
     }
 
-    /// Whether the WAL tail or metadata manifest has bounded work waiting.
-    pub async fn metadata_probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        let threshold = MetadataMaintenanceOptions::default()
-            .max_wal_tail_segments
-            .get();
+    /// Whether the WAL tail or metadata manifest has work under these options.
+    ///
+    /// Use the same options as [`Self::maintain_metadata`] so recovery probes
+    /// and scheduled steps agree on when work is due. Active leases may still
+    /// prevent an eligible merge from running until their expiry.
+    pub async fn metadata_probe(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &MetadataMaintenanceOptions,
+    ) -> Result<MaintenanceProbe> {
+        let threshold = options.max_wal_tail_segments.get();
         let cache = self.core.metadata_segment_cache();
         loonfs_core::cache::metadata_maintenance_due(
             self.core.store(),
             Some(cache.as_ref()),
             namespace_id,
             threshold,
+            options.compaction_policy,
         )
         .await
         .map(|due| {

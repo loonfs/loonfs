@@ -211,8 +211,8 @@ The implementation is validated with the following tests:
 - Leave the final lease after publication and verify that an older collection pass cannot remove the published output.
 - Reclaim staged output after a lease expires, is already marked `reaping`, or is missing.
 - Reject malformed leases and leases whose namespace or group disagrees with their key.
-- Exercise continuous delta creation and verify that metadata maintenance requests full compaction after two published delta merges.
-- Verify that explicit compaction selects full compaction immediately for a frozen base.
+- Exercise continuous delta creation and verify that size-based selection eventually merges an eligible base within the eight-run fan-in limit.
+- Verify that explicit compaction bypasses the size ratio and automatic trigger while preserving the fan-in limit.
 - Process large attribute histories and heavily reused binding slots while holding at most one row in retention state.
 - Reject canonical-family and secondary-index mismatches before publication.
 - Reject a metadata family whose merge input repeats a row key.
@@ -222,4 +222,4 @@ The implementation is validated with the following tests:
 
 Durable resume may be added later if measured restart cost justifies the additional state. Resume state would be owned by the compactor and would record completed segment boundaries without changing the reader-visible namespace manifest. The job lease is not resume state and never records progress.
 
-Support for multiple concurrent compactions in one namespace remains deferred. The process-wide concurrency limit is fixed at two rather than exposed as configuration.
+The built-in job defaults to two concurrent compactions per process; `MetadataCompactionJob::max_concurrent` sets another limit. Each family group has its own durable lease. A completed job retains that lease until expiry to protect its published output from an older GC scan, so another window for that group may wait.

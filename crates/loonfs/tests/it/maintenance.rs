@@ -802,3 +802,119 @@ async fn fork_recovers_an_ambiguously_landed_checkpoint_renewal() {
         .expect("fork checkpoint remains installed");
     assert_eq!(fork_checkpoint.namespace_id, source);
 }
+
+#[tokio::test]
+async fn a_cold_metadata_job_probes_with_its_configured_options() {
+    use loonfs::{
+        MaintenanceCancellation, MaintenanceJob, MaintenanceProbe, MetadataMaintenanceJob,
+    };
+    use loonfs::{MetadataCompactionPolicy, MetadataMaintenanceOptions};
+    use std::num::NonZeroU64;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace = namespace_id("probe-options");
+    runtime
+        .create_namespace(&namespace, CreateNamespaceOptions::default())
+        .await
+        .expect("namespace");
+    runtime
+        .put_file_bytes(
+            &namespace,
+            "/one.txt",
+            b"one",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write one WAL segment");
+    drop(runtime);
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
+    let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());
+    let eager_flush = MetadataMaintenanceJob::new(runtime.maintenance.clone()).options(
+        MetadataMaintenanceOptions {
+            max_wal_tail_segments: NonZeroU64::MIN,
+            ..MetadataMaintenanceOptions::default()
+        },
+    );
+    assert_eq!(
+        defaults.probe(&namespace).await.expect("default probe"),
+        MaintenanceProbe::Idle
+    );
+    assert_eq!(
+        eager_flush.probe(&namespace).await.expect("custom probe"),
+        MaintenanceProbe::Due
+    );
+    runtime
+        .create_checkpoint(&namespace)
+        .await
+        .expect("flush the first run");
+    runtime
+        .put_file_bytes(
+            &namespace,
+            "/two.txt",
+            b"two",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write another segment");
+    runtime
+        .create_checkpoint(&namespace)
+        .await
+        .expect("flush a delta below the default trigger");
+    drop(runtime);
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-c").await;
+    let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());
+    let immediate = MetadataMaintenanceJob::new(runtime.maintenance.clone()).options(
+        MetadataMaintenanceOptions {
+            compaction_policy: MetadataCompactionPolicy::CompactImmediately,
+            ..MetadataMaintenanceOptions::default()
+        },
+    );
+    assert_eq!(
+        defaults
+            .probe(&namespace)
+            .await
+            .expect("default merge probe"),
+        MaintenanceProbe::Idle
+    );
+    assert_eq!(
+        immediate
+            .probe(&namespace)
+            .await
+            .expect("immediate merge probe"),
+        MaintenanceProbe::Due
+    );
+    for _ in 0..16 {
+        immediate
+            .run(&namespace, None, &MaintenanceCancellation::new())
+            .await
+            .expect("run configured maintenance");
+        if immediate
+            .probe(&namespace)
+            .await
+            .expect("probe after progress")
+            == MaintenanceProbe::Idle
+        {
+            assert_eq!(
+                runtime
+                    .reader
+                    .get_file_bytes(&namespace, "/one.txt")
+                    .await
+                    .expect("first file")
+                    .bytes,
+                b"one"
+            );
+            assert_eq!(
+                runtime
+                    .reader
+                    .get_file_bytes(&namespace, "/two.txt")
+                    .await
+                    .expect("second file")
+                    .bytes,
+                b"two"
+            );
+            return;
+        }
+    }
+    panic!("configured maintenance must finish its finite work");
+}
