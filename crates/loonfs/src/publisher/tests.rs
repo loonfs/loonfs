@@ -437,15 +437,16 @@ async fn settle_delete(handle: tokio::task::JoinHandle<DeleteResult>, label: &st
 /// fallback the production paths reserve for a dropped registry. The
 /// caller keeps `runtime` alive; the publisher holds its bits weakly.
 fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> NamespacePublisher {
-    NamespacePublisher::new(
-        namespace_id.clone(),
+    let registry = PublisherRegistry::new(
         runtime.core.clone(),
         Arc::downgrade(&runtime.bits),
-        Weak::new(),
         tokio::runtime::Handle::current(),
-        Arc::new(loonfs_objectstore::timing::StdMonotonicTimer::default()),
         TEST_STANDALONE_PACING,
-    )
+        NamespaceSessionPolicy::OpenOnFirstWrite,
+        NonZeroUsize::new(crate::DEFAULT_MAX_WRITER_SESSIONS).expect("nonzero session limit"),
+        crate::PublicationLimits::default(),
+    );
+    NamespacePublisher::new(namespace_id.clone(), &registry)
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -460,7 +461,7 @@ async fn wait_past_cas_pacing() {
 
 /// One directory creation directly under the root, named by the directory
 /// the test wants: the cheapest mutation that is distinct per name.
-fn create_directory_request(
+pub(super) fn create_directory_request(
     commit_id: impl Into<String>,
     directory_name: impl AsRef<str>,
 ) -> CommitRequest {
@@ -499,13 +500,17 @@ fn try_admit_candidate(
     candidate: CommitCandidate,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
     let commit_id = candidate.commit_id().clone();
+    publisher.check_admission(&publisher.lock_state())?;
+    let permit = publisher
+        .admission
+        .acquire(namespace_id, candidate.estimated_retained_bytes()?)?;
     let semantic_identity = candidate.semantic_identity(namespace_id)?;
     let (sender, receiver) = oneshot::channel();
     let admission = publisher.admit(
         commit_id,
         candidate,
         semantic_identity,
-        sender,
+        AdmittedWaiter::new(sender, &permit),
         publisher.timer.monotonic_now_ms(),
     )?;
     assert!(matches!(admission, SubmissionAdmission::OwnOutcome));
@@ -551,7 +556,16 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
         commit_id.clone(),
         InFlightRequest {
             semantic_identity,
-            waiters: vec![sender],
+            waiters: vec![AdmittedWaiter::new(
+                sender,
+                &publisher
+                    .admission
+                    .acquire(
+                        &namespace_id,
+                        candidate.estimated_retained_bytes().expect("weight"),
+                    )
+                    .expect("admit request"),
+            )],
         },
     );
     let selected_at = publisher.timer.monotonic_now_ms();
@@ -761,7 +775,11 @@ async fn publisher_contender_retries_after_active_request_fails() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let runtime = test_runtime(store);
     create_namespace(&runtime, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &runtime);
+    let mut publisher = standalone_publisher(&namespace_id, &runtime);
+    publisher.admission = Arc::new(PublicationAdmission::new(crate::PublicationLimits {
+        max_requests: NonZeroUsize::new(1).expect("one slot"),
+        ..crate::PublicationLimits::default()
+    }));
     let commit_id = CommitId::parse("handoff").expect("valid commit id");
     let primary_identity = CommitCandidate::new(create_directory_request("handoff", "first"))
         .semantic_identity(&namespace_id)
@@ -800,6 +818,7 @@ async fn publisher_contender_retries_after_active_request_fails() {
         .expect("contender publishes after the failed primary");
     assert_eq!(response.commit_id, commit_id);
     assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(publisher.admission.used_requests(), 0);
 }
 
 #[tokio::test]
@@ -860,7 +879,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
+async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
@@ -877,8 +896,12 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
     );
     store.wait_until_blocked().await;
 
-    let mut pending = Vec::with_capacity(MAX_BATCH_CANDIDATES);
-    for index in 0..MAX_BATCH_CANDIDATES {
+    let mut pending = Vec::new();
+    for index in 0..crate::PublicationLimits::default()
+        .max_requests_per_namespace
+        .get()
+        - 3
+    {
         pending.push(admit_commit(
             &publisher,
             &namespace_id,
@@ -905,6 +928,19 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
         create_directory_request("overflow", "overflow"),
     );
     assert!(matches!(overflow, Err(CoreError::CommitQueueFull)));
+
+    assert!(matches!(
+        try_admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("pending-0", "pending-0")
+        ),
+        Err(CoreError::CommitQueueFull)
+    ));
+    assert!(matches!(
+        publisher.admit_delete(DeleteNamespaceOptions::default()),
+        Err(CoreError::CommitQueueFull)
+    ));
 
     store.release();
     assert_eq!(
@@ -946,8 +982,11 @@ async fn publisher_takes_a_cold_full_batch_immediately() {
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
-    let mut receivers = Vec::with_capacity(MAX_BATCH_CANDIDATES);
-    for index in 0..MAX_BATCH_CANDIDATES {
+    let mut receivers = Vec::new();
+    for index in 0..crate::PublicationLimits::default()
+        .max_requests_per_namespace
+        .get()
+    {
         receivers.push(admit_commit(
             &publisher,
             &namespace_id,
@@ -1892,6 +1931,11 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         drain_error.to_string().contains("panicked"),
         "drain reports panicked publisher tasks: {drain_error}"
     );
+    assert_eq!(
+        registry.shared.admission.used_requests(),
+        0,
+        "panic and drain refund admission"
+    );
 }
 
 #[tokio::test]
@@ -2795,4 +2839,89 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
         .drain()
         .await
         .expect("drain settles every publisher");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registry_shares_admission_and_publication_slots_after_caller_cancellation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let a = NamespaceId::parse("a").expect("namespace");
+    let b = NamespaceId::parse("b").expect("namespace");
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &a));
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("bounded-writer")
+        .publication_limits(crate::PublicationLimits {
+            max_requests: NonZeroUsize::new(2).expect("two requests"),
+            max_requests_per_namespace: NonZeroUsize::new(1).expect("one request per namespace"),
+            max_concurrent_publications: NonZeroUsize::new(1).expect("one publication"),
+            ..crate::PublicationLimits::default()
+        })
+        .build()
+        .await
+        .expect("writer");
+    for namespace in [&a, &b] {
+        writer
+            .create_namespace(namespace, CreateNamespaceOptions::default())
+            .await
+            .expect("bootstrap");
+    }
+    let registry = writer.publisher();
+    store.block_next();
+    let first = {
+        let registry = registry.clone();
+        let namespace = a.clone();
+        tokio::spawn(async move {
+            registry
+                .submit_candidate(
+                    namespace,
+                    CommitCandidate::new(create_directory_request("first", "first")),
+                )
+                .await
+        })
+    };
+    store.wait_until_blocked().await;
+    let second = {
+        let registry = registry.clone();
+        let namespace = b.clone();
+        tokio::spawn(async move {
+            registry
+                .submit_candidate(
+                    namespace,
+                    CommitCandidate::new(create_directory_request("second", "second")),
+                )
+                .await
+        })
+    };
+    let publisher = registry.test_publisher_for(&b).expect("publisher");
+    wait_for_queued_candidates(&publisher, 1).await;
+    assert_eq!(
+        registry.shared.admission.publications.available_permits(),
+        0
+    );
+    assert!(
+        publisher.engine.lock().await.engine.is_none(),
+        "waiting for a slot must not load the other namespace's engine"
+    );
+    first.abort();
+    let _ = first.await;
+    assert_eq!(
+        registry.shared.admission.used_requests(),
+        2,
+        "disconnected work remains charged"
+    );
+    let error = registry
+        .submit_delete(a, DeleteNamespaceOptions::default())
+        .await
+        .expect_err("budget remains full");
+    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    store.release();
+    second
+        .await
+        .expect("second task")
+        .expect("second publication");
+    writer.shutdown().await.expect("drain");
+    assert_eq!(registry.shared.admission.used_requests(), 0);
+    assert_eq!(
+        registry.shared.admission.publications.available_permits(),
+        1
+    );
 }

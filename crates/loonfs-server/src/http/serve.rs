@@ -443,6 +443,7 @@ pub(super) async fn build_handles(
             std::num::NonZeroUsize::new(config.max_writer_sessions)
                 .expect("validated maximum writer sessions should be nonzero"),
         )
+        .publication_limits(config.publication.resolve())
         .max_concurrent_folds(
             std::num::NonZeroUsize::new(config.max_concurrent_folds)
                 .expect("validated maximum concurrent folds should be nonzero"),

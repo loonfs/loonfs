@@ -245,6 +245,7 @@ pub struct FsWriterBuilder {
     min_publish_interval_ms: u64,
     namespace_session_policy: NamespaceSessionPolicy,
     max_writer_sessions: NonZeroUsize,
+    publication_limits: crate::PublicationLimits,
     max_concurrent_folds: NonZeroUsize,
     namespace_advance_observer: Option<NamespaceAdvanceObserver>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
@@ -261,6 +262,7 @@ impl FsWriterBuilder {
                 .expect("default maximum writer sessions should be nonzero"),
             max_concurrent_folds: NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS)
                 .expect("default maximum concurrent folds should be nonzero"),
+            publication_limits: crate::PublicationLimits::default(),
             namespace_advance_observer: None,
             maintenance_hint_observer: None,
         }
@@ -315,6 +317,12 @@ impl FsWriterBuilder {
     /// The default is [`crate::DEFAULT_MAX_CONCURRENT_FOLDS`].
     pub fn max_concurrent_folds(mut self, limit: NonZeroUsize) -> Self {
         self.max_concurrent_folds = limit;
+        self
+    }
+
+    /// Sets the shared admission and concurrency limits for publications.
+    pub fn publication_limits(mut self, limits: crate::PublicationLimits) -> Self {
+        self.publication_limits = limits;
         self
     }
 
@@ -416,6 +424,12 @@ impl FsWriterBuilder {
         let writer_id = self
             .writer_id
             .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
+        if self.publication_limits.max_concurrent_publications.get() > Semaphore::MAX_PERMITS {
+            return Err(RuntimeError::Config(format!(
+                "max_concurrent_publications must not exceed {}",
+                Semaphore::MAX_PERMITS
+            )));
+        }
         let identity = WriterIdentity::new(writer_id)?;
         let runtime = owning_runtime()?;
         let core = self.core.open_read_core()?;
@@ -433,6 +447,7 @@ impl FsWriterBuilder {
             std::time::Duration::from_millis(self.min_publish_interval_ms),
             self.namespace_session_policy,
             self.max_writer_sessions,
+            self.publication_limits,
         );
         Ok(FsWriter {
             core,

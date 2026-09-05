@@ -16,6 +16,38 @@ use thiserror::Error;
 
 pub use loonfs_objectstore::StoreConfig;
 
+/// Optional overrides for the writer's shared publication budget.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationLimitsOverrides {
+    pub max_requests: Option<std::num::NonZeroUsize>,
+    pub max_requests_per_namespace: Option<std::num::NonZeroUsize>,
+    pub max_estimated_bytes: Option<std::num::NonZeroUsize>,
+    pub max_estimated_bytes_per_namespace: Option<std::num::NonZeroUsize>,
+    pub max_concurrent_publications: Option<std::num::NonZeroUsize>,
+}
+
+impl PublicationLimitsOverrides {
+    pub(crate) fn resolve(&self) -> loonfs::PublicationLimits {
+        let defaults = loonfs::PublicationLimits::default();
+        loonfs::PublicationLimits {
+            max_requests: self.max_requests.unwrap_or(defaults.max_requests),
+            max_requests_per_namespace: self
+                .max_requests_per_namespace
+                .unwrap_or(defaults.max_requests_per_namespace),
+            max_estimated_bytes: self
+                .max_estimated_bytes
+                .unwrap_or(defaults.max_estimated_bytes),
+            max_estimated_bytes_per_namespace: self
+                .max_estimated_bytes_per_namespace
+                .unwrap_or(defaults.max_estimated_bytes_per_namespace),
+            max_concurrent_publications: self
+                .max_concurrent_publications
+                .unwrap_or(defaults.max_concurrent_publications),
+        }
+    }
+}
+
 /// The only request-authentication decisions exposed to HTTP helpers.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum AuthPolicy<'a> {
@@ -50,6 +82,9 @@ pub struct ServerConfig {
     /// `loonfs.publisher.wal_folds_waiting` gauge means this cap is too low.
     #[serde(default = "default_max_concurrent_folds")]
     pub max_concurrent_folds: usize,
+    /// Shared request and concurrency limits for namespace publications.
+    #[serde(default)]
+    pub publication: PublicationLimitsOverrides,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
     /// The node-local cache of encoded metadata blocks, if this deployment
@@ -543,6 +578,14 @@ impl ServerConfig {
                 });
             }
         }
+        if self.publication.resolve().max_concurrent_publications.get()
+            > tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return Err(ServerConfigError::InvalidField {
+                field: "publication.max_concurrent_publications",
+                reason: format!("must not exceed {}", tokio::sync::Semaphore::MAX_PERMITS),
+            });
+        }
         if let Err(error) = self.grep.worker_config().validate() {
             return Err(ServerConfigError::InvalidField {
                 field: "grep",
@@ -650,8 +693,8 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{
-        load_server_config, ServerConfigError, AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV,
-        DISK_BLOCK_BYTES, MIN_DISK_BYTES,
+        load_server_config, PublicationLimitsOverrides, ServerConfigError, AUTH_TOKEN_ENV,
+        CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES, MIN_DISK_BYTES,
     };
     use loonfs_test_support::EnvGuard;
     use std::fs;
@@ -1255,6 +1298,27 @@ root = "/tmp/loonfs-server"
             let error = load_server_config(&path).expect_err("zero deadline must be rejected");
             assert_invalid_field(error, field);
         }
+    }
+
+    #[test]
+    fn publication_overrides_are_strict_and_positive() {
+        let defaults: PublicationLimitsOverrides = toml::from_str("").expect("empty overrides");
+        assert_eq!(defaults.resolve(), loonfs::PublicationLimits::default());
+        for field in [
+            "max_requests",
+            "max_requests_per_namespace",
+            "max_estimated_bytes",
+            "max_estimated_bytes_per_namespace",
+            "max_concurrent_publications",
+        ] {
+            assert!(toml::from_str::<PublicationLimitsOverrides>(&format!("{field} = 0")).is_err());
+        }
+        assert!(toml::from_str::<PublicationLimitsOverrides>("max_requsets = 10").is_err());
+        let overrides: PublicationLimitsOverrides =
+            toml::from_str("max_requests = 12\nmax_concurrent_publications = 3")
+                .expect("overrides");
+        assert_eq!(overrides.resolve().max_requests.get(), 12);
+        assert_eq!(overrides.resolve().max_concurrent_publications.get(), 3);
     }
 
     #[test]

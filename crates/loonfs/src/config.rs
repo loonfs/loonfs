@@ -30,6 +30,44 @@ pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 2;
 /// dropped: it takes the next one that frees.
 pub const DEFAULT_MAX_CONCURRENT_MAINTENANCE: usize = 2;
 
+/// Shared limits for queued and active publications owned by one writer.
+///
+/// Every admitted caller counts, including duplicate commits and namespace
+/// deletes. Counts and bytes remain charged until the work settles, even if
+/// the caller disconnects. Reaching either admission limit returns
+/// `commit_queue_full`; admitted work waits for a publication slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationLimits {
+    /// Maximum admitted requests across all namespaces. Defaults to 8,192.
+    pub max_requests: std::num::NonZeroUsize,
+    /// Maximum admitted requests for one namespace. Defaults to 1,024.
+    pub max_requests_per_namespace: std::num::NonZeroUsize,
+    /// Approximate retained request bytes across all namespaces. Defaults to
+    /// 64 MiB. This includes request data, prepared proofs, and waiter overhead;
+    /// it is not a bound on allocator capacity or working publication memory.
+    pub max_estimated_bytes: std::num::NonZeroUsize,
+    /// Approximate retained request bytes for one namespace. Defaults to 8 MiB.
+    pub max_estimated_bytes_per_namespace: std::num::NonZeroUsize,
+    /// Maximum publication batches or deletes running at once. Defaults to 8.
+    pub max_concurrent_publications: std::num::NonZeroUsize,
+}
+
+impl Default for PublicationLimits {
+    fn default() -> Self {
+        Self {
+            max_requests: std::num::NonZeroUsize::new(8192).expect("nonzero request limit"),
+            max_requests_per_namespace: std::num::NonZeroUsize::new(1024)
+                .expect("nonzero namespace request limit"),
+            max_estimated_bytes: std::num::NonZeroUsize::new(64 * 1024 * 1024)
+                .expect("nonzero request byte limit"),
+            max_estimated_bytes_per_namespace: std::num::NonZeroUsize::new(8 * 1024 * 1024)
+                .expect("nonzero namespace byte limit"),
+            max_concurrent_publications: std::num::NonZeroUsize::new(8)
+                .expect("nonzero publication limit"),
+        }
+    }
+}
+
 /// Read and cache configuration shared by all handles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadConfig {

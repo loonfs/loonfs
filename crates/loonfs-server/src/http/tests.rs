@@ -3622,6 +3622,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         writer_id: writer_id.to_owned(),
         max_writer_sessions: loonfs::DEFAULT_MAX_WRITER_SESSIONS,
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
+        publication: Default::default(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {

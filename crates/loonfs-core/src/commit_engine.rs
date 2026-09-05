@@ -107,6 +107,54 @@ impl CommitCandidate {
         commit_fingerprint(namespace_id, &self.request)
     }
 
+    /// Estimates retained request data and prepared proofs for publication
+    /// admission. Counts inline storage plus JSON payload bytes without
+    /// allocating a second request. Allocator slack and publication working
+    /// copies are excluded; this is a sizing policy, not a heap measurement.
+    pub fn estimated_retained_bytes(&self) -> Result<usize> {
+        let mut bytes = RequestByteCounter(
+            std::mem::size_of_val(self)
+                .saturating_add(std::mem::size_of_val(self.request.operations.as_slice())),
+        );
+        serde_json::to_writer(
+            &mut bytes,
+            &(
+                &self.request.commit_id,
+                &self.request.actor,
+                &self.request.message,
+                &self.request.operations,
+            ),
+        )
+        .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
+        match &self.content {
+            ContentPreparation::Ready(proofs) => {
+                bytes.0 = bytes
+                    .0
+                    .saturating_add(std::mem::size_of_val(proofs.as_slice()));
+                for proof in proofs {
+                    bytes.0 = bytes.0.saturating_add(proof.estimated_payload_bytes());
+                }
+            }
+            ContentPreparation::Rejected(ContentPreparationError::ContentToken(rejections)) => {
+                bytes.0 = bytes
+                    .0
+                    .saturating_add(std::mem::size_of_val(rejections.as_slice()));
+                for (content_id, error) in rejections {
+                    bytes.0 = bytes.0.saturating_add(content_id.as_str().len());
+                    if let ContentTokenError::Codec(message) = error {
+                        bytes.0 = bytes.0.saturating_add(message.len());
+                    }
+                }
+            }
+            ContentPreparation::Rejected(ContentPreparationError::ContentNotPrepared {
+                content_id,
+            }) => {
+                bytes.0 = bytes.0.saturating_add(content_id.as_str().len());
+            }
+        }
+        Ok(bytes.0)
+    }
+
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
         // Apply limits to the complete request because the serialized publisher
         // processes every operation before releasing the write path.
@@ -159,6 +207,19 @@ impl CommitCandidate {
                 "mutation request carries no operations".to_owned(),
             ));
         }
+        Ok(())
+    }
+}
+
+struct RequestByteCounter(usize);
+
+impl std::io::Write for RequestByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -600,6 +661,43 @@ mod tests {
                 parents: false,
             },
         )
+    }
+
+    #[test]
+    fn admission_weight_includes_annotation_proofs_and_preparation_errors() {
+        let request = create_dir_request("weight", "docs");
+        let baseline = CommitCandidate::new(request.clone())
+            .estimated_retained_bytes()
+            .expect("weight");
+        let mut annotated = request.clone();
+        annotated.message = Some("x".repeat(4096));
+        assert!(
+            CommitCandidate::new(annotated)
+                .estimated_retained_bytes()
+                .expect("weight")
+                >= baseline + 4096
+        );
+        let proof = PreparedContent::for_durable_content_write(
+            NamespaceId::parse("demo").expect("namespace"),
+            ContentStoreId::parse("cs_00000000000000000000000000000001").expect("store"),
+            ContentRef::blob_v1(ContentId::generate(), b"proof"),
+        );
+        let prepared = CommitCandidate::prepared(request.clone(), vec![proof; 100]);
+        assert!(
+            prepared.estimated_retained_bytes().expect("weight")
+                > baseline + 100 * std::mem::size_of::<PreparedContent>()
+        );
+        let rejected = CommitCandidate::rejected(
+            request,
+            ContentPreparationError::ContentToken(vec![
+                (
+                    ContentId::generate(),
+                    ContentTokenError::Codec("x".repeat(4096))
+                );
+                10
+            ]),
+        );
+        assert!(rejected.estimated_retained_bytes().expect("weight") > baseline + 40960);
     }
 
     #[test]

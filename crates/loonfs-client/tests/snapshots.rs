@@ -31,6 +31,7 @@ async fn start_server(name: &str) -> TestServer {
         writer_id: name.to_owned(),
         max_writer_sessions: 10_000,
         max_concurrent_folds: 2,
+        publication: Default::default(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: GrepConfig::default(),
