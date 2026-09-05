@@ -154,12 +154,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .expect("repeat put");
     assert_eq!(repeated, first);
 
-    // Re-running the put under the same commit id uploads a second content
-    // object, so the server sees a different commit and rejects it. The
-    // client resolves that by reading back what the commit id actually
-    // committed: same bytes, so the logical operation had already
-    // succeeded, and the original answer stands. The duplicate object is
-    // referenced by nothing and content collection reclaims it.
+    // Fresh content is a different request even when its bytes match.
     let reuploaded = harness
         .client
         .put_file_bytes(
@@ -177,8 +172,11 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             },
         )
         .await
-        .expect("re-uploading identical bytes under a used commit id is idempotent");
-    assert_eq!(reuploaded, first);
+        .expect_err("fresh uploads must preserve the conflict");
+    assert_eq!(
+        reuploaded.code(),
+        Some(loonfs_api::ErrorCode::CommitIdReuseConflict)
+    );
 
     let entry = harness
         .client
@@ -193,8 +191,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .expect("read file");
     assert_eq!(bytes, b"stable bytes\n");
 
-    // Retry reconciliation includes the actor in the fingerprint. Identical
-    // content submitted by a different actor must still conflict.
+    // A different actor must still conflict.
     let different_actor = ActorRef::service(ActorId::parse("retry-worker").expect("actor id"));
     match harness
         .client
@@ -1041,4 +1038,84 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
 
     server_a.server.abort();
     server_b.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepared_puts_replay_and_changed_options_conflict() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "prepared-put",
+        "prepared-put",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("namespace");
+    for streamed in [false, true] {
+        let target =
+            NamespacePath::parse("demo", &format!("/prepared-{streamed}.txt")).expect("path");
+        let bytes = b"prepared exactly once";
+        let prepared = if streamed {
+            harness
+                .client
+                .prepare_file_stream(&namespace, loonfs_client::PayloadSource::reader(&bytes[..]))
+                .await
+        } else {
+            harness.client.prepare_file_bytes(&namespace, bytes).await
+        }
+        .expect("prepare content");
+        let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+        options.commit.commit_id = Some(CommitId::generate());
+        let first = harness
+            .client
+            .put_file_prepared(&target, prepared.clone(), &options)
+            .await
+            .expect("first publication");
+        let repeated = harness
+            .client
+            .put_file_prepared(&target, prepared.clone(), &options)
+            .await
+            .expect("exact replay despite create-only behavior");
+        assert_eq!(repeated, first);
+        let mut changed = Vec::new();
+        let mut candidate = options.clone();
+        candidate.commit.message = Some("different".to_owned());
+        changed.push(candidate);
+        let mut candidate = options.clone();
+        candidate.commit.actor = ActorRef::system(ActorId::parse("another-actor").expect("actor"));
+        changed.push(candidate);
+        let mut candidate = options.clone();
+        candidate.behavior = DestinationBehavior::Replace;
+        changed.push(candidate);
+        let mut candidate = options.clone();
+        candidate.expected_inode_id = Some(loonfs_api::InodeId(123));
+        changed.push(candidate);
+        let mut candidate = options.clone();
+        candidate.expected_revision_no = Some(RevisionNo(123));
+        changed.push(candidate);
+        for candidate in changed {
+            let error = harness
+                .client
+                .put_file_prepared(&target, prepared.clone(), &candidate)
+                .await
+                .expect_err("changed options must not replay");
+            assert_eq!(
+                error.code(),
+                Some(loonfs_api::ErrorCode::CommitIdReuseConflict)
+            );
+        }
+        assert_eq!(
+            harness
+                .client
+                .get_file_bytes(&target, &Default::default())
+                .await
+                .expect("read published bytes"),
+            bytes
+        );
+    }
+    harness.server.abort();
 }

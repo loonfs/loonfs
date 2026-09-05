@@ -265,7 +265,7 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
 }
 
 #[tokio::test]
-async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survives() {
+async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
     let runtime = open_runtime_async(store.clone(), "retrying-writer").await;
@@ -273,7 +273,7 @@ async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survi
     let options = || {
         let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
         options.commit.commit_id =
-            Some(loonfs::CommitId::parse("cmt_reconciled").expect("valid commit id"));
+            Some(loonfs::CommitId::parse("cmt_original").expect("valid commit id"));
         options
     };
 
@@ -296,10 +296,11 @@ async fn a_retrys_duplicate_content_is_reclaimed_and_the_commit_it_matched_survi
         .writer
         .put_file_bytes(&namespace_id, "/docs/retry.txt", b"same bytes", options())
         .await
-        .expect("the rerun reconciles against what the commit id landed");
+        .expect_err("the fresh upload conflicts with the committed request");
     assert_eq!(
-        retry.committed_seq, first.committed_seq,
-        "the rerun reports the original commit, not a second one"
+        retry.details().expect("receipt").committed_seq,
+        Some(first.committed_seq),
+        "the conflict identifies the original commit"
     );
     assert_eq!(
         session_keys(&store, &namespace_id).await.len(),

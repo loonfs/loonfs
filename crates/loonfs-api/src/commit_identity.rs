@@ -3,24 +3,21 @@
 //! whether two requests that use the same commit ID describe the same
 //! mutation.
 //!
-//! The runtime and HTTP client use the functions in this module so that they
-//! apply the same identity rules. The runtime stores a fingerprint in the
-//! commit receipt. A client can later recompute it when retrying a request.
+//! The publisher stores this fingerprint in the commit receipt and compares
+//! it when the same commit ID is submitted again.
 //!
 //! The commit ID is not part of the fingerprint input. The commit ID selects
 //! a receipt, while the fingerprint describes the mutation stored in that
 //! receipt.
 
-use crate::options::PutFileOptions;
 use crate::{
-    AbsolutePath, ActorKind, ActorRef, AttributeRevisionNo, ChangeSeq, CommitId, ContentEvidence,
-    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId,
-    NamespaceId, RevisionNo,
+    AbsolutePath, ActorKind, ActorRef, AttributeRevisionNo, ChangeSeq, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
+    RevisionNo,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::future::Future;
 use thiserror::Error;
 
 /// Domain separator included in every mutation fingerprint input.
@@ -386,152 +383,10 @@ fn canonical_commit_bytes(
     })?)
 }
 
-/// Computes the fingerprint for a retried single-file PUT using the content
-/// reference from the original commit.
-///
-/// Retrying an upload creates a new content object, so its content ID differs
-/// from the ID stored by the original commit. This function substitutes the
-/// original content reference before computing the fingerprint. The caller
-/// must separately verify that both content objects contain the same bytes.
-pub fn put_retry_fingerprint(
-    namespace_id: &NamespaceId,
-    path: &AbsolutePath,
-    options: &PutFileOptions,
-    committed_content_ref: &ContentRef,
-) -> Result<CommitFingerprint, SemanticFingerprintError> {
-    let operation = FilesystemOperation::PutFile {
-        path: path.clone(),
-        content_ref: committed_content_ref.clone(),
-        behavior: options.behavior,
-        expected_inode_id: options.expected_inode_id,
-        expected_revision_no: options.expected_revision_no,
-    };
-    semantic_commit_fingerprint(
-        namespace_id,
-        &options.commit.actor,
-        options.commit.message.as_deref(),
-        std::slice::from_ref(&operation),
-    )
-}
-
-/// Receipt data needed to verify a PUT that reused a commit ID.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PutRetryReceipt {
-    /// Sequence number assigned to the original commit.
-    pub committed_seq: ChangeSeq,
-    /// Semantic fingerprint stored in the original commit receipt.
-    pub committed_fingerprint: String,
-}
-
-/// Classification of an error encountered while verifying a retried PUT.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PutRetryErrorClassification {
-    /// The commit ID was already used. The receipt is included when available.
-    CommitIdReuseConflict(Option<PutRetryReceipt>),
-    /// Retention removed the change record needed to verify the retry.
-    RebootstrapRequired,
-    /// Any error that does not have special handling during retry verification.
-    Other,
-}
-
-/// Details of the retried PUT being compared with an existing receipt.
-#[derive(Debug, Clone, Copy)]
-pub struct PutRetryAttempt<'a> {
-    /// Namespace targeted by the PUT.
-    pub namespace_id: &'a NamespaceId,
-    /// Absolute path targeted by the PUT.
-    pub path: &'a AbsolutePath,
-    /// Commit ID that was already used.
-    pub commit_id: &'a CommitId,
-    /// PUT options supplied by the caller.
-    pub options: &'a crate::options::PutFileOptions,
-    /// Checksum or byte evidence for the new upload.
-    pub staged: ContentEvidence<'a>,
-}
-
-/// Checks whether a PUT rejected for commit-ID reuse is an exact retry of an
-/// earlier successful PUT.
-///
-/// `read_change` receives the change-feed sequence immediately before the
-/// sequence in the receipt. It must return a page containing at most the
-/// expected change.
-///
-/// The function returns the original commit response only when both the
-/// request fingerprint and the uploaded content match the original commit.
-/// It returns the original conflict when the receipt or change record is
-/// missing, the retained history is unavailable, or either comparison fails.
-/// Other errors from `read_change` are returned unchanged.
-pub async fn reconcile_put_commit_id_reuse<E, ReadChange, ReadChangeFuture, ClassifyError>(
-    attempt: PutRetryAttempt<'_>,
-    conflict: E,
-    read_change: ReadChange,
-    classify_error: ClassifyError,
-) -> Result<crate::v0::CommitResponse, E>
-where
-    ReadChange: FnOnce(ChangeSeq) -> ReadChangeFuture,
-    ReadChangeFuture: Future<Output = Result<crate::v0::ListChangesResponse, E>>,
-    ClassifyError: Fn(&E) -> PutRetryErrorClassification,
-{
-    let PutRetryErrorClassification::CommitIdReuseConflict(Some(receipt)) =
-        classify_error(&conflict)
-    else {
-        return Err(conflict);
-    };
-    let after_seq = ChangeSeq(receipt.committed_seq.0.saturating_sub(1));
-    let page = match read_change(after_seq).await {
-        Ok(page) => page,
-        Err(error)
-            if matches!(
-                classify_error(&error),
-                PutRetryErrorClassification::RebootstrapRequired
-            ) =>
-        {
-            return Err(conflict);
-        }
-        Err(error) => return Err(error),
-    };
-    let Some(committed) = page.changes.into_iter().find(|change| {
-        change.committed_seq == receipt.committed_seq && &change.commit_id == attempt.commit_id
-    }) else {
-        return Err(conflict);
-    };
-    let Some(content_ref) = sole_committed_content_ref(&committed) else {
-        return Err(conflict);
-    };
-    let retried = put_retry_fingerprint(
-        attempt.namespace_id,
-        attempt.path,
-        attempt.options,
-        content_ref,
-    );
-    if retried.ok().as_ref().map(CommitFingerprint::as_str)
-        != Some(receipt.committed_fingerprint.as_str())
-        || !content_ref.matches_evidence(attempt.staged)
-    {
-        return Err(conflict);
-    }
-    Ok(crate::v0::CommitResponse::from_committed_change(
-        attempt.namespace_id.clone(),
-        committed,
-    ))
-}
-
-/// Returns the content reference when a committed change wrote exactly one
-/// file.
-fn sole_committed_content_ref(change: &crate::v0::CommittedChange) -> Option<&ContentRef> {
-    let mut content = change.events.iter().filter_map(|event| match event {
-        crate::v0::FilesystemChange::FileCreated { content_ref, .. }
-        | crate::v0::FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
-        _ => None,
-    });
-    let only = content.next()?;
-    content.next().is_none().then_some(only)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::PutFileOptions;
     use crate::{
         ActorId, AttributeKey, AttributeValue, Checksum, ContentId, ContentRefKind, DisplayName,
     };
@@ -834,9 +689,8 @@ mod tests {
     }
 
     #[test]
-    fn a_put_retry_reaches_the_pinned_fingerprint_under_every_checksum_algorithm() {
+    fn a_put_has_the_pinned_fingerprint_under_every_checksum_algorithm() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let options = PutFileOptions::new(test_actor());
         let content_id =
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id");
         let bytes = b"pinned put bytes";
@@ -857,11 +711,11 @@ mod tests {
             },
         ] {
             assert_eq!(
-                put_retry_fingerprint(
+                semantic_commit_fingerprint(
                     &namespace_id,
-                    &AbsolutePath::parse("/docs/report.txt").expect("path"),
-                    &options,
-                    &content_ref,
+                    &test_actor(),
+                    None,
+                    &[put("/docs/report.txt", content_ref)],
                 )
                 .expect("retry fingerprint")
                 .as_str(),
@@ -955,51 +809,28 @@ mod tests {
     }
 
     #[test]
-    fn put_retry_fingerprint_matches_the_equivalent_single_operation_request() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let path = AbsolutePath::parse("/docs/report.txt").expect("path");
-        let mut options = PutFileOptions::new(test_actor());
-        options.behavior = DestinationBehavior::Replace;
-        options.expected_inode_id = Some(InodeId(42));
-        options.expected_revision_no = Some(RevisionNo(4));
-        options.commit.message = Some("import batch".to_owned());
-        let content_ref = ContentRef::blob_v1(
-            ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
-            b"pinned put bytes",
-        );
-
-        let by_hand = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            Some("import batch"),
-            &[FilesystemOperation::PutFile {
-                path: path.clone(),
-                content_ref: content_ref.clone(),
-                behavior: DestinationBehavior::Replace,
-                expected_inode_id: Some(InodeId(42)),
-                expected_revision_no: Some(RevisionNo(4)),
-            }],
-        )
-        .expect("hand-built fingerprint");
-
-        assert_eq!(
-            put_retry_fingerprint(&namespace_id, &path, &options, &content_ref,)
-                .expect("retry fingerprint"),
-            by_hand
-        );
-    }
-
-    #[test]
-    fn put_retry_fingerprint_changes_with_every_request_field() {
+    fn put_fingerprint_changes_with_every_request_field() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let path = AbsolutePath::parse("/a.txt").expect("path");
         let content_ref = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let mut options = PutFileOptions::new(test_actor());
         options.behavior = DestinationBehavior::Replace;
-        let fingerprint = |namespace_id, path, options| {
-            put_retry_fingerprint(namespace_id, path, options, &content_ref)
+        let fingerprint =
+            |namespace_id: &NamespaceId, path: &AbsolutePath, options: &PutFileOptions| {
+                semantic_commit_fingerprint(
+                    namespace_id,
+                    &options.commit.actor,
+                    options.commit.message.as_deref(),
+                    &[FilesystemOperation::PutFile {
+                        path: path.clone(),
+                        content_ref: content_ref.clone(),
+                        behavior: options.behavior,
+                        expected_inode_id: options.expected_inode_id,
+                        expected_revision_no: options.expected_revision_no,
+                    }],
+                )
                 .expect("retry fingerprint")
-        };
+            };
         let baseline = fingerprint(&namespace_id, &path, &options);
 
         let mut changed_behavior = options.clone();
@@ -1051,110 +882,5 @@ mod tests {
                 "changed {label} must change identity"
             );
         }
-    }
-
-    #[test]
-    fn put_retry_reconciliation_agrees_on_receipt_mismatch_and_unavailable_evidence() {
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        enum ReconciliationError {
-            Conflict(PutRetryReceipt),
-            EvidenceUnavailable,
-        }
-
-        fn classify(error: &ReconciliationError) -> PutRetryErrorClassification {
-            match error {
-                ReconciliationError::Conflict(receipt) => {
-                    PutRetryErrorClassification::CommitIdReuseConflict(Some(receipt.clone()))
-                }
-                ReconciliationError::EvidenceUnavailable => {
-                    PutRetryErrorClassification::RebootstrapRequired
-                }
-            }
-        }
-
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let path = AbsolutePath::parse("/report.txt").expect("valid path");
-        let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
-        let committed_seq = ChangeSeq(7);
-        let bytes = b"stable bytes";
-        let content_ref = ContentRef::blob_v1(ContentId::generate(), bytes);
-        let mut options = crate::options::PutFileOptions::new(test_actor());
-        options.commit.commit_id = Some(commit_id.clone());
-        let receipt = PutRetryReceipt {
-            committed_seq,
-            committed_fingerprint: put_retry_fingerprint(
-                &namespace_id,
-                &path,
-                &options,
-                &content_ref,
-            )
-            .expect("fingerprint")
-            .as_str()
-            .to_owned(),
-        };
-        let page = crate::v0::ListChangesResponse {
-            namespace_id: namespace_id.clone(),
-            after_seq: ChangeSeq(6),
-            through_seq: committed_seq,
-            next_after_seq: None,
-            changes: vec![crate::v0::CommittedChange {
-                committed_seq,
-                commit_id: commit_id.clone(),
-                committed_by: test_actor(),
-                committed_at_ms: 1,
-                message: None,
-                events: vec![crate::v0::FilesystemChange::FileCreated {
-                    inode_id: InodeId(2),
-                    parent_inode_id: InodeId(1),
-                    display_name: DisplayName::parse("report.txt").expect("valid display name"),
-                    binding_generation: crate::BindingGeneration::parse("abcdef")
-                        .expect("binding generation"),
-                    revision_no: RevisionNo(1),
-                    content_ref,
-                }],
-            }],
-        };
-
-        let matching_attempt = PutRetryAttempt {
-            namespace_id: &namespace_id,
-            path: &path,
-            commit_id: &commit_id,
-            options: &options,
-            staged: ContentEvidence::Bytes(bytes),
-        };
-        let reconciled = futures::executor::block_on(reconcile_put_commit_id_reuse(
-            matching_attempt,
-            ReconciliationError::Conflict(receipt.clone()),
-            |after_seq| {
-                assert_eq!(after_seq, ChangeSeq(6));
-                std::future::ready(Ok(page.clone()))
-            },
-            classify,
-        ))
-        .expect("matching receipt and evidence reconcile");
-        assert_eq!(reconciled.commit_id, commit_id);
-        assert_eq!(reconciled.committed_seq, committed_seq);
-
-        let mismatch = futures::executor::block_on(reconcile_put_commit_id_reuse(
-            PutRetryAttempt {
-                staged: ContentEvidence::Bytes(b"different bytes"),
-                ..matching_attempt
-            },
-            ReconciliationError::Conflict(receipt.clone()),
-            |_| std::future::ready(Ok(page.clone())),
-            classify,
-        ));
-        assert_eq!(
-            mismatch,
-            Err(ReconciliationError::Conflict(receipt.clone()))
-        );
-
-        let unavailable = futures::executor::block_on(reconcile_put_commit_id_reuse(
-            matching_attempt,
-            ReconciliationError::Conflict(receipt.clone()),
-            |_| std::future::ready(Err(ReconciliationError::EvidenceUnavailable)),
-            classify,
-        ));
-        assert_eq!(unavailable, Err(ReconciliationError::Conflict(receipt)));
     }
 }

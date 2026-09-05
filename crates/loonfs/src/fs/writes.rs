@@ -11,12 +11,7 @@ use crate::{
     PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAttributesOptions,
 };
 use crate::{Result, RuntimeError};
-use loonfs_api::{
-    ContentEvidence, EffectiveLimit, ErrorCode, PutRetryAttempt, PutRetryErrorClassification,
-    PutRetryReceipt,
-};
 use loonfs_core::NamespaceWriterEngine;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
 fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> CommitRequest {
@@ -26,22 +21,6 @@ fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> C
         commit.message.clone(),
         operation,
     )
-}
-
-fn classify_put_retry_error(error: &RuntimeError) -> PutRetryErrorClassification {
-    match error.code() {
-        ErrorCode::CommitIdReuseConflict => {
-            let receipt = error.details().and_then(|details| {
-                Some(PutRetryReceipt {
-                    committed_seq: details.committed_seq?,
-                    committed_fingerprint: details.committed_fingerprint?,
-                })
-            });
-            PutRetryErrorClassification::CommitIdReuseConflict(receipt)
-        }
-        ErrorCode::RebootstrapRequired => PutRetryErrorClassification::RebootstrapRequired,
-        _ => PutRetryErrorClassification::Other,
-    }
 }
 
 impl FsWriter {
@@ -76,6 +55,9 @@ impl FsWriter {
     /// The bytes become durable content first; metadata referencing them is
     /// published only afterward. `options.behavior` selects create-only or
     /// replace semantics.
+    /// Each call stages new content. For retries, retain the result of
+    /// [`Self::prepare_file_bytes`] and use [`Self::put_file_prepared`] with
+    /// the same explicit commit ID and options.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.put",
@@ -90,17 +72,6 @@ impl FsWriter {
             payload_class = tracing::field::Empty,
         )
     )]
-    /// A retry with the same `commit_id` is reconciled against the durable
-    /// receipt.
-    ///
-    /// Each retry stages a new content object, so its initial fingerprint differs
-    /// from the committed request. On a reuse conflict, the runtime reads the
-    /// committed change, rebuilds the fingerprint with the committed content
-    /// reference, and verifies that the staged bytes match. The retry succeeds
-    /// only when the complete request and payload are equivalent.
-    ///
-    /// The unused staged object remains unpublished and is reclaimed by content
-    /// garbage collection after the grace period.
     pub async fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -111,35 +82,17 @@ impl FsWriter {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        let attempt = options.clone();
         let prepared_content = self.prepare_file_bytes_inner(namespace_id, bytes).await?;
-        let published = self
-            .put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
-            .await;
-        self.settle_put(
-            namespace_id,
-            absolute_path,
-            &attempt,
-            published,
-            ContentEvidence::Bytes(bytes),
-        )
-        .await
+        self.put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
+            .await
     }
 
     /// Writes a file from a payload read once from its source.
     ///
-    /// This is [`Self::put_file_bytes`] for a caller that should not hold
-    /// its payload: the stream is hashed as it is forwarded to object
-    /// storage and never held whole, so a large file costs one transfer
-    /// part of memory rather than its own size. Everything after the bytes
-    /// land is identical — same full-object checksum, same
-    /// publication, same retry reconciliation — so a caller that already
-    /// holds its bytes has no reason to come here.
-    ///
-    /// Retrying with a `commit_id` that already committed is safe in the
-    /// same way it is for the buffered call. The evidence is different only
-    /// because the payload is gone: what this pass measured and hashed on
-    /// the way past is what the reconciliation compares.
+    /// The stream is hashed while it is forwarded to object storage, using
+    /// one transfer part of memory. Each call stages new content. For retries,
+    /// retain [`Self::prepare_file_stream`]'s result and call
+    /// [`Self::put_file_prepared`] with the same explicit commit ID and options.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.put",
@@ -162,89 +115,9 @@ impl FsWriter {
         options: PutFileOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let attempt = options.clone();
         let prepared_content = self.prepare_file_stream_inner(namespace_id, body).await?;
-        // The prepared reference describes the bytes that just went past,
-        // and with the payload gone it is the only description of them that
-        // still exists.
-        let staged = prepared_content.content_ref().clone();
-        let published = self
-            .put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
-            .await;
-        self.settle_put(
-            namespace_id,
-            absolute_path,
-            &attempt,
-            published,
-            ContentEvidence::ContentRef(&staged),
-        )
-        .await
-    }
-
-    /// Turns a reused-commit-id rejection into the answer the retry
-    /// deserves, and passes everything else through.
-    async fn settle_put(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        attempt: &PutFileOptions,
-        published: Result<CommitResponse>,
-        staged: ContentEvidence<'_>,
-    ) -> Result<CommitResponse> {
-        match (published, attempt.commit.commit_id.as_ref()) {
-            (Err(error), Some(commit_id)) if error.code() == ErrorCode::CommitIdReuseConflict => {
-                self.reconcile_commit_id_reuse(
-                    namespace_id,
-                    absolute_path,
-                    commit_id,
-                    attempt,
-                    staged,
-                    error,
-                )
-                .await
-            }
-            (published, _) => published,
-        }
-    }
-
-    /// Checks whether a commit-ID conflict came from retrying the same file
-    /// write.
-    ///
-    /// The shared helper compares the full request fingerprint and verifies
-    /// that the new upload contains the same bytes as the original commit. If
-    /// either check cannot be completed or does not match, this method returns
-    /// the original conflict.
-    async fn reconcile_commit_id_reuse(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        commit_id: &CommitId,
-        attempt: &PutFileOptions,
-        staged: ContentEvidence<'_>,
-        conflict: RuntimeError,
-    ) -> Result<CommitResponse> {
-        let Ok(path) = loonfs_core::path::parse_mutation_path(absolute_path) else {
-            return Err(conflict);
-        };
-        let engine = self.engine(namespace_id);
-        loonfs_api::reconcile_put_commit_id_reuse(
-            PutRetryAttempt {
-                namespace_id,
-                path: &path,
-                commit_id,
-                options: attempt,
-                staged,
-            },
-            conflict,
-            |after_seq| async move {
-                engine
-                    .list_changes_after(after_seq, EffectiveLimit::new(NonZeroU32::MIN))
-                    .await
-                    .map_err(RuntimeError::from)
-            },
-            classify_put_retry_error,
-        )
-        .await
+        self.put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
+            .await
     }
 
     /// Stores file bytes and returns proof that they are ready to publish.
@@ -344,7 +217,10 @@ impl FsWriter {
     /// Publishes a file revision from already-prepared content.
     ///
     /// Submission and publication perform no content I/O. `options.behavior`
-    /// selects create-only or replace semantics.
+    /// selects create-only or replace semantics. Retry with a clone of the
+    /// prepared content, the same explicit `options.commit.commit_id`, and
+    /// unchanged options. A missing commit ID generates a new one on each call.
+    /// Replay is bounded by the namespace's receipt retention horizon.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.put",

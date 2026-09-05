@@ -93,13 +93,11 @@ pub use capability::{
     LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
 pub use commit_identity::{
-    put_retry_fingerprint, reconcile_put_commit_id_reuse, semantic_commit_fingerprint,
-    CommitFingerprint, PutRetryAttempt, PutRetryErrorClassification, PutRetryReceipt,
-    SemanticFingerprintError,
+    semantic_commit_fingerprint, CommitFingerprint, SemanticFingerprintError,
 };
 pub use content::{
-    Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentEvidence, ContentRef,
-    ContentRefKind, ContentRefValidationError, Crc32c, Crc64Nvme, Sha256, StreamingChecksum,
+    Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
+    ContentRefValidationError, Crc32c, Crc64Nvme, Sha256, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};

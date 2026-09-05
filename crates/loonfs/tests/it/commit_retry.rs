@@ -1,12 +1,5 @@
-//! Rerunning a put under a commit id that already committed.
-//!
-//! A commit's identity names *which* content object it wrote, so a rerun —
-//! which necessarily stages a fresh object — is a different commit as far as
-//! the publisher is concerned and it says so. What makes the rerun safe
-//! anyway is the runtime reading back what that commit id actually
-//! committed, rebuilding this request's fingerprint around the committed
-//! reference, and requiring the whole value to match before it proves the
-//! bytes agree. Nothing weaker counts as agreement.
+//! File publication replays the same prepared content and commit ID.
+//! Uploading again creates a new object and must preserve a reuse conflict.
 
 use crate::common::{open_runtime_async, store, TestRuntime};
 use bytes::Bytes;
@@ -171,7 +164,7 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
 }
 
 #[tokio::test]
-async fn rerunning_a_put_with_the_same_commit_id_replays_on_identical_bytes() {
+async fn reuploading_identical_bytes_under_the_same_commit_id_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
@@ -184,9 +177,13 @@ async fn rerunning_a_put_with_the_same_commit_id_replays_on_identical_bytes() {
     let rerun = runtime
         .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
         .await
-        .expect("rerunning identical bytes is idempotent");
+        .expect_err("a fresh upload is a different request");
 
-    assert_eq!(rerun, first);
+    assert_eq!(rerun.code(), ErrorCode::CommitIdReuseConflict);
+    assert_eq!(
+        rerun.details().expect("receipt").committed_seq,
+        Some(first.committed_seq)
+    );
     assert_eq!(
         runtime
             .reader
@@ -428,19 +425,28 @@ async fn same_length_different_bytes_conflict() {
 }
 
 #[tokio::test]
-async fn rerunning_a_put_with_the_same_message_replays_on_identical_bytes() {
+async fn prepared_content_replays_after_restart_with_the_same_message() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
     let options = || options_with_message(&commit_id, Some("import batch"));
 
+    let prepared = runtime
+        .writer
+        .prepare_file_stream(&namespace_id, streamed(b"stable bytes\n", 3))
+        .await
+        .expect("prepare content once");
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options())
+        .writer
+        .put_file_prepared(&namespace_id, PATH, prepared.clone(), options())
         .await
         .expect("first put");
+    drop(runtime);
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
     let rerun = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options())
+        .writer
+        .put_file_prepared(&namespace_id, PATH, prepared.clone(), options())
         .await
         .expect("rerunning an identical request is idempotent");
 
@@ -634,7 +640,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     let error = runtime
         .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
         .await
-        .expect_err("evidence that cannot be read cannot reconcile to success");
+        .expect_err("fresh content must conflict while the receipt remains");
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
@@ -716,9 +722,21 @@ async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
 
+    let prepared = runtime
+        .writer
+        .prepare_file_bytes(&namespace_id, b"stable bytes\n")
+        .await
+        .expect("prepare the new attempt once");
     let (left, right) = tokio::join!(
-        runtime.put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id)),
-        runtime.put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id)),
+        runtime.writer.put_file_prepared(
+            &namespace_id,
+            PATH,
+            prepared.clone(),
+            options(&commit_id)
+        ),
+        runtime
+            .writer
+            .put_file_prepared(&namespace_id, PATH, prepared, options(&commit_id)),
     );
     let left = left.expect("first late retry");
     let right = right.expect("second late retry");
@@ -770,7 +788,7 @@ async fn an_unused_commit_id_is_an_ordinary_commit() {
 }
 
 #[tokio::test]
-async fn rerunning_a_streamed_put_with_the_same_commit_id_replays_on_identical_bytes() {
+async fn reuploading_an_identical_stream_under_the_same_commit_id_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
@@ -796,11 +814,12 @@ async fn rerunning_a_streamed_put_with_the_same_commit_id_replays_on_identical_b
             options(&commit_id),
         )
         .await
-        .expect("rerunning identical bytes is idempotent");
+        .expect_err("a fresh upload is a different request");
 
+    assert_eq!(rerun.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        rerun, first,
-        "the same bytes reconcile however the source chunked them"
+        rerun.details().expect("receipt").committed_seq,
+        Some(first.committed_seq)
     );
     assert_eq!(
         runtime
@@ -855,7 +874,7 @@ async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
 }
 
 #[tokio::test]
-async fn a_streamed_rerun_reconciles_against_a_buffered_first_run() {
+async fn a_streamed_reupload_conflicts_with_a_buffered_first_run() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
@@ -875,7 +894,11 @@ async fn a_streamed_rerun_reconciles_against_a_buffered_first_run() {
             options(&commit_id),
         )
         .await
-        .expect("the same bytes, read differently, are the same commit");
+        .expect_err("a fresh upload is a different request");
 
-    assert_eq!(rerun, first);
+    assert_eq!(rerun.code(), ErrorCode::CommitIdReuseConflict);
+    assert_eq!(
+        rerun.details().expect("receipt").committed_seq,
+        Some(first.committed_seq)
+    );
 }
