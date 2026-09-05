@@ -405,7 +405,7 @@ mod tests {
         let mut allocation = allocator.begin_candidate();
         let validated = prepare_commit_against_publish_view(
             request,
-            serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
+            serde_json::from_str(r#""v2:sha256:test""#).expect("fingerprint"),
             view.head(),
             view.projected_metadata_view(),
             &empty_overlay,
