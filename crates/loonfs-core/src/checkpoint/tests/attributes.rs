@@ -289,7 +289,7 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
     segments: Vec<MetadataSegmentRef>,
 ) -> ManifestObjectId {
     let manifest_object_id = ManifestObjectId::generate(manifest_no);
-    let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+    let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no,
         manifest_object_id: manifest_object_id.clone(),
@@ -307,8 +307,9 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
             segments,
         }],
     })
-    .expect("manifest envelope");
-    write_namespace_manifest(store, &manifest)
+    .expect("manifest envelope")
+    .into_envelope();
+    write_namespace_manifest(store, manifest.payload().clone())
         .await
         .expect("write manifest");
     manifest_object_id

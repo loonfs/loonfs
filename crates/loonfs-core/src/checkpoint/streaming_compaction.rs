@@ -544,7 +544,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
 
         let previous = segments.manifest();
         let surviving = previous
-            .payload
+            .payload()
             .runs
             .iter()
             .filter_map(|run| {
@@ -586,7 +586,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         let lost_to = match published {
             ManifestPublicationOutcome::Published(_) => {
                 return Ok(MetadataCompactionJobOutcome::Published {
-                    manifest_no: manifest.payload.manifest_no,
+                    manifest_no: manifest.payload().manifest_no,
                     rows_read,
                     rows_written,
                     input_bytes,

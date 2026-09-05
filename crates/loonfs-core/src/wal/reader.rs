@@ -244,8 +244,8 @@ async fn walk_chain<S: ObjectStore + ?Sized>(
             .map_err(|err| WalSegmentError::Codec(err.to_string()))?;
         validate_pointer_matches_envelope(&pointer, &object_key, &envelope)?;
 
-        let reached_stop = envelope.payload.base_head_seq <= stop_after_seq;
-        let prev = envelope.payload.prev_visible_segment.clone();
+        let reached_stop = envelope.payload().base_head_seq <= stop_after_seq;
+        let prev = envelope.payload().prev_visible_segment.clone();
         reversed.push(ValidatedWalSegment::new(object_key.clone(), envelope));
 
         if reached_stop {
@@ -275,14 +275,14 @@ fn finish_chain(
         return Ok(ValidatedWalChain::empty());
     };
     if let Some(after_seq) = request.stop_after_seq {
-        if first_segment.envelope().payload.base_head_seq > after_seq
-            || first_segment.envelope().payload.end_seq <= after_seq
+        if first_segment.envelope().payload().base_head_seq > after_seq
+            || first_segment.envelope().payload().end_seq <= after_seq
         {
             return Err(WalChainLoadError::CursorNotCovered { after_seq });
         }
     }
 
-    let mut expected_base_seq = first_segment.envelope().payload.base_head_seq;
+    let mut expected_base_seq = first_segment.envelope().payload().base_head_seq;
     if request.stop_after_seq.is_none() && expected_base_seq != request.chain_base_seq {
         return Err(WalChainLoadError::HeadSeqMismatch {
             expected: request.chain_base_seq,
@@ -295,7 +295,7 @@ fn finish_chain(
             expected_base_seq,
             segment.envelope(),
         )?;
-        expected_base_seq = segment.envelope().payload.end_seq;
+        expected_base_seq = segment.envelope().payload().end_seq;
     }
 
     if expected_base_seq != request.head_seq {

@@ -114,7 +114,7 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
 }
 
 fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> {
-    runs_in_reorganization_order(&manifest.payload)
+    runs_in_reorganization_order(manifest.payload())
         .into_iter()
         .flat_map(|run| {
             run.segments.into_iter().flat_map(|family_segments| {
@@ -216,7 +216,7 @@ type FamilyRunShape = (ApiMetadataRowFamily, u64, usize);
 type ManifestRunShape = (ChangeSeq, RunTier, Vec<FamilyRunShape>);
 
 fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunShape> {
-    runs_in_reorganization_order(&manifest.payload)
+    runs_in_reorganization_order(manifest.payload())
         .into_iter()
         .map(|run| {
             let segments = run
@@ -345,7 +345,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     .await
     .expect("load current manifest")
     .manifest()
-    .payload
+    .payload()
     .runs
     .iter()
     .flat_map(|run| &run.segments)
@@ -424,7 +424,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
     .expect("load current manifest");
     let missing_key = segments
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -489,7 +489,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     .expect("load current manifest");
     let selected_key = segments
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -1093,15 +1093,18 @@ async fn checkpoint_checksum_disagreement_is_terminal_corruption_and_releases_re
         .expect("read manifest")
         .expect("current manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    let record_checksum = manifest.payload_checksum.clone();
-    let mut mismatched_payload = manifest.payload;
+    let record_checksum = manifest.payload_checksum().to_owned();
+    let mut mismatched_payload = manifest.into_payload();
     mismatched_payload.next_inode_id = InodeId(mismatched_payload.next_inode_id.0 + 1);
-    let mismatched_manifest = NamespaceManifestEnvelope::from_payload(mismatched_payload)
-        .expect("build mismatched manifest");
-    let manifest_checksum = mismatched_manifest.payload_checksum.clone();
+    let mismatched_manifest = encode_namespace_manifest_json(mismatched_payload)
+        .expect("build mismatched manifest")
+        .into_envelope();
+    let manifest_checksum = mismatched_manifest.payload_checksum().to_owned();
     assert_ne!(record_checksum, manifest_checksum);
     let mismatched_bytes = Bytes::from(
-        encode_namespace_manifest_json(&mismatched_manifest).expect("encode mismatched manifest"),
+        encode_namespace_manifest_json(mismatched_manifest.payload().clone())
+            .expect("encode mismatched manifest")
+            .into_bytes(),
     );
     let store = ManifestChecksumMismatchOnceStore::new(
         setup_store,
@@ -1282,7 +1285,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     .expect("load appended manifest");
     assert_eq!(delta_runs(&appended.manifest).len(), rounds);
     assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_CHECKPOINT_DELTA_RUNS);
-    assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
+    assert_eq!(appended.manifest.payload().base_seq, ChangeSeq(0));
 
     // Reorganization folds one family group per unit, each publishing its
     // own manifest — the manifest chain is the progress record.
@@ -1329,7 +1332,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         .expect("materialization");
     assert!(delta_runs(&drained.manifest).is_empty());
     assert_eq!(
-        drained.manifest.payload.base_seq,
+        drained.manifest.payload().base_seq,
         ChangeSeq(u64::try_from(rounds).expect("round count fits"))
     );
     assert!(metadata_states_equivalent(
@@ -1653,7 +1656,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
     );
 
     assert_eq!(
-        compacted_materialized.manifest.payload.base_seq,
+        compacted_materialized.manifest.payload().base_seq,
         compacted.checkpoint_seq
     );
     assert!(delta_runs(&compacted_materialized.manifest).is_empty());
@@ -1755,7 +1758,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
     // Groups untouched since the first fold keep their older base run, so
     // several base runs may coexist; what matters is that no delta remains.
     assert!(
-        runs_in_reorganization_order(&compacted_materialized.manifest.payload)
+        runs_in_reorganization_order(compacted_materialized.manifest.payload())
             .iter()
             .all(|run| run.tier == RunTier::Base)
     );
@@ -2026,7 +2029,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     let group = super::reorganize::select_family_group(
         store,
         namespace_id,
-        &segments.manifest().payload,
+        segments.manifest().payload(),
         0,
         MetadataCompactionPolicy::default(),
         policy,

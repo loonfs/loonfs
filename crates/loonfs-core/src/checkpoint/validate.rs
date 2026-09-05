@@ -24,36 +24,37 @@ pub(super) fn validate_namespace_manifest(
     object_key: &str,
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<(), ManifestLoadError> {
-    if manifest.payload.namespace_id != *namespace_id {
+    if manifest.payload().namespace_id != *namespace_id {
         return Err(ManifestLoadError::ManifestNamespaceMismatch {
             object_key: object_key.to_owned(),
             expected: namespace_id.clone(),
-            actual: manifest.payload.namespace_id.clone(),
+            actual: manifest.payload().namespace_id.clone(),
         });
     }
-    if manifest.payload.manifest_no != manifest_no {
+    if manifest.payload().manifest_no != manifest_no {
         return Err(ManifestLoadError::ManifestNoMismatch {
             object_key: object_key.to_owned(),
             expected: manifest_no,
-            actual: manifest.payload.manifest_no,
+            actual: manifest.payload().manifest_no,
         });
     }
-    if manifest_object_id_manifest_no(manifest.payload.manifest_object_id.as_str())
-        != Some(manifest.payload.manifest_no)
+    if manifest_object_id_manifest_no(manifest.payload().manifest_object_id.as_str())
+        != Some(manifest.payload().manifest_no)
     {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
                 "manifest object id `{}` does not encode manifest number `{}`",
-                manifest.payload.manifest_object_id, manifest.payload.manifest_no
+                manifest.payload().manifest_object_id,
+                manifest.payload().manifest_no
             ),
         });
     }
-    if manifest.payload.manifest_object_id != *manifest_object_id {
+    if manifest.payload().manifest_object_id != *manifest_object_id {
         return Err(ManifestLoadError::ManifestObjectIdMismatch {
             object_key: object_key.to_owned(),
             expected: manifest_object_id.clone(),
-            actual: manifest.payload.manifest_object_id.clone(),
+            actual: manifest.payload().manifest_object_id.clone(),
         });
     }
     Ok(())

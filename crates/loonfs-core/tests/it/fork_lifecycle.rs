@@ -12,12 +12,10 @@ use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{
     wire::control::{
-        decode_control_object, encode_control_object, CheckpointOwner, CheckpointStatus,
-        ControlObjectKind, HeadState, HeadStateEnvelope,
+        decode_control_object, CheckpointOwner, CheckpointStatus, ControlObjectKind, HeadState,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
-        NamespaceManifestEnvelope,
     },
     AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId,
 };
@@ -545,7 +543,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         decode_namespace_manifest_json(&clone_manifest_bytes).expect("decode clone manifest");
     assert!(
         clone_manifest
-            .payload
+            .payload()
             .runs
             .iter()
             .flat_map(|run| &run.segments)
@@ -648,12 +646,17 @@ async fn a_fork_basis_checksum_mismatch_is_corruption() {
     let fork_basis = head.fork_basis.as_mut().expect("fork basis");
     fork_basis.manifest.manifest_payload_checksum =
         loonfs_api::sha256_digest(b"not-the-source-manifest-payload");
-    let envelope =
-        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
+    let envelope = head;
     store
         .put_overwrite(
             &wal_head(&clone),
-            Bytes::from(encode_control_object(&envelope).expect("encode head")),
+            Bytes::from(
+                loonfs_api::wire::control::encode_control_state(
+                    ControlObjectKind::WalHead,
+                    &envelope,
+                )
+                .expect("encode head"),
+            ),
         )
         .await
         .expect("rewrite clone head");
@@ -802,15 +805,19 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         .await
         .expect("read source manifest")
         .expect("source manifest exists");
-    let mut manifest =
-        decode_namespace_manifest_json(&manifest_bytes).expect("decode source manifest");
-    manifest.payload.runs.iter_mut().for_each(|run| {
+    let mut manifest = decode_namespace_manifest_json(&manifest_bytes)
+        .expect("decode source manifest")
+        .into_payload();
+    manifest.runs.iter_mut().for_each(|run| {
         run.segments
             .retain(|descriptor| descriptor.family != MetadataRowFamily::DirentryChildBinds);
     });
-    let manifest = NamespaceManifestEnvelope::from_payload(manifest.payload)
-        .expect("rebuild manifest checksum");
-    let corrupted = encode_namespace_manifest_json(&manifest).expect("encode corrupt manifest");
+    let manifest = loonfs_api::wire::manifest::encode_namespace_manifest_json(manifest)
+        .expect("rebuild manifest checksum")
+        .into_envelope();
+    let corrupted = encode_namespace_manifest_json(manifest.payload().clone())
+        .expect("encode corrupt manifest")
+        .into_bytes();
     store
         .put_overwrite(&manifest_key, Bytes::from(corrupted))
         .await
@@ -874,11 +881,9 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
         loonfs_api::ContentStoreId::generate(),
         1_000,
     );
-    let foreign_bytes = encode_control_object(
-        &HeadStateEnvelope::from_state(ControlObjectKind::WalHead, foreign)
-            .expect("foreign head envelope"),
-    )
-    .expect("encode foreign head");
+    let foreign_bytes =
+        loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &foreign)
+            .expect("encode foreign head");
     let store = InjectCreateFailureStore::new(
         inner,
         KeyMatcher::Exact(wal_head(&namespace_id)),
@@ -1083,19 +1088,21 @@ impl ReleasePinBeforeRenewalStore {
             ControlObjectKind::CheckpointRecord,
         )
         .expect("decode record")
-        .state;
+        .into_payload();
         record.status = CheckpointStatus::Released {
             released_at_ms: 2_000,
         };
-        let released = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
-            ControlObjectKind::CheckpointRecord,
-            record,
-        )
-        .expect("released record envelope");
+        let released = record;
         self.inner
             .put_overwrite(
                 key,
-                Bytes::from(encode_control_object(&released).expect("encode record")),
+                Bytes::from(
+                    loonfs_api::wire::control::encode_control_state(
+                        ControlObjectKind::CheckpointRecord,
+                        &released,
+                    )
+                    .expect("encode record"),
+                ),
             )
             .await
             .expect("release record");

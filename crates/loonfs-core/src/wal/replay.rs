@@ -126,17 +126,17 @@ pub(super) fn validate_wal_segment_for_replay(
     expected_base_head_seq: ChangeSeq,
     envelope: &WalSegmentEnvelope,
 ) -> Result<(), WalSegmentError> {
-    if &envelope.payload.namespace_id != expected_namespace_id {
+    if &envelope.payload().namespace_id != expected_namespace_id {
         return Err(WalSegmentError::NamespaceMismatch {
             expected: expected_namespace_id.clone(),
-            actual: envelope.payload.namespace_id.clone(),
+            actual: envelope.payload().namespace_id.clone(),
         });
     }
 
-    if envelope.payload.base_head_seq != expected_base_head_seq {
+    if envelope.payload().base_head_seq != expected_base_head_seq {
         return Err(WalSegmentError::BaseHeadSeqMismatch {
             expected: expected_base_head_seq,
-            actual: envelope.payload.base_head_seq,
+            actual: envelope.payload().base_head_seq,
         });
     }
 
@@ -144,24 +144,25 @@ pub(super) fn validate_wal_segment_for_replay(
         .successor()
         .map_err(|_| WalSegmentError::SeqOverflow)?;
 
-    if envelope.payload.start_seq != expected_start {
+    if envelope.payload().start_seq != expected_start {
         return Err(WalSegmentError::NonContiguousSeq {
             expected: expected_start,
-            actual: envelope.payload.start_seq,
+            actual: envelope.payload().start_seq,
         });
     }
-    if envelope.payload.records.is_empty() {
+    if envelope.payload().records.is_empty() {
         return Err(WalSegmentError::EmptySegment);
     }
-    if envelope.payload.records.first().map(|record| record.seq) != Some(envelope.payload.start_seq)
-        || envelope.payload.records.last().map(|record| record.seq)
-            != Some(envelope.payload.end_seq)
+    if envelope.payload().records.first().map(|record| record.seq)
+        != Some(envelope.payload().start_seq)
+        || envelope.payload().records.last().map(|record| record.seq)
+            != Some(envelope.payload().end_seq)
     {
         return Err(WalSegmentError::SegmentSummaryMismatch);
     }
-    for (offset, record) in envelope.payload.records.iter().enumerate() {
+    for (offset, record) in envelope.payload().records.iter().enumerate() {
         let expected = envelope
-            .payload
+            .payload()
             .start_seq
             .0
             .checked_add(offset as u64)

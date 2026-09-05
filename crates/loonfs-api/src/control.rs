@@ -978,39 +978,8 @@ impl<'de> Deserialize<'de> for UploadSessionState {
     }
 }
 
-/// In-memory view of a control object envelope.
-///
-/// This struct is not the durable layout; durable bytes are produced only by
-/// [`encode_control_object`] and validated only by [`decode_control_object`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ControlObjectEnvelope<T> {
-    /// Durable-family discriminator that selects `T` and its independent version.
-    pub kind: ControlObjectKind,
-    /// Family-local format version obtained from `kind`.
-    pub format_version: u32,
-    /// Digest of the payload JSON exactly as stored in the durable document,
-    /// in `sha256:<hex>` form.
-    pub payload_checksum: String,
-    /// Decoded control state protected by `payload_checksum`.
-    pub state: T,
-}
-
-impl<T> ControlObjectEnvelope<T>
-where
-    T: Serialize,
-{
-    /// Builds a family-versioned envelope and computes its checksum from canonical state JSON.
-    ///
-    /// Construction fails when `state` cannot be encoded.
-    pub fn from_state(kind: ControlObjectKind, state: T) -> Result<Self, EnvelopeCodecError> {
-        Ok(Self {
-            kind,
-            format_version: kind.format_version(),
-            payload_checksum: control_payload_checksum(&state)?,
-            state,
-        })
-    }
-}
+/// Control state decoded through its checked durable codec.
+pub type ControlObjectEnvelope<T> = crate::envelope::VerifiedEnvelope<T>;
 
 /// Specializes a control envelope for the authoritative namespace head.
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
@@ -1026,43 +995,13 @@ pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>
 /// its staged output.
 pub type MetadataCompactionLeaseEnvelope = ControlObjectEnvelope<MetadataCompactionLeaseState>;
 
-/// Computes the checksum stored beside canonical JSON for a control state.
-///
-/// Computation fails when `state` cannot be serialized.
-pub fn control_payload_checksum<T>(state: &T) -> Result<String, EnvelopeCodecError>
-where
-    T: Serialize,
-{
-    crate::envelope::json_payload_checksum(state)
-}
-
-/// Encodes a control-object envelope as its durable JSON representation.
-///
-/// Encoding fails when the family version is unsupported, the in-memory
-/// checksum is stale, or JSON serialization fails. See
-/// [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
-pub fn encode_control_object<T>(
-    envelope: &ControlObjectEnvelope<T>,
-) -> Result<Vec<u8>, EnvelopeCodecError>
-where
-    T: Serialize,
-{
-    crate::envelope::encode_json_envelope(
-        envelope.kind.as_str(),
-        envelope.format_version,
-        envelope.kind.format_version(),
-        &envelope.payload_checksum,
-        &envelope.state,
-    )
-}
-
-/// Encodes state in a control-object envelope.
+/// Encodes control state once, deriving its checksum and family version.
 pub fn encode_control_state<T: Serialize>(
     kind: ControlObjectKind,
     state: &T,
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
-    let envelope = ControlObjectEnvelope::from_state(kind, state)?;
-    encode_control_object(&envelope)
+    crate::envelope::encode_json_envelope(kind.as_str(), kind.format_version(), state)
+        .map(crate::envelope::EncodedEnvelope::into_bytes)
 }
 
 /// Decodes and verifies a durable JSON control object of `expected_kind`.
@@ -1094,12 +1033,7 @@ where
         },
     )?;
 
-    Ok(ControlObjectEnvelope {
-        kind: expected_kind,
-        format_version: decoded.format_version,
-        payload_checksum: decoded.payload_checksum,
-        state: decoded.payload,
-    })
+    Ok(decoded)
 }
 
 #[cfg(test)]
@@ -1291,13 +1225,12 @@ mod tests {
 
     #[test]
     fn control_object_codec_round_trips_and_validates() {
-        let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, sample_head())
-            .expect("envelope");
+        let state = sample_head();
 
-        let encoded = encode_control_object(&envelope).expect("encode");
+        let encoded = encode_control_state(ControlObjectKind::WalHead, &state).expect("encode");
         let decoded: HeadStateEnvelope =
             decode_control_object(&encoded, ControlObjectKind::WalHead).expect("decode");
-        assert_eq!(decoded, envelope);
+        assert_eq!(decoded.into_payload(), state);
 
         let mismatch =
             decode_control_object::<MetadataRootState>(&encoded, ControlObjectKind::MetadataRoot)

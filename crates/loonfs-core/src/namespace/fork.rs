@@ -79,7 +79,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             writer_id: context.writer_id.clone(),
             acquired_at_ms: context.now_ms,
         }),
-        next_inode_id: source_manifest.payload.next_inode_id,
+        next_inode_id: source_manifest.payload().next_inode_id,
         visible_wal_tip: None,
         recent_segments: Vec::new(),
         status: NamespaceStatus::Active {},

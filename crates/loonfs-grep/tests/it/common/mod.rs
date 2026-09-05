@@ -206,7 +206,7 @@ pub(crate) mod control {
             .expect("namespace head exists");
         decode_control_object::<HeadState>(&bytes, ControlObjectKind::WalHead)
             .expect("decode namespace head")
-            .state
+            .into_payload()
     }
 
     pub(crate) async fn metadata_root(
@@ -218,7 +218,7 @@ pub(crate) mod control {
             .expect("metadata root exists");
         decode_control_object::<MetadataRootState>(&bytes, ControlObjectKind::MetadataRoot)
             .expect("decode metadata root")
-            .state
+            .into_payload()
     }
 
     pub(crate) async fn checkpoint_record(
@@ -234,7 +234,7 @@ pub(crate) mod control {
                 ControlObjectKind::CheckpointRecord,
             )
             .expect("decode checkpoint record")
-            .state,
+            .into_payload(),
         )
     }
 }

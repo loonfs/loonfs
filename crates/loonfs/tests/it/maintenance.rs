@@ -12,8 +12,7 @@ use loonfs::{
     RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, ControlObjectEnvelope, ControlObjectKind,
-    HeadState, HeadStateEnvelope,
+    decode_control_object, ControlObjectEnvelope, ControlObjectKind, HeadState,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::{AdvanceRetentionRequest, GcRequest, MetadataCompactionRequest};
@@ -169,15 +168,15 @@ fn truncate_recent_segments(store: &SharedObjectStore, namespace_id: &NamespaceI
         .expect("head exists");
     let envelope: ControlObjectEnvelope<HeadState> =
         decode_control_object(&bytes, ControlObjectKind::WalHead).expect("decode head");
-    let mut state = envelope.state;
+    let mut state = envelope.into_payload();
     assert!(
         state.recent_segments.len() > keep,
         "the fixture must publish more pointers than the legacy window held"
     );
     state.recent_segments.truncate(keep);
-    let truncated =
-        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, state).expect("head envelope");
-    let encoded = encode_control_object(&truncated).expect("encode head");
+    let encoded =
+        loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &state)
+            .expect("encode head");
     block_on(store.put_overwrite(&key, bytes::Bytes::from(encoded))).expect("rewrite head");
 }
 
@@ -594,9 +593,9 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
     // A WAL flush only appends: the base marker stays where the first
     // published manifest put it until reorganization folds the delta runs.
-    assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
+    assert_eq!(manifest.payload().base_seq, ChangeSeq(1));
     let delta_files = manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .filter(|run| run.tier == loonfs_api::wire::manifest::RunTier::Delta)

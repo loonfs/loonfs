@@ -40,13 +40,11 @@ impl ManifestSwapOnCasConflictStore {
         // Same-seq replacement referencing a different manifest: the shape a
         // pure compaction publishes.
         root.manifest.manifest_no = ManifestNo(root.manifest.manifest_no.0 + 1);
-        let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+        let bytes = loonfs_api::wire::control::encode_control_state(
             loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-            root,
+            &root,
         )
-        .expect("root envelope");
-        let bytes =
-            loonfs_api::wire::control::encode_control_object(&envelope).expect("root bytes");
+        .expect("root bytes");
         self.inner
             .put(
                 &loonfs_objectstore::keys::metadata_root(&self.namespace_id),
@@ -135,13 +133,11 @@ impl FloorRaiseOnCasConflictStore {
             },
         };
         floor.floor_seq = ChangeSeq(5);
-        let envelope = loonfs_api::wire::control::WalFloorEnvelope::from_state(
+        let bytes = loonfs_api::wire::control::encode_control_state(
             loonfs_api::wire::control::ControlObjectKind::WalFloor,
-            floor,
+            &floor,
         )
-        .expect("floor envelope");
-        let bytes =
-            loonfs_api::wire::control::encode_control_object(&envelope).expect("floor bytes");
+        .expect("floor bytes");
         self.inner
             .put(
                 &loonfs_objectstore::keys::wal_floor(&self.namespace_id),
@@ -379,14 +375,12 @@ impl RootCasTransportAfterCompetingRootStore {
     }
 
     async fn install_competing_root(&self, root: MetadataRootState) {
-        let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
-            loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-            root,
-        )
-        .expect("metadata root envelope");
         let bytes = Bytes::from(
-            loonfs_api::wire::control::encode_control_object(&envelope)
-                .expect("encode metadata root"),
+            loonfs_api::wire::control::encode_control_state(
+                loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
+                &root,
+            )
+            .expect("encode metadata root"),
         );
         self.inner
             .put(&self.root_key, bytes, PutMode::Overwrite)
@@ -583,18 +577,18 @@ async fn same_root_publications_keep_the_first_candidate() {
     )
     .await;
     assert_eq!(
-        first_manifest.payload.manifest_no,
-        second_manifest.payload.manifest_no
+        first_manifest.payload().manifest_no,
+        second_manifest.payload().manifest_no
     );
     assert_ne!(
-        first_manifest.payload.manifest_object_id,
-        second_manifest.payload.manifest_object_id
+        first_manifest.payload().manifest_object_id,
+        second_manifest.payload().manifest_object_id
     );
 
-    write_namespace_manifest(&store, &first_manifest)
+    write_namespace_manifest(&store, first_manifest.payload().clone())
         .await
         .expect("write first manifest");
-    write_namespace_manifest(&store, &second_manifest)
+    write_namespace_manifest(&store, second_manifest.payload().clone())
         .await
         .expect("write second manifest");
 
@@ -611,7 +605,7 @@ async fn same_root_publications_keep_the_first_candidate() {
         ManifestPublicationOutcome::Published(root) => {
             assert_eq!(
                 root.manifest.manifest_object_id,
-                first_manifest.payload.manifest_object_id
+                first_manifest.payload().manifest_object_id
             );
         }
         other => panic!("expected first publication to win, got {other:?}"),
@@ -630,7 +624,7 @@ async fn same_root_publications_keep_the_first_candidate() {
         ManifestPublicationOutcome::CoveredByCurrent(root) => {
             assert_eq!(
                 root.manifest.manifest_object_id,
-                first_manifest.payload.manifest_object_id
+                first_manifest.payload().manifest_object_id
             );
         }
         other => panic!("expected the second publication to be covered, got {other:?}"),
@@ -669,17 +663,17 @@ async fn flush_retries_when_a_same_seq_replacement_wins_behind_its_target() {
         ManifestNo(basis.root.manifest.manifest_no.0 + 1),
     )
     .await;
-    write_namespace_manifest(&inner, &replacement)
+    write_namespace_manifest(&inner, replacement.payload().clone())
         .await
         .expect("write replacement manifest");
     let competing_root = MetadataRootState {
         namespace_id: namespace_id.clone(),
         manifest: ManifestRef {
             owner_namespace_id: namespace_id.clone(),
-            manifest_no: replacement.payload.manifest_no,
-            manifest_object_id: replacement.payload.manifest_object_id.clone(),
-            manifest_head_seq: replacement.payload.head_seq,
-            manifest_payload_checksum: replacement.payload_checksum.clone(),
+            manifest_no: replacement.payload().manifest_no,
+            manifest_object_id: replacement.payload().manifest_object_id.clone(),
+            manifest_head_seq: replacement.payload().head_seq,
+            manifest_payload_checksum: replacement.payload_checksum().to_owned(),
         },
         updated_at_ms: context.now_ms + 1,
     };
@@ -701,7 +695,7 @@ async fn flush_retries_when_a_same_seq_replacement_wins_behind_its_target() {
         .expect("load target head")
         .state
         .seq;
-    assert!(replacement.payload.head_seq < target);
+    assert!(replacement.payload().head_seq < target);
 
     let store = RootCasTransportAfterCompetingRootStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -753,7 +747,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
     )
     .await
     .expect("build metadata segments");
-    let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+    let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no: ManifestNo(materialization_before.head.seq.0),
         manifest_object_id: manifest_object_id(ManifestNo(materialization_before.head.seq.0)),
@@ -771,8 +765,9 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
             segments: flatten_manifest_segments(segments),
         }],
     })
-    .expect("build manifest");
-    write_namespace_manifest(&store, &manifest)
+    .expect("build manifest")
+    .into_envelope();
+    write_namespace_manifest(&store, manifest.payload().clone())
         .await
         .expect("write manifest");
 
@@ -856,7 +851,7 @@ async fn root_cas_conflict_reports_a_race() {
     )
     .await
     .expect("build manifest");
-    write_namespace_manifest(&store, &manifest)
+    write_namespace_manifest(&store, manifest.payload().clone())
         .await
         .expect("write manifest");
 
@@ -913,7 +908,7 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
     )
     .await
     .expect("build manifest");
-    write_namespace_manifest(&store, &manifest)
+    write_namespace_manifest(&store, manifest.payload().clone())
         .await
         .expect("write manifest");
 
@@ -930,10 +925,10 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
 
     match outcome {
         ManifestPublicationOutcome::Published(root) => {
-            assert_eq!(root.manifest.manifest_no, manifest.payload.manifest_no);
+            assert_eq!(root.manifest.manifest_no, manifest.payload().manifest_no);
             assert_eq!(
                 root.manifest.manifest_object_id,
-                manifest.payload.manifest_object_id
+                manifest.payload().manifest_object_id
             );
         }
         other => panic!("expected the candidate to be found current, got {other:?}"),
@@ -978,10 +973,10 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
         ManifestNo(candidate_manifest_no.0 + 1),
     )
     .await;
-    write_namespace_manifest(&raw_store, &candidate_manifest)
+    write_namespace_manifest(&raw_store, candidate_manifest.payload().clone())
         .await
         .expect("write candidate manifest");
-    write_namespace_manifest(&raw_store, &competing_manifest)
+    write_namespace_manifest(&raw_store, competing_manifest.payload().clone())
         .await
         .expect("write competing manifest");
 
@@ -989,10 +984,10 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
         namespace_id: namespace_id.clone(),
         manifest: ManifestRef {
             owner_namespace_id: namespace_id.clone(),
-            manifest_no: competing_manifest.payload.manifest_no,
-            manifest_object_id: competing_manifest.payload.manifest_object_id.clone(),
-            manifest_head_seq: competing_manifest.payload.head_seq,
-            manifest_payload_checksum: competing_manifest.payload_checksum.clone(),
+            manifest_no: competing_manifest.payload().manifest_no,
+            manifest_object_id: competing_manifest.payload().manifest_object_id.clone(),
+            manifest_head_seq: competing_manifest.payload().head_seq,
+            manifest_payload_checksum: competing_manifest.payload_checksum().to_owned(),
         },
         updated_at_ms: context.now_ms + 1,
     };
@@ -1016,11 +1011,11 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
         ManifestPublicationOutcome::CoveredByCurrent(root) => {
             assert_eq!(
                 root.manifest.manifest_no,
-                competing_manifest.payload.manifest_no
+                competing_manifest.payload().manifest_no
             );
             assert_eq!(
                 root.manifest.manifest_object_id,
-                competing_manifest.payload.manifest_object_id
+                competing_manifest.payload().manifest_object_id
             );
         }
         other => panic!("expected a covering root after an ambiguous CAS, got {other:?}"),
@@ -1065,20 +1060,20 @@ async fn root_cas_permission_error_surfaces_when_a_newer_root_was_published() {
         ManifestNo(candidate_manifest_no.0 + 1),
     )
     .await;
-    write_namespace_manifest(&raw_store, &candidate_manifest)
+    write_namespace_manifest(&raw_store, candidate_manifest.payload().clone())
         .await
         .expect("write candidate manifest");
-    write_namespace_manifest(&raw_store, &competing_manifest)
+    write_namespace_manifest(&raw_store, competing_manifest.payload().clone())
         .await
         .expect("write competing manifest");
     let competing_root = MetadataRootState {
         namespace_id: namespace_id.clone(),
         manifest: ManifestRef {
             owner_namespace_id: namespace_id.clone(),
-            manifest_no: competing_manifest.payload.manifest_no,
-            manifest_object_id: competing_manifest.payload.manifest_object_id.clone(),
-            manifest_head_seq: competing_manifest.payload.head_seq,
-            manifest_payload_checksum: competing_manifest.payload_checksum.clone(),
+            manifest_no: competing_manifest.payload().manifest_no,
+            manifest_object_id: competing_manifest.payload().manifest_object_id.clone(),
+            manifest_head_seq: competing_manifest.payload().head_seq,
+            manifest_payload_checksum: competing_manifest.payload_checksum().to_owned(),
         },
         updated_at_ms: context.now_ms + 1,
     };
@@ -1107,13 +1102,11 @@ async fn root_cas_permission_error_surfaces_when_a_newer_root_was_published() {
         ),
         async {
             store.wait_until_blocked().await;
-            let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+            let bytes = loonfs_api::wire::control::encode_control_state(
                 loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-                competing_root,
+                &competing_root,
             )
-            .expect("metadata root envelope");
-            let bytes = loonfs_api::wire::control::encode_control_object(&envelope)
-                .expect("encode metadata root");
+            .expect("encode metadata root");
             raw_store
                 .put(&root_key, Bytes::from(bytes), PutMode::Overwrite)
                 .await
@@ -1364,10 +1357,10 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
     .await
     .expect("build compacted manifest");
     assert_eq!(
-        compacted.payload.head_seq,
+        compacted.payload().head_seq,
         materialization.root.manifest.manifest_head_seq
     );
-    write_namespace_manifest(&store, &compacted)
+    write_namespace_manifest(&store, compacted.payload().clone())
         .await
         .expect("write compacted manifest");
 
@@ -1382,7 +1375,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
     .expect("same-seq replacement publishes");
     match outcome {
         ManifestPublicationOutcome::Published(root) => {
-            assert_eq!(root.manifest.manifest_no, compacted.payload.manifest_no);
+            assert_eq!(root.manifest.manifest_no, compacted.payload().manifest_no);
             assert_eq!(
                 root.manifest.manifest_head_seq,
                 materialization.root.manifest.manifest_head_seq
@@ -1396,7 +1389,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
         .expect("materialization after compaction");
     assert_eq!(
         after.root.manifest.manifest_no,
-        compacted.payload.manifest_no
+        compacted.payload().manifest_no
     );
     assert!(metadata_states_equivalent(
         &materialization.metadata_state,
@@ -1653,11 +1646,11 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         ManifestNo(stale_basis.root.manifest.manifest_no.0 + 1),
     )
     .await;
-    assert!(stale_higher_head.payload.head_seq > sibling.payload.head_seq);
-    write_namespace_manifest(&store, &sibling)
+    assert!(stale_higher_head.payload().head_seq > sibling.payload().head_seq);
+    write_namespace_manifest(&store, sibling.payload().clone())
         .await
         .expect("write sibling manifest");
-    write_namespace_manifest(&store, &stale_higher_head)
+    write_namespace_manifest(&store, stale_higher_head.payload().clone())
         .await
         .expect("write stale manifest");
 
@@ -1687,7 +1680,8 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
     match stale_outcome {
         ManifestPublicationOutcome::PredecessorChanged(root) => {
             assert_eq!(
-                root.manifest.manifest_object_id, sibling.payload.manifest_object_id,
+                root.manifest.manifest_object_id,
+                sibling.payload().manifest_object_id,
                 "the sibling's acknowledged publication must survive"
             );
         }
@@ -1700,6 +1694,6 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         .state;
     assert_eq!(
         root_after.manifest.manifest_object_id,
-        sibling.payload.manifest_object_id
+        sibling.payload().manifest_object_id
     );
 }

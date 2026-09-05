@@ -446,7 +446,7 @@ async fn collect_manifest_segments<S: ObjectStore + ?Sized>(
         {
             Ok(Some(manifest)) => live.segments.extend(
                 manifest
-                    .payload
+                    .payload()
                     .runs
                     .iter()
                     .flat_map(|run| &run.segments)
@@ -721,13 +721,13 @@ pub(super) async fn select_reference_anchor<S: ObjectStore + ?Sized>(
         };
         manifest_object_ids.insert(manifest_object_id);
         head_seq = Some(
-            head_seq.map_or(manifest.payload.head_seq, |current: ChangeSeq| {
-                current.min(manifest.payload.head_seq)
+            head_seq.map_or(manifest.payload().head_seq, |current: ChangeSeq| {
+                current.min(manifest.payload().head_seq)
             }),
         );
         segments.extend(
             manifest
-                .payload
+                .payload()
                 .runs
                 .iter()
                 .flat_map(|run| &run.segments)

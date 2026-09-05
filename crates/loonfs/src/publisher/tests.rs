@@ -1631,8 +1631,8 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
             .expect("read WAL segment")
             .expect("WAL segment exists");
         let segment = decode_wal_segment_envelope_zstd(&bytes).expect("decode WAL segment");
-        if segment.payload.records.len() == 2 {
-            for record in segment.payload.records {
+        if segment.payload().records.len() == 2 {
+            for record in segment.into_payload().records {
                 batched_actors.insert(record.commit_id.to_string(), record.committed_by);
             }
         }
@@ -1780,7 +1780,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
             .expect("read wal")
             .expect("wal exists");
         let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");
-        record_counts.push(segment.payload.records.len());
+        record_counts.push(segment.payload().records.len());
     }
     record_counts.sort_unstable();
     // The warmup published alone; the concurrent pair shares a segment.

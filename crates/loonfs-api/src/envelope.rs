@@ -84,17 +84,6 @@ pub enum EnvelopeCodecError {
         /// Digest recomputed over the exact stored payload bytes.
         actual: String,
     },
-    /// Reports an in-memory payload changed without rebuilding its envelope checksum.
-    #[error(
-        "envelope checksum `{checksum}` does not match its payload `{actual}`: \
-         rebuild the envelope from its payload"
-    )]
-    StalePayloadChecksum {
-        /// Digest retained by the stale in-memory envelope.
-        checksum: String,
-        /// Digest recomputed from the payload about to be encoded.
-        actual: String,
-    },
 }
 
 /// Requires the probed kind to be exactly `expected`.
@@ -136,23 +125,6 @@ pub fn verify_payload_checksum(
     Ok(())
 }
 
-/// Requires an in-memory envelope's recorded checksum to still match its
-/// payload before encoding — a stale checksum means the caller mutated the
-/// payload without rebuilding the envelope.
-pub fn verify_checksum_fresh(
-    checksum: &str,
-    payload_bytes: &[u8],
-) -> Result<(), EnvelopeCodecError> {
-    let actual = sha256_digest(payload_bytes);
-    if actual != checksum {
-        return Err(EnvelopeCodecError::StalePayloadChecksum {
-            checksum: checksum.to_owned(),
-            actual,
-        });
-    }
-    Ok(())
-}
-
 /// Durable layout of a JSON-bodied envelope: the shared fields plus the
 /// payload as a raw JSON fragment, kept inline so the object remains
 /// directly readable JSON while `payload_checksum` covers the exact
@@ -166,46 +138,91 @@ struct JsonEnvelopeDocument {
     payload: Box<RawValue>,
 }
 
-/// The `sha256:<hex>` checksum a JSON payload will carry, computed over its
-/// canonical serialization.
-pub fn json_payload_checksum<T: Serialize>(payload: &T) -> Result<String, EnvelopeCodecError> {
-    let bytes = serde_json::to_vec(payload)
-        .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
-    Ok(sha256_digest(&bytes))
+/// An envelope whose framing was verified on read or derived on write.
+///
+/// Payload access is read-only: changing a payload requires a new encoding.
+/// Family codecs apply their own kind, version, and payload validation rules.
+/// Kind and version are checked at the codec boundary, not retained as caller state.
+/// This type has no serde decoder; durable reads must use a checked codec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedEnvelope<T> {
+    pub(crate) payload_checksum: String,
+    pub(crate) payload: T,
 }
 
-/// Encodes one JSON-bodied envelope, validating that the recorded version is
-/// what this build writes for `kind` and that the recorded checksum still
-/// matches the payload.
+impl<T> VerifiedEnvelope<T> {
+    /// Checksum of the exact stored payload bytes.
+    pub fn payload_checksum(&self) -> &str {
+        &self.payload_checksum
+    }
+    /// Payload protected by this framing. Clone it to prepare a changed successor.
+    pub fn payload(&self) -> &T {
+        &self.payload
+    }
+    /// Takes the payload out of its verified framing for reuse or modification.
+    pub fn into_payload(self) -> T {
+        self.payload
+    }
+}
+
+/// One encoding and the envelope derived from those exact bytes.
+///
+/// Only codecs construct this pair. Neither half can be changed in place.
+/// Readers retain just [`VerifiedEnvelope`], without a second copy of the bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedEnvelope<T> {
+    pub(crate) envelope: VerifiedEnvelope<T>,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl<T> EncodedEnvelope<T> {
+    /// Envelope derived while encoding, without decoding or serializing again.
+    pub fn envelope(&self) -> &VerifiedEnvelope<T> {
+        &self.envelope
+    }
+    /// Complete durable document, ready to write.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    /// Takes the complete durable document.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+    /// Discards the encoding and retains its verified envelope.
+    pub fn into_envelope(self) -> VerifiedEnvelope<T> {
+        self.envelope
+    }
+    /// Separates the immutable envelope and its bytes for storage publication.
+    pub fn into_parts(self) -> (VerifiedEnvelope<T>, Vec<u8>) {
+        (self.envelope, self.bytes)
+    }
+}
+
+/// Serializes the payload once and derives framing from those same bytes.
 pub fn encode_json_envelope<T: Serialize>(
     kind: &str,
     format_version: u32,
-    supported_version: u32,
-    payload_checksum: &str,
-    payload: &T,
-) -> Result<Vec<u8>, EnvelopeCodecError> {
-    verify_version(kind, format_version, supported_version)?;
-    let payload_json = serde_json::to_string(payload)
+    payload: T,
+) -> Result<EncodedEnvelope<T>, EnvelopeCodecError> {
+    let payload_json = serde_json::to_string(&payload)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
-    verify_checksum_fresh(payload_checksum, payload_json.as_bytes())?;
+    let payload_checksum = sha256_digest(payload_json.as_bytes());
     let document = JsonEnvelopeDocument {
         kind: kind.to_owned(),
         format_version,
-        payload_checksum: payload_checksum.to_owned(),
+        payload_checksum: payload_checksum.clone(),
         payload: RawValue::from_string(payload_json)
             .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?,
     };
-    serde_json::to_vec(&document).map_err(|err| EnvelopeCodecError::EnvelopeEncode(err.to_string()))
-}
-
-/// A decoded JSON-bodied envelope's shared fields plus its parsed payload.
-pub struct DecodedJsonEnvelope<T> {
-    /// Version gate the stored object declared and this build accepted.
-    pub format_version: u32,
-    /// Digest verified against the payload fragment exactly as stored.
-    pub payload_checksum: String,
-    /// The family payload decoded from that verified fragment.
-    pub payload: T,
+    let bytes = serde_json::to_vec(&document)
+        .map_err(|err| EnvelopeCodecError::EnvelopeEncode(err.to_string()))?;
+    Ok(EncodedEnvelope {
+        envelope: VerifiedEnvelope {
+            payload_checksum,
+            payload,
+        },
+        bytes,
+    })
 }
 
 /// Decodes one JSON-bodied envelope, then checks its kind, version, checksum,
@@ -218,7 +235,7 @@ pub fn decode_json_envelope<T: DeserializeOwned>(
     bytes: &[u8],
     supported_version: u32,
     classify_kind: impl FnOnce(&str) -> Result<(), EnvelopeCodecError>,
-) -> Result<DecodedJsonEnvelope<T>, EnvelopeCodecError> {
+) -> Result<VerifiedEnvelope<T>, EnvelopeCodecError> {
     let probe: EnvelopeProbe = serde_json::from_slice(bytes)
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     classify_kind(&probe.kind)?;
@@ -230,7 +247,7 @@ pub fn decode_json_envelope<T: DeserializeOwned>(
 
 fn decode_json_envelope_payload<T: DeserializeOwned>(
     document: JsonEnvelopeDocument,
-) -> Result<DecodedJsonEnvelope<T>, EnvelopeCodecError> {
+) -> Result<VerifiedEnvelope<T>, EnvelopeCodecError> {
     verify_payload_checksum(
         &document.payload_checksum,
         document.payload.get().as_bytes(),
@@ -238,9 +255,56 @@ fn decode_json_envelope_payload<T: DeserializeOwned>(
     let payload: T = serde_json::from_str(document.payload.get())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
 
-    Ok(DecodedJsonEnvelope {
-        format_version: document.format_version,
+    Ok(VerifiedEnvelope {
         payload_checksum: document.payload_checksum,
         payload,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn encoding_serializes_the_payload_once_and_checksums_those_bytes() {
+        struct CountedPayload<'a>(&'a Cell<usize>);
+        impl Serialize for CountedPayload<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                serializer.serialize_u64(42)
+            }
+        }
+        let calls = Cell::new(0);
+        let encoded = encode_json_envelope("test", 1, CountedPayload(&calls)).expect("encode");
+        let document: JsonEnvelopeDocument =
+            serde_json::from_slice(encoded.as_bytes()).expect("document");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(document.payload.get(), "42");
+        assert_eq!(encoded.envelope().payload_checksum(), sha256_digest(b"42"));
+        assert_eq!(
+            document.payload_checksum,
+            encoded.envelope().payload_checksum()
+        );
+    }
+
+    #[test]
+    fn decoding_checks_the_stored_payload_including_noncanonical_whitespace() {
+        let payload = r#"{ "value" : 42 }"#;
+        let checksum = sha256_digest(payload.as_bytes());
+        let bytes = format!(
+            r#"{{"kind":"test","format_version":1,"payload_checksum":"{checksum}","payload":{payload}}}"#
+        );
+        let decoded: VerifiedEnvelope<serde_json::Value> =
+            decode_json_envelope(bytes.as_bytes(), 1, |kind| verify_kind("test", kind))
+                .expect("decode exact stored bytes");
+        assert_eq!(decoded.payload_checksum(), checksum);
+        let successor =
+            encode_json_envelope("test", 1, decoded.into_payload()).expect("canonical encoding");
+        assert_ne!(successor.envelope().payload_checksum(), checksum);
+        let reread: VerifiedEnvelope<serde_json::Value> =
+            decode_json_envelope(successor.as_bytes(), 1, |kind| verify_kind("test", kind))
+                .expect("decode canonical bytes");
+        assert_eq!(&reread, successor.envelope());
+    }
 }

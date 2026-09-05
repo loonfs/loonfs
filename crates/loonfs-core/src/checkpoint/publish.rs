@@ -10,7 +10,9 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, ManifestRef, MetadataRootState,
 };
-use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
+use loonfs_api::wire::manifest::{
+    encode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestPayload,
+};
 use loonfs_api::{ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_root};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -37,29 +39,29 @@ pub(super) enum ManifestPublicationOutcome {
 )]
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
-    manifest: &NamespaceManifestEnvelope,
-) -> std::result::Result<(), MetadataProjectionLoadError> {
-    let manifest_key = metadata_manifest_object(
-        &manifest.payload.namespace_id,
-        &manifest.payload.manifest_object_id,
-    );
-    let manifest_bytes = Bytes::from(encode_namespace_manifest_json(manifest).map_err(|err| {
-        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
-            object_key: manifest_key.clone(),
-            message: err.to_string(),
-        })
-    })?);
+    payload: NamespaceManifestPayload,
+) -> std::result::Result<NamespaceManifestEnvelope, MetadataProjectionLoadError> {
+    let manifest_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_object_id);
+    let (manifest, bytes) = encode_namespace_manifest_json(payload)
+        .map_err(|err| {
+            MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
+                object_key: manifest_key.clone(),
+                message: err.to_string(),
+            })
+        })?
+        .into_parts();
+    let manifest_bytes = Bytes::from(bytes);
     // Immutable format objects use verified writes so identical bytes are an idempotent success
     // and different bytes are corruption.
     match store
         .put_immutable_verified(&manifest_key, manifest_bytes)
         .await
     {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(manifest),
         Err(ImmutableWriteError::DifferentObject { .. }) => Err(
             MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
                 object_key: manifest_key,
-                manifest_no: manifest.payload.manifest_no,
+                manifest_no: manifest.payload().manifest_no,
             }),
         ),
         Err(ImmutableWriteError::Transport { source, .. }) => Err(
@@ -299,10 +301,10 @@ pub(super) fn manifest_ref_for(
 ) -> ManifestRef {
     ManifestRef {
         owner_namespace_id: namespace_id.clone(),
-        manifest_no: manifest.payload.manifest_no,
-        manifest_object_id: manifest.payload.manifest_object_id.clone(),
-        manifest_head_seq: manifest.payload.head_seq,
-        manifest_payload_checksum: manifest.payload_checksum.clone(),
+        manifest_no: manifest.payload().manifest_no,
+        manifest_object_id: manifest.payload().manifest_object_id.clone(),
+        manifest_head_seq: manifest.payload().head_seq,
+        manifest_payload_checksum: manifest.payload_checksum().to_owned(),
     }
 }
 

@@ -198,38 +198,10 @@ pub struct WalSegmentPayload {
     pub records: Vec<WalCommitPayload>,
 }
 
-/// In-memory view of a WAL segment envelope.
-///
-/// This struct is not the durable layout; durable bytes are produced only by
-/// [`encode_wal_segment_envelope_zstd`] and validated only by
-/// [`decode_wal_segment_envelope_zstd`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WalSegmentEnvelope {
-    /// Durable-family discriminator checked before payload decoding.
-    pub kind: WalEnvelopeKind,
-    /// Family-local format version, which must equal [`WAL_FORMAT_VERSION`].
-    pub format_version: u32,
-    /// Digest of the encoded payload bytes exactly as stored in the durable
-    /// document, in `sha256:<hex>` form.
-    pub payload_checksum: String,
-    /// Decoded namespace segment content protected by `payload_checksum`.
-    pub payload: WalSegmentPayload,
-}
+/// A WAL segment decoded through its checked durable codec.
+pub type WalSegmentEnvelope = crate::envelope::VerifiedEnvelope<WalSegmentPayload>;
 
 impl WalSegmentEnvelope {
-    /// Builds a versioned envelope and computes its checksum from canonical CBOR payload bytes.
-    ///
-    /// Construction fails when the payload cannot be encoded.
-    pub fn from_payload(payload: WalSegmentPayload) -> Result<Self, EnvelopeCodecError> {
-        Ok(Self {
-            kind: WalEnvelopeKind::NamespaceWalSegment,
-            format_version: WAL_FORMAT_VERSION,
-            payload_checksum: wal_payload_checksum(&payload)?,
-            payload,
-        })
-    }
-
     /// Projects the identity, integrity, and sequence metadata needed to link this segment.
     pub fn pointer(&self) -> WalSegmentPointer {
         WalSegmentPointer {
@@ -256,12 +228,6 @@ struct WalSegmentDocument {
     payload: Vec<u8>,
 }
 
-pub(crate) fn wal_payload_checksum(
-    payload: &WalSegmentPayload,
-) -> Result<String, EnvelopeCodecError> {
-    Ok(sha256_digest(&encode_wal_payload_cbor(payload)?))
-}
-
 pub(crate) fn encode_wal_payload_cbor(
     payload: &WalSegmentPayload,
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
@@ -271,33 +237,30 @@ pub(crate) fn encode_wal_payload_cbor(
     Ok(encoded)
 }
 
-/// Encodes a WAL envelope as its durable zstd-compressed CBOR representation.
-///
-/// Encoding fails when the version is unsupported, the in-memory checksum is
-/// stale, CBOR serialization fails, or zstd cannot compress the document. See
-/// [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
+/// Encodes a WAL payload once, then checksums and compresses its durable document.
 pub fn encode_wal_segment_envelope_zstd(
-    envelope: &WalSegmentEnvelope,
-) -> Result<Vec<u8>, EnvelopeCodecError> {
-    envelope::verify_version(
-        envelope.kind.as_str(),
-        envelope.format_version,
-        WAL_FORMAT_VERSION,
-    )?;
-    let payload_bytes = encode_wal_payload_cbor(&envelope.payload)?;
-    envelope::verify_checksum_fresh(&envelope.payload_checksum, &payload_bytes)?;
-
+    payload: WalSegmentPayload,
+) -> Result<crate::envelope::EncodedEnvelope<WalSegmentPayload>, EnvelopeCodecError> {
+    let payload_bytes = encode_wal_payload_cbor(&payload)?;
+    let payload_checksum = sha256_digest(&payload_bytes);
     let document = WalSegmentDocument {
-        kind: envelope.kind.as_str().to_owned(),
-        format_version: envelope.format_version,
-        payload_checksum: envelope.payload_checksum.clone(),
+        kind: WalEnvelopeKind::NamespaceWalSegment.as_str().to_owned(),
+        format_version: WAL_FORMAT_VERSION,
+        payload_checksum: payload_checksum.clone(),
         payload: payload_bytes,
     };
     let mut encoded = Vec::new();
     into_writer(&document, &mut encoded)
         .map_err(|err| EnvelopeCodecError::EnvelopeEncode(err.to_string()))?;
-    zstd::stream::encode_all(encoded.as_slice(), crate::sst_blocks::ZSTD_LEVEL)
-        .map_err(|err| EnvelopeCodecError::Compress(err.to_string()))
+    let bytes = zstd::stream::encode_all(encoded.as_slice(), crate::sst_blocks::ZSTD_LEVEL)
+        .map_err(|err| EnvelopeCodecError::Compress(err.to_string()))?;
+    Ok(crate::envelope::EncodedEnvelope {
+        envelope: crate::envelope::VerifiedEnvelope {
+            payload_checksum,
+            payload,
+        },
+        bytes,
+    })
 }
 
 /// Decodes and verifies a durable zstd-compressed WAL segment envelope.
@@ -326,8 +289,6 @@ pub fn decode_wal_segment_envelope_zstd(
         .map_err(EnvelopeCodecError::PayloadDecode)?;
 
     Ok(WalSegmentEnvelope {
-        kind: expected_kind,
-        format_version: document.format_version,
         payload_checksum: document.payload_checksum,
         payload,
     })

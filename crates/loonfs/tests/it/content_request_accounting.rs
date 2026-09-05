@@ -12,7 +12,7 @@ use loonfs::{
     ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
     CONTENT_READ_CHUNK_BYTES,
 };
-use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
+use loonfs_api::wire::control::ControlObjectKind;
 use loonfs_api::{ContentId, ContentStoreId};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -177,12 +177,17 @@ async fn bind_namespace_to_content_store(
         .expect("load namespace head")
         .state;
     head.content_store_id = content_store_id;
-    let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
-        .expect("build namespace head");
+    let envelope = head;
     store
         .put_overwrite(
             &wal_head(namespace_id),
-            Bytes::from(encode_control_object(&envelope).expect("encode namespace head")),
+            Bytes::from(
+                loonfs_api::wire::control::encode_control_state(
+                    ControlObjectKind::WalHead,
+                    &envelope,
+                )
+                .expect("encode namespace head"),
+            ),
         )
         .await
         .expect("rebind the namespace head to the shared content store");

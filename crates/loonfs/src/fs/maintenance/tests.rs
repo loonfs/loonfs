@@ -343,7 +343,7 @@ async fn current_manifest_payload<S: ObjectStore + ?Sized>(
         .expect("the manifest exists");
     decode_namespace_manifest_json(&bytes)
         .expect("decode the manifest")
-        .payload
+        .into_payload()
 }
 
 /// The runs the bindings group holds right now, and the rows in them.

@@ -27,7 +27,7 @@ pub(crate) fn prepare_commit_head_publish(
     plan: &CommitPlan,
     wal: &PreparedWalSegment,
 ) -> Result<PreparedCommitHeadPublish, CommitHeadPublishError> {
-    let wal_payload = &wal.envelope.payload;
+    let wal_payload = &wal.envelope().payload();
     ensure_segment_connects(
         "writer_epoch",
         current_head.writer_epoch,
@@ -47,7 +47,7 @@ pub(crate) fn prepare_commit_head_publish(
     ensure_segment_connects("end_seq", plan.assigned_seq, wal_payload.end_seq)?;
 
     let object_key = wal_head(&current_head.namespace_id);
-    let new_tip = wal.envelope.pointer();
+    let new_tip = wal.envelope().pointer();
     let resulting_head = HeadState {
         seq: plan.assigned_seq,
         head_commit_id: plan.commit_id.clone(),
@@ -135,7 +135,6 @@ fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHead
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::{encode_control_object, HeadStateEnvelope};
 
     #[test]
     fn head_cas_transport_failure_maps_to_unknown_outcome_not_failure() {
@@ -170,7 +169,7 @@ mod tests {
         ));
     }
     use loonfs_api::wire::control::{NamespaceStatus, WriterBlock};
-    use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
+    use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentPayload};
     use loonfs_api::{CommitId, InodeId, NamespaceId, WalSegmentId, WriterEpoch, MAX_ID_BYTES};
 
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
@@ -252,11 +251,7 @@ mod tests {
             end_seq,
             records,
         };
-        let envelope = WalSegmentEnvelope::from_payload(payload).expect("wal envelope");
-        PreparedWalSegment {
-            envelope,
-            encoded_bytes: Vec::new(),
-        }
+        loonfs_api::wire::wal::encode_wal_segment_envelope_zstd(payload).expect("wal encoding")
     }
 
     #[test]
@@ -272,20 +267,20 @@ mod tests {
         assert_eq!(prepared.resulting_head.seq, ChangeSeq(9));
         assert_eq!(
             prepared.resulting_head.visible_wal_tip,
-            Some(wal.envelope.pointer())
+            Some(wal.envelope().pointer())
         );
         assert_eq!(
             prepared.object_key,
             wal_head(&prepared.resulting_head.namespace_id),
         );
-        let expected_envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::WalHead,
-            prepared.resulting_head.clone(),
-        )
-        .expect("head envelope");
+        let expected_envelope = prepared.resulting_head.clone();
         assert_eq!(
             prepared.encoded_bytes,
-            encode_control_object(&expected_envelope).expect("encoded head"),
+            loonfs_api::wire::control::encode_control_state(
+                ControlObjectKind::WalHead,
+                &expected_envelope
+            )
+            .expect("encoded head"),
         );
     }
 
@@ -352,7 +347,7 @@ mod tests {
             ChangeSeq(7),
             2,
         );
-        let prior_tip = prior.envelope.pointer();
+        let prior_tip = prior.envelope().pointer();
         current_head.visible_wal_tip = Some(prior_tip.clone());
         current_head.recent_segments = Vec::new();
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
@@ -361,7 +356,7 @@ mod tests {
         let prepared =
             prepare_commit_head_publish(&current_head, &plan, &wal).expect("prepare head publish");
 
-        let new_tip = wal.envelope.pointer();
+        let new_tip = wal.envelope().pointer();
         assert_eq!(prepared.resulting_head.recent_segments, vec![prior_tip]);
         assert_eq!(prepared.resulting_head.visible_wal_tip, Some(new_tip));
     }
@@ -379,7 +374,7 @@ mod tests {
                 ChangeSeq(index + 1),
                 1,
             );
-            segment.envelope.pointer()
+            segment.envelope().pointer()
         };
         let old_tip = filler(limit);
         current_head.visible_wal_tip = Some(old_tip.clone());
@@ -407,7 +402,7 @@ mod tests {
         assert_eq!(recent[0], old_tip);
         assert_eq!(
             prepared.resulting_head.visible_wal_tip,
-            Some(wal.envelope.pointer())
+            Some(wal.envelope().pointer())
         );
         assert!(!recent.contains(&oldest), "oldest hint must fall off");
     }
@@ -511,9 +506,10 @@ mod tests {
         state.visible_wal_tip = segments.first().cloned();
         state.recent_segments = segments.into_iter().skip(1).collect();
 
-        let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, state)
-            .expect("head envelope");
-        encode_control_object(&envelope).expect("encode head").len()
+        let envelope = state;
+        loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &envelope)
+            .expect("encode head")
+            .len()
     }
 
     #[test]

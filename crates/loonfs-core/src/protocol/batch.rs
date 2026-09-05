@@ -239,7 +239,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         Err(error) => return abort_batch(slots, &error),
     };
 
-    let wal_records = wal.envelope.payload.records.clone();
+    let wal_records = wal.envelope().payload().records.clone();
     assert_eq!(
         slots
             .iter()
@@ -311,11 +311,11 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
         )
         .map_err(|error| CoreError::Internal(format!("wal build failed: {error}")))?;
         let object_key = wal_segment(
-            &wal.envelope.payload.namespace_id,
-            &wal.envelope.payload.segment_id,
+            &wal.envelope().payload().namespace_id,
+            &wal.envelope().payload().segment_id,
         );
         store
-            .put_immutable_verified(&object_key, Bytes::copy_from_slice(&wal.encoded_bytes))
+            .put_immutable_verified(&object_key, Bytes::copy_from_slice(wal.as_bytes()))
             .await
             .map_err(wal_immutable_write_error)?;
         Ok(wal)
