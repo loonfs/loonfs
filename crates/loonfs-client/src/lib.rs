@@ -37,16 +37,15 @@ use loonfs_api::{
         UploadContentResponse, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
     },
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Checksum,
-    ChecksumAlgorithm, CommitId, CommitRequest, ContentEvidence, ContentRef,
-    CreateCheckpointRequest, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceDiagnostics, NamespaceId,
-    PathEntry, PutRetryAttempt, PutRetryErrorClassification, PutRetryReceipt,
-    ReleaseCheckpointResponse, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse,
-    SecretString, StreamingChecksum, UploadId, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, CreateCheckpointRequest,
+    CreateNamespaceRequest, DeleteNamespaceResponse, FilesystemOperation, ForkNamespaceRequest,
+    GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ListInodeChildrenResponse, ListPathEntriesResponse, ListTrashResponse, Namespace,
+    NamespaceDiagnostics, NamespaceId, PathEntry, ReleaseCheckpointResponse, RevisionNo,
+    RunMaintenanceRequest, RunMaintenanceResponse, SecretString, StreamingChecksum, UploadId,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
@@ -80,7 +79,9 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 
 pub use downloads::{DirectDownloadStream, DownloadOptions};
 pub use namespace_path::NamespacePath;
-pub use uploads::staging::{MultipartUploadResume, PutFileJournal, STREAMING_PUT_MIN_BYTES};
+pub use uploads::staging::{
+    MultipartUploadResume, PreparedContent, PutFileJournal, STREAMING_PUT_MIN_BYTES,
+};
 
 /// Async HTTP client for LoonFS.
 ///

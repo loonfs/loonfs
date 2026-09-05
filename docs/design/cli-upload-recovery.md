@@ -4,7 +4,10 @@ File-backed remote PUTs keep recovery records in `$XDG_STATE_HOME/loonfs/uploads
 or `$HOME/.local/state/loonfs/uploads`. The key includes the profile, server URL,
 namespace, remote path, canonical local path, and any explicit commit ID. Local
 path bytes are encoded without lossy Unicode conversion. Embedded uploads and
-standard-input streams do not use these records.
+standard-input streams do not use these records. Repeating those commands uploads
+new content and conflicts if the supplied commit ID already committed, even for
+identical bytes. The embedded Rust API supports retries through retained prepared
+content; the embedded CLI does not persist that proof across commands.
 
 Before opening an upload, the CLI saves the chosen commit ID, actor, message,
 overwrite guards, source length, and full-precision modification time. The record
@@ -22,8 +25,9 @@ through `create_commit`, without reopening the upload or reconciling new content
 against the earlier commit. Durable commit receipts can resolve a lost response
 even after the upload session has disappeared. If the request never committed and
 its proof expired, the server rejects it; recovery does not silently create a new
-attempt. Client calls without a journal still use the existing convenience retry
-reconciliation.
+attempt. Calls without a journal can retain prepared content and an explicit
+commit ID to retry publication. Repeating the upload creates a different request
+and returns a conflict if the ID already committed, even for identical bytes.
 
 Each update writes and syncs a private temporary file in the journal directory,
 then atomically replaces the record. Unix hosts also sync the directory after

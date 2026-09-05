@@ -588,64 +588,18 @@ Keep the `content_ref` a completed upload returned and reuse it across
 commit retries; that is the cheapest retry and the one the server can
 answer on its own.
 
-**Client-side retry reconciliation.** Rerunning a whole upload-then-commit
-sequence under one `commit_id` — the shape of a command rerun, where no
-`content_ref` survived the first attempt — is nonetheless safe when the
-request is identical. A client that composes upload and commit must, on
-`commit_id_reuse_conflict`, resolve it as follows before surfacing it.
+**Rust convenience calls.** Both the HTTP client and embedded runtime offer
+`prepare_file_bytes()` / `prepare_file_stream()`, followed by `put_file_prepared()`.
+Retain the prepared content and use the same explicit commit ID, path, and
+options on each publication attempt. Preparation alone does not publish a file
+or extend the completed upload's lifetime.
 
-The proof is the commit's whole semantic identity, not a selection of its
-parts. The conflict reports `details.committed_fingerprint`, the fingerprint
-the server's receipt holds for what landed. The client recomputes the
-fingerprint its own retry would have had if the only difference were the
-fresh content object, and the two values must be equal. Comparing the whole
-value is what makes the check complete: a path, a `behavior`, an
-`expected_revision_no`, a `message`, or an operation count that differs is
-a different mutation, and every field a future request gains is covered the
-day it joins the preimage.
-
-1. Find what that `commit_id` committed. There is no read keyed by commit
-   id, but the error names where it landed: read the change feed once at
-   `details.committed_seq` — cursor `after_seq = committed_seq - 1`, limit 1
-   — and take the row whose `commit_id` matches. If `details.committed_seq`
-   or `details.committed_fingerprint` is absent, or the feed answers
-   `rebootstrap_required` because retention has moved past that sequence, or
-   the row there names some other commit, there is nothing to compare: go
-   straight to rule 5.
-2. Take the committed content reference from that row. The row must carry
-   exactly one content-bearing event — a `file_created` or a
-   `content_changed`. A single put produces exactly one, however many
-   parent directories it also had to create, because directory creations
-   carry no content ref. None, or more than one, means the commit was not
-   this put: go to rule 5.
-3. Recompute the fingerprint of the request just made, with that committed
-   `content_ref` substituted for the freshly uploaded one, and compare it
-   against `details.committed_fingerprint`. Any difference means the two
-   requests are not the same mutation: go to rule 5. The preimage is the
-   one defined in section 5.1, so annotations are compared exactly as the
-   server fingerprints them — an absent message and an empty one are
-   different commits, and a client must not fold both into "no message".
-4. Compare the uploaded bytes with the committed content reference's
-   `checksum`. If the client still has the bytes, it recomputes the required
-   checksum. If it streamed the bytes, it uses the checksum calculated during
-   that stream. The algorithms must match; the client must not compare or
-   convert different algorithms.
-
-   If both the fingerprint and checksum match, report the original commit and
-   its `committed_seq`.
-5. Otherwise, report failure. Preserve `commit_id_reuse_conflict` when the
-   fingerprints or content differ. Also fail when the original commit cannot
-   be found or the client cannot compute the required checksum. An incomplete
-   comparison is never treated as success.
-
-The duplicate content object the rerun uploaded is then referenced by
-nothing. That is by design: it is a completed upload whose content no
-metadata names, and content garbage collection reclaims it once its grace
-passes (format spec, "Garbage collection", rule 11).
-
-This reconciliation is a client obligation, not a server behaviour: the
-server's answer to a reused id with different content is always
-`commit_id_reuse_conflict`.
+Calling `put_file_bytes()` or `put_file_stream()` again uploads a new object; using
+an already-committed ID therefore returns `commit_id_reuse_conflict`, even for
+identical bytes. The unused upload can be reclaimed after its grace period.
+These helpers do not read the change feed or substitute an earlier content
+reference. To recover across processes, the remote CLI saves the full request
+before submission and resends it directly.
 
 Identical resubmission is the reconciliation mechanism. There is no separate
 commit-status lookup: after `commit_outcome_unknown`, a transport failure, or

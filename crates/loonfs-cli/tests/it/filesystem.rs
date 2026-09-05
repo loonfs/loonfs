@@ -407,13 +407,8 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         json_error(&conflicted)
     );
 
-    // A put's identity includes *which* content object it attaches, and
-    // `loonfs put` uploads its file every time it runs, so a rerun under the
-    // same commit id is a different mutation as far as the server is
-    // concerned. What makes rerunning safe anyway is the client comparing
-    // the bytes it just sent against what that commit id actually
-    // committed: identical bytes mean the command had already succeeded, so
-    // it reports the same commit rather than a conflict.
+    // Embedded PUTs upload a new object on each command invocation.
+    // The original receipt remains authoritative even when the bytes match.
     let local_payload = payload.to_str().expect("utf-8 path");
     let first = harness.run(&[
         "--json",
@@ -432,11 +427,12 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         "--commit-id",
         "pinned-put",
     ]);
-    assert_success(&rerun);
+    assert_failure(&rerun);
+    assert_eq!(json_error(&rerun)["code"], "commit_id_reuse_conflict");
     assert_eq!(
-        json_data(&rerun)["committed_seq"],
+        json_error(&rerun)["details"]["committed_seq"],
         json_data(&first)["committed_seq"],
-        "rerunning an identical put must report the commit that already landed"
+        "the conflict identifies the original publication"
     );
 
     // Different bytes under that commit id are a different operation, and
@@ -486,8 +482,7 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
     assert_success(&first);
     assert_eq!(download(&harness, "/big.bin", "big-back.bin"), payload);
 
-    // The same reconciliation the buffered path has: the rerun uploads
-    // again, conflicts on identity, and resolves to the commit that landed.
+    // A second embedded upload creates another object and must conflict.
     let rerun = harness.run(&[
         "--json",
         "put",
@@ -497,11 +492,12 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
         "pinned-big",
         "--force",
     ]);
-    assert_success(&rerun);
+    assert_failure(&rerun);
+    assert_eq!(json_error(&rerun)["code"], "commit_id_reuse_conflict");
     assert_eq!(
-        json_data(&rerun)["committed_seq"],
+        json_error(&rerun)["details"]["committed_seq"],
         json_data(&first)["committed_seq"],
-        "rerunning an identical large put must report the commit that already landed"
+        "the conflict identifies the original publication"
     );
 
     let mut changed = payload.clone();

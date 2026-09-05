@@ -2,29 +2,10 @@
 
 use super::*;
 use crate::transport::SendPolicy;
-use crate::uploads::staging::{StagedContent, UploadContinuity};
+use crate::uploads::staging::{PreparedContent, UploadContinuity};
 
 fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
     commit.commit_id.clone().unwrap_or_else(CommitId::generate)
-}
-
-fn classify_put_retry_error(error: &ClientError) -> PutRetryErrorClassification {
-    match error.code() {
-        Some(ErrorCode::CommitIdReuseConflict) => {
-            let receipt = match error {
-                ClientError::Api { details, .. } => details.as_ref().and_then(|details| {
-                    Some(PutRetryReceipt {
-                        committed_seq: details.committed_seq?,
-                        committed_fingerprint: details.committed_fingerprint.clone()?,
-                    })
-                }),
-                _ => None,
-            };
-            PutRetryErrorClassification::CommitIdReuseConflict(receipt)
-        }
-        Some(ErrorCode::RebootstrapRequired) => PutRetryErrorClassification::RebootstrapRequired,
-        _ => PutRetryErrorClassification::Other,
-    }
 }
 
 impl Client {
@@ -47,15 +28,9 @@ impl Client {
 
     /// Uploads bytes and commits them at a path.
     ///
-    /// Reusing a successful `commit_id` is safe when the request is unchanged.
-    /// A retry uploads a new content object, so the server initially reports
-    /// `commit_id_reuse_conflict`. The client reads the stored receipt and
-    /// compares the content and message. Matching values return the original
-    /// result; different values preserve the conflict.
-    ///
-    /// The freshly uploaded duplicate object is then referenced by nothing.
-    /// That is by design, not a leak: content garbage collection reclaims an
-    /// unreferenced completed upload once its grace passes.
+    /// Each call uploads a new content object. To retry publication, retain
+    /// the result of [`Self::prepare_file_bytes`] and call
+    /// [`Self::put_file_prepared`] with the same explicit commit ID and options.
     pub async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
@@ -65,8 +40,7 @@ impl Client {
         let staged = self
             .stage_bytes_as_content_ref(spec.namespace(), bytes)
             .await?;
-        self.commit_staged_file(spec, staged, options, ContentEvidence::Bytes(bytes), None)
-            .await
+        self.commit_staged_file(spec, staged, options, None).await
     }
 
     /// Uploads a payload read once from its source and commits it at a path.
@@ -77,9 +51,8 @@ impl Client {
     /// Direct multipart uploads support at most 10,000 parts. Payloads larger
     /// than `part_size_bytes × 10_000` require a larger configured part size.
     ///
-    /// Retrying with a previously committed `commit_id` is safe for the same
-    /// reason as [`Self::put_file_bytes`]: the client measures the payload and
-    /// calculates the checksum used for reconciliation.
+    /// Each call uploads new content. For retries, retain the result of
+    /// [`Self::prepare_file_stream`] and use [`Self::put_file_prepared`].
     pub async fn put_file_stream(
         &self,
         spec: &NamespacePath,
@@ -129,18 +102,50 @@ impl Client {
         let staged = self
             .stage_source_as_content_ref(spec.namespace(), source, continuity)
             .await?;
-        // The staged reference is what the server verified about the bytes
-        // that just went past, and with the payload gone it is the only
-        // description of them that still exists.
-        let uploaded = staged.content_ref.clone();
-        self.commit_staged_file(
-            spec,
-            staged,
-            options,
-            ContentEvidence::ContentRef(&uploaded),
-            continuity.journal,
-        )
-        .await
+        self.commit_staged_file(spec, staged, options, continuity.journal)
+            .await
+    }
+
+    /// Uploads bytes and returns content ready for publication.
+    ///
+    /// Retain this value and an explicit commit ID to retry
+    /// [`Self::put_file_prepared`] without uploading again. Unpublished content
+    /// expires after the upload's receipt horizon.
+    pub async fn prepare_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        bytes: &[u8],
+    ) -> Result<PreparedContent> {
+        self.stage_bytes_as_content_ref(namespace_id, bytes).await
+    }
+
+    /// Uploads a stream once, in bounded chunks, for later publication.
+    ///
+    /// The result has the same retry contract as [`Self::prepare_file_bytes`].
+    pub async fn prepare_file_stream(
+        &self,
+        namespace_id: &NamespaceId,
+        source: PayloadSource,
+    ) -> Result<PreparedContent> {
+        self.stage_source_as_content_ref(namespace_id, source, UploadContinuity::default())
+            .await
+    }
+
+    /// Publishes already-prepared content without uploading it again.
+    ///
+    /// Retry with a clone of the prepared content, the same explicit
+    /// `options.commit.commit_id`, and unchanged options. A missing commit ID
+    /// generates a new one on each call. Replay is bounded by server receipt
+    /// retention. For process recovery, use [`Self::put_file_stream_resumable`]
+    /// to save the full request before submission.
+    pub async fn put_file_prepared(
+        &self,
+        spec: &NamespacePath,
+        prepared_content: PreparedContent,
+        options: &PutFileOptions,
+    ) -> Result<ApiCommitResponse> {
+        self.commit_staged_file(spec, prepared_content, options, None)
+            .await
     }
 
     /// Commits content after an upload completed but its file commit did not.
@@ -156,29 +161,20 @@ impl Client {
         options: &PutFileOptions,
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<ApiCommitResponse> {
-        let uploaded = content_ref.clone();
-        let staged = StagedContent {
+        let staged = PreparedContent {
             content_token,
             content_ref,
         };
-        self.commit_staged_file(
-            spec,
-            staged,
-            options,
-            ContentEvidence::ContentRef(&uploaded),
-            journal,
-        )
-        .await
+        self.commit_staged_file(spec, staged, options, journal)
+            .await
     }
 
-    /// Saves an exact request when journaled. Unjournaled convenience calls
-    /// reconcile fresh content when a commit ID was already used.
+    /// Saves an exact request when journaled, then submits it unchanged.
     async fn commit_staged_file(
         &self,
         spec: &NamespacePath,
-        staged: StagedContent,
+        staged: PreparedContent,
         options: &PutFileOptions,
-        uploaded: ContentEvidence<'_>,
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<ApiCommitResponse> {
         let commit_id = commit_id_or_generated(&options.commit);
@@ -201,52 +197,8 @@ impl Client {
                     "could not record file commit `{commit_id}` before submission: {error}"
                 ))
             })?;
-            return self.create_commit(spec.namespace(), &request).await;
         }
-        let response = self.create_commit(spec.namespace(), &request).await;
-        match response {
-            Ok(response) => Ok(response),
-            Err(error) if error.code() == Some(ErrorCode::CommitIdReuseConflict) => {
-                self.reconcile_commit_id_reuse(spec, &commit_id, options, uploaded, error)
-                    .await
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Checks whether a commit-ID conflict came from retrying the same PUT.
-    ///
-    /// The shared helper loads the original change and compares the complete
-    /// request fingerprint. It also verifies that the new upload contains the
-    /// same bytes as the content from the original commit. If either check
-    /// cannot be completed or does not match, this method returns the original
-    /// conflict.
-    async fn reconcile_commit_id_reuse(
-        &self,
-        spec: &NamespacePath,
-        commit_id: &CommitId,
-        options: &PutFileOptions,
-        uploaded: ContentEvidence<'_>,
-        conflict: ClientError,
-    ) -> Result<ApiCommitResponse> {
-        let namespace_id = spec.namespace();
-        let list_options = ListChangesOptions {
-            limit: Some(1),
-            snapshot_id: None,
-        };
-        loonfs_api::reconcile_put_commit_id_reuse(
-            PutRetryAttempt {
-                namespace_id,
-                path: spec.absolute_path(),
-                commit_id,
-                options,
-                staged: uploaded,
-            },
-            conflict,
-            |after_seq| self.list_changes(namespace_id, after_seq, &list_options),
-            classify_put_retry_error,
-        )
-        .await
+        self.create_commit(spec.namespace(), &request).await
     }
 
     /// Creates a directory at the requested path.

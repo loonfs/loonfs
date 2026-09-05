@@ -1160,14 +1160,17 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     assert_eq!(received, payload);
     assert_direct_get_capability_serves_ranges(&harness.client, &target, &payload).await;
 
-    // And a rerun of the same put under the same commit id reconciles by
-    // content rather than conflicting, even with no whole-file sha256 to
-    // compare — the provider's crc is the evidence.
+    // Retaining provider-checksummed content supports exact publication replay.
+    let prepared = harness
+        .client
+        .prepare_file_bytes(&namespace_id, &payload)
+        .await
+        .expect("prepare provider content once");
     let rerun = harness
         .client
-        .put_file_bytes(
+        .put_file_prepared(
             &NamespacePath::parse(namespace, "/rerun.bin").expect("rerun target"),
-            &payload,
+            prepared.clone(),
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
@@ -1183,9 +1186,9 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .expect("a multipart put through the client");
     let replayed_rerun = harness
         .client
-        .put_file_bytes(
+        .put_file_prepared(
             &NamespacePath::parse(namespace, "/rerun.bin").expect("rerun target"),
-            &payload,
+            prepared.clone(),
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
@@ -1198,7 +1201,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             },
         )
         .await
-        .expect("rerunning identical bytes is idempotent without a sha256");
+        .expect("prepared CRC content replays without another upload");
     assert_eq!(replayed_rerun, rerun);
 
     one_pass_puts_against_the_provider(&harness, namespace).await;

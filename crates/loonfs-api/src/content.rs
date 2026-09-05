@@ -368,15 +368,6 @@ pub struct ContentRef {
     pub checksum: Checksum,
 }
 
-/// Available proof that a payload matches a committed content reference.
-#[derive(Debug, Clone, Copy)]
-pub enum ContentEvidence<'a> {
-    /// Bytes that can be hashed with the committed reference's algorithm.
-    Bytes(&'a [u8]),
-    /// A reference carrying checksum evidence about its payload.
-    ContentRef(&'a ContentRef),
-}
-
 impl ContentRef {
     /// Builds a reference to a freshly minted content object holding these bytes.
     ///
@@ -405,22 +396,6 @@ impl ContentRef {
         }
     }
 
-    /// Whether `evidence` proves that a payload has the same bytes as this
-    /// reference.
-    ///
-    /// Reference evidence returns `false` when the size or checksum algorithm
-    /// differs. A checksum that was never computed is not evidence of a match.
-    pub fn matches_evidence(&self, evidence: ContentEvidence<'_>) -> bool {
-        match evidence {
-            ContentEvidence::Bytes(bytes) => {
-                self.size_bytes == bytes.len() as u64 && self.checksum.matches(bytes)
-            }
-            ContentEvidence::ContentRef(reference) => {
-                self.size_bytes == reference.size_bytes && self.checksum == reference.checksum
-            }
-        }
-    }
-
     /// Reports whether the reference is well formed enough to publish.
     ///
     /// This is a shape check on the reference itself; proving that the
@@ -441,8 +416,8 @@ impl ContentRef {
 #[cfg(test)]
 mod tests {
     use super::{
-        Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentEvidence, ContentRef,
-        ContentRefKind, ContentRefValidationError, StreamingChecksum,
+        Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
+        ContentRefValidationError, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -631,49 +606,5 @@ mod tests {
             assert!(expected.matches(b"hello"));
             assert!(!expected.matches(b"other"));
         }
-    }
-
-    #[test]
-    fn a_reference_compares_bytes_using_its_checksum_and_size() {
-        let bytes = b"retried payload";
-        let reference = ContentRef {
-            kind: ContentRefKind::BlobV1,
-            content_id: content_id(),
-            size_bytes: bytes.len() as u64,
-            checksum: Checksum::crc32c(bytes),
-        };
-
-        assert!(reference.matches_evidence(ContentEvidence::Bytes(bytes)));
-        assert!(!reference.matches_evidence(ContentEvidence::Bytes(b"different payload")));
-        let mut wrong_size = reference.clone();
-        wrong_size.size_bytes += 1;
-        assert!(!wrong_size.matches_evidence(ContentEvidence::Bytes(bytes)));
-    }
-
-    #[test]
-    fn a_reference_requires_the_other_reference_to_carry_its_checksum_algorithm() {
-        let bytes = b"retried payload";
-        let crc_reference = ContentRef {
-            kind: ContentRefKind::BlobV1,
-            content_id: content_id(),
-            size_bytes: bytes.len() as u64,
-            checksum: Checksum::crc32c(bytes),
-        };
-        let sha_reference = ContentRef::blob_v1(content_id(), bytes);
-        let matching_crc_reference = ContentRef {
-            content_id: content_id(),
-            ..crc_reference.clone()
-        };
-        let different_size = ContentRef {
-            size_bytes: crc_reference.size_bytes + 1,
-            ..crc_reference.clone()
-        };
-
-        assert!(!crc_reference.matches_evidence(ContentEvidence::ContentRef(&sha_reference)));
-        assert!(
-            crc_reference.matches_evidence(ContentEvidence::ContentRef(&matching_crc_reference))
-        );
-        assert!(!crc_reference.matches_evidence(ContentEvidence::ContentRef(&different_size)));
-        assert!(sha_reference.matches_evidence(ContentEvidence::ContentRef(&sha_reference)));
     }
 }

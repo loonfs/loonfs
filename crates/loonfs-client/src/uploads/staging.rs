@@ -65,10 +65,21 @@ pub(crate) struct UploadContinuity<'a> {
     pub(crate) journal: Option<&'a dyn PutFileJournal>,
 }
 
+/// Uploaded content and its publication token, ready for a file commit.
+///
+/// Clone this value to retry publication with the same commit ID and options.
+/// Preparation alone does not publish a file or extend the upload's lifetime.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StagedContent {
+pub struct PreparedContent {
     pub(crate) content_ref: ContentRef,
     pub(crate) content_token: Option<ContentToken>,
+}
+
+impl PreparedContent {
+    /// Returns the immutable content reference produced by the upload.
+    pub fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
+    }
 }
 
 /// Upload path selected from the server capability document.
@@ -287,7 +298,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
-    ) -> Result<StagedContent> {
+    ) -> Result<PreparedContent> {
         // The exact size is known, so transport limits can reject it now.
         match self.transport_for_measured(bytes.len() as u64).await? {
             UploadTransport::Multipart => {
@@ -314,7 +325,7 @@ impl Client {
         namespace_id: &NamespaceId,
         source: PayloadSource,
         continuity: UploadContinuity<'_>,
-    ) -> Result<StagedContent> {
+    ) -> Result<PreparedContent> {
         // A declared length is only a routing hint. Rejection requires a size
         // measured while reading the payload.
         match self.provisional_transport(source.size_bytes()).await? {
@@ -433,7 +444,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         body: DirectPutBody<'_>,
-    ) -> Result<StagedContent> {
+    ) -> Result<PreparedContent> {
         let begin = self
             .create_direct_put_upload(namespace_id, body.size_hint())
             .await?;
@@ -492,7 +503,7 @@ impl Client {
         namespace_id: &NamespaceId,
         payload: MultipartPayload<'_>,
         continuity: UploadContinuity<'_>,
-    ) -> Result<StagedContent> {
+    ) -> Result<PreparedContent> {
         // Resume with the original session and part size so completed parts
         // remain usable.
         let (upload_id, part_size_bytes, checksum_algorithm) = match continuity.resume {
@@ -726,7 +737,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
-    ) -> Result<StagedContent> {
+    ) -> Result<PreparedContent> {
         let upload = self
             .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
@@ -744,7 +755,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         source: PayloadSource,
-    ) -> Result<StagedContent> {
+    ) -> Result<PreparedContent> {
         let upload = self
             .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
@@ -762,7 +773,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<StagedContent> {
+    ) -> Result<PreparedContent> {
         let response = self
             .complete_upload(
                 namespace_id,
@@ -773,14 +784,14 @@ impl Client {
         Self::staged_from_completion(response)
     }
 
-    pub(crate) fn staged_from_completion(response: UploadSession) -> Result<StagedContent> {
+    pub(crate) fn staged_from_completion(response: UploadSession) -> Result<PreparedContent> {
         let status = match response.status {
             UploadSessionStatus::Completed {
                 content_ref,
                 content_token,
                 ..
             } => {
-                return Ok(StagedContent {
+                return Ok(PreparedContent {
                     content_ref,
                     content_token,
                 });
