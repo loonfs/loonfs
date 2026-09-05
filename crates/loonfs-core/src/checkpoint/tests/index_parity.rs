@@ -90,7 +90,7 @@ async fn revision_test_materialization(
     );
     assert!(!revision_rows.is_empty());
     (
-        materialized.manifest.payload.manifest_no,
+        materialized.manifest.payload().manifest_no,
         materialized.manifest,
         revision_rows,
     )
@@ -102,9 +102,9 @@ async fn rewrite_revision_segment(
     manifest: &mut NamespaceManifestEnvelope,
     mut rows: Vec<MetadataRow>,
 ) {
+    let mut payload = manifest.payload().clone();
     rows.sort_by_key(|row| row.row_key_for_family(ApiMetadataRowFamily::Revisions));
-    let descriptor = manifest
-        .payload
+    let descriptor = payload
         .runs
         .iter_mut()
         .filter(|run| run.tier == RunTier::Base)
@@ -114,13 +114,16 @@ async fn rewrite_revision_segment(
     rewrite_manifest_segment(
         store,
         namespace_id,
-        manifest.payload.head_seq,
+        payload.head_seq,
         ApiMetadataRowFamily::Revisions,
         descriptor,
         rows,
         default_target_block_bytes(),
     )
     .await;
+    *manifest = encode_namespace_manifest_json(payload)
+        .expect("encode changed manifest")
+        .into_envelope();
 }
 
 fn default_target_block_bytes() -> NonZeroUsize {
@@ -132,13 +135,14 @@ pub(super) async fn overwrite_manifest(
     namespace_id: &NamespaceId,
     manifest: NamespaceManifestEnvelope,
 ) {
-    let manifest_key = metadata_manifest_object(namespace_id, &manifest.payload.manifest_object_id);
-    let manifest_no = manifest.payload.manifest_no;
-    let manifest_object_id = manifest.payload.manifest_object_id.clone();
-    let updated_manifest =
-        NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
-    let manifest_bytes =
-        encode_namespace_manifest_json(&updated_manifest).expect("encode updated manifest");
+    let manifest_key =
+        metadata_manifest_object(namespace_id, &manifest.payload().manifest_object_id);
+    let manifest_no = manifest.payload().manifest_no;
+    let manifest_object_id = manifest.payload().manifest_object_id.clone();
+    let (updated_manifest, manifest_bytes) =
+        encode_namespace_manifest_json(manifest.into_payload())
+            .expect("updated manifest")
+            .into_parts();
     store
         .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
         .await
@@ -152,14 +156,12 @@ pub(super) async fn overwrite_manifest(
     if loaded_root.state.manifest.manifest_no == manifest_no {
         let mut root = loaded_root.state;
         root.manifest.manifest_object_id = manifest_object_id;
-        root.manifest.manifest_payload_checksum = updated_manifest.payload_checksum.clone();
-        let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+        root.manifest.manifest_payload_checksum = updated_manifest.payload_checksum().to_owned();
+        let bytes = loonfs_api::wire::control::encode_control_state(
             loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-            root,
+            &root,
         )
-        .expect("root envelope");
-        let bytes =
-            loonfs_api::wire::control::encode_control_object(&envelope).expect("root bytes");
+        .expect("root bytes");
         store
             .put_overwrite(
                 &loonfs_objectstore::keys::metadata_root(namespace_id),
@@ -181,9 +183,10 @@ async fn load_perturbed_manifest(
     payload.manifest_no = ManifestNo(payload.manifest_no.0 + id_offset);
     payload.manifest_object_id = ManifestObjectId::generate(payload.manifest_no);
     let manifest_object_id = payload.manifest_object_id.clone();
-    let envelope =
-        NamespaceManifestEnvelope::from_payload(payload).expect("perturbed manifest envelope");
-    write_namespace_manifest(store, &envelope)
+    let envelope = encode_namespace_manifest_json(payload)
+        .expect("perturbed manifest envelope")
+        .into_envelope();
+    write_namespace_manifest(store, envelope.payload().clone())
         .await
         .expect("write perturbed manifest");
     load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
@@ -208,7 +211,7 @@ fn base_segment_of_family(
     family: ApiMetadataRowFamily,
 ) -> MetadataSegmentRef {
     manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .filter(|run| run.tier == RunTier::Base)
@@ -544,21 +547,28 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
 
     // Tamper only the descriptor's row_count for the child-bind index family;
     // the per-run count-equality check must reject the manifest at load.
-    let mut manifest =
+    let manifest =
         load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load manifest")
             .manifest;
-    let descriptor = manifest
-        .payload
+    let mut payload = manifest.payload().clone();
+    let descriptor = payload
         .runs
         .iter_mut()
         .flat_map(|run| &mut run.segments)
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryChildBinds)
         .expect("child-bind index descriptor");
     descriptor.row_count += 1;
-    let manifest_object_id = manifest.payload.manifest_object_id.clone();
-    overwrite_manifest(&store, &namespace_id, manifest).await;
+    let manifest_object_id = payload.manifest_object_id.clone();
+    overwrite_manifest(
+        &store,
+        &namespace_id,
+        encode_namespace_manifest_json(payload)
+            .expect("encode changed manifest")
+            .into_envelope(),
+    )
+    .await;
 
     match load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
         .await
@@ -603,9 +613,9 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     )
     .await
     .expect("load manifest");
-    let mut manifest = materialized.manifest;
-    let descriptor = manifest
-        .payload
+    let manifest = materialized.manifest;
+    let mut payload = manifest.payload().clone();
+    let descriptor = payload
         .runs
         .iter_mut()
         .filter(|run| run.tier == RunTier::Base)
@@ -616,13 +626,11 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     // is what binds the manifest to the object's exact bytes.
     descriptor.index_block.crc32c ^= 0xffff_ffff;
 
-    let manifest_key =
-        metadata_manifest_object(&namespace_id, &manifest.payload.manifest_object_id);
-    let manifest_no = manifest.payload.manifest_no;
-    let updated_manifest =
-        NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
-    let manifest_bytes =
-        encode_namespace_manifest_json(&updated_manifest).expect("encode manifest");
+    let manifest_key = metadata_manifest_object(&namespace_id, &payload.manifest_object_id);
+    let manifest_no = payload.manifest_no;
+    let manifest_bytes = encode_namespace_manifest_json(payload)
+        .expect("updated manifest")
+        .into_bytes();
     store
         .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
         .await
@@ -661,7 +669,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint");
-    let mut materialized =
+    let materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load manifest before replacing a row");
@@ -682,9 +690,8 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         )
         .expect("encode pre-change row");
     let built = builder.finish().expect("finish pre-change segment");
-    let descriptor = materialized
-        .manifest
-        .payload
+    let mut payload = materialized.manifest.payload().clone();
+    let descriptor = payload
         .runs
         .iter_mut()
         .flat_map(|run| &mut run.segments)
@@ -712,8 +719,15 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     descriptor.filter_block = built.filter;
     descriptor.object_checksum = loonfs_api::sha256_digest(&built.bytes);
     let segment_key = metadata_segment_object_key(descriptor);
-    let manifest_no = materialized.manifest.payload.manifest_no;
-    overwrite_manifest(&store, &namespace_id, materialized.manifest).await;
+    let manifest_no = payload.manifest_no;
+    overwrite_manifest(
+        &store,
+        &namespace_id,
+        encode_namespace_manifest_json(payload)
+            .expect("encode changed manifest")
+            .into_envelope(),
+    )
+    .await;
 
     match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
         Err(ManifestLoadError::SegmentCodec {
@@ -828,7 +842,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("load manifest before corruption");
-    let mut manifest = materialized.manifest;
+    let manifest = materialized.manifest;
     let mut child_index_rows = manifest_rows_for_family(
         &materialized.metadata_state,
         ApiMetadataRowFamily::DirentryChildBinds,
@@ -838,8 +852,8 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     child_index_rows
         .sort_by_key(|row| row.row_key_for_family(ApiMetadataRowFamily::DirentryChildBinds));
 
-    let child_descriptor = manifest
-        .payload
+    let mut payload = manifest.payload().clone();
+    let child_descriptor = payload
         .runs
         .iter_mut()
         .filter(|run| run.tier == RunTier::Base)
@@ -849,7 +863,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     rewrite_manifest_segment(
         &store,
         &namespace_id,
-        manifest.payload.head_seq,
+        payload.head_seq,
         ApiMetadataRowFamily::DirentryChildBinds,
         child_descriptor,
         child_index_rows,
@@ -857,13 +871,11 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     )
     .await;
 
-    let manifest_key =
-        metadata_manifest_object(&namespace_id, &manifest.payload.manifest_object_id);
-    let manifest_no = manifest.payload.manifest_no;
-    let updated_manifest =
-        NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
-    let manifest_bytes =
-        encode_namespace_manifest_json(&updated_manifest).expect("encode updated manifest");
+    let manifest_key = metadata_manifest_object(&namespace_id, &payload.manifest_object_id);
+    let manifest_no = payload.manifest_no;
+    let manifest_bytes = encode_namespace_manifest_json(payload)
+        .expect("updated manifest")
+        .into_bytes();
     store
         .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
         .await
@@ -924,7 +936,7 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
     )
     .await
     .expect("build orphan manifest");
-    write_namespace_manifest(&store, &orphan_manifest)
+    write_namespace_manifest(&store, orphan_manifest.payload().clone())
         .await
         .expect("write orphan manifest");
 
@@ -937,7 +949,7 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
     );
     assert_eq!(
         materialization_after.head.seq,
-        orphan_manifest.payload.head_seq
+        orphan_manifest.payload().head_seq
     );
     assert!(metadata_states_equivalent(
         &materialization_before.metadata_state,
@@ -978,7 +990,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
             .await
             .expect("load manifest before the rewrite");
-    let mut manifest = materialized.manifest;
+    let manifest = materialized.manifest;
     let mut inode_rows =
         manifest_rows_for_family(&materialized.metadata_state, ApiMetadataRowFamily::Inodes);
     inode_rows.sort_by_key(|row| row.row_key_for_family(ApiMetadataRowFamily::Inodes));
@@ -992,7 +1004,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         .row_key_for_family(ApiMetadataRowFamily::Inodes);
 
     let base_inode_segments = manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .filter(|run| run.tier == RunTier::Base)
@@ -1003,8 +1015,8 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         base_inode_segments, 1,
         "the folded base should hold one inode segment"
     );
-    let descriptor = manifest
-        .payload
+    let mut payload = manifest.payload().clone();
+    let descriptor = payload
         .runs
         .iter_mut()
         .filter(|run| run.tier == RunTier::Base)
@@ -1017,7 +1029,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     rewrite_manifest_segment(
         &store,
         &namespace_id,
-        manifest.payload.head_seq,
+        payload.head_seq,
         ApiMetadataRowFamily::Inodes,
         descriptor,
         inode_rows.clone(),
@@ -1028,7 +1040,14 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         descriptor.max_row_key, last_inode_key,
         "the descriptor must carry the segment's last row key"
     );
-    overwrite_manifest(&store, &namespace_id, manifest).await;
+    overwrite_manifest(
+        &store,
+        &namespace_id,
+        encode_namespace_manifest_json(payload)
+            .expect("encode changed manifest")
+            .into_envelope(),
+    )
+    .await;
 
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     let segments =
@@ -1075,7 +1094,7 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
             .await
             .expect("load segments");
-    let payload = segments.manifest().payload.clone();
+    let payload = segments.manifest().payload().clone();
 
     // The read path assumes the filter block directly precedes the index
     // block, that an inline copy matches its handle's length, and that a
@@ -1146,14 +1165,14 @@ async fn a_manifest_whose_group_base_fragmented_does_not_load() {
         "the seed must leave the group in one base run"
     );
 
-    let mut fragmented = manifest.payload.clone();
+    let mut fragmented = manifest.payload().clone();
     // A second base run, not a second segment of the one already there, so
     // the copy takes a run number of its own out of the allocator.
     let second_base_run_no = fragmented.next_run_no;
     fragmented.next_run_no = RunNo(second_base_run_no.0 + 1);
     fragmented.runs.push(MetadataRunRef {
         run_no: second_base_run_no,
-        run_seq: manifest.payload.head_seq,
+        run_seq: manifest.payload().head_seq,
         tier: RunTier::Base,
         segments: vec![segment_modelled_on(&base_segment_of_family(
             &manifest,
@@ -1184,7 +1203,7 @@ async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
     let existing = base_segment_of_family(&manifest, ApiMetadataRowFamily::Inodes);
     assert_eq!(existing.segment_index, 0);
 
-    let mut repeated = manifest.payload.clone();
+    let mut repeated = manifest.payload().clone();
     repeated
         .runs
         .iter_mut()
@@ -1222,7 +1241,7 @@ async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
     let existing = base_segment_of_family(&manifest, ApiMetadataRowFamily::Inodes);
     assert_eq!(existing.segment_index, 0);
 
-    let mut overlapping = manifest.payload.clone();
+    let mut overlapping = manifest.payload().clone();
     let mut second = segment_modelled_on(&existing);
     // Index one keeps the numbering valid, leaving the overlapping range as
     // the only error.

@@ -116,11 +116,11 @@ impl GrepService {
                             manifest_key(namespace_id, manifest_object_id)
                         ),
                     })?;
-                let state = Arc::new(manifest.manifest_state().clone());
+                let state = Arc::new(manifest.payload().clone());
                 // As with the metadata manifest cache, JSON-backed decoded
                 // state is weighted at twice its canonical payload bytes to
                 // cover both owned strings and decoded structure overhead.
-                let decoded_bytes = serde_json::to_vec(manifest.manifest_state())
+                let decoded_bytes = serde_json::to_vec(manifest.payload())
                     .map_err(|error| {
                         CoreError::Internal(format!(
                             "failed to size decoded grep manifest `{}`: {error}",

@@ -216,7 +216,7 @@ fn ack_lost_head_cas_store(
                 _ => return false,
             };
             decode_control_object::<HeadState>(bytes, ControlObjectKind::WalHead)
-                .is_ok_and(|envelope| envelope.state.seq > ChangeSeq(0))
+                .is_ok_and(|envelope| envelope.payload().seq > ChangeSeq(0))
         },
         InjectedError::Transport("response lost after head compare-and-swap".to_owned()),
     )
@@ -340,7 +340,7 @@ async fn head_cas_advances_seq(
         decode_control_object(&existing_bytes, ControlObjectKind::WalHead).map_err(|err| {
             ObjectStoreError::transport(key, format!("decode existing head: {err}"))
         })?;
-    Ok(candidate.state.seq > existing.state.seq)
+    Ok(candidate.payload().seq > existing.payload().seq)
 }
 
 #[tokio::test]
@@ -464,13 +464,13 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload.start_seq, ChangeSeq(1));
-    assert_eq!(segment.payload.end_seq, ChangeSeq(2));
-    assert_eq!(segment.payload.records.len(), 2);
-    assert_eq!(segment.payload.records[0].deltas.len(), 2);
-    assert_eq!(segment.payload.records[0].deltas[0].semantic_op_index, 0);
-    assert_eq!(segment.payload.records[0].deltas[1].semantic_op_index, 0);
-    match &segment.payload.records[0].deltas[1].delta {
+    assert_eq!(segment.payload().start_seq, ChangeSeq(1));
+    assert_eq!(segment.payload().end_seq, ChangeSeq(2));
+    assert_eq!(segment.payload().records.len(), 2);
+    assert_eq!(segment.payload().records[0].deltas.len(), 2);
+    assert_eq!(segment.payload().records[0].deltas[0].semantic_op_index, 0);
+    assert_eq!(segment.payload().records[0].deltas[1].semantic_op_index, 0);
+    match &segment.payload().records[0].deltas[1].delta {
         WalDelta::BindDirentry {
             name_key,
             display_name,
@@ -658,11 +658,11 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         .expect("visible wal exists");
     let visible_segment =
         decode_wal_segment_envelope_zstd(&visible_wal).expect("decode visible segment");
-    assert_eq!(visible_segment.payload.start_seq, ChangeSeq(1));
-    assert_eq!(visible_segment.payload.end_seq, ChangeSeq(1));
-    assert_eq!(visible_segment.payload.records.len(), 1);
+    assert_eq!(visible_segment.payload().start_seq, ChangeSeq(1));
+    assert_eq!(visible_segment.payload().end_seq, ChangeSeq(1));
+    assert_eq!(visible_segment.payload().records.len(), 1);
     assert_eq!(
-        visible_segment.payload.records[0].commit_id,
+        visible_segment.payload().records[0].commit_id,
         CommitId::parse("retry-after-orphan").expect("valid commit id")
     );
     let orphan_wal = store
@@ -672,7 +672,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         .expect("orphan wal exists");
     let orphan_segment =
         decode_wal_segment_envelope_zstd(&orphan_wal).expect("decode orphan segment");
-    let visible_created_ids = visible_segment.payload.records[0]
+    let visible_created_ids = visible_segment.payload().records[0]
         .deltas
         .iter()
         .filter_map(|delta| match &delta.delta {
@@ -680,7 +680,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let orphan_created_ids = orphan_segment.payload.records[0]
+    let orphan_created_ids = orphan_segment.payload().records[0]
         .deltas
         .iter()
         .filter_map(|delta| match &delta.delta {
@@ -1159,7 +1159,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload.records.len(), 1);
+    assert_eq!(segment.payload().records.len(), 1);
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
         .await
@@ -1563,7 +1563,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload.records.len(), 1);
+    assert_eq!(segment.payload().records.len(), 1);
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
         .await

@@ -8,8 +8,8 @@ use loonfs_api::{ChangeSeq, NamespaceId, RunNo};
 use loonfs_grep::keyspace::{manifest_key, manifests_prefix, root_key};
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_manifest, encode_grep_root, load_grep_root, seed_grep_root,
-    GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestObjectId, GrepManifestState,
-    GrepRootEnvelope, GrepRootError, GrepRootPointer,
+    GrepIndexState, GrepIndexStatus, GrepManifestObjectId, GrepManifestState, GrepRootError,
+    GrepRootPointer,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -22,9 +22,10 @@ async fn load_rejects_namespace_identity_mismatch() {
     let store = LocalFsStore::new(temp_dir.path()).expect("local store");
     let requested = namespace_id("requested");
     let wrong = root(namespace_id("other"), ChangeSeq(0));
-    let manifest = GrepManifestEnvelope::from_state(wrong).expect("manifest envelope");
     let manifest_object_id = GrepManifestObjectId::generate();
-    let manifest_bytes = encode_grep_manifest(&manifest).expect("encode manifest");
+    let (manifest, manifest_bytes) = encode_grep_manifest(wrong)
+        .expect("encode manifest")
+        .into_parts();
     store
         .put(
             &manifest_key(&requested, &manifest_object_id),
@@ -33,13 +34,13 @@ async fn load_rejects_namespace_identity_mismatch() {
         )
         .await
         .expect("write mismatched manifest");
-    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+    let bytes = encode_grep_root(GrepRootPointer::new(
         requested.clone(),
         manifest_object_id,
         manifest.payload_checksum().to_owned(),
     ))
-    .expect("pointer envelope");
-    let bytes = encode_grep_root(&envelope).expect("encode pointer");
+    .expect("pointer envelope")
+    .into_bytes();
     let key = root_key(&requested);
     store
         .put(&key, Bytes::from(bytes), PutMode::CreateIfAbsent)
@@ -125,8 +126,9 @@ async fn identical_state_publishes_a_fresh_manifest_object() {
             .await
             .expect("read a published manifest")
             .expect("a published manifest is durable at the key the pointer names");
-        let expected =
-            encode_grep_manifest(published.manifest_envelope()).expect("encode manifest");
+        let expected = encode_grep_manifest(published.manifest_envelope().payload().clone())
+            .expect("encode manifest")
+            .into_bytes();
         assert_eq!(
             stored,
             Bytes::from(expected),

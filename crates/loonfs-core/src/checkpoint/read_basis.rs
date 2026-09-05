@@ -89,7 +89,7 @@ pub(crate) async fn load_checkpoint_read_basis_from_record<S: ObjectStore + ?Siz
     let envelope = segments.manifest();
     Ok(CheckpointReadBasis {
         head: head_from_manifest(live_head, envelope),
-        head_etag: envelope.payload_checksum.clone(),
+        head_etag: envelope.payload_checksum().to_owned(),
         basis: MetadataBasis::Manifest(manifest),
     })
 }

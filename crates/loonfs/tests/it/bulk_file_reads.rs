@@ -512,7 +512,7 @@ async fn foreign_metadata_segment_owners(
         .expect("manifest object exists");
     loonfs_api::wire::manifest::decode_namespace_manifest_json(&bytes)
         .expect("decode manifest")
-        .payload
+        .into_payload()
         .runs
         .into_iter()
         .flat_map(|run| run.segments)

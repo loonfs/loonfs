@@ -189,8 +189,7 @@ mod tests {
     }
     use bytes::Bytes;
     use loonfs_api::wire::control::{
-        decode_control_object, encode_control_object, ControlObjectKind, HeadStateEnvelope,
-        NamespaceStatus,
+        decode_control_object, ControlObjectKind, HeadStateEnvelope, NamespaceStatus,
     };
     use loonfs_api::{ChangeSeq, CommitId, NamespaceId, MAX_PUBLIC_INTEGER};
     use loonfs_objectstore::keys::wal_head;
@@ -229,9 +228,9 @@ mod tests {
     }
 
     async fn write_head(store: &LocalFsStore, namespace_id: &NamespaceId, head: HeadState) {
-        let envelope =
-            HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
-        let bytes = encode_control_object(&envelope).expect("head bytes");
+        let bytes =
+            loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &head)
+                .expect("head bytes");
         store
             .put_if_absent(&wal_head(namespace_id), Bytes::from(bytes))
             .await
@@ -538,15 +537,17 @@ mod tests {
                 let envelope: HeadStateEnvelope =
                     decode_control_object(&body.bytes, ControlObjectKind::WalHead)
                         .expect("decode head");
-                let mut head = envelope.state;
+                let mut head = envelope.into_payload();
                 head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
                 head.writer = Some(WriterBlock {
                     writer_id: loonfs_api::WriterId::parse("writer-b").expect("writer id"),
                     acquired_at_ms: 1_500,
                 });
-                let next = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
-                    .expect("head envelope");
-                let bytes = encode_control_object(&next).expect("head bytes");
+                let bytes = loonfs_api::wire::control::encode_control_state(
+                    ControlObjectKind::WalHead,
+                    &head,
+                )
+                .expect("head bytes");
                 inner
                     .put(&head_key, Bytes::from(bytes), PutMode::Overwrite)
                     .await
@@ -608,9 +609,11 @@ mod tests {
             let namespace_id = winner_namespace_id.clone();
             Box::pin(async move {
                 let winner = head_owned_by(&namespace_id, "writer-b", WriterEpoch(8));
-                let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, winner)
-                    .expect("head envelope");
-                let bytes = encode_control_object(&envelope).expect("head bytes");
+                let bytes = loonfs_api::wire::control::encode_control_state(
+                    ControlObjectKind::WalHead,
+                    &winner,
+                )
+                .expect("head bytes");
                 inner
                     .put(
                         &wal_head(&namespace_id),

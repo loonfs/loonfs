@@ -487,7 +487,7 @@ pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>
             .await
             .expect("load the published manifest")
             .manifest()
-            .payload
+            .payload()
             .runs
             .iter()
             .flat_map(|run| &run.segments)
@@ -567,7 +567,7 @@ pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
 /// as many base runs as it has rebuilt groups. A caller asking about "the
 /// base" means all of them.
 fn base_tier(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataFamilySegments> {
-    let base_runs = runs_in_reorganization_order(&manifest.payload)
+    let base_runs = runs_in_reorganization_order(manifest.payload())
         .into_iter()
         .filter(|run| run.tier == RunTier::Base)
         .collect::<Vec<_>>();
@@ -587,7 +587,7 @@ fn base_tier(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataFamilySegments
 }
 
 fn delta_runs(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataRunManifest> {
-    runs_in_materialization_order(&manifest.payload)
+    runs_in_materialization_order(manifest.payload())
         .into_iter()
         .filter(|run| run.tier == RunTier::Delta)
         .collect()
@@ -598,7 +598,7 @@ fn group_runs(
     manifest: &NamespaceManifestEnvelope,
     group: &[ApiMetadataRowFamily],
 ) -> Vec<MetadataRunManifest> {
-    runs_in_reorganization_order(&manifest.payload)
+    runs_in_reorganization_order(manifest.payload())
         .into_iter()
         .filter(|run| {
             run.segments.iter().any(|family_segments| {
@@ -776,14 +776,17 @@ impl ObjectStore for ConflictOnManifestCreateStore {
                     ManifestConflictReplacement::MutateCandidateNextInode => {
                         let candidate = decode_namespace_manifest_json(&bytes)
                             .map_err(|error| ObjectStoreError::transport(key, error.to_string()))?;
-                        let mut payload = candidate.payload;
+                        let mut payload = candidate.into_payload();
                         payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
-                        let mutated = NamespaceManifestEnvelope::from_payload(payload)
+                        let mutated = encode_namespace_manifest_json(payload)
+                            .map(|encoded| encoded.into_envelope())
                             .map_err(|error| ObjectStoreError::transport(key, error.to_string()))?;
                         Bytes::from(
-                            encode_namespace_manifest_json(&mutated).map_err(|error| {
-                                ObjectStoreError::transport(key, error.to_string())
-                            })?,
+                            encode_namespace_manifest_json(mutated.payload().clone())
+                                .map(|encoded| encoded.into_bytes())
+                                .map_err(|error| {
+                                    ObjectStoreError::transport(key, error.to_string())
+                                })?,
                         )
                     }
                 };
@@ -853,10 +856,10 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     // the counter alone.
     let run_no = previous_manifest
         .as_ref()
-        .map_or(RunNo(0), |previous| previous.manifest.payload.next_run_no);
+        .map_or(RunNo(0), |previous| previous.manifest.payload().next_run_no);
     let mut next_run_no = next_run_no_after(run_no)?;
     let (base_seq, runs) = match previous_manifest {
-        Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
+        Some(previous) if is_bootstrap_seed_manifest(previous.manifest.payload()) => {
             let run_segments =
                 build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
@@ -871,10 +874,10 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             )
         }
         Some(previous)
-            if delta_run_count(&previous.manifest.payload) < policy.max_delta_runs.get() =>
+            if delta_run_count(previous.manifest.payload()) < policy.max_delta_runs.get() =>
         {
-            let mut runs = previous.manifest.payload.runs.clone();
-            if previous.manifest.payload.head_seq < head_seq {
+            let mut runs = previous.manifest.payload().runs.clone();
+            if previous.manifest.payload().head_seq < head_seq {
                 runs.push(MetadataRunRef {
                     run_no,
                     run_seq: head_seq,
@@ -883,7 +886,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                         build_manifest_delta_run_segments(
                             store,
                             namespace_id,
-                            previous.manifest.payload.head_seq,
+                            previous.manifest.payload().head_seq,
                             metadata_state,
                             policy,
                         )
@@ -893,7 +896,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             } else {
                 next_run_no = run_no;
             }
-            (previous.manifest.payload.base_seq, runs)
+            (previous.manifest.payload().base_seq, runs)
         }
         Some(_) => {
             let run_segments =
@@ -924,7 +927,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         }
     };
 
-    NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+    encode_namespace_manifest_json(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no,
         manifest_object_id,
@@ -937,6 +940,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         retention_floor_seq: source.retention_floor_seq,
         runs,
     })
+    .map(|encoded| encoded.into_envelope())
     .map_err(|err| {
         CoreError::Internal(format!(
             "failed to build namespace manifest envelope: {err}"

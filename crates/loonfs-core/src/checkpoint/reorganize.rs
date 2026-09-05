@@ -33,7 +33,6 @@ use loonfs_api::wire::manifest::{
     RunTier,
 };
 use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, RunNo};
-use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
@@ -161,9 +160,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let segments = load_manifest_segments(store, None, &root.manifest).await?;
     let previous = segments.manifest();
 
-    let delta_runs = delta_run_count(&previous.payload);
+    let delta_runs = delta_run_count(previous.payload());
     if !manifest_has_reorganization_work(
-        &previous.payload,
+        previous.payload(),
         segments.scan_runs.as_ref(),
         policy,
         compaction_policy,
@@ -176,7 +175,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let Some(group) = select_family_group(
         store,
         namespace_id,
-        &previous.payload,
+        previous.payload(),
         context.now_ms,
         compaction_policy,
         policy,
@@ -236,7 +235,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     .await?;
 
     let surviving = previous
-        .payload
+        .payload()
         .runs
         .iter()
         .filter_map(|run| {
@@ -279,7 +278,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
                 input_runs: input.runs.len(),
                 decoded_input_rows: input.decoded_rows,
                 decoded_input_bytes: input.decoded_bytes,
-                manifest_no: manifest.payload.manifest_no,
+                manifest_no: manifest.payload().manifest_no,
                 bottom_anchored_merge_blocked,
             },
         )),
@@ -328,7 +327,7 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     };
     let segments = load_manifest_segments(store, segment_cache, &root.state.manifest).await?;
     Ok(manifest_has_reorganization_work(
-        &segments.manifest().payload,
+        segments.manifest().payload(),
         segments.scan_runs.as_ref(),
         MetadataLsmPolicy::default(),
         compaction_policy,
@@ -575,7 +574,7 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
         let placement = merge_placement(
             bottom_anchored,
             &window.runs,
-            segments.manifest().payload.head_seq,
+            segments.manifest().payload().head_seq,
         );
         ReorganizationPlan::BoundedMerge(ReorganizationInput {
             run_nos: window.runs.iter().map(|run| run.run_no).collect(),
@@ -597,7 +596,11 @@ pub(super) async fn select_reorganization_input<S: ObjectStore + ?Sized>(
                 .flat_map(|run| group_run_descriptors(run, group))
                 .map(|d| d.row_count)
                 .sum(),
-            merge_placement(bottom_anchored, &runs, segments.manifest().payload.head_seq),
+            merge_placement(
+                bottom_anchored,
+                &runs,
+                segments.manifest().payload().head_seq,
+            ),
             frozen_floor_seq,
         ))
     };
@@ -847,14 +850,14 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
     floor_seq: ChangeSeq,
 ) -> Result<NamespaceManifestEnvelope> {
     let next_run_no = if output.segments.is_empty() {
-        previous.payload.next_run_no
+        previous.payload().next_run_no
     } else {
-        next_run_no_after(previous.payload.next_run_no)?
+        next_run_no_after(previous.payload().next_run_no)?
     };
     let mut runs = surviving;
     if !output.segments.is_empty() {
         runs.push(MetadataRunRef {
-            run_no: previous.payload.next_run_no,
+            run_no: previous.payload().next_run_no,
             run_seq: output.placement.output_seq(),
             tier: output.placement.output_tier(),
             segments: output.segments,
@@ -865,34 +868,30 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
         .map(|run| run.run_seq)
         .min()
         .expect("a replacement manifest should hold at least one run");
-    let retention_floor_seq = previous.payload.retention_floor_seq.max(floor_seq);
+    let retention_floor_seq = previous.payload().retention_floor_seq.max(floor_seq);
     // One generated object id, one write. The generated id ends in 16 random
     // hex characters, so the key is this unit's alone and a conflict under it
     // is corruption rather than contention.
-    let manifest_no = next_manifest_no_after(previous.payload.manifest_no)?;
+    let manifest_no = next_manifest_no_after(previous.payload().manifest_no)?;
     let manifest_object_id = ManifestObjectId::generate(manifest_no);
-    let object_key = metadata_manifest_object(namespace_id, &manifest_object_id);
-    let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
-        namespace_id: namespace_id.clone(),
-        manifest_no,
-        manifest_object_id,
-        head_seq: previous.payload.head_seq,
-        head_commit_id: previous.payload.head_commit_id.clone(),
-        base_seq,
-        writer_epoch: previous.payload.writer_epoch,
-        next_inode_id: previous.payload.next_inode_id,
-        next_run_no,
-        retention_floor_seq,
-        runs,
-    })
-    .map_err(|error| CoreError::Codec {
-        object_key,
-        message: error.to_string(),
-    })?;
-    write_namespace_manifest(store, &manifest)
-        .await
-        .map_err(manifest_write_failure)?;
-    Ok(manifest)
+    write_namespace_manifest(
+        store,
+        NamespaceManifestPayload {
+            namespace_id: namespace_id.clone(),
+            manifest_no,
+            manifest_object_id,
+            head_seq: previous.payload().head_seq,
+            head_commit_id: previous.payload().head_commit_id.clone(),
+            base_seq,
+            writer_epoch: previous.payload().writer_epoch,
+            next_inode_id: previous.payload().next_inode_id,
+            next_run_no,
+            retention_floor_seq,
+            runs,
+        },
+    )
+    .await
+    .map_err(manifest_write_failure)
 }
 
 #[cfg(test)]
@@ -908,7 +907,7 @@ mod planning_tests {
             "../../../loonfs-api/tests/golden/namespace_manifest.v4.json"
         ))
         .expect("manifest fixture");
-        let mut template = runs_in_reorganization_order(&manifest.payload).remove(0);
+        let mut template = runs_in_reorganization_order(manifest.payload()).remove(0);
         template
             .segments
             .retain(|family| family.family == MetadataRowFamily::Inodes);

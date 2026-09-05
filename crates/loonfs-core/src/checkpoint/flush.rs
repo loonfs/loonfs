@@ -33,9 +33,7 @@ use crate::wal::{
     ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::wire::control::{HeadState, ManifestRef};
-use loonfs_api::wire::manifest::{
-    MetadataRunRef, NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
-};
+use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_api::{
     ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo, ManifestObjectId,
     NamespaceId, RunNo, MAX_PUBLIC_INTEGER,
@@ -146,7 +144,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     // checkpoint record can pin only its own.
     let basis_manifest = projection.basis.manifest();
     if projection.basis.is_owned_by(namespace_id)
-        && projection.manifest_segments.manifest().payload.head_seq == head_seq
+        && projection.manifest_segments.manifest().payload().head_seq == head_seq
     {
         let basis_manifest = basis_manifest.expect("an owned basis names a manifest");
         return Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
@@ -171,7 +169,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         ManifestObjectId::generate(manifest_no),
     )
     .await?;
-    write_namespace_manifest(store, &manifest)
+    let manifest = write_namespace_manifest(store, manifest)
         .await
         .map_err(manifest_write_failure)?;
     // The publication budget gates the root compare-and-swap: past it, the
@@ -189,7 +187,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
             projection
                 .manifest_segments
                 .manifest()
-                .payload
+                .payload()
                 .manifest_object_id
                 .clone()
         }),
@@ -199,8 +197,8 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     {
         ManifestPublicationOutcome::Published(_) => (
             FlushWalOutcome::Published,
-            manifest.payload.manifest_no,
-            manifest.payload.head_seq,
+            manifest.payload().manifest_no,
+            manifest.payload().head_seq,
         ),
         // The candidate's head sequence is this flush's target, so a root
         // that covers the candidate covers the target too.
@@ -402,7 +400,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     projection: &RootProjection<'_, S>,
     manifest_no: ManifestNo,
     manifest_object_id: ManifestObjectId,
-) -> Result<NamespaceManifestEnvelope> {
+) -> Result<NamespaceManifestPayload> {
     let head_seq = projection.head.seq;
     // A WAL flush keeps existing runs and writes the WAL delta as one new delta
     // run. Reorganization merges delta runs into the base separately.
@@ -435,10 +433,10 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         let previous_manifest = projection.manifest_segments.manifest();
         // The manifest that first names a run allocates its number. A flush
         // takes one number for its delta, or none when the head is unchanged.
-        let run_no = previous_manifest.payload.next_run_no;
-        let mut runs = previous_manifest.payload.runs.clone();
+        let run_no = previous_manifest.payload().next_run_no;
+        let mut runs = previous_manifest.payload().runs.clone();
         let mut next_run_no = run_no;
-        if previous_manifest.payload.head_seq < head_seq {
+        if previous_manifest.payload().head_seq < head_seq {
             runs.push(MetadataRunRef {
                 run_no,
                 run_seq: head_seq,
@@ -447,7 +445,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                     build_manifest_delta_run_segments(
                         store,
                         namespace_id,
-                        previous_manifest.payload.head_seq,
+                        previous_manifest.payload().head_seq,
                         &projection.tail_state,
                         MetadataLsmPolicy::default(),
                     )
@@ -456,10 +454,10 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             });
             next_run_no = next_run_no_after(run_no)?;
         }
-        (previous_manifest.payload.base_seq, runs, next_run_no)
+        (previous_manifest.payload().base_seq, runs, next_run_no)
     };
 
-    NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+    Ok(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no,
         manifest_object_id,
@@ -471,11 +469,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         next_run_no,
         retention_floor_seq: projection.floor_seq,
         runs,
-    })
-    .map_err(|err| {
-        CoreError::Internal(format!(
-            "failed to build namespace manifest envelope: {err}"
-        ))
     })
 }
 

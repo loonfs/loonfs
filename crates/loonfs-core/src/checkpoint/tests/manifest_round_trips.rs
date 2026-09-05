@@ -62,18 +62,18 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
             .expect("load folded manifest");
     let delta = materialized
         .manifest
-        .payload
+        .payload()
         .runs
         .last()
         .expect("folded manifest has a delta run");
     assert_eq!(delta.tier, RunTier::Delta);
-    let delta_manifest = runs_in_materialization_order(&materialized.manifest.payload)
+    let delta_manifest = runs_in_materialization_order(materialized.manifest.payload())
         .into_iter()
         .find(|run| run.run_no == delta.run_no)
         .expect("folded delta run is valid");
     let manifest_key = metadata_manifest_object(
         &namespace_id,
-        &materialized.manifest.payload.manifest_object_id,
+        &materialized.manifest.payload().manifest_object_id,
     );
     let mut actual_tail = MetadataStateBuilder::default();
     inspection_materialization::append_manifest_segments_to_metadata(
@@ -257,10 +257,10 @@ async fn manifest_round_trip_supports_empty_namespace() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(1))
             .await
             .expect("first manifest is valid");
-    assert_eq!(published.manifest.payload.next_run_no, RunNo(1));
-    assert_eq!(published.manifest.payload.runs.len(), 1);
-    assert_eq!(published.manifest.payload.runs[0].run_no, RunNo(0));
-    assert_eq!(published.manifest.payload.runs[0].tier, RunTier::Base);
+    assert_eq!(published.manifest.payload().next_run_no, RunNo(1));
+    assert_eq!(published.manifest.payload().runs.len(), 1);
+    assert_eq!(published.manifest.payload().runs[0].run_no, RunNo(0));
+    assert_eq!(published.manifest.payload().runs[0].tier, RunTier::Base);
     assert!(metadata_states_equivalent(
         &published.metadata_state,
         &genesis.base_state
@@ -333,13 +333,11 @@ async fn recovery_rejects_a_root_head_seq_that_disagrees_with_its_manifest() {
     assert_eq!(loaded_root.state.manifest.manifest_head_seq, ChangeSeq(1));
     let mut root = loaded_root.state;
     root.manifest.manifest_head_seq = ChangeSeq(0);
-    let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+    let bytes = loonfs_api::wire::control::encode_control_state(
         loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-        root,
+        &root,
     )
-    .expect("root envelope");
-    let bytes = loonfs_api::wire::control::encode_control_object(&envelope)
-        .expect("encode contradictory root");
+    .expect("encode contradictory root");
     store
         .put_overwrite(
             &loonfs_objectstore::keys::metadata_root(&namespace_id),
@@ -720,8 +718,8 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     // Checkpoints only append: the base run stays the bootstrap seed's and
     // each checkpoint contributes one delta run.
     assert_eq!(
-        second_materialized.manifest.payload.base_seq,
-        first_materialized.manifest.payload.base_seq
+        second_materialized.manifest.payload().base_seq,
+        first_materialized.manifest.payload().base_seq
     );
     assert_eq!(
         base_tier(&second_materialized.manifest),
@@ -768,7 +766,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             .await
             .expect("load chained manifest");
     assert_eq!(
-        latest_materialized.manifest.payload.base_seq,
+        latest_materialized.manifest.payload().base_seq,
         ChangeSeq(0),
         "always-append checkpoints keep the first published base"
     );
@@ -893,7 +891,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     )
     .await
     .expect("write empty metadata run segments");
-    let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+    let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),
         manifest_object_id: manifest_object_id(manifest_no(materialization.head.seq)),
@@ -919,12 +917,13 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             },
         ],
     })
-    .expect("build malformed manifest");
+    .expect("build malformed manifest")
+    .into_envelope();
 
     match load_manifest_metadata_state_for_inspection_from_manifest(
         &store,
         &namespace_id,
-        &metadata_manifest_object(&namespace_id, &manifest.payload.manifest_object_id),
+        &metadata_manifest_object(&namespace_id, &manifest.payload().manifest_object_id),
         &manifest,
     )
     .await
@@ -1026,10 +1025,10 @@ async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
     .await
     .expect("build manifest");
 
-    write_namespace_manifest(&store, &manifest)
+    write_namespace_manifest(&store, manifest.payload().clone())
         .await
         .expect("first manifest write");
-    write_namespace_manifest(&store, &manifest)
+    write_namespace_manifest(&store, manifest.payload().clone())
         .await
         .expect("same manifest write is idempotent");
 }
@@ -1061,15 +1060,16 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
     )
     .await
     .expect("build manifest");
-    let mut conflicting_payload = manifest.payload.clone();
+    let mut conflicting_payload = manifest.payload().clone();
     conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
-    let conflicting_manifest = NamespaceManifestEnvelope::from_payload(conflicting_payload)
-        .expect("build conflicting manifest");
+    let conflicting_manifest = encode_namespace_manifest_json(conflicting_payload)
+        .expect("build conflicting manifest")
+        .into_envelope();
 
-    write_namespace_manifest(&store, &manifest)
+    write_namespace_manifest(&store, manifest.payload().clone())
         .await
         .expect("first manifest write");
-    let error = write_namespace_manifest(&store, &conflicting_manifest)
+    let error = write_namespace_manifest(&store, conflicting_manifest.payload().clone())
         .await
         .expect_err("different same-id manifest must conflict");
 
@@ -1126,7 +1126,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     )
     .await
     .expect("build manifest");
-    write_namespace_manifest(&store, &manifest_without_checkpoint)
+    write_namespace_manifest(&store, manifest_without_checkpoint.payload().clone())
         .await
         .expect("write manifest");
     publish_metadata_root(
@@ -1155,7 +1155,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     assert_eq!(record.manifest.manifest_no, covering_manifest_no);
     assert_eq!(
         record.manifest.manifest_payload_checksum,
-        manifest_without_checkpoint.payload_checksum
+        manifest_without_checkpoint.payload_checksum()
     );
 }
 
@@ -1204,7 +1204,7 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
 
     assert_eq!(
         reconstructed.head_commit_id,
-        manifest.payload.head_commit_id
+        manifest.payload().head_commit_id
     );
     assert_ne!(reconstructed.head_commit_id, newer_live_head.head_commit_id);
 }

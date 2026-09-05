@@ -503,7 +503,7 @@ async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
     group: MetadataFamilyGroup,
 ) -> MetadataLsmPolicy {
     let segments = load_current_manifest_segments(store, namespace_id).await;
-    let base_rows: u64 = runs_in_reorganization_order(&segments.manifest().payload)
+    let base_rows: u64 = runs_in_reorganization_order(segments.manifest().payload())
         .iter()
         .filter(|run| run.tier == RunTier::Base)
         .flat_map(|run| run.segments.iter())
@@ -552,7 +552,7 @@ fn snapshot_runs_for_group(
     manifest: &NamespaceManifestEnvelope,
     group: MetadataFamilyGroup,
 ) -> Vec<MetadataRunManifest> {
-    runs_in_reorganization_order(&manifest.payload)
+    runs_in_reorganization_order(manifest.payload())
         .into_iter()
         .filter(|run| {
             run.segments.iter().any(|family_segments| {
@@ -1464,10 +1464,10 @@ async fn rewrite_base_segment(
     family: ApiMetadataRowFamily,
     mut rows: Vec<MetadataRow>,
 ) {
+    let mut payload = manifest.payload().clone();
     rows.sort_by_key(|row| row.row_key_for_family(family));
-    let head_seq = manifest.payload.head_seq;
-    let descriptor = manifest
-        .payload
+    let head_seq = payload.head_seq;
+    let descriptor = payload
         .runs
         .iter_mut()
         .filter(|run| run.tier == RunTier::Base)
@@ -1484,6 +1484,9 @@ async fn rewrite_base_segment(
         NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).expect("the default target is positive"),
     )
     .await;
+    *manifest = encode_namespace_manifest_json(payload)
+        .expect("encode changed manifest")
+        .into_envelope();
 }
 
 #[tokio::test]
@@ -1846,14 +1849,14 @@ async fn install_synthetic_bindings_base(
         ));
     }
 
-    let mut manifest = load_current_manifest_segments(store, namespace_id)
+    let manifest = load_current_manifest_segments(store, namespace_id)
         .await
         .manifest()
         .clone();
     // The synthetic segments replace this run's bindings, so they join the
     // run that already holds the group's other families.
     let base_run = manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .find(|run| {
@@ -1889,8 +1892,8 @@ async fn install_synthetic_bindings_base(
 
     // Only the base tier is replaced: the delta run above it is what gives a
     // bottom-anchored window something to fold.
-    let base_run = manifest
-        .payload
+    let mut payload = manifest.payload().clone();
+    let base_run = payload
         .runs
         .iter_mut()
         .find(|run| run.run_no == base_run_no)
@@ -1906,8 +1909,7 @@ async fn install_synthetic_bindings_base(
     // What the probe cache would have to hold to serve every probe without
     // refetching: the decoded data blocks of the unbind family.
     let mut unbind_decoded_bytes = 0u64;
-    for descriptor in manifest
-        .payload
+    for descriptor in payload
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -1926,7 +1928,14 @@ async fn install_synthetic_bindings_base(
             .map(|entry| u64::from(entry.block.decoded_len))
             .sum::<u64>();
     }
-    super::index_parity::overwrite_manifest(store, namespace_id, manifest).await;
+    super::index_parity::overwrite_manifest(
+        store,
+        namespace_id,
+        encode_namespace_manifest_json(payload)
+            .expect("encode changed manifest")
+            .into_envelope(),
+    )
+    .await;
     unbind_decoded_bytes
 }
 
@@ -1951,7 +1960,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     let descriptors: Vec<MetadataSegmentRef> = segments
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| run.segments.iter().cloned())
@@ -2239,7 +2248,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     let manifest_keys: BTreeSet<String> = load_current_manifest_segments(&store, &namespace_id)
         .await
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -2921,7 +2930,7 @@ async fn group_segments_outside_the_job<S: ObjectStore + ?Sized>(
     load_current_manifest_segments(store, namespace_id)
         .await
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .filter(|run| !inputs.contains(&run.run_no))
@@ -2939,7 +2948,7 @@ async fn referenced_segment_keys<S: ObjectStore + ?Sized>(
     load_current_manifest_segments(store, namespace_id)
         .await
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -3389,7 +3398,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     );
 
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    assert_eq!(segments.manifest().payload.manifest_no, manifest_no);
+    assert_eq!(segments.manifest().payload().manifest_no, manifest_no);
     let runs = snapshot_runs_for_group(segments.manifest(), group);
     drop(segments);
     // Two runs: the base run the job built, and the delta run the flush

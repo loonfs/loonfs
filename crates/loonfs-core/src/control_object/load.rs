@@ -60,12 +60,12 @@ where
         .ok_or_else(|| classify(&object_key, ControlLoadFailure::MissingEtag))?;
     let envelope = decode_control_object(&body.bytes, kind)
         .map_err(|error| classify(&object_key, ControlLoadFailure::Decode(error)))?;
-    validate_identity(&envelope.state)
+    validate_identity(envelope.payload())
         .map_err(|error| classify(&object_key, ControlLoadFailure::EmbeddedIdentity(error)))?;
     Ok(LoadedControl {
         object_key,
         etag,
-        state: envelope.state,
+        state: envelope.into_payload(),
     })
 }
 
@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::error::StoreFailureClass;
     use bytes::Bytes;
-    use loonfs_api::wire::control::{encode_control_object, HeadState, HeadStateEnvelope};
+    use loonfs_api::wire::control::HeadState;
     use loonfs_api::{ContentStoreId, NamespaceId};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -203,9 +203,9 @@ mod tests {
 
     fn encoded_head(namespace_id: &NamespaceId) -> (HeadState, Vec<u8>) {
         let state = HeadState::initial(namespace_id.clone(), ContentStoreId::generate(), 1_000);
-        let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, state.clone())
-            .expect("head envelope");
-        let bytes = encode_control_object(&envelope).expect("head bytes");
+        let bytes =
+            loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &state)
+                .expect("head bytes");
         (state, bytes)
     }
 

@@ -525,7 +525,7 @@ mod direct_multipart {
             .expect("session exists");
         decode_control_object::<UploadSessionState>(&bytes, ControlObjectKind::UploadSession)
             .expect("decode session")
-            .state
+            .into_payload()
     }
 
     /// Uploads every part, the way a client would after asking for the

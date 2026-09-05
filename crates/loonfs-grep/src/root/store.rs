@@ -35,7 +35,7 @@ impl LoadedGrepRootPointer {
     }
 
     pub fn pointer(&self) -> &GrepRootPointer {
-        self.envelope.pointer()
+        self.envelope.payload()
     }
 
     pub fn etag(&self) -> &str {
@@ -69,7 +69,7 @@ impl LoadedGrepRoot {
     }
 
     pub fn manifest_state(&self) -> &GrepManifestState {
-        self.manifest.manifest_state()
+        self.manifest.payload()
     }
 }
 
@@ -88,11 +88,11 @@ pub async fn load_grep_root_pointer<S: ObjectStore + ?Sized>(
     };
     let etag = required_etag(&object_key, body.metadata.etag)?;
     let envelope = decode_grep_root(&body.bytes).map_err(|error| corrupt(&object_key, error))?;
-    if envelope.pointer().namespace_id() != namespace_id {
+    if envelope.payload().namespace_id() != namespace_id {
         return Err(GrepRootError::IdentityMismatch {
             object_key,
             expected: namespace_id.clone(),
-            actual: envelope.pointer().namespace_id().clone(),
+            actual: envelope.payload().namespace_id().clone(),
         });
     }
     Ok(Some(LoadedGrepRootPointer {
@@ -132,11 +132,11 @@ pub async fn load_grep_manifest<S: ObjectStore + ?Sized>(
             ),
         });
     }
-    if envelope.manifest_state().namespace_id() != namespace_id {
+    if envelope.payload().namespace_id() != namespace_id {
         return Err(GrepRootError::IdentityMismatch {
             object_key,
             expected: namespace_id.clone(),
-            actual: envelope.manifest_state().namespace_id().clone(),
+            actual: envelope.payload().namespace_id().clone(),
         });
     }
     Ok(Some(envelope))
@@ -170,13 +170,13 @@ pub async fn seed_grep_root<S: ObjectStore + ?Sized>(
     let written = write_grep_manifest(store, state).await?;
     let manifest = written.envelope;
     let object_key = root_key(state.namespace_id());
-    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+    let (envelope, bytes) = encode_grep_root(GrepRootPointer::new(
         state.namespace_id().clone(),
         written.manifest_object_id,
         manifest.payload_checksum().to_owned(),
     ))
-    .map_err(|error| corrupt(&object_key, error))?;
-    let bytes = encode_grep_root(&envelope).map_err(|error| corrupt(&object_key, error))?;
+    .map_err(|error| corrupt(&object_key, error))?
+    .into_parts();
     let metadata = match store
         .put(&object_key, Bytes::from(bytes), PutMode::CreateIfAbsent)
         .await
@@ -222,14 +222,13 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
         });
     }
     let written = write_grep_manifest(store, next).await?;
-    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+    let (envelope, bytes) = encode_grep_root(GrepRootPointer::new(
         next.namespace_id().clone(),
         written.manifest_object_id,
         written.envelope.payload_checksum().to_owned(),
     ))
-    .map_err(|error| corrupt(&current.pointer.object_key, error))?;
-    let bytes =
-        encode_grep_root(&envelope).map_err(|error| corrupt(&current.pointer.object_key, error))?;
+    .map_err(|error| corrupt(&current.pointer.object_key, error))?
+    .into_parts();
     let metadata = match store
         .put(
             &current.pointer.object_key,
@@ -274,12 +273,12 @@ async fn write_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     state: &GrepManifestState,
 ) -> Result<WrittenGrepManifest> {
-    let envelope = GrepManifestEnvelope::from_state(state.clone())
-        .map_err(|error| corrupt(&root_key(state.namespace_id()), error))?;
     let manifest_object_id = GrepManifestObjectId::generate();
     let object_key = manifest_key(state.namespace_id(), &manifest_object_id);
-    let bytes =
-        Bytes::from(encode_grep_manifest(&envelope).map_err(|error| corrupt(&object_key, error))?);
+    let (envelope, bytes) = encode_grep_manifest(state.clone())
+        .map_err(|error| corrupt(&object_key, error))?
+        .into_parts();
+    let bytes = Bytes::from(bytes);
     // Create-only plus the byte check stay on this write even though a
     // random id cannot collide: an occupied key here is corruption, and it
     // must fail loudly rather than be overwritten.

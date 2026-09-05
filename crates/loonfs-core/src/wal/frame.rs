@@ -2,17 +2,15 @@
 //! replay paths.
 
 use loonfs_api::wire::control::{HeadState, WalSegmentPointer};
-use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalSegmentEnvelope};
+use loonfs_api::wire::wal::{
+    WalCommitDelta, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
+};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PreparedWalSegment {
-    pub envelope: WalSegmentEnvelope,
-    pub encoded_bytes: Vec<u8>,
-}
+pub(crate) type PreparedWalSegment = loonfs_api::wire::envelope::EncodedEnvelope<WalSegmentPayload>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WalSegmentError {
@@ -70,7 +68,7 @@ pub(crate) struct WalChainLoadRequest<'a> {
     pub(crate) recent_segments: &'a [WalSegmentPointer],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedWalSegment {
     object_key: String,
     envelope: WalSegmentEnvelope,
@@ -106,7 +104,7 @@ impl ValidatedWalSegment {
     }
 
     pub(crate) fn records(&self) -> &[WalCommitPayload] {
-        &self.envelope.payload.records
+        &self.envelope.payload().records
     }
 
     pub(crate) fn pointer(&self) -> WalSegmentPointer {
@@ -114,10 +112,10 @@ impl ValidatedWalSegment {
     }
 
     pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {
-        let namespace_id = &self.envelope.payload.namespace_id;
-        let writer_epoch = self.envelope.payload.writer_epoch;
+        let namespace_id = &self.envelope.payload().namespace_id;
+        let writer_epoch = self.envelope.payload().writer_epoch;
         self.envelope
-            .payload
+            .payload()
             .records
             .iter()
             .map(move |record| DecodedWalRecord {
@@ -134,7 +132,7 @@ impl ValidatedWalSegment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedWalChain {
     segments: Vec<ValidatedWalSegment>,
 }

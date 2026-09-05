@@ -41,7 +41,7 @@ async fn segment_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> S
         .expect("manifest exists");
     let manifest = decode_namespace_manifest_json(&bytes).expect("decode manifest");
     manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| {

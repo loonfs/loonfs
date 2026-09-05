@@ -929,7 +929,7 @@ mod tests {
     use crate::namespace::control::load_head_object;
     use crate::path::write::{CommitRequest, FilesystemOperation};
     use bytes::Bytes;
-    use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
+    use loonfs_api::wire::control::ControlObjectKind;
     use loonfs_api::{AttributeRevisionNo, AttributeValue, CommitId, ErrorCode};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1020,12 +1020,17 @@ mod tests {
             .expect("load head")
             .state;
         head.next_inode_id = InodeId(head.next_inode_id.0 + 1);
-        let envelope =
-            HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
+        let envelope = head;
         store
             .put_overwrite(
                 &wal_head(&namespace_id),
-                Bytes::from(encode_control_object(&envelope).expect("encode head")),
+                Bytes::from(
+                    loonfs_api::wire::control::encode_control_state(
+                        ControlObjectKind::WalHead,
+                        &envelope,
+                    )
+                    .expect("encode head"),
+                ),
             )
             .await
             .expect("rewrite head");

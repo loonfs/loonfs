@@ -29,9 +29,7 @@ use loonfs_api::{
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
-use loonfs_grep::root::{
-    encode_grep_root, load_grep_root, GrepManifestObjectId, GrepRootEnvelope, GrepRootPointer,
-};
+use loonfs_grep::root::{encode_grep_root, load_grep_root, GrepManifestObjectId, GrepRootPointer};
 use loonfs_grep::{GrepWorker, NamespaceReads};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -3491,7 +3489,7 @@ async fn write_grep_pointer(
 ) {
     // Every caller here injects a fault the load hits before it compares
     // digests, so any well-formed digest stands in for the real one.
-    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+    let envelope = encode_grep_root(GrepRootPointer::new(
         pointer_namespace_id,
         manifest_object_id,
         loonfs_api::sha256_digest(b"a manifest these tests never reach"),
@@ -3500,7 +3498,7 @@ async fn write_grep_pointer(
     store
         .put_overwrite(
             &grep_root_key(stored_namespace_id),
-            Bytes::from(encode_grep_root(&envelope).expect("encode grep pointer")),
+            Bytes::from(envelope.into_bytes()),
         )
         .await
         .expect("write grep pointer");

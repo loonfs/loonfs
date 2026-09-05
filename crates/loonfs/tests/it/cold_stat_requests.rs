@@ -155,7 +155,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .expect("manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
     let direntry_delta_runs: BTreeSet<_> = manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .filter(|run| {
@@ -174,7 +174,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     );
     assert!(
         manifest
-            .payload
+            .payload()
             .runs
             .iter()
             .filter(|run| run.tier == loonfs_api::wire::manifest::RunTier::Delta)
@@ -183,7 +183,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         "every delta segment should carry an inline filter"
     );
     let filter_offsets: BTreeSet<(String, u64)> = manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -195,7 +195,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         })
         .collect();
     let segment_keys: BTreeSet<String> = manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)

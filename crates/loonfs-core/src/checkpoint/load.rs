@@ -50,7 +50,7 @@ pub(crate) fn ensure_manifest_reference_matches(
     reference: &ManifestRef,
     manifest: &NamespaceManifestEnvelope,
 ) -> crate::error::Result<()> {
-    let payload = &manifest.payload;
+    let payload = &manifest.payload();
     let mismatch = if reference.owner_namespace_id != payload.namespace_id {
         Some((
             "owner_namespace_id",
@@ -75,11 +75,11 @@ pub(crate) fn ensure_manifest_reference_matches(
             reference.manifest_head_seq.to_string(),
             payload.head_seq.to_string(),
         ))
-    } else if reference.manifest_payload_checksum != manifest.payload_checksum {
+    } else if reference.manifest_payload_checksum != manifest.payload_checksum() {
         Some((
             "manifest_payload_checksum",
             reference.manifest_payload_checksum.clone(),
-            manifest.payload_checksum.clone(),
+            manifest.payload_checksum().to_owned(),
         ))
     } else {
         None
@@ -144,7 +144,7 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
         });
     };
     let segments = load_manifest_segments(store, segment_cache, manifest).await?;
-    let manifest_head_seq = segments.manifest().payload.head_seq;
+    let manifest_head_seq = segments.manifest().payload().head_seq;
     Ok(LoadedMetadataBasis {
         identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), manifest_head_seq),
         segments,
@@ -238,13 +238,13 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         })?;
         validate_namespace_manifest(
             namespace_id,
-            manifest.payload.manifest_no,
+            manifest.payload().manifest_no,
             manifest_object_id,
             &manifest_key,
             &manifest,
         )?;
-        validate_manifest(&manifest_key, &manifest.payload)?;
-        let scan_runs = Arc::new(runs_in_reorganization_order(&manifest.payload));
+        validate_manifest(&manifest_key, manifest.payload())?;
+        let scan_runs = Arc::new(runs_in_reorganization_order(manifest.payload()));
         Ok(DecodedMetadataSegmentBlock::Manifest {
             manifest: (Arc::new(manifest), scan_runs),
             // The entry retains the envelope plus its scan-ordered run list.
@@ -283,13 +283,13 @@ pub(crate) fn head_from_manifest(
         content_store_id: current_head.content_store_id.clone(),
         created_at_ms: current_head.created_at_ms,
         fork_basis: current_head.fork_basis.clone(),
-        seq: manifest.payload.head_seq,
-        head_commit_id: manifest.payload.head_commit_id.clone(),
+        seq: manifest.payload().head_seq,
+        head_commit_id: manifest.payload().head_commit_id.clone(),
         // The manifest records the manifest-time writer epoch. That may lag the
         // live head if writer takeover advanced the epoch without WAL replay.
-        writer_epoch: manifest.payload.writer_epoch,
+        writer_epoch: manifest.payload().writer_epoch,
         writer: current_head.writer.clone(),
-        next_inode_id: manifest.payload.next_inode_id,
+        next_inode_id: manifest.payload().next_inode_id,
         visible_wal_tip: None,
         recent_segments: Vec::new(),
         status: current_head.status,
@@ -325,7 +325,7 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
     })?;
     validate_namespace_manifest(
         namespace_id,
-        manifest.payload.manifest_no,
+        manifest.payload().manifest_no,
         manifest_object_id,
         manifest_key,
         &manifest,

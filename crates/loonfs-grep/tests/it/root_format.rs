@@ -16,8 +16,8 @@ use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::{ChangeSeq, RunNo};
 use loonfs_grep::root::{
     decode_grep_manifest, decode_grep_root, encode_grep_manifest, GrepEnvelopeCodecError,
-    GrepIndexState, GrepIndexStatus, GrepManifestEnvelope, GrepManifestState,
-    GrepManifestStateError, GrepReorganizeState,
+    GrepIndexState, GrepIndexStatus, GrepManifestState, GrepManifestStateError,
+    GrepReorganizeState,
 };
 use loonfs_test_support::ids::namespace_id;
 
@@ -55,10 +55,9 @@ fn every_status_round_trips_carrying_only_its_own_position() {
         (sample_active_manifest(ChangeSeq(11), 0), "target_seq"),
         (sample_disabled_manifest(), "built_through_seq"),
     ] {
-        let encoded = encode_grep_manifest(
-            &GrepManifestEnvelope::from_state(state.clone()).expect("build manifest envelope"),
-        )
-        .expect("encode grep manifest");
+        let encoded = encode_grep_manifest(state.clone())
+            .expect("encode grep manifest")
+            .into_bytes();
         assert!(
             !String::from_utf8(encoded.clone())
                 .expect("manifest JSON is UTF-8")
@@ -69,7 +68,7 @@ fn every_status_round_trips_carrying_only_its_own_position() {
         assert_eq!(
             decode_grep_manifest(&encoded)
                 .expect("decode grep manifest")
-                .manifest_state(),
+                .payload(),
             &state
         );
     }

@@ -5,7 +5,7 @@ use super::{PreparedWalSegment, WalSegmentError};
 use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{
-    encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
+    encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentPayload,
 };
 use loonfs_api::{ChangeSeq, NamespaceId, WalSegmentId, WriterEpoch};
 
@@ -72,12 +72,5 @@ pub(crate) fn prepare_wal_segment(
         end_seq,
         records: payload_records,
     };
-    let envelope = WalSegmentEnvelope::from_payload(payload)
-        .map_err(|err| WalSegmentError::Codec(err.to_string()))?;
-    let encoded_bytes = encode_wal_segment_envelope_zstd(&envelope)
-        .map_err(|err| WalSegmentError::Codec(err.to_string()))?;
-    Ok(PreparedWalSegment {
-        envelope,
-        encoded_bytes,
-    })
+    encode_wal_segment_envelope_zstd(payload).map_err(|err| WalSegmentError::Codec(err.to_string()))
 }

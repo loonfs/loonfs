@@ -10,7 +10,7 @@ use crate::commit::{
 };
 use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
-use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentEnvelope};
+use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentPayload};
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WalSegmentId, WriterEpoch};
 use loonfs_objectstore::keys::{wal_segment, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -66,7 +66,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
     .expect("prepare wal segment");
     let payload = wal_payload_from_materialized_commit(&record);
 
-    assert_eq!(payload, segment.envelope.payload.records[0]);
+    assert_eq!(payload, segment.envelope().payload().records[0]);
 }
 
 #[tokio::test]
@@ -95,8 +95,8 @@ async fn prepared_wal_segments_use_unique_segment_ids_and_derived_object_keys() 
     )
     .expect("prepare second wal segment");
 
-    let first_id = &first.envelope.payload.segment_id;
-    let second_id = &second.envelope.payload.segment_id;
+    let first_id = &first.envelope().payload().segment_id;
+    let second_id = &second.envelope().payload().segment_id;
     assert_ne!(first_id, second_id);
     assert_ne!(prepared_segment_key(&first), prepared_segment_key(&second));
     WalSegmentId::parse(first_id.as_str()).expect("first segment id shape");
@@ -151,7 +151,7 @@ async fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
             namespace_id: &namespace_id,
             chain_base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(1),
-            visible_tip: Some(segment.envelope.pointer()),
+            visible_tip: Some(segment.envelope().pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
             recent_segments: &[],
@@ -188,8 +188,8 @@ fn canonical_replay_advances_head_and_applies_metadata_rows() {
     );
     base_head.writer_epoch = WriterEpoch(1);
     let record = segment
-        .envelope
-        .payload
+        .envelope()
+        .payload()
         .records
         .first()
         .expect("wal record");
@@ -201,7 +201,7 @@ fn canonical_replay_advances_head_and_applies_metadata_rows() {
         [DecodedWalRecord {
             namespace_id: &namespace_id,
             seq: record.seq,
-            writer_epoch: segment.envelope.payload.writer_epoch,
+            writer_epoch: segment.envelope().payload().writer_epoch,
             commit_id: &record.commit_id,
             committed_by: &record.committed_by,
             committed_at_ms: record.committed_at_ms,
@@ -249,8 +249,8 @@ fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
     );
     base_head.writer_epoch = WriterEpoch(1);
     let record = segment
-        .envelope
-        .payload
+        .envelope()
+        .payload()
         .records
         .first()
         .expect("wal record");
@@ -262,7 +262,7 @@ fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
         [DecodedWalRecord {
             namespace_id: &namespace_id,
             seq: record.seq,
-            writer_epoch: segment.envelope.payload.writer_epoch,
+            writer_epoch: segment.envelope().payload().writer_epoch,
             commit_id: &record.commit_id,
             committed_by: &record.committed_by,
             committed_at_ms: record.committed_at_ms,
@@ -300,7 +300,7 @@ async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
     let second = write_create_directory_segment(
         &store,
         &namespace_id,
-        Some(first.envelope.pointer()),
+        Some(first.envelope().pointer()),
         "c_wal_suffix_b",
         "beta",
         ChangeSeq(1),
@@ -314,7 +314,7 @@ async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
             namespace_id: &namespace_id,
             chain_base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(2),
-            visible_tip: Some(second.envelope.pointer()),
+            visible_tip: Some(second.envelope().pointer()),
             stop_after_seq: Some(ChangeSeq(1)),
             max_segment_fetches: None,
             recent_segments: &[],
@@ -349,7 +349,7 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
             namespace_id: &namespace_id,
             chain_base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(2),
-            visible_tip: Some(segment.envelope.pointer()),
+            visible_tip: Some(segment.envelope().pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
             recent_segments: &[],
@@ -360,7 +360,7 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
 
     let message = error.to_string();
     assert!(
-        message.contains(segment.envelope.payload.segment_id.as_str()),
+        message.contains(segment.envelope().payload().segment_id.as_str()),
         "the error names the segment: {message}"
     );
     assert!(
@@ -371,55 +371,47 @@ async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
 
 #[tokio::test]
 async fn validated_wal_chain_rejects_corrupt_visible_segments() {
-    assert_wal_chain_corruption_rejected(|envelope, pointer| {
-        envelope.payload.namespace_id = NamespaceId::parse("other").expect("valid namespace id");
-        rewrap_envelope(envelope);
-        *pointer = envelope.pointer();
+    assert_wal_chain_corruption_rejected(|payload, pointer| {
+        payload.namespace_id = NamespaceId::parse("other").expect("valid namespace id");
+        *pointer = pointer_for_payload(payload);
     })
     .await;
-    assert_wal_chain_corruption_rejected(|envelope, _pointer| {
-        envelope.payload.segment_id =
-            WalSegmentId::parse("wal_00000000000000000001-bbbbbbbbbbbbbbbb")
-                .expect("valid segment id");
-        rewrap_envelope(envelope);
+    assert_wal_chain_corruption_rejected(|payload, _pointer| {
+        payload.segment_id = WalSegmentId::parse("wal_00000000000000000001-bbbbbbbbbbbbbbbb")
+            .expect("valid segment id");
     })
     .await;
-    assert_wal_chain_corruption_rejected(|_envelope, pointer| {
+    assert_wal_chain_corruption_rejected(|_payload, pointer| {
         pointer.payload_checksum = "sha256:not-the-payload".to_owned();
     })
     .await;
-    assert_wal_chain_corruption_rejected(|envelope, pointer| {
-        envelope.payload.records.clear();
-        rewrap_envelope(envelope);
-        *pointer = envelope.pointer();
+    assert_wal_chain_corruption_rejected(|payload, pointer| {
+        payload.records.clear();
+        *pointer = pointer_for_payload(payload);
     })
     .await;
-    assert_wal_chain_corruption_rejected(|envelope, pointer| {
-        envelope.payload.end_seq = ChangeSeq(2);
-        rewrap_envelope(envelope);
-        *pointer = envelope.pointer();
+    assert_wal_chain_corruption_rejected(|payload, pointer| {
+        payload.end_seq = ChangeSeq(2);
+        *pointer = pointer_for_payload(payload);
     })
     .await;
-    assert_wal_chain_corruption_rejected(|envelope, pointer| {
-        let mut skipped = envelope.payload.records[0].clone();
+    assert_wal_chain_corruption_rejected(|payload, pointer| {
+        let mut skipped = payload.records[0].clone();
         skipped.seq = ChangeSeq(3);
-        envelope.payload.records.push(skipped);
-        envelope.payload.end_seq = ChangeSeq(3);
-        rewrap_envelope(envelope);
-        *pointer = envelope.pointer();
+        payload.records.push(skipped);
+        payload.end_seq = ChangeSeq(3);
+        *pointer = pointer_for_payload(payload);
     })
     .await;
-    assert_wal_chain_corruption_rejected(|envelope, pointer| {
-        envelope.payload.base_head_seq = ChangeSeq(1);
-        envelope.payload.start_seq = ChangeSeq(2);
-        envelope.payload.end_seq = ChangeSeq(2);
-        envelope.payload.records[0].seq = ChangeSeq(2);
+    assert_wal_chain_corruption_rejected(|payload, pointer| {
+        payload.base_head_seq = ChangeSeq(1);
+        payload.start_seq = ChangeSeq(2);
+        payload.end_seq = ChangeSeq(2);
+        payload.records[0].seq = ChangeSeq(2);
         // Keep the id consistent so this test reaches the chain validation.
-        envelope.payload.segment_id =
-            WalSegmentId::parse("wal_00000000000000000002-cccccccccccccccc")
-                .expect("valid segment id");
-        rewrap_envelope(envelope);
-        *pointer = envelope.pointer();
+        payload.segment_id = WalSegmentId::parse("wal_00000000000000000002-cccccccccccccccc")
+            .expect("valid segment id");
+        *pointer = pointer_for_payload(payload);
     })
     .await;
 }
@@ -455,8 +447,15 @@ fn materialized_create_directory(
     materialize_commit(plan, 4_200)
 }
 
+fn pointer_for_payload(payload: &WalSegmentPayload) -> WalSegmentPointer {
+    encode_wal_segment_envelope_zstd(payload.clone())
+        .expect("encode WAL pointer")
+        .envelope()
+        .pointer()
+}
+
 async fn assert_wal_chain_corruption_rejected(
-    corrupt: impl FnOnce(&mut WalSegmentEnvelope, &mut WalSegmentPointer),
+    corrupt: impl FnOnce(&mut WalSegmentPayload, &mut WalSegmentPointer),
 ) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -474,12 +473,14 @@ async fn assert_wal_chain_corruption_rejected(
         )],
     )
     .expect("prepare wal segment");
-    let mut envelope = segment.envelope;
-    let mut pointer = envelope.pointer();
+    let mut pointer = segment.envelope().pointer();
+    let mut payload = segment.into_envelope().into_payload();
 
-    corrupt(&mut envelope, &mut pointer);
+    corrupt(&mut payload, &mut pointer);
 
-    let encoded = encode_wal_segment_envelope_zstd(&envelope).expect("encode corrupted envelope");
+    let encoded = encode_wal_segment_envelope_zstd(payload)
+        .expect("encode corrupted envelope")
+        .into_bytes();
     let object_key = wal_segment(&namespace_id, &pointer.segment_id);
     store
         .put_if_absent(&object_key, Bytes::from(encoded))
@@ -520,7 +521,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
     let second = write_create_directory_segment(
         &store,
         &namespace_id,
-        Some(first.envelope.pointer()),
+        Some(first.envelope().pointer()),
         "c_wal_hint_b",
         "beta",
         ChangeSeq(1),
@@ -533,7 +534,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
             namespace_id: &namespace_id,
             chain_base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(2),
-            visible_tip: Some(second.envelope.pointer()),
+            visible_tip: Some(second.envelope().pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
             recent_segments: &[],
@@ -543,14 +544,14 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
     .expect("unhinted chain");
 
     // Accurate predecessor hints prefetch the gap together with the tip.
-    let accurate = [first.envelope.pointer()];
+    let accurate = [first.envelope().pointer()];
     let hinted = load_complete_wal_chain(
         &store,
         WalChainLoadRequest {
             namespace_id: &namespace_id,
             chain_base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(2),
-            visible_tip: Some(second.envelope.pointer()),
+            visible_tip: Some(second.envelope().pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
             recent_segments: &accurate,
@@ -562,7 +563,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
 
     // Garbage hints (missing objects, lying seq ranges) cost fallback
     // fetches, never correctness: chain links stay the authority.
-    let mut lying_tip = second.envelope.pointer();
+    let mut lying_tip = second.envelope().pointer();
     lying_tip.end_seq = ChangeSeq(999);
     let missing_segment_id =
         WalSegmentId::parse("wal_00000000000000000001-00000000deadbeef").expect("valid segment id");
@@ -581,7 +582,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
             namespace_id: &namespace_id,
             chain_base_seq: ChangeSeq(0),
             head_seq: ChangeSeq(2),
-            visible_tip: Some(second.envelope.pointer()),
+            visible_tip: Some(second.envelope().pointer()),
             stop_after_seq: None,
             max_segment_fetches: None,
             recent_segments: &garbage,
@@ -611,7 +612,7 @@ async fn write_linked_chain(
             ChangeSeq(index + 1),
         )
         .await;
-        pointers.push(segment.envelope.pointer());
+        pointers.push(segment.envelope().pointer());
     }
     pointers
 }
@@ -855,7 +856,7 @@ async fn write_create_directory_segment(
     .expect("prepare wal segment");
     let object_key = prepared_segment_key(&segment);
     store
-        .put_if_absent(&object_key, Bytes::copy_from_slice(&segment.encoded_bytes))
+        .put_if_absent(&object_key, Bytes::copy_from_slice(segment.as_bytes()))
         .await
         .expect("write wal segment");
     segment
@@ -863,14 +864,9 @@ async fn write_create_directory_segment(
 
 fn prepared_segment_key(segment: &PreparedWalSegment) -> String {
     wal_segment(
-        &segment.envelope.payload.namespace_id,
-        &segment.envelope.payload.segment_id,
+        &segment.envelope().payload().namespace_id,
+        &segment.envelope().payload().segment_id,
     )
-}
-
-fn rewrap_envelope(envelope: &mut WalSegmentEnvelope) {
-    *envelope =
-        WalSegmentEnvelope::from_payload(envelope.payload.clone()).expect("rewrap wal envelope");
 }
 
 fn prepared_create_directory_segment(
@@ -901,7 +897,7 @@ fn prepared_create_directory_segment(
 fn prepared_unstored_chain(namespace_id: &NamespaceId, len: u64) -> Vec<PreparedWalSegment> {
     let mut chain: Vec<PreparedWalSegment> = Vec::new();
     for seq in 1..=len {
-        let prev = chain.last().map(|segment| segment.envelope.pointer());
+        let prev = chain.last().map(|segment| segment.envelope().pointer());
         chain.push(prepared_create_directory_segment(
             namespace_id,
             prev,
@@ -918,7 +914,7 @@ fn newest_first_pointers(chain: &[PreparedWalSegment]) -> Vec<WalSegmentPointer>
     chain
         .iter()
         .rev()
-        .map(|segment| segment.envelope.pointer())
+        .map(|segment| segment.envelope().pointer())
         .collect()
 }
 
@@ -926,7 +922,7 @@ async fn store_chain<S: ObjectStore + ?Sized>(store: &S, chain: &[PreparedWalSeg
     for segment in chain {
         let object_key = prepared_segment_key(segment);
         store
-            .put_if_absent(&object_key, Bytes::copy_from_slice(&segment.encoded_bytes))
+            .put_if_absent(&object_key, Bytes::copy_from_slice(segment.as_bytes()))
             .await
             .expect("write wal segment");
     }
@@ -1199,14 +1195,17 @@ async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
     // Rewrite the middle segment's body at its own key: it decodes, but its
     // payload no longer matches the checksum its successor's chain link
     // recorded.
-    let mut tampered = chain[1].envelope.clone();
-    tampered.payload.records[0].committed_at_ms += 1;
-    rewrap_envelope(&mut tampered);
+    let mut tampered = chain[1].envelope().payload().clone();
+    tampered.records[0].committed_at_ms += 1;
     let tampered_key = prepared_segment_key(&chain[1]);
     store
         .put_overwrite(
             &tampered_key,
-            Bytes::from(encode_wal_segment_envelope_zstd(&tampered).expect("encode tampered")),
+            Bytes::from(
+                encode_wal_segment_envelope_zstd(tampered)
+                    .expect("encode tampered")
+                    .into_bytes(),
+            ),
         )
         .await
         .expect("overwrite middle wal segment");

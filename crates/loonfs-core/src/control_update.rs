@@ -318,7 +318,7 @@ async fn load_upload_session_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
+    use loonfs_api::wire::control::ControlObjectKind;
     use loonfs_api::NamespaceId;
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -329,16 +329,14 @@ mod tests {
     use tempfile::tempdir;
 
     async fn write_initial_head(store: &LocalFsStore, namespace_id: &NamespaceId) {
-        let envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::WalHead,
-            HeadState::initial(
-                namespace_id.clone(),
-                loonfs_api::ContentStoreId::generate(),
-                1_000,
-            ),
-        )
-        .expect("head envelope");
-        let bytes = encode_control_object(&envelope).expect("head bytes");
+        let envelope = HeadState::initial(
+            namespace_id.clone(),
+            loonfs_api::ContentStoreId::generate(),
+            1_000,
+        );
+        let bytes =
+            loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &envelope)
+                .expect("head bytes");
         store
             .put_if_absent(&wal_head(namespace_id), Bytes::from(bytes))
             .await

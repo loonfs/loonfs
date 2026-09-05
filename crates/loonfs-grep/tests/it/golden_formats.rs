@@ -28,8 +28,8 @@ use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, RevisionNo, R
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
 use loonfs_grep::root::{
     decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root, GrepIndexState,
-    GrepIndexStatus, GrepManifestEnvelope, GrepManifestObjectId, GrepManifestState,
-    GrepReorganizeState, GrepRootEnvelope, GrepRootPointer, GrepSegmentRef,
+    GrepIndexStatus, GrepManifestObjectId, GrepManifestState, GrepReorganizeState, GrepRootPointer,
+    GrepSegmentRef,
 };
 use loonfs_test_support::ids::namespace_id;
 use std::path::{Path, PathBuf};
@@ -186,8 +186,9 @@ pub(crate) fn sample_disabled_manifest() -> GrepManifestState {
 /// [`ACTIVE_MANIFEST_FIXTURE`] pins. Its digest is that manifest envelope's
 /// own `payload_checksum`.
 fn sample_root_pointer() -> GrepRootPointer {
-    let manifest = GrepManifestEnvelope::from_state(sample_active_manifest(ChangeSeq(11), 5))
-        .expect("build a grep manifest envelope");
+    let manifest = encode_grep_manifest(sample_active_manifest(ChangeSeq(11), 5))
+        .expect("manifest")
+        .into_envelope();
     GrepRootPointer::new(
         namespace_id("docs"),
         GrepManifestObjectId::parse(ACTIVE_MANIFEST_OBJECT_ID).expect("valid manifest object id"),
@@ -297,29 +298,33 @@ fn decode_golden_data_block(name: &str) -> DecodedDataBlock<IndexRow> {
 // ---------------------------------------------------------------------------
 
 fn assert_manifest_matches_golden(fixture: &str, state: GrepManifestState) {
-    let envelope = GrepManifestEnvelope::from_state(state).expect("build a grep manifest envelope");
-    let encoded = encode_grep_manifest(&envelope).expect("encode a grep manifest");
+    let encoded = encode_grep_manifest(state)
+        .expect("build a grep manifest envelope")
+        .into_bytes();
     assert_matches_golden(fixture, &encoded);
 }
 
 fn assert_manifest_golden_decodes(fixture: &str, state: GrepManifestState) {
-    let expected = GrepManifestEnvelope::from_state(state).expect("build a grep manifest envelope");
+    let expected = encode_grep_manifest(state)
+        .expect("build a grep manifest envelope")
+        .into_envelope();
     let decoded = decode_grep_manifest(&read_golden(fixture)).expect("decode the golden manifest");
     assert_eq!(decoded, expected);
 }
 
 #[test]
 fn grep_root_matches_golden_bytes() {
-    let envelope =
-        GrepRootEnvelope::from_pointer(sample_root_pointer()).expect("build a grep root envelope");
-    let encoded = encode_grep_root(&envelope).expect("encode a grep root pointer");
+    let encoded = encode_grep_root(sample_root_pointer())
+        .expect("build a grep root envelope")
+        .into_bytes();
     assert_matches_golden(ROOT_POINTER_FIXTURE, &encoded);
 }
 
 #[test]
 fn grep_root_golden_decodes_to_sample() {
-    let expected =
-        GrepRootEnvelope::from_pointer(sample_root_pointer()).expect("build a grep root envelope");
+    let expected = encode_grep_root(sample_root_pointer())
+        .expect("build a grep root envelope")
+        .into_envelope();
     let decoded =
         decode_grep_root(&read_golden(ROOT_POINTER_FIXTURE)).expect("decode the golden pointer");
     assert_eq!(decoded, expected);
@@ -333,7 +338,7 @@ fn grep_root_golden_carries_the_manifest_golden_checksum() {
         .expect("decode the golden manifest");
 
     assert_eq!(
-        pointer.pointer().manifest_payload_checksum(),
+        pointer.payload().manifest_payload_checksum(),
         manifest.payload_checksum()
     );
 }

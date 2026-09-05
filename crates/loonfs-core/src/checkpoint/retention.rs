@@ -26,7 +26,7 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
     manifest: &NamespaceManifestEnvelope,
 ) -> std::result::Result<(), ManifestLoadError> {
     let object_keys = manifest
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -107,7 +107,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     let manifest_segments = load_manifest_segments(store, None, &root.manifest).await?;
     // Grep tolerates retention gaps by checkpointed rebootstrap, so its
     // independent watermark never holds the core WAL floor back.
-    let target_floor = manifest_segments.manifest().payload.head_seq;
+    let target_floor = manifest_segments.manifest().payload().head_seq;
     let initial_floor = match load_wal_floor_object(store, namespace_id).await {
         Ok(loaded) => Some(loaded),
         Err(ControlObjectLoadError::MissingObject { .. }) => None,

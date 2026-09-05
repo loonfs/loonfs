@@ -267,7 +267,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
     );
     assert_eq!(
         *first.scan_runs,
-        runs_in_reorganization_order(&first.manifest().payload),
+        runs_in_reorganization_order(first.manifest().payload()),
         "the cached run list must equal the manifest's reorganization-order grouping"
     );
     assert!(
@@ -568,7 +568,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
             .expect("load segments");
     let direntry_descriptors: Vec<_> = segments
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -585,7 +585,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        segments.manifest().payload.manifest_no,
+        segments.manifest().payload().manifest_no,
     )
     .await
     .expect("materialize manifest");
@@ -622,7 +622,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     // The same lookup against the same manifest with the inline copies
     // stripped must return the same rows through fetched filter blocks —
     // the inline copy is an accelerator, never an answer of its own.
-    let mut stripped_payload = segments.manifest().payload.clone();
+    let mut stripped_payload = segments.manifest().payload().clone();
     stripped_payload.manifest_no = ManifestNo(stripped_payload.manifest_no.0 + 1);
     stripped_payload.manifest_object_id = ManifestObjectId::generate(stripped_payload.manifest_no);
     for descriptor in stripped_payload
@@ -633,9 +633,10 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         descriptor.filter_inline = None;
     }
     let stripped_object_id = stripped_payload.manifest_object_id.clone();
-    let stripped = NamespaceManifestEnvelope::from_payload(stripped_payload)
-        .expect("stripped manifest envelope");
-    write_namespace_manifest(&store, &stripped)
+    let stripped = encode_namespace_manifest_json(stripped_payload)
+        .expect("stripped manifest envelope")
+        .into_envelope();
+    write_namespace_manifest(&store, stripped.payload().clone())
         .await
         .expect("write stripped manifest");
     let stripped_segments =
@@ -688,7 +689,7 @@ async fn corrupt_inline_filter_fails_the_lookup() {
             .expect("load segments");
     let descriptor = segments
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -759,7 +760,7 @@ async fn checkpointed_direntry_segment() -> (
             .expect("load segments");
     let mut descriptor = segments
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)
@@ -1027,7 +1028,7 @@ async fn multi_block_direntry_segment() -> (
             .expect("load segments");
     let mut descriptor = segments
         .manifest()
-        .payload
+        .payload()
         .runs
         .iter()
         .flat_map(|run| &run.segments)

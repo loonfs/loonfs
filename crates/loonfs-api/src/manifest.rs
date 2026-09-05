@@ -939,59 +939,17 @@ pub struct NamespaceManifestPayload {
     pub runs: Vec<MetadataRunRef>,
 }
 
-/// In-memory view of a namespace manifest envelope.
-///
-/// This struct is not the durable layout; durable bytes are produced only by
-/// [`encode_namespace_manifest_json`] and validated only by
-/// [`decode_namespace_manifest_json`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NamespaceManifestEnvelope {
-    /// Durable-family discriminator checked before payload decoding.
-    pub kind: NamespaceManifestKind,
-    /// Family-local format version, which must equal [`NAMESPACE_MANIFEST_FORMAT_VERSION`].
-    pub format_version: u32,
-    /// Digest of the payload JSON exactly as stored in the durable document,
-    /// in `sha256:<hex>` form.
-    pub payload_checksum: String,
-    /// Decoded file-set description protected by `payload_checksum`.
-    pub payload: NamespaceManifestPayload,
-}
+/// A manifest decoded through its checked durable codec.
+pub type NamespaceManifestEnvelope = crate::envelope::VerifiedEnvelope<NamespaceManifestPayload>;
 
-impl NamespaceManifestEnvelope {
-    /// Builds a versioned envelope and computes its checksum from canonical payload JSON.
-    ///
-    /// Construction fails when the payload cannot be encoded.
-    pub fn from_payload(payload: NamespaceManifestPayload) -> Result<Self, EnvelopeCodecError> {
-        Ok(Self {
-            kind: NamespaceManifestKind::NamespaceManifest,
-            format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
-            payload_checksum: namespace_manifest_payload_checksum(&payload)?,
-            payload,
-        })
-    }
-}
-
-fn namespace_manifest_payload_checksum(
-    payload: &NamespaceManifestPayload,
-) -> Result<String, EnvelopeCodecError> {
-    crate::envelope::json_payload_checksum(payload)
-}
-
-/// Encodes a namespace-manifest envelope as its durable JSON representation.
-///
-/// Encoding fails when the version is unsupported, the in-memory checksum is
-/// stale, or JSON serialization fails. See
-/// [manifest publication](../../../docs/specs/format.md#61-manifest-publication-and-checkpoint-verification).
+/// Encodes a manifest once and returns its immutable framing and durable bytes.
 pub fn encode_namespace_manifest_json(
-    envelope: &NamespaceManifestEnvelope,
-) -> Result<Vec<u8>, EnvelopeCodecError> {
+    payload: NamespaceManifestPayload,
+) -> Result<crate::envelope::EncodedEnvelope<NamespaceManifestPayload>, EnvelopeCodecError> {
     crate::envelope::encode_json_envelope(
-        envelope.kind.as_str(),
-        envelope.format_version,
+        NamespaceManifestKind::NamespaceManifest.as_str(),
         NAMESPACE_MANIFEST_FORMAT_VERSION,
-        &envelope.payload_checksum,
-        &envelope.payload,
+        payload,
     )
 }
 
@@ -1009,20 +967,14 @@ pub fn decode_namespace_manifest_json(
             crate::envelope::verify_kind(expected_kind.as_str(), found)
         })?;
 
-    Ok(NamespaceManifestEnvelope {
-        kind: expected_kind,
-        format_version: decoded.format_version,
-        payload_checksum: decoded.payload_checksum,
-        payload: decoded.payload,
-    })
+    Ok(decoded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
-        MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope,
-        NamespaceManifestPayload, RunTier,
+        MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
     use crate::{
         ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
@@ -1082,7 +1034,7 @@ mod tests {
 
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
-        let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
             manifest_object_id: ManifestObjectId::parse(
@@ -1105,9 +1057,8 @@ mod tests {
                 RunTier::Base,
             )],
         })
-        .expect("manifest");
-
-        let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
+        .expect("manifest")
+        .into_parts();
         let document: serde_json::Value =
             serde_json::from_slice(&encoded).expect("decode manifest document");
         assert!(document["payload"]
@@ -1123,7 +1074,7 @@ mod tests {
 
     #[test]
     fn namespace_manifest_codec_round_trips_inherited_source_segments() {
-        let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
             manifest_object_id: ManifestObjectId::parse(
@@ -1155,9 +1106,8 @@ mod tests {
                 ),
             ],
         })
-        .expect("manifest");
-
-        let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
+        .expect("manifest")
+        .into_parts();
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
@@ -1177,7 +1127,7 @@ mod tests {
         let mut staged = metadata_segment_ref("demo", "seg_00000000000000000000000000000001");
         staged.compaction_job_id = Some(compaction_job_id.clone());
         let flushed = metadata_segment_ref("demo", "seg_00000000000000000000000000000002");
-        let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(14),
             manifest_object_id: ManifestObjectId::parse(
@@ -1207,9 +1157,8 @@ mod tests {
                 },
             ],
         })
-        .expect("manifest");
-
-        let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
+        .expect("manifest")
+        .into_parts();
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);

@@ -200,7 +200,7 @@ impl BlockingControlCasTarget {
                 ) else {
                     return false;
                 };
-                matches!(envelope.state.status, CheckpointStatus::Released { .. })
+                matches!(envelope.payload().status, CheckpointStatus::Released { .. })
             }
             BlockingControlCasTarget::UploadCompleted | BlockingControlCasTarget::UploadAborted => {
                 let Ok(envelope) = decode_control_object::<UploadSessionState>(
@@ -211,12 +211,12 @@ impl BlockingControlCasTarget {
                 };
                 match self {
                     BlockingControlCasTarget::UploadCompleted => matches!(
-                        envelope.state.status,
+                        envelope.payload().status,
                         UploadSessionRecordStatus::Completed { .. }
                     ),
                     BlockingControlCasTarget::UploadAborted => {
                         matches!(
-                            envelope.state.status,
+                            envelope.payload().status,
                             UploadSessionRecordStatus::Aborted { .. }
                         )
                     }
@@ -409,13 +409,11 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
             expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
         },
     };
-    let envelope = loonfs_api::wire::control::UploadSessionEnvelope::from_state(
+    let bytes = loonfs_api::wire::control::encode_control_state(
         loonfs_api::wire::control::ControlObjectKind::UploadSession,
-        state,
+        &state,
     )
-    .expect("session envelope");
-    let bytes =
-        loonfs_api::wire::control::encode_control_object(&envelope).expect("encode session");
+    .expect("encode session");
     let key = loonfs_objectstore::keys::upload_session(namespace_id, &upload_id);
     store
         .put_if_absent(&key, bytes::Bytes::from(bytes))
@@ -462,7 +460,7 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
     Some(
         decode_control_object::<UploadSessionState>(&body, ControlObjectKind::UploadSession)
             .expect("decode upload session")
-            .state,
+            .into_payload(),
     )
 }
 
@@ -2158,7 +2156,7 @@ async fn an_old_unpublished_manifest_cannot_replace_the_published_grace_anchor()
         .await
         .expect("load current projection");
     let next_manifest_no = ManifestNo(projection.root.manifest.manifest_no.0 + 1);
-    let mut orphan = build_namespace_manifest_from_metadata_state(
+    let orphan = build_namespace_manifest_from_metadata_state(
         &inner,
         &namespace_id,
         ManifestMetadataSource {
@@ -2175,12 +2173,14 @@ async fn an_old_unpublished_manifest_cannot_replace_the_published_grace_anchor()
     )
     .await
     .expect("build unpublished manifest");
-    orphan.payload.manifest_object_id =
+    let mut orphan_payload = orphan.into_payload();
+    orphan_payload.manifest_object_id =
         ManifestObjectId::parse(format!("man_{:020}-0000000000000000", next_manifest_no.0))
             .expect("ordered orphan manifest id");
-    orphan = loonfs_api::wire::manifest::NamespaceManifestEnvelope::from_payload(orphan.payload)
-        .expect("re-envelope orphan manifest");
-    crate::checkpoint::write_namespace_manifest(&inner, &orphan)
+    let orphan = loonfs_api::wire::manifest::encode_namespace_manifest_json(orphan_payload)
+        .expect("re-envelope orphan manifest")
+        .into_envelope();
+    crate::checkpoint::write_namespace_manifest(&inner, orphan.payload().clone())
         .await
         .expect("write unpublished manifest");
 
@@ -2294,21 +2294,20 @@ async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
     expires_at_ms: u64,
     status: loonfs_api::wire::control::CompactionLeaseStatus,
 ) {
-    let envelope = loonfs_api::wire::control::MetadataCompactionLeaseEnvelope::from_state(
+    let envelope = loonfs_api::wire::control::MetadataCompactionLeaseState {
+        job_id: metadata_compaction_id.clone(),
+        namespace_id: namespace_id.clone(),
+        group,
+        writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
+        status,
+        started_at_ms: 1_000,
+        expires_at_ms,
+    };
+    let bytes = loonfs_api::wire::control::encode_control_state(
         loonfs_api::wire::control::ControlObjectKind::CompactionLease,
-        loonfs_api::wire::control::MetadataCompactionLeaseState {
-            job_id: metadata_compaction_id.clone(),
-            namespace_id: namespace_id.clone(),
-            group,
-            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
-            status,
-            started_at_ms: 1_000,
-            expires_at_ms,
-        },
+        &envelope,
     )
-    .expect("build a lease");
-    let bytes =
-        loonfs_api::wire::control::encode_control_object(&envelope).expect("encode a lease");
+    .expect("encode a lease");
     store
         .put(
             &metadata_compaction_lease(namespace_id, group),
@@ -3158,7 +3157,7 @@ async fn assert_record_reaped_and_basis_kept(
     )
     .await
     .expect("the basis manifest survives its record");
-    for descriptor in basis.payload.runs.iter().flat_map(|run| &run.segments) {
+    for descriptor in basis.payload().runs.iter().flat_map(|run| &run.segments) {
         assert!(
             store
                 .head(&metadata_segment_object_key(descriptor))
@@ -4011,7 +4010,7 @@ async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> Checkpo
             ControlObjectKind::CheckpointRecord,
         )
         .expect("decode record")
-        .state;
+        .into_payload();
         if matches!(record.owner, CheckpointOwner::Fork { .. }) {
             return record;
         }
@@ -4136,17 +4135,19 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         ControlObjectKind::WalHead,
     )
     .expect("decode target head")
-    .state;
+    .into_payload();
     let basis = head.fork_basis.as_mut().expect("a fork target has a basis");
     basis.manifest.manifest_no = ManifestNo(basis.manifest.manifest_no.0 + 1);
-    let drifted =
-        loonfs_api::wire::control::HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
-            .expect("drifted head envelope");
+    let drifted = head;
     store
         .put_overwrite(
             &head_key,
             Bytes::from(
-                loonfs_api::wire::control::encode_control_object(&drifted).expect("encode head"),
+                loonfs_api::wire::control::encode_control_state(
+                    ControlObjectKind::WalHead,
+                    &drifted,
+                )
+                .expect("encode head"),
             ),
         )
         .await

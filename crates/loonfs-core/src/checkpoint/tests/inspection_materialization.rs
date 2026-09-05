@@ -131,8 +131,8 @@ pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<MetadataState, ManifestLoadError> {
     let mut metadata_state = MetadataStateBuilder::default();
-    validate_manifest_materialization_ranges(manifest_object_key, &manifest.payload)?;
-    for run in runs_in_materialization_order(&manifest.payload) {
+    validate_manifest_materialization_ranges(manifest_object_key, manifest.payload())?;
+    for run in runs_in_materialization_order(manifest.payload()) {
         append_manifest_segments_to_metadata(
             store,
             namespace_id,

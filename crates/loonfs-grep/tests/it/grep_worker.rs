@@ -20,7 +20,7 @@ use loonfs_grep::keyspace::{
 };
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_root, load_grep_root, GrepIndexState, GrepIndexStatus,
-    GrepManifestObjectId, GrepManifestState, GrepRootEnvelope, GrepRootPointer,
+    GrepManifestObjectId, GrepManifestState, GrepRootPointer,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcOptions, GrepGcReport,
@@ -887,16 +887,16 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
         panic!("the backfill pin is user-owned");
     };
     *expires_at_ms = Some(record.created_at_ms);
-    let expired = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
-        loonfs_api::wire::control::ControlObjectKind::CheckpointRecord,
-        record,
-    )
-    .expect("expired record envelope");
+    let expired = record;
     store
         .put_overwrite(
             &key,
             Bytes::from(
-                loonfs_api::wire::control::encode_control_object(&expired).expect("encode record"),
+                loonfs_api::wire::control::encode_control_state(
+                    loonfs_api::wire::control::ControlObjectKind::CheckpointRecord,
+                    &expired,
+                )
+                .expect("encode record"),
             ),
         )
         .await
@@ -1582,16 +1582,21 @@ async fn write_pointer(
     manifest_object_id: GrepManifestObjectId,
     manifest_payload_checksum: String,
 ) {
-    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+    let envelope = encode_grep_root(GrepRootPointer::new(
         namespace_id.clone(),
         manifest_object_id,
         manifest_payload_checksum,
     ))
-    .expect("build pointer");
+    .expect("build pointer")
+    .into_envelope();
     store
         .put_overwrite(
             &root_key(namespace_id),
-            Bytes::from(encode_grep_root(&envelope).expect("encode pointer")),
+            Bytes::from(
+                encode_grep_root(envelope.payload().clone())
+                    .expect("encode pointer")
+                    .into_bytes(),
+            ),
         )
         .await
         .expect("write pointer");
