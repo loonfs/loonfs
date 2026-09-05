@@ -85,17 +85,6 @@ pub(super) fn component_schemas(
         .ok_or_else(|| invalid_document("components.schemas"))
 }
 
-pub(super) fn component_schemas_mut(
-    document: &mut Value,
-) -> Result<&mut Map<String, Value>, OpenapiPostprocessError> {
-    document
-        .get_mut("components")
-        .and_then(Value::as_object_mut)
-        .and_then(|components| components.get_mut("schemas"))
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| invalid_document("components.schemas"))
-}
-
 pub(super) fn collect_component_references(value: &Value, references: &mut Vec<String>) {
     match value {
         Value::String(value) => {
@@ -139,11 +128,4 @@ pub(super) fn component_schema_name(reference: &str) -> Option<String> {
     reference
         .strip_prefix("#/components/schemas/")
         .map(decode_json_pointer_segment)
-}
-
-pub(super) fn component_schema_reference(schema_name: &str) -> String {
-    format!(
-        "#/components/schemas/{}",
-        schema_name.replace('~', "~0").replace('/', "~1")
-    )
 }

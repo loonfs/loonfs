@@ -35,6 +35,7 @@ pub struct PathEntry {
         skip_serializing_if = "Option::is_none",
         with = "crate::public_inode_id::option"
     )]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub parent_inode_id: Option<InodeId>,
     /// Stored display name for this path component, absent for the nameless root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +155,7 @@ pub struct AttributesProjection {
     /// The latest attribute update time in Unix milliseconds, or `None` for the
     /// initial empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub attributes_updated_at_ms: Option<u64>,
     /// The complete attribute map at `attributes_revision_no`, including an empty map
     /// for the initial state.
@@ -175,6 +177,7 @@ pub struct ListPathEntriesResponse {
     pub entries: Vec<PathEntry>,
     /// Cursor for the next page, if more entries remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
@@ -193,6 +196,7 @@ pub struct ListInodeChildrenResponse {
     pub entries: Vec<PathEntry>,
     /// Cursor for the next page, if more entries remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
@@ -235,6 +239,7 @@ pub struct ListTrashResponse {
     pub entries: Vec<TrashEntry>,
     /// Present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 

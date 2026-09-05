@@ -185,6 +185,7 @@ pub struct CommittedChange {
     pub committed_at_ms: u64,
     /// Caller annotation, omitted when absent and carrying no filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
     /// The filesystem events for this commit in commit order.
     pub events: Vec<FilesystemChange>,

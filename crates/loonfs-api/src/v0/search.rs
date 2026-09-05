@@ -85,6 +85,7 @@ pub struct GrepResponse {
     pub matches: Vec<GrepMatch>,
     /// Present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 
@@ -107,6 +108,7 @@ pub enum GrepIndexLifecycle {
             skip_serializing_if = "Option::is_none",
             with = "crate::public_inode_id::option"
         )]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
         cursor_inode_id: Option<InodeId>,
         /// Checkpoint pinning the state being walked.
         checkpoint_id: CheckpointId,
@@ -192,6 +194,7 @@ pub struct GrepGcResponse {
     pub namespace_degraded: bool,
     /// Present when the budget stopped the pass with keys left to examine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
 }
 

@@ -1,5 +1,8 @@
 //! Request and response shapes for the v0 HTTP API.
 //!
+#[cfg(feature = "openapi")]
+pub mod openapi;
+
 mod commits;
 mod downloads;
 mod operations;

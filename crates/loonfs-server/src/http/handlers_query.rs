@@ -305,7 +305,8 @@ pub(super) async fn disable_grep_index(
         summary = "Collect grep index garbage",
         description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. `max_objects` bounds the reads the pass spends and returns a `next_cursor` when keys remain; resuming re-reads liveness and the grep root, so a cursor only skips enumeration. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
-        request_body = Option<GrepGcRequest>,
+        // A reference body is optional in utoipa; its value is an object.
+        request_body(content = ref("#/components/schemas/GrepGcRequest")),
         responses(
             (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
             (status = 400, description = "Invalid budget or cursor", body = ApiError),
