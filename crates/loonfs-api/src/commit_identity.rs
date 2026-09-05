@@ -24,13 +24,13 @@ use std::future::Future;
 use thiserror::Error;
 
 /// Domain separator included in every mutation fingerprint input.
-const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v1";
+const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v2";
 
 /// Format version and hash algorithm stored with each fingerprint.
 ///
 /// Storing both values lets a later format use different encoding rules or a
 /// different hash without changing existing fingerprints.
-const FINGERPRINT_SCHEME: &str = "v1:sha256";
+const FINGERPRINT_SCHEME: &str = "v2:sha256";
 
 /// The semantic identity of one mutation request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
@@ -51,18 +51,6 @@ impl CommitFingerprint {
 #[error("failed to encode the commit fingerprint preimage: {0}")]
 pub struct SemanticFingerprintError(#[from] serde_json::Error);
 
-/// Encodes a canonical input and returns its stored fingerprint.
-///
-/// The result has the form `v1:sha256:<64 lowercase hex>`. Compact JSON is
-/// part of the durable format, so fixed-value tests detect encoding changes.
-fn fingerprint_digest<T>(preimage: &T) -> Result<CommitFingerprint, SemanticFingerprintError>
-where
-    T: Serialize,
-{
-    let bytes = serde_json::to_vec(preimage)?;
-    Ok(fingerprint_bytes(&bytes))
-}
-
 fn fingerprint_bytes(bytes: &[u8]) -> CommitFingerprint {
     let digest = Sha256::digest(bytes);
     CommitFingerprint(format!(
@@ -80,29 +68,23 @@ fn fingerprint_bytes(bytes: &[u8]) -> CommitFingerprint {
 ///
 /// The serialized variant names, the field names, and the field order below
 /// are all part of that preimage under the [`COMMIT_FINGERPRINT_DOMAIN`] tag.
-/// They deliberately differ from the wire enum. [`operation_fingerprint_input`]
-/// is the one place the wire spelling is translated into this one. Change any
-/// serialized value and stored fingerprints disagree with recomputed values.
+/// Operation and field names follow [`FilesystemOperation`]. Optional fields
+/// are always present, using `null` when unset. This explicit representation
+/// keeps request serialization defaults and transport details out of identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum OperationFingerprintInput<'a> {
-    // The string is the frozen preimage spelling.
-    #[serde(rename = "create_dir")]
     CreateDirectory {
-        absolute_path: &'a str,
+        path: &'a str,
         parents: bool,
     },
-    // Omitting unset guards keeps unguarded fingerprints unchanged.
     PutFile {
-        absolute_path: &'a str,
+        path: &'a str,
         behavior: DestinationBehavior,
         content_ref: ContentRefFingerprintInput<'a>,
-        expected_revision_no: Option<RevisionNo>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         expected_inode_id: Option<InodeId>,
+        expected_revision_no: Option<RevisionNo>,
     },
-    // The string is the frozen preimage spelling.
-    #[serde(rename = "create_dir_by_inode")]
     CreateDirectoryByInode {
         parent_inode_id: InodeId,
         display_name: &'a str,
@@ -123,9 +105,7 @@ enum OperationFingerprintInput<'a> {
         to_parent_inode_id: InodeId,
         to_display_name: &'a str,
         behavior: DestinationBehavior,
-        #[serde(skip_serializing_if = "Option::is_none")]
         expected_destination_inode_id: Option<InodeId>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         expected_destination_revision_no: Option<RevisionNo>,
     },
     DeleteByInode {
@@ -137,7 +117,7 @@ enum OperationFingerprintInput<'a> {
     // delete guard must conflict instead of replaying the old receipt
     // without checking the new guard.
     DeletePath {
-        absolute_path: &'a str,
+        path: &'a str,
         behavior: DeleteDirectoryBehavior,
         expected_inode_id: Option<InodeId>,
     },
@@ -145,45 +125,44 @@ enum OperationFingerprintInput<'a> {
         from_path: &'a str,
         to_path: &'a str,
         behavior: DestinationBehavior,
-        #[serde(skip_serializing_if = "Option::is_none")]
         expected_destination_inode_id: Option<InodeId>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         expected_destination_revision_no: Option<RevisionNo>,
     },
-    CopyFilePath {
+    CopyPath {
         from_path: &'a str,
         to_path: &'a str,
         behavior: DestinationBehavior,
-        #[serde(skip_serializing_if = "Option::is_none")]
         expected_destination_inode_id: Option<InodeId>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         expected_destination_revision_no: Option<RevisionNo>,
     },
     RestoreRevision {
-        absolute_path: &'a str,
+        path: &'a str,
         source_revision_no: RevisionNo,
     },
     Undelete {
         inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
-        // Preimage-additive: `Some` serializes as the bare string it always
-        // was, so every stored undelete fingerprint is unchanged; `None`
-        // serializes as `null`, a new distinct preimage for the in-place
-        // form. Both shapes are pinned below.
-        absolute_path: Option<&'a str>,
+        deletion_seq: ChangeSeq,
+        path: Option<&'a str>,
     },
     // Both guards join the preimage for the same reason the delete guard
     // does: a changed expectation is a different logical request. `set` is a
     // map, so it serializes key-ordered whatever order the caller sent; the
     // translation below sorts and deduplicates `remove` so two spellings of
     // one removal set reach the same preimage.
-    UpdateAttrs {
-        absolute_path: &'a str,
+    UpdateAttributes {
+        path: &'a str,
         set: BTreeMap<&'a str, &'a str>,
         remove: Vec<&'a str>,
         expected_inode_id: Option<InodeId>,
         expected_attributes_revision_no: Option<AttributeRevisionNo>,
     },
+}
+
+/// Canonical actor shape, matching the request and durable actor vocabulary.
+#[derive(Serialize)]
+struct ActorFingerprintInput<'a> {
+    kind: ActorKind,
+    id: &'a str,
 }
 
 /// Canonical preimage for the content a put attaches.
@@ -214,16 +193,14 @@ fn content_ref_fingerprint_input(content_ref: &ContentRef) -> ContentRefFingerpr
     }
 }
 
-/// Renames one wire operation into its durable preimage.
-///
-/// This is the whole of the wire-to-fingerprint translation. The left side
-/// follows [`FilesystemOperation`] and may be renamed with it; the right side
-/// is frozen (see [`OperationFingerprintInput`]).
+/// Normalizes one operation into its durable semantic representation.
+/// Attribute removals are a sorted set; content checksums are verification
+/// evidence and excluded from identity.
 fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFingerprintInput<'_> {
     match operation {
         FilesystemOperation::CreateDirectory { path, parents } => {
             OperationFingerprintInput::CreateDirectory {
-                absolute_path: path.as_str(),
+                path: path.as_str(),
                 parents: *parents,
             }
         }
@@ -234,11 +211,11 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             expected_inode_id,
             expected_revision_no,
         } => OperationFingerprintInput::PutFile {
-            absolute_path: path.as_str(),
+            path: path.as_str(),
             behavior: *behavior,
             content_ref: content_ref_fingerprint_input(content_ref),
-            expected_revision_no: *expected_revision_no,
             expected_inode_id: *expected_inode_id,
+            expected_revision_no: *expected_revision_no,
         },
         FilesystemOperation::CreateDirectoryByInode {
             parent_inode_id,
@@ -294,7 +271,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             behavior,
             expected_inode_id,
         } => OperationFingerprintInput::DeletePath {
-            absolute_path: path.as_str(),
+            path: path.as_str(),
             behavior: *behavior,
             expected_inode_id: *expected_inode_id,
         },
@@ -313,7 +290,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             from_path,
             to_path,
             guard,
-        } => OperationFingerprintInput::CopyFilePath {
+        } => OperationFingerprintInput::CopyPath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
             behavior: guard.behavior,
@@ -324,7 +301,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             path,
             source_revision_no,
         } => OperationFingerprintInput::RestoreRevision {
-            absolute_path: path.as_str(),
+            path: path.as_str(),
             source_revision_no: *source_revision_no,
         },
         FilesystemOperation::Undelete {
@@ -333,8 +310,8 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             path,
         } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
-            deleted_at_seq: *deletion_seq,
-            absolute_path: path.as_ref().map(AbsolutePath::as_str),
+            deletion_seq: *deletion_seq,
+            path: path.as_ref().map(AbsolutePath::as_str),
         },
         FilesystemOperation::UpdateAttributes {
             path,
@@ -350,8 +327,8 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             let mut remove: Vec<&str> = remove.iter().map(|key| key.as_str()).collect();
             remove.sort_unstable();
             remove.dedup();
-            OperationFingerprintInput::UpdateAttrs {
-                absolute_path: path.as_str(),
+            OperationFingerprintInput::UpdateAttributes {
+                path: path.as_str(),
                 set: set
                     .iter()
                     .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -374,24 +351,39 @@ pub fn semantic_commit_fingerprint(
     message: Option<&str>,
     operations: &[FilesystemOperation],
 ) -> Result<CommitFingerprint, SemanticFingerprintError> {
+    Ok(fingerprint_bytes(&canonical_commit_bytes(
+        namespace_id,
+        actor,
+        message,
+        operations,
+    )?))
+}
+
+fn canonical_commit_bytes(
+    namespace_id: &NamespaceId,
+    actor: &ActorRef,
+    message: Option<&str>,
+    operations: &[FilesystemOperation],
+) -> Result<Vec<u8>, SemanticFingerprintError> {
     #[derive(Serialize)]
     struct CanonicalCommit<'a> {
         domain: &'static str,
         namespace_id: &'a str,
-        actor_kind: ActorKind,
-        actor_id: &'a str,
+        actor: ActorFingerprintInput<'a>,
         operations: Vec<OperationFingerprintInput<'a>>,
         message: Option<&'a str>,
     }
 
-    fingerprint_digest(&CanonicalCommit {
+    Ok(serde_json::to_vec(&CanonicalCommit {
         domain: COMMIT_FINGERPRINT_DOMAIN,
         namespace_id: namespace_id.as_str(),
-        actor_kind: actor.kind,
-        actor_id: actor.id.as_str(),
+        actor: ActorFingerprintInput {
+            kind: actor.kind,
+            id: actor.id.as_str(),
+        },
         operations: operations.iter().map(operation_fingerprint_input).collect(),
         message,
-    })
+    })?)
 }
 
 /// Computes the fingerprint for a retried single-file PUT using the content
@@ -544,6 +536,41 @@ mod tests {
         ActorId, AttributeKey, AttributeValue, Checksum, ContentId, ContentRefKind, DisplayName,
     };
 
+    #[test]
+    fn canonical_bytes_and_digests_match_shared_vectors() {
+        #[derive(serde::Deserialize)]
+        struct Vector {
+            name: String,
+            operation: FilesystemOperation,
+            canonical_json: String,
+            fingerprint: String,
+        }
+        let vectors: Vec<Vector> =
+            serde_json::from_str(include_str!("../tests/golden/commit_fingerprints_v2.json"))
+                .expect("fingerprint vectors");
+        for vector in vectors {
+            let namespace = NamespaceId::parse("demo").expect("namespace");
+            let operations = [vector.operation];
+            let bytes = canonical_commit_bytes(&namespace, &test_actor(), None, &operations)
+                .expect("canonical bytes");
+            assert_eq!(
+                bytes,
+                vector.canonical_json.as_bytes(),
+                "{} canonical bytes",
+                vector.name
+            );
+            let fingerprint =
+                semantic_commit_fingerprint(&namespace, &test_actor(), None, &operations)
+                    .expect("fingerprint");
+            assert_eq!(
+                fingerprint.as_str(),
+                vector.fingerprint,
+                "{} digest",
+                vector.name
+            );
+        }
+    }
+
     fn test_actor() -> ActorRef {
         ActorRef::user(ActorId::parse("test-actor").expect("valid test actor id"))
     }
@@ -584,29 +611,6 @@ mod tests {
             expected_inode_id,
             expected_attributes_revision_no,
         }
-    }
-
-    #[test]
-    fn update_attributes_fingerprint_value_is_pinned() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
-        let fingerprint = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            &[update_attributes(
-                [("owner", text("ada")), ("tags", text("a,b"))],
-                ["draft"],
-                Some(InodeId(42)),
-                Some(AttributeRevisionNo(3)),
-            )],
-        )
-        .expect("fingerprint");
-
-        assert_eq!(
-            fingerprint.as_str(),
-            "v1:sha256:bc41940773fa7df87aaeecf44b2fbd8205071e15fcb81705887ff1de0a9582bb"
-        );
     }
 
     #[test]
@@ -736,20 +740,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_fingerprint_value_is_pinned() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
-        let fingerprint =
-            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[create_dir("/docs")])
-                .expect("fingerprint");
-
-        assert_eq!(
-            fingerprint.as_str(),
-            "v1:sha256:dc41318564ff5329c73ba2f1af338f24bd323be7a56305a2b9b94cb24b95ec5a"
-        );
-    }
-
-    #[test]
     fn actor_kind_and_id_are_distinct_canonical_identity_fields() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let operation = create_dir("/docs");
@@ -768,106 +758,6 @@ mod tests {
         };
         assert_ne!(fingerprint(&user_x), fingerprint(&user_y));
         assert_ne!(fingerprint(&user_x), fingerprint(&service_x));
-    }
-
-    #[test]
-    fn guarded_delete_fingerprint_value_is_pinned() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
-        let fingerprint = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            &[FilesystemOperation::DeletePath {
-                path: AbsolutePath::parse("/docs").expect("path"),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-                expected_inode_id: Some(InodeId(42)),
-            }],
-        )
-        .expect("fingerprint");
-
-        assert_eq!(
-            fingerprint.as_str(),
-            "v1:sha256:bd1dc71c8b7e0b1e503dbf0925b801275088b6f2598888f893787688f1f01d0f"
-        );
-    }
-
-    #[test]
-    fn undelete_fingerprint_value_is_pinned() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
-        let fingerprint = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            &[FilesystemOperation::Undelete {
-                inode_id: InodeId(42),
-                deletion_seq: ChangeSeq(17),
-                path: Some(AbsolutePath::parse("/docs/report.txt").expect("path")),
-            }],
-        )
-        .expect("fingerprint");
-
-        // The mechanism behind "did not move": a present option serializes
-        // as the bare value, so wrapping the preimage field changed no
-        // stored byte.
-        assert_eq!(
-            serde_json::to_value(Some("/docs/report.txt")).expect("serialize"),
-            serde_json::to_value("/docs/report.txt").expect("serialize"),
-        );
-        assert_eq!(
-            fingerprint.as_str(),
-            "v1:sha256:9146c9e675a2e132bb16adb32d235f73080a3ef065cbd2f5c82ccb83aee02e57"
-        );
-    }
-
-    #[test]
-    fn in_place_undelete_fingerprint_value_is_pinned() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
-        let fingerprint = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            &[FilesystemOperation::Undelete {
-                inode_id: InodeId(42),
-                deletion_seq: ChangeSeq(17),
-                path: None,
-            }],
-        )
-        .expect("fingerprint");
-
-        assert_eq!(
-            fingerprint.as_str(),
-            "v1:sha256:52e0be7cc080b08b6efb7dcabf474e795be9066dc30b77dac0cc1acd09f43bdb"
-        );
-    }
-
-    #[test]
-    fn put_file_fingerprint_value_is_pinned() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
-        let fingerprint = semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            &[FilesystemOperation::PutFile {
-                path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-                content_ref: ContentRef::blob_v1(
-                    ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
-                    b"pinned put bytes",
-                ),
-                behavior: DestinationBehavior::NoReplace,
-                expected_inode_id: None,
-                expected_revision_no: None,
-            }],
-        )
-        .expect("fingerprint");
-
-        assert_eq!(
-            fingerprint.as_str(),
-            "v1:sha256:bc5ab43ea228015ee13ceb52bb074b3ec1f3026babeb007eec8f5512fb64a924"
-        );
     }
 
     #[test]
@@ -975,7 +865,7 @@ mod tests {
                 )
                 .expect("retry fingerprint")
                 .as_str(),
-                "v1:sha256:bc5ab43ea228015ee13ceb52bb074b3ec1f3026babeb007eec8f5512fb64a924"
+                "v2:sha256:f83a2787fca6165732d4c92faef300ed2f1527ac2804ecb0b4d2ccf6b0a6da83"
             );
         }
     }

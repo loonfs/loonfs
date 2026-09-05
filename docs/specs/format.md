@@ -1389,26 +1389,25 @@ already published under this `commit_id`?". That answer is the semantic commit
 fingerprint stored as `semantic_commit_fingerprint` in every WAL commit record
 and commit receipt.
 
-A fingerprint value is `v1:sha256:<64 lowercase hex>`. The `v1` tag names the
+A fingerprint value is `v2:sha256:<64 lowercase hex>`. The `v2` tag names the
 canonicalization rules below and `sha256` the digest algorithm, so either can
-change later without re-interpreting stored values. The `v1` tag and the `v1`
+change later without re-interpreting stored values. The `v2` tag and the `v2`
 ending the preimage's `domain` string name the same version.
 
-The `v1` preimage is the compact JSON encoding (no whitespace, object keys in
+The `v2` preimage is the compact JSON encoding (no whitespace, object keys in
 exactly the order shown) of:
 
 ```json
 {
-  "domain": "loonfs.commit.semantic.v1",
+  "domain": "loonfs.commit.semantic.v2",
   "namespace_id": "...",
-  "actor_kind": "user | service | system",
-  "actor_id": "...",
+  "actor": { "kind": "user | service | system", "id": "..." },
   "operations": [...],
   "message": "... or null"
 }
 ```
 
-where `actor_kind` and `actor_id` are distinct canonical fields and
+where `actor` contains `kind` followed by `id`, matching the request actor, and
 `operations` appear in request order, each as its canonical form
 (operation kind, canonical absolute paths, and the operation's semantic
 parameters including its caller-supplied race guards), and `message` is
@@ -1417,6 +1416,43 @@ different guard, or the same operations in a different order conflicts. The
 preimage deliberately excludes `commit_id`, writer epoch, and
 `committed_at_ms`: a retry of the same logical commit must fingerprint
 identically no matter who retries it or when.
+
+Every operation starts with `kind`, using the current API operation name.
+The remaining fields appear in this order:
+
+| Kind | Fields after `kind`, in order |
+| --- | --- |
+| `create_directory` | `path`, `parents` |
+| `create_directory_by_inode` | `parent_inode_id`, `display_name` |
+| `put_file` | `path`, `behavior`, `content_ref`, `expected_inode_id`, `expected_revision_no` |
+| `put_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref` |
+| `put_file_revision_by_inode` | `inode_id`, `content_ref`, `expected_revision_no` |
+| `move_by_inode` | `inode_id`, `expected_binding_generation`, `to_parent_inode_id`, `to_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
+| `delete_by_inode` | `inode_id`, `expected_binding_generation`, `behavior` |
+| `delete_path` | `path`, `behavior`, `expected_inode_id` |
+| `move_path` | `from_path`, `to_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
+| `copy_path` | `from_path`, `to_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
+| `restore_revision` | `path`, `source_revision_no` |
+| `undelete` | `inode_id`, `deletion_seq`, `path` |
+| `update_attributes` | `path`, `set`, `remove`, `expected_inode_id`, `expected_attributes_revision_no` |
+
+The encoding is UTF-8, with non-ASCII characters written directly. JSON
+quotes, backslashes, and control characters are escaped; slashes are not.
+Integers use decimal digits without leading zeroes, and sorted string keys
+use lexicographic UTF-8 order.
+
+Every listed field is present. Unset optional fields encode as `null`; default
+booleans and behaviors are explicit. Paths use their validated absolute form.
+Inode IDs use the numeric storage representation, not the public `ino_` string;
+sequence and revision numbers are JSON integers. Binding generations retain
+their opaque string representation. Attribute `set` keys are sorted, and
+`remove` is sorted and deduplicated. Operation order remains significant.
+
+Exact inputs, canonical JSON bytes, and expected digests for every operation
+are shared in `crates/loonfs-api/tests/golden/commit_fingerprints_v2.json`.
+These vectors include absent and present race guards and both undelete forms.
+The API's request serializer is not the canonical encoder: omitted defaults,
+public ID encoding, and transport evidence must not change stored identity.
 
 A content reference enters the preimage as exactly:
 
@@ -1450,8 +1486,8 @@ A reused `commit_id` with an equal fingerprint replays the originally
 committed response; an unequal fingerprint is rejected as
 `commit_id_reuse_conflict`, which reports the stored fingerprint so a client
 can prove its retry is the same request (API spec, section 5.2). Reference
-values are pinned by tests in `loonfs-api` (`commit_identity.rs`); those
-literals must never change within scheme `v1`.
+values and canonical bytes are pinned by shared vectors and semantic tests in
+`loonfs-api`; those values must never change within scheme `v2`.
 
 ### 3.4 Server authority
 
@@ -1593,7 +1629,7 @@ Durable attribution fields describe the recorded event. Inode rows use `created_
 
 A streaming compaction lease's `writer_id` is the writer id of the process running the job (`MutationContext::writer_id`): the server's in an embedded deployment, the maintenance node's in a standalone one. No other maintenance job stores this value.
 
-The commit fingerprint preimage in section 3.3.1 describes the commit request rather than a durable record. It uses `actor_kind` and `actor_id`, matching `CommitRequest.actor`.
+The commit fingerprint preimage in section 3.3.1 describes the commit request rather than a durable record. It uses the same `{kind, id}` actor shape as `CommitRequest.actor`.
 
 Retained commits keep their actor in the change feed and in metadata for inode
 creation, file revisions, current attributes, and active deletions.
@@ -2111,7 +2147,7 @@ and grep maintenance does not collect core-owned objects.
   so the value carries no prefix. A block CRC is a bare integer whose field
   name is the algorithm, `crc32c` in a block handle (section 4.2.1), because a
   handle is fixed-size and the format fixes the algorithm. Commit fingerprints
-  additionally carry their canonicalization scheme (`v1:sha256:<hex>`, section
+  additionally carry their canonicalization scheme (`v2:sha256:<hex>`, section
   3.3.1) because their preimage rules can evolve independently of the
   algorithm.
 - **Unknown content-ref kinds round-trip in immutable records.** A reader that

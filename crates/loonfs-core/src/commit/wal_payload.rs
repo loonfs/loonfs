@@ -32,7 +32,7 @@ mod tests {
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WriterEpoch};
 
     fn test_fingerprint() -> CommitFingerprint {
-        serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint")
+        serde_json::from_str(r#""v2:sha256:test""#).expect("fingerprint")
     }
 
     #[test]

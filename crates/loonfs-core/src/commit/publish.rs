@@ -204,7 +204,7 @@ mod tests {
             actor: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             message: None,
-            semantic_identity: serde_json::from_str(r#""v1:sha256:publish-plan""#)
+            semantic_identity: serde_json::from_str(r#""v2:sha256:publish-plan""#)
                 .expect("fingerprint"),
             apply_after_seq: ChangeSeq(assigned_seq.0.saturating_sub(1)),
             assigned_seq,

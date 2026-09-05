@@ -393,7 +393,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
             let fingerprint = details
                 .committed_fingerprint
                 .expect("the receipt's semantic identity");
-            assert!(fingerprint.starts_with("v1:sha256:"), "got `{fingerprint}`");
+            assert!(fingerprint.starts_with("v2:sha256:"), "got `{fingerprint}`");
         }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }

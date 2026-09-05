@@ -877,7 +877,7 @@ mod tests {
         let reuse = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),
             committed_seq: Some(ChangeSeq(9)),
-            committed_fingerprint: Some("v1:sha256:abc".to_owned()),
+            committed_fingerprint: Some("v2:sha256:abc".to_owned()),
         };
         let details = reuse.details().expect("reuse details");
         assert_eq!(
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(details.committed_seq, Some(ChangeSeq(9)));
         assert_eq!(
             details.committed_fingerprint.as_deref(),
-            Some("v1:sha256:abc")
+            Some("v2:sha256:abc")
         );
 
         // A conflict between two live claims has no landed commit to name,

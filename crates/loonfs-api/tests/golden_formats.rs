@@ -310,7 +310,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             commit_id: commit_id(),
             committed_by: actor(),
             semantic_commit_fingerprint: serde_json::from_str(
-                r#""v1:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
+                r#""v2:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
             )
             .expect("fingerprint"),
             committed_at_ms: 4_000,
@@ -2547,7 +2547,7 @@ fn provenance_rows_reject_every_missing_required_field() {
             MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
                 commit_id: commit_id(),
                 committed_by: actor(),
-                semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:receipt""#)
+                semantic_commit_fingerprint: serde_json::from_str(r#""v2:sha256:receipt""#)
                     .expect("fingerprint"),
                 committed_seq: ChangeSeq(9),
                 committed_at_ms: 9_000,
