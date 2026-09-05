@@ -1,45 +1,100 @@
-//! The GC entry point: orchestrates root collection, verification,
-//! and the bounded, resumable sweep.
-
+//! Server-owned GC progress. Every worker joins the same run and advances it
+//! by CAS; a client token carries identity, never deletion evidence.
 use super::budget::PassBudget;
 use super::compaction_staging::CompactionLeases;
-use super::config::{GcConfig, GcPolicy};
-use super::cursor::{cursor_after, CandidateFamily, GcCursor};
-use super::fork_checkpoints::{
-    maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
-    MissingBasisCheckpointSweep,
-};
-use super::live_set::{collect_live_set, LiveSet, LiveSetCollection, SweepStep, SweepVerifier};
-use super::reap::{grace_age, sweep_checkpoint_record, CheckpointSweep, GraceAge};
-use super::uploads::{
-    sweep_upload_session, ContentReferences, UploadSessionSweep, UploadSweepContext,
-};
-use crate::checkpoint::CompactionPrefixOwner;
+use super::config::GcConfig;
+use super::cursor::CandidateFamilyExt;
+use super::mark_table::MarkTables;
+use super::references::References;
+use super::sweep::Sweep;
+use super::uploads::UploadSweepContext;
+use super::{mark, mark_index};
 use crate::context::MutationContext;
-use crate::control_object::ControlObjectLoadError;
-use crate::error::{CoreError, Result};
-use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
-use crate::namespace::control_snapshot::load_control_snapshot;
-use futures::StreamExt;
-use loonfs_api::{
-    DeletedObjectCounts, GcResponse, MetadataFamilyGroup, NamespaceId, RetainedReason,
+use crate::control_object::{
+    expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
-use loonfs_objectstore::layout::{manifest_object_id_of, upload_id_of};
-use loonfs_objectstore::ObjectStore;
-use std::sync::Arc;
+use crate::error::{CoreError, Result};
+use crate::namespace::control_snapshot::load_control_snapshot;
+use bytes::Bytes;
+use loonfs_api::wire::control::{encode_control_state, ControlObjectKind};
+use loonfs_api::wire::gc::*;
+use loonfs_api::{decode_cursor, encode_cursor, GcResponse, GcRunId, NamespaceId, PageCursor};
+use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use serde::{Deserialize, Serialize};
 
-fn is_live(live: &LiveSet, family: CandidateFamily, key: &str) -> bool {
-    match family {
-        CandidateFamily::WalSegments => live.protects_wal_segment(key),
-        CandidateFamily::MetadataSegments | CandidateFamily::CompactionStaging => {
-            live.segments.contains(key)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunCursor {
+    namespace_id: NamespaceId,
+    gc_run_id: GcRunId,
+    // Informational only. The singleton record selects the next step.
+    step_no: u64,
+}
+impl PageCursor for RunCursor {
+    const KIND: &'static str = "namespace_gc_run";
+}
+
+pub(super) fn run_key(namespace_id: &NamespaceId) -> String {
+    loonfs_objectstore::keys::gc_run(namespace_id)
+}
+fn scratch_prefix(namespace_id: &NamespaceId) -> String {
+    loonfs_objectstore::keys::gc_runs_prefix(namespace_id)
+}
+
+pub(super) async fn load_run<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<Option<LoadedControl<GcRunState>>> {
+    let loaded = load_control_object(
+        store,
+        run_key(namespace_id),
+        ControlObjectKind::GcRun,
+        |state: &GcRunState| expect_namespace(namespace_id, &state.namespace_id),
+    )
+    .await;
+    match loaded {
+        Ok(loaded) => {
+            super::validate::run(&loaded.state)?;
+            Ok(Some(loaded))
         }
-        CandidateFamily::Manifests => manifest_object_id_of(key)
-            .and_then(std::result::Result::ok)
-            .is_some_and(|manifest_object_id| live.manifests.contains(&manifest_object_id)),
-        CandidateFamily::Checkpoints => live.checkpoint_keys.contains(key),
-        CandidateFamily::UploadSessions => false,
+        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+        Err(error) => Err(CoreError::ControlObjectLoad(error)),
     }
+}
+
+fn encoded(state: &GcRunState) -> Result<Bytes> {
+    encode_control_state(ControlObjectKind::GcRun, state)
+        .map(Bytes::from)
+        .map_err(|error| CoreError::NamespaceCorrupt(format!("cannot encode GC progress: {error}")))
+}
+
+/// Conditional writes are settled only by re-reading durable progress. A
+/// transport failure never licenses sweeping an uncommitted partial mark set.
+async fn save<S: ObjectStore + ?Sized>(
+    store: &S,
+    previous: Option<&LoadedControl<GcRunState>>,
+    state: &GcRunState,
+) -> Result<LoadedControl<GcRunState>> {
+    let key = run_key(&state.namespace_id);
+    let bytes = encoded(state)?;
+    let result = match previous {
+        Some(previous) => store.compare_and_swap(&key, &previous.etag, bytes).await,
+        None => store.put_if_absent(&key, bytes).await,
+    };
+    match result {
+        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
+        Err(error @ ObjectStoreError::Transport { .. }) => {
+            let current = load_run(store, &state.namespace_id).await?;
+            return match current {
+                Some(current) if current.state == *state => Ok(current),
+                _ => Err(CoreError::store(&key, &error)),
+            };
+        }
+        Err(error) => return Err(CoreError::store(&key, &error)),
+    }
+    load_run(store, &state.namespace_id)
+        .await?
+        .ok_or_else(|| CoreError::NamespaceCorrupt("GC progress disappeared after CAS".to_owned()))
 }
 
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
@@ -48,503 +103,416 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     config: &GcConfig,
     context: &MutationContext,
 ) -> Result<GcResponse> {
-    gc_namespace_with_reverify_chunk(store, namespace_id, config, context, SWEEP_REVERIFY_CHUNK)
-        .await
-}
-
-/// How many sweep candidates may be decided against one live set before the
-/// set is re-collected (rule 3: candidate selection may be stale, deletion
-/// may not).
-const SWEEP_REVERIFY_CHUNK: usize = 1024;
-
-pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    config: &GcConfig,
-    context: &MutationContext,
-    reverify_chunk: usize,
-) -> Result<GcResponse> {
-    let policy = GcPolicy::settle(config, namespace_id)?;
-    let mut report = GcResponse::empty(namespace_id.clone());
-    // The budget opens before the first read, so marking spends out of it
-    // too. A pass that cannot afford its own roots reports that. It does
-    // not read the whole retained chain for free and then meter only what
-    // comes after.
-    let mut budget = PassBudget::new(policy.max_objects);
-
-    // Read the namespace's head, root, and floor as one budget unit.
-    budget.charge();
-    let snapshot = match load_control_snapshot(store, namespace_id).await {
-        Ok(snapshot) => snapshot,
-        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
-        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-    };
-    let content_store_id = snapshot.head.state.content_store_id.clone();
-
-    // Every invocation rebuilds all roots before interpreting the cursor.
-    // The cursor can skip enumeration only; it never carries safety state.
-    let initial_live = match collect_live_set(
-        store,
-        namespace_id,
-        &snapshot,
-        policy.grace_window_ms,
-        None,
-        &mut budget,
-        context,
-    )
-    .await?
+    config.validate()?;
+    let requested = config
+        .cursor
+        .as_deref()
+        .map(|token| {
+            decode_cursor::<RunCursor>(token)
+                .map_err(|error| CoreError::InvalidGcConfig(error.to_string()))
+        })
+        .transpose()?;
+    if requested
+        .as_ref()
+        .is_some_and(|cursor| cursor.namespace_id != *namespace_id)
     {
-        LiveSetCollection::Complete(live) => Arc::new(live),
-        // The pass has no root set, so it may not decide any candidate. It
-        // deletes nothing and hands back the token it was given, because it
-        // made no progress to report. It also skips content reclamation for
-        // the same reason the scan skips it. The collection that decision
-        // needs did not fit in the budget.
-        LiveSetCollection::BudgetExhausted => {
-            report.budget_exhausted = true;
-            report.content_reclamation_deferred = true;
-            report.next_cursor.clone_from(&policy.unchanged_cursor);
+        return Err(CoreError::InvalidGcConfig(
+            "GC cursor belongs to another namespace".to_owned(),
+        ));
+    }
+    let mut report = GcResponse::empty(namespace_id.clone());
+    let current = load_run(store, namespace_id).await?;
+    if let Some(requested) = &requested {
+        if current
+            .as_ref()
+            .is_none_or(|current| current.state.gc_run_id != requested.gc_run_id)
+        {
+            return Err(CoreError::InvalidGcConfig(
+                "GC cursor does not identify the namespace's current run".to_owned(),
+            ));
+        }
+    }
+    let mut loaded = if current.as_ref().is_none_or(|current| {
+        matches!(current.state.phase, GcPhase::Complete {}) && requested.is_none()
+    }) {
+        // Read the format gate before reserving progress. Old collectors must
+        // reject the head version used by this GC protocol.
+        match crate::namespace::control::load_head_object(store, namespace_id).await {
+            Ok(_) => {}
+            Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
+            Err(error) => return Err(CoreError::ControlObjectLoad(error)),
+        }
+        let state = GcRunState {
+            namespace_id: namespace_id.clone(),
+            gc_run_id: GcRunId::generate(),
+            step_no: 0,
+            started_at_ms: context.now_ms,
+            grace_window_ms: config.grace_window_ms,
+            phase: GcPhase::Starting {},
+        };
+        save(store, current.as_ref(), &state).await?
+    } else {
+        current.expect("existing run")
+    };
+    let run_id = loaded.state.gc_run_id.clone();
+    let fixed_context = MutationContext {
+        writer_id: context.writer_id.clone(),
+        now_ms: loaded.state.started_at_ms,
+    };
+    let mut pass = Pass::new(store, namespace_id, &run_id, &fixed_context);
+    let mut budget = PassBudget::new(config.max_objects);
+    while !matches!(loaded.state.phase, GcPhase::Complete {}) && budget.try_charge() {
+        let mut next = loaded.state.clone();
+        pass.step(&mut next, &mut report).await?;
+        next.step_no = next
+            .step_no
+            .checked_add(1)
+            .ok_or_else(|| CoreError::NamespaceCorrupt("GC step number overflow".to_owned()))?;
+        let confirmed = save(store, Some(&loaded), &next).await?;
+        if confirmed.state.gc_run_id != run_id {
+            // Another caller completed our run and reserved the next. Our
+            // token cannot become permission to work on that newer run.
             return Ok(report);
         }
-    };
-
-    // A pass exists only after root collection succeeds. From here on it is
-    // the one owner of every mutable sweep concern, including the budget and cursor.
-    let upload_sweep = UploadSweepContext::new(
-        store,
-        namespace_id,
-        content_store_id,
-        policy.grace_window_ms,
-        context,
-    );
-    GcPass {
-        store,
-        namespace_id,
-        policy,
-        mutation: context,
-        initial_live: Arc::clone(&initial_live),
-        sweep: SweepVerifier::seeded(Arc::clone(&initial_live), reverify_chunk),
-        references: ContentReferences::over(initial_live),
-        upload_sweep,
-        leases: CompactionLeases::default(),
-        budget,
-        report,
-        position: None,
+        loaded = confirmed;
     }
-    .run()
-    .await
+    report.retention_degraded |= match &loaded.state.phase {
+        GcPhase::Marking { work } => work.roots.degraded,
+        GcPhase::Revisions { roots, .. }
+        | GcPhase::Sealing { roots, .. }
+        | GcPhase::Sweeping { roots, .. } => roots.degraded,
+        _ => false,
+    };
+    if !matches!(loaded.state.phase, GcPhase::Complete {}) {
+        report.budget_exhausted = true;
+        report.content_reclamation_deferred = !matches!(
+            loaded.state.phase,
+            GcPhase::Sweeping { .. } | GcPhase::Cleaning { .. }
+        );
+        report.next_cursor = Some(
+            encode_cursor(&RunCursor {
+                namespace_id: namespace_id.clone(),
+                gc_run_id: run_id,
+                step_no: loaded.state.step_no,
+            })
+            .map_err(|error| CoreError::Internal(format!("cannot encode GC cursor: {error}")))?,
+        );
+    }
+    Ok(report)
 }
 
-/// One initialized garbage-collection pass.
-///
-/// These fields share a lifecycle rather than merely sharing a call site:
-/// candidate decisions mutate the verifier, reference memo, lease observations,
-/// budget, cursor, and report together.
-struct GcPass<'a, S: ?Sized> {
+/// Per-invocation I/O state. Durable positions remain entirely in GcRunState.
+pub(super) struct Pass<'a, S: ?Sized> {
     store: &'a S,
     namespace_id: &'a NamespaceId,
-    policy: GcPolicy,
-    mutation: &'a MutationContext,
-    /// The root snapshot used to select candidates and collect content
-    /// references. Re-verification has its own newer snapshot in `sweep`.
-    initial_live: Arc<LiveSet>,
-    sweep: SweepVerifier,
-    references: ContentReferences,
-    upload_sweep: UploadSweepContext<'a, S>,
+    context: &'a MutationContext,
+    tables: MarkTables<'a, S>,
     leases: CompactionLeases,
-    budget: PassBudget,
-    report: GcResponse,
-    /// The last candidate this pass decided, if it has made progress.
-    position: Option<GcCursor>,
+    scan: mark::Scan,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PassEnd {
-    Complete,
-    BudgetExhausted,
-}
-
-/// Budget units the compaction lease stage costs: one read per family group.
-pub(super) const COMPACTION_LEASE_STAGE_UNITS: u64 = MetadataFamilyGroup::ALL.len() as u64;
-
-impl<S: ObjectStore + ?Sized> GcPass<'_, S> {
-    /// Runs the pass. Group slots stay in place and are replaced by CAS, so a
-    /// paused collector can never delete a newer job's lease.
-    async fn run(mut self) -> Result<GcResponse> {
-        let end = self.walk_candidates().await?;
-        self.finish_report(end)
+impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
+    pub(super) fn new(
+        store: &'a S,
+        namespace_id: &'a NamespaceId,
+        run_id: &'a GcRunId,
+        context: &'a MutationContext,
+    ) -> Self {
+        Self {
+            store,
+            namespace_id,
+            context,
+            tables: MarkTables::new(store, namespace_id, run_id),
+            leases: CompactionLeases::default(),
+            scan: mark::Scan::default(),
+        }
     }
-
-    async fn walk_candidates(&mut self) -> Result<PassEnd> {
-        // The compaction lease stage reads one lease per family group and
-        // keeps terminal group slots for the next CAS. Every pass pays for those reads here,
-        // whether or not it reaches the stage, so the budget bounds the pass
-        // and a pass that cannot cover the stage decides nothing.
-        if self.budget.remaining() < COMPACTION_LEASE_STAGE_UNITS {
-            return Ok(PassEnd::BudgetExhausted);
-        }
-        self.budget.charge_block(COMPACTION_LEASE_STAGE_UNITS);
-        let resume_family = self.policy.resume.keyspace().family;
-        let resume_last_key = self.policy.resume.last_key().map(str::to_owned);
-
-        // Data precedes mutable records. A crash or bounded return can
-        // therefore leave data protected for an extra pass, never a readable
-        // record whose basis was removed underneath it.
-        for &family in &CandidateFamily::ALL[resume_family.index()..] {
-            if family == CandidateFamily::CompactionStaging {
-                self.leases.load_once(self.store, self.namespace_id).await?;
-            }
-            let prefix = family.prefix(self.namespace_id);
-            let start_after = if family == resume_family {
-                resume_last_key.as_deref()
-            } else {
-                None
-            };
-            let mut stream = self.store.list_prefix_from_stream(&prefix, start_after);
-            while let Some(item) = stream.next().await {
-                let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
-                // This one-key lookahead proves work remains. It performs no
-                // candidate reads or mutations, and the key is reconsidered
-                // from the exclusive last-examined position on resume.
-                if self.budget.exhausted() {
-                    return Ok(PassEnd::BudgetExhausted);
-                }
-
-                if self.process_candidate(family, &key).await? == SweepStep::BudgetExhausted {
-                    // The re-verification this candidate's decision needs
-                    // could not be paid for, so the candidate stays undecided
-                    // and is reconsidered from the same exclusive position on
-                    // resume.
-                    return Ok(PassEnd::BudgetExhausted);
-                }
-                // Every candidate that gets past the check above comes back
-                // decided one way or the other, so the cursor always advances
-                // past it. A content-reference scan that exhausts the budget
-                // retains its session instead of pinning the cursor forever.
-                self.budget.charge();
-                self.position = Some(cursor_after(self.namespace_id, family, key));
-            }
-        }
-        Ok(PassEnd::Complete)
-    }
-
-    /// Decides one candidate using the pass-owned verifier and family state.
-    async fn process_candidate(&mut self, family: CandidateFamily, key: &str) -> Result<SweepStep> {
-        if !family.recognizes(key) {
-            self.report.retain(RetainedReason::UnrecognizedKey);
-            return Ok(SweepStep::Continue);
-        }
-        match family {
-            CandidateFamily::UploadSessions => {
-                self.process_upload_session(key).await?;
-                return Ok(SweepStep::Continue);
-            }
-            CandidateFamily::Checkpoints
-                if self.initial_live.missing_basis_records.contains(key) =>
-            {
-                self.process_missing_basis_checkpoint(key).await?;
-                return Ok(SweepStep::Continue);
-            }
-            CandidateFamily::WalSegments
-            | CandidateFamily::MetadataSegments
-            | CandidateFamily::CompactionStaging
-            | CandidateFamily::Manifests
-            | CandidateFamily::Checkpoints => {}
-        };
-
-        // Objects reachable from the invocation's root snapshot — either
-        // anchor's — are skipped, while every selected candidate is
-        // re-verified immediately before its decision.
-        if is_live(&self.initial_live, family, key) {
-            return Ok(SweepStep::Continue);
-        }
-        if self
-            .sweep
-            .refresh_if_due(
-                self.store,
-                self.namespace_id,
-                self.policy.grace_window_ms,
-                &mut self.budget,
-                self.mutation,
-            )
-            .await?
-            == SweepStep::BudgetExhausted
-        {
-            return Ok(SweepStep::BudgetExhausted);
-        }
-
-        match family {
-            CandidateFamily::WalSegments => {
-                self.process_aged_family(family, key, |deleted| &mut deleted.wal_segments)
-                    .await?
-            }
-            CandidateFamily::MetadataSegments => {
-                self.process_aged_family(family, key, |deleted| &mut deleted.metadata_segments)
-                    .await?
-            }
-            CandidateFamily::Manifests => {
-                self.process_aged_family(family, key, |deleted| &mut deleted.manifests)
-                    .await?
-            }
-            CandidateFamily::CompactionStaging => self.process_compaction_staging(key).await?,
-            CandidateFamily::Checkpoints => self.process_checkpoint(key).await?,
-            CandidateFamily::UploadSessions => self.process_upload_session(key).await?,
-        }
-        Ok(SweepStep::Continue)
-    }
-
-    async fn process_aged_family(
+    pub(super) async fn step(
         &mut self,
-        family: CandidateFamily,
-        key: &str,
-        deleted: fn(&mut DeletedObjectCounts) -> &mut u64,
+        state: &mut GcRunState,
+        report: &mut GcResponse,
     ) -> Result<()> {
-        // Rule 5 is sticky across every re-collection in this pass.
-        if self.sweep.degraded
-            && matches!(
-                family,
-                CandidateFamily::MetadataSegments | CandidateFamily::Manifests
-            )
-        {
-            self.report.retain(RetainedReason::DegradedRoots);
-            return Ok(());
-        }
-        if is_live(&self.sweep.live, family, key) {
-            self.report.retain(RetainedReason::Referenced);
-            return Ok(());
-        }
-        if self.sweep_aged(key, self.policy.grace_window_ms).await? {
-            *deleted(&mut self.report.deleted) += 1;
-        }
-        Ok(())
-    }
-
-    async fn process_compaction_staging(&mut self, key: &str) -> Result<()> {
-        if key.ends_with("/protection.json") {
-            return self.process_compaction_output_protection(key).await;
-        }
-        if self.sweep.degraded {
-            self.report.retain(RetainedReason::DegradedRoots);
-            return Ok(());
-        }
-        if is_live(&self.sweep.live, CandidateFamily::CompactionStaging, key) {
-            self.report.retain(RetainedReason::Referenced);
-            return Ok(());
-        }
-
-        match self
-            .leases
-            .owner_of(self.store, self.namespace_id, key, self.mutation.now_ms)
-            .await?
-        {
-            Some(CompactionPrefixOwner::Protected) => {
-                self.report.retain(RetainedReason::WithinGraceWindow);
+        let store = self.store;
+        let namespace_id = self.namespace_id;
+        let context = self.context;
+        let tables = &mut self.tables;
+        let leases = &mut self.leases;
+        let scan = &mut self.scan;
+        match &mut state.phase {
+            GcPhase::Starting {} => {
+                let snapshot = load_control_snapshot(store, namespace_id)
+                    .await
+                    .map_err(CoreError::ControlObjectLoad)?;
+                let head = &snapshot.head.state;
+                let deleted = head.status.is_deleted();
+                let basis = snapshot.basis();
+                let root = (!deleted && basis.is_owned_by(namespace_id))
+                    .then(|| basis.manifest().expect("owned basis").clone());
+                let wal_tip = if deleted || head.seq == snapshot.retention_floor_seq {
+                    None
+                } else {
+                    Some(
+                        head.visible_wal_tip
+                            .clone()
+                            .filter(|tip| tip.end_seq == head.seq)
+                            .ok_or_else(|| {
+                                CoreError::NamespaceCorrupt(
+                                    "GC snapshot has no matching WAL tip".to_owned(),
+                                )
+                            })?,
+                    )
+                };
+                state.phase = GcPhase::Marking {
+                    work: Box::new(GcMarkWork {
+                        roots: GcRoots {
+                            content_store_id: head.content_store_id.clone(),
+                            namespace_deleted: deleted,
+                            degraded: false,
+                            anchor: GcReferenceAnchor::NotNeeded {},
+                        },
+                        index: GcMarkIndex::default(),
+                        source: GcMarkSource::Root { manifest: root },
+                        floor_seq: snapshot.retention_floor_seq,
+                        wal_tip,
+                    }),
+                };
             }
-            None => {
-                self.report.retain(RetainedReason::UnrecognizedKey);
-            }
-            Some(CompactionPrefixOwner::Fenced | CompactionPrefixOwner::Unclaimed) => {
-                if key.ends_with(".sst.zst")
-                    && self
-                        .sweep_aged(key, METADATA_COMPACTION_STAGING_GRACE_MS)
-                        .await?
-                {
-                    self.report.deleted.metadata_segments += 1;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Output protection stays readable until no output remains. In particular,
-    /// a newer collector must not remove the protection an older one still needs.
-    async fn process_compaction_output_protection(&mut self, key: &str) -> Result<()> {
-        use loonfs_objectstore::layout::parse_object_key;
-        let parsed = parse_object_key(key).expect("recognized output protection");
-        let job_id = loonfs_api::MetadataCompactionId::parse(parsed.identifier().expect("job id"))
-            .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
-        let Some(loaded) =
-            crate::checkpoint::load_output_protection(self.store, self.namespace_id, &job_id)
+            GcPhase::Marking { work } => {
+                if let Some(objects) = mark::step(
+                    store,
+                    namespace_id,
+                    tables,
+                    work,
+                    scan,
+                    state.grace_window_ms,
+                    context,
+                )
                 .await?
-        else {
-            return Ok(());
-        };
-        if self.mutation.now_ms <= loaded.state.expires_at_ms {
-            self.report.retain(RetainedReason::WithinGraceWindow);
-            return Ok(());
-        }
-        let prefix = format!(
-            "{}segments/",
-            key.strip_suffix("protection.json")
-                .expect("protection suffix")
-        );
-        let mut outputs = self.store.list_prefix_from_stream(&prefix, None);
-        match outputs.next().await {
-            Some(Ok(_)) => {
-                self.report.retain(RetainedReason::Referenced);
-                Ok(())
-            }
-            Some(Err(error)) => Err(CoreError::store(&prefix, &error)),
-            None => self.delete_key(key).await,
-        }
-    }
-
-    async fn process_missing_basis_checkpoint(&mut self, key: &str) -> Result<()> {
-        match release_missing_basis_checkpoint(
-            self.store,
-            self.namespace_id,
-            key,
-            self.policy.grace_window_ms,
-            self.mutation,
-        )
-        .await?
-        {
-            MissingBasisCheckpointSweep::Released => {
-                self.report.released_checkpoints.missing_basis += 1;
-            }
-            MissingBasisCheckpointSweep::Retained => {
-                self.report.retain(RetainedReason::CheckpointNotReleasable);
-            }
-        }
-        Ok(())
-    }
-
-    async fn process_checkpoint(&mut self, key: &str) -> Result<()> {
-        if is_live(&self.sweep.live, CandidateFamily::Checkpoints, key) {
-            self.report.retain(RetainedReason::Referenced);
-            return Ok(());
-        }
-        match maybe_release_fork_checkpoint(self.store, key, self.mutation).await? {
-            ForkCheckpointSweep::Released => {
-                self.report.released_checkpoints.fork += 1;
-                return Ok(());
-            }
-            ForkCheckpointSweep::Retained => {
-                self.report.retain(RetainedReason::CheckpointNotReleasable);
-                return Ok(());
-            }
-            ForkCheckpointSweep::NotAnActiveFork => {}
-        }
-        match sweep_checkpoint_record(
-            self.store,
-            self.namespace_id,
-            key,
-            self.policy.grace_window_ms,
-            self.sweep.live.namespace_deleted,
-            self.mutation,
-        )
-        .await?
-        {
-            CheckpointSweep::Delete => {
-                self.delete_key(key).await?;
-                self.report.deleted.checkpoint_records += 1;
-            }
-            CheckpointSweep::Released => self.report.released_checkpoints.expired += 1,
-            CheckpointSweep::ReleasedSnapshot => self.report.released_checkpoints.snapshot += 1,
-            CheckpointSweep::Retain => self.report.retain(RetainedReason::CheckpointNotReleasable),
-        }
-        Ok(())
-    }
-
-    async fn process_upload_session(&mut self, key: &str) -> Result<()> {
-        let Some(upload_id) = upload_id_of(key) else {
-            self.report.retain(RetainedReason::UnrecognizedKey);
-            return Ok(());
-        };
-        match sweep_upload_session(
-            &self.upload_sweep,
-            &upload_id,
-            &mut self.references,
-            &mut self.budget,
-        )
-        .await?
-        {
-            UploadSessionSweep::Delete { reclaimed_content } => {
-                self.delete_key(key).await?;
-                self.report.deleted.upload_sessions += 1;
-                if reclaimed_content {
-                    self.report.deleted.content_objects += 1;
+                {
+                    state.phase = GcPhase::Revisions {
+                        roots: work.roots.clone(),
+                        objects,
+                        position: GcMarkPosition::default(),
+                        block_no: 0,
+                        content: GcMarkIndex::default(),
+                    };
                 }
             }
-            UploadSessionSweep::Retain { reclaimable_at_ms } => {
-                // A deadline is the difference between "come back then" and
-                // "ask again next pass", and the sweep already draws that
-                // line.
-                self.report.retain(match reclaimable_at_ms {
-                    Some(_) => RetainedReason::UploadSessionWindow,
-                    None => RetainedReason::UploadSessionUndecided,
-                });
-                self.note_reclamation_deadline(reclaimable_at_ms);
+            GcPhase::Revisions {
+                roots,
+                objects,
+                position,
+                block_no,
+                content,
+            } => {
+                if content.merge.is_some() {
+                    return mark_index::step(tables, content).await;
+                }
+                if roots.degraded || roots.namespace_deleted {
+                    state.phase = GcPhase::Sweeping {
+                        roots: roots.clone(),
+                        table: objects.clone(),
+                        family: GcCandidateFamily::WalSegments,
+                        last_key: None,
+                    };
+                    return Ok(());
+                }
+                for _ in 0..GC_MARK_PAGE_ENTRIES {
+                    let Some(entry) = tables.peek(objects, *position).await? else {
+                        let mut index = content.clone();
+                        mark_index::insert(&mut index, objects.clone(), 0)?;
+                        state.phase = GcPhase::Sealing {
+                            roots: roots.clone(),
+                            index,
+                        };
+                        return Ok(());
+                    };
+                    match entry.value {
+                        GcMarkValue::RevisionSegment { segment, max_seq } => {
+                            match crate::checkpoint::revision_content_block(
+                                store, &segment, max_seq, *block_no,
+                            )
+                            .await?
+                            {
+                                Some(ids) => {
+                                    let table = mark_index::write_sorted(
+                                        tables,
+                                        ids.iter().map(mark::content).collect(),
+                                    )
+                                    .await?;
+                                    mark_index::insert(content, table, 0)?;
+                                    *block_no = block_no.checked_add(1).ok_or_else(|| {
+                                        CoreError::NamespaceCorrupt(
+                                            "GC revision block position overflow".to_owned(),
+                                        )
+                                    })?;
+                                }
+                                None => {
+                                    MarkTables::<S>::advance(objects, position);
+                                    *block_no = 0;
+                                }
+                            }
+                            break;
+                        }
+                        _ => MarkTables::<S>::advance(objects, position),
+                    }
+                }
             }
-            UploadSessionSweep::ContentReclamationDeferred => {
-                self.report.retain(RetainedReason::ContentScanDeferred);
-                self.report.content_reclamation_deferred = true;
+            GcPhase::Sealing { roots, index } => {
+                if index.merge.is_some() {
+                    mark_index::step(tables, index).await?;
+                } else if !mark_index::seal(index)? {
+                    state.phase = GcPhase::Sweeping {
+                        roots: roots.clone(),
+                        table: index
+                            .levels
+                            .iter()
+                            .flatten()
+                            .next()
+                            .cloned()
+                            .unwrap_or_else(mark::empty_table),
+                        family: GcCandidateFamily::WalSegments,
+                        last_key: None,
+                    };
+                }
             }
+            GcPhase::Sweeping {
+                roots,
+                table,
+                family,
+                last_key,
+            } => {
+                report.retention_degraded |= roots.degraded;
+                let prefix = family.prefix(namespace_id);
+                match scan.next(store, &prefix, last_key.as_deref()).await? {
+                    Some(key) => {
+                        let upload_sweep = UploadSweepContext::new(
+                            store,
+                            namespace_id,
+                            roots.content_store_id.clone(),
+                            state.grace_window_ms,
+                            context,
+                        );
+                        let references = References {
+                            tables,
+                            table,
+                            roots,
+                        };
+                        Sweep {
+                            store,
+                            namespace_id,
+                            grace_window_ms: state.grace_window_ms,
+                            mutation: context,
+                            references,
+                            upload_sweep,
+                            leases,
+                            report,
+                        }
+                        .candidate(*family, &key)
+                        .await?;
+                        *last_key = Some(key);
+                    }
+                    None => match GcCandidateFamily::ALL.get(family.index() + 1) {
+                        Some(next) => {
+                            *family = *next;
+                            *last_key = None;
+                        }
+                        None => state.phase = GcPhase::Cleaning { last_key: None },
+                    },
+                }
+            }
+            GcPhase::Cleaning { last_key } => {
+                let prefix = scratch_prefix(namespace_id);
+                match scan.next(store, &prefix, last_key.as_deref()).await? {
+                    Some(key) => {
+                        if scratch_page(&key) {
+                            store
+                                .delete(&key)
+                                .await
+                                .map_err(|error| CoreError::store(&key, &error))?;
+                        } else {
+                            report.retain(loonfs_api::RetainedReason::UnrecognizedKey);
+                        }
+                        *last_key = Some(key);
+                    }
+                    None => state.phase = GcPhase::Complete {},
+                }
+            }
+            GcPhase::Complete {} => {}
         }
         Ok(())
     }
+}
 
-    /// Ages one unreferenced key out, recording the reason when it stays.
-    async fn sweep_aged(&mut self, key: &str, grace_window_ms: u64) -> Result<bool> {
-        match grace_age(self.store, key, grace_window_ms, self.mutation.now_ms)
-            .await
-            .map_err(|error| CoreError::store(key, &error))?
-        {
-            // Nothing was decided about a key that is already gone, so
-            // nothing is counted for it either.
-            GraceAge::Gone => return Ok(false),
-            GraceAge::Young => {
-                self.report.retain(RetainedReason::WithinGraceWindow);
-                return Ok(false);
-            }
-            GraceAge::Unknown => {
-                self.report.retain(RetainedReason::NoProviderTimestamp);
-                return Ok(false);
-            }
-            GraceAge::Aged if !self.sweep.live.anchor.proves_unreferencing() => {
-                self.report.retain(RetainedReason::NoReferenceManifest);
-                return Ok(false);
-            }
-            GraceAge::Aged => {}
+fn scratch_page(key: &str) -> bool {
+    let parts: Vec<_> = key.split('/').collect();
+    match parts.as_slice() {
+        ["namespaces", _, "gc", "runs", run, "tables", table, page] => {
+            loonfs_api::GcRunId::parse(run).is_ok()
+                && loonfs_api::GcMarkTableId::parse(table).is_ok()
+                && page.strip_suffix(".json").is_some_and(|number| {
+                    number.len() == 20
+                        && number.bytes().all(|byte| byte.is_ascii_digit())
+                        && number.parse::<u64>().is_ok()
+                })
         }
-        self.delete_key(key).await?;
-        Ok(true)
+        _ => false,
     }
+}
 
-    async fn delete_key(&self, key: &str) -> Result<()> {
-        self.store
-            .delete(key)
-            .await
-            .map_err(|error| CoreError::store(key, &error))
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
 
-    /// Records the earliest future reclamation deadline.
-    fn note_reclamation_deadline(&mut self, at_ms: Option<u64>) {
-        let Some(at_ms) = at_ms.filter(|at_ms| *at_ms > self.mutation.now_ms) else {
-            return;
+    #[tokio::test]
+    async fn cursor_progress_cannot_skip_server_owned_marking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalFsStore::new(dir.path()).expect("store");
+        let ns = NamespaceId::parse("demo").expect("namespace");
+        let context = MutationContext {
+            writer_id: loonfs_api::WriterId::parse("gc-test").expect("writer"),
+            now_ms: 1000,
         };
-        self.report.next_reclamation_at_ms = Some(
-            self.report
-                .next_reclamation_at_ms
-                .map_or(at_ms, |soonest_ms| soonest_ms.min(at_ms)),
+        crate::namespace::bootstrap::bootstrap_namespace(&store, &ns, &context, false)
+            .await
+            .expect("bootstrap");
+        let mut config = GcConfig {
+            max_objects: Some(1),
+            ..GcConfig::default()
+        };
+        let first = gc_namespace(&store, &ns, &config, &context)
+            .await
+            .expect("start");
+        let mut cursor = decode_cursor::<RunCursor>(first.next_cursor.as_deref().expect("cursor"))
+            .expect("decode");
+        cursor.step_no = u64::MAX;
+        config.cursor = Some(encode_cursor(&cursor).expect("encode"));
+        let next = gc_namespace(&store, &ns, &config, &context)
+            .await
+            .expect("resume server position");
+        let state = load_run(&store, &ns)
+            .await
+            .expect("load")
+            .expect("run")
+            .state;
+        assert_eq!(state.step_no, 2);
+        assert!(matches!(state.phase, GcPhase::Marking { .. }));
+        assert_eq!(next.deleted.wal_segments, 0);
+        cursor.namespace_id = NamespaceId::parse("other").expect("namespace");
+        config.cursor = Some(encode_cursor(&cursor).expect("encode"));
+        assert!(gc_namespace(&store, &ns, &config, &context).await.is_err());
+        cursor.namespace_id = ns.clone();
+        cursor.gc_run_id = GcRunId::generate();
+        config.cursor = Some(encode_cursor(&cursor).expect("encode"));
+        assert!(gc_namespace(&store, &ns, &config, &context).await.is_err());
+        assert_eq!(
+            load_run(&store, &ns)
+                .await
+                .expect("load")
+                .expect("run")
+                .state,
+            state
         );
-    }
-
-    /// Produces the response after lease settlement. Budget-stop cursor and
-    /// degraded-root reporting live here so every completed walk uses the
-    /// same finalization path.
-    fn finish_report(mut self, end: PassEnd) -> Result<GcResponse> {
-        if end == PassEnd::BudgetExhausted {
-            self.report.budget_exhausted = true;
-            match self.position.as_ref() {
-                Some(position) => self.report.next_cursor = Some(position.encode()?),
-                None => self
-                    .report
-                    .next_cursor
-                    .clone_from(&self.policy.unchanged_cursor),
-            }
-        }
-        self.report.retention_degraded = self.sweep.degraded;
-        Ok(self.report)
     }
 }

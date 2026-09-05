@@ -3368,7 +3368,7 @@
         "description": "Runs one bounded mark-and-sweep garbage-collection pass.",
         "properties": {
           "cursor": {
-            "description": "The opaque `next_cursor` returned by an earlier pass for the same namespace.",
+            "description": "The opaque `next_cursor` returned by an earlier call for this namespace.\nOmitting it joins any active run; scan positions remain server-owned.",
             "type": [
               "string",
               "null"
@@ -3390,7 +3390,7 @@
             "type": "string"
           },
           "max_objects": {
-            "description": "The maximum objects this pass may inspect, or `None` to run to completion.",
+            "description": "Maximum durable GC work steps in this call, or `None` to finish the run.\nEven a budget of one saves progress through marking and sweeping.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -3510,7 +3510,7 @@
             "description": "Namespace the pass ran against."
           },
           "next_cursor": {
-            "description": "The opaque resume token for remaining candidates in the same namespace.",
+            "description": "The opaque run token for remaining marking, sweeping, or cleanup work.",
             "type": "string"
           },
           "next_reclamation_at_ms": {

@@ -359,6 +359,52 @@ where
     best.map(|(position, _, _)| position)
 }
 
+/// Reads one validated revision block for resumable content marking. Raw
+/// revision rows are conservative references: compaction never prunes them.
+pub(crate) async fn revision_content_block<S: ObjectStore + ?Sized>(
+    store: &S,
+    descriptor: &MetadataSegmentRef,
+    max_seq: ChangeSeq,
+    block_no: u64,
+) -> Result<Option<Vec<loonfs_api::ContentId>>> {
+    if descriptor.family != MetadataRowFamily::Revisions {
+        return Err(crate::error::CoreError::NamespaceCorrupt(
+            "GC revision task names another family".to_owned(),
+        ));
+    }
+    let loader = MetadataSegmentBlockLoader::new(store);
+    let segment = MetadataSegmentInput {
+        descriptor: descriptor.clone(),
+        max_seq,
+    };
+    let index = loader.load_index(segment.clone()).await?;
+    let block_no = usize::try_from(block_no).map_err(|_| {
+        crate::error::CoreError::NamespaceCorrupt("GC block position overflow".to_owned())
+    })?;
+    if block_no == index.len() {
+        return Ok(None);
+    }
+    let entry = index.get(block_no).ok_or_else(|| {
+        crate::error::CoreError::NamespaceCorrupt("GC block position exceeds segment".to_owned())
+    })?;
+    let blocks = loader
+        .load_data_blocks(segment, vec![entry.clone()])
+        .await?;
+    Ok(Some(
+        blocks
+            .iter()
+            .flat_map(|block| &block.rows)
+            .filter_map(|row| {
+                if let MetadataRow::FileRevision(revision) = row {
+                    Some(revision.content_ref.content_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{locality_of, LocalityGrouping};

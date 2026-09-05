@@ -9,9 +9,6 @@
 //! lifetime and any publication that receipt can authorize, so no new
 //! reference can appear after the scan becomes eligible.
 
-use super::budget::PassBudget;
-use super::live_set::LiveSet;
-use crate::checkpoint::{load_manifest_segments_for_inspection, ManifestLoadFailureClass};
 use crate::context::MutationContext;
 use crate::control_update::{
     load_upload_session_state, try_update_upload_session, CasAttempt, UploadSessionUpdate,
@@ -21,18 +18,8 @@ use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
 use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
 use loonfs_api::wire::control::{UploadSessionRecordStatus, UploadSessionState};
-use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
-use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::{ContentId, ContentStoreId, NamespaceId, UploadId};
+use loonfs_api::{ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeSet;
-use std::sync::Arc;
-
-/// Rows read from one metadata segment per request while collecting content
-/// references. Each wave is one page of rows and costs one budget unit, so
-/// this sets both how much of a revision family is held in memory at a time
-/// and how finely the scan can be interrupted.
-const REVISION_SCAN_WAVE_ROWS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UploadSessionSweep {
@@ -49,10 +36,6 @@ pub(super) enum UploadSessionSweep {
         /// completed and nothing ever published.
         reclaimed_content: bool,
     },
-    /// The remaining pass budget was too small to scan content references. Keep
-    /// the session, disable completed-content reclamation for this invocation,
-    /// and continue sweeping other candidates.
-    ContentReclamationDeferred,
 }
 
 pub(super) struct UploadSweepContext<'a, S: ?Sized> {
@@ -90,8 +73,7 @@ impl<'a, S: ?Sized> UploadSweepContext<'a, S> {
 pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     sweep: &UploadSweepContext<'_, S>,
     upload_id: &UploadId,
-    references: &mut ContentReferences,
-    budget: &mut PassBudget,
+    references: &mut super::references::References<'_, '_, S>,
 ) -> Result<UploadSessionSweep> {
     // This read selects the lifecycle branch only. Any state change is applied
     // through a later CAS using a fresh ETag.
@@ -135,17 +117,8 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                     completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_MS),
                 ));
             }
-            match references
-                .lookup(
-                    sweep.store,
-                    sweep.namespace_id,
-                    &content_ref.content_id,
-                    budget,
-                )
-                .await?
-            {
+            match references.content(&content_ref.content_id).await? {
                 ContentReference::Unknown => Ok(retain_undated()),
-                ContentReference::Deferred => Ok(UploadSessionSweep::ContentReclamationDeferred),
                 // Metadata now owns the published content. Delete only the completed
                 // upload-session record.
                 ContentReference::Referenced => Ok(UploadSessionSweep::Delete {
@@ -246,184 +219,10 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Whether the namespace's metadata references one content object.
+/// Whether the complete run index can decide one content object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContentReference {
+pub(super) enum ContentReference {
     Referenced,
     Absent,
-    /// The reference set could not be established, so nothing is reclaimed
-    /// (format spec, "Garbage collection", rule 5).
     Unknown,
-    /// The set did not fit in the budget the pass had left, so content
-    /// reclamation is skipped for the rest of this invocation. It is not an
-    /// answer of any kind — see [`CollectedReferences::Deferred`].
-    Deferred,
-}
-
-/// What the reference scan has produced for this invocation.
-#[derive(Debug)]
-pub(super) enum CollectedReferences {
-    /// A root could not be read, so this pass has no reference set at all
-    /// (format spec, "Garbage collection", rule 5).
-    Unavailable,
-    /// The reference scan exceeded the pass budget. Do not retry it during this
-    /// invocation, and discard the partial result because missing IDs could make
-    /// live content appear unreferenced.
-    Deferred,
-    /// Every root was read. The set is complete and may decide deletions.
-    Referenced(BTreeSet<ContentId>),
-}
-
-/// Memoized set of content IDs referenced by live namespace metadata.
-///
-/// The set is collected at most once per garbage-collection invocation and
-/// only when an aged completed session needs it. It is not stored in the
-/// pagination cursor because the cursor records position, not permission to
-/// delete. A resumed invocation performs a new budgeted scan.
-pub(super) struct ContentReferences {
-    live: Arc<LiveSet>,
-    collected: Option<CollectedReferences>,
-}
-
-impl ContentReferences {
-    pub(super) fn over(live: Arc<LiveSet>) -> Self {
-        Self {
-            live,
-            collected: None,
-        }
-    }
-
-    async fn lookup<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        namespace_id: &NamespaceId,
-        content_id: &ContentId,
-        budget: &mut PassBudget,
-    ) -> Result<ContentReference> {
-        if self.collected.is_none() {
-            self.collected = Some(if self.live.degraded {
-                CollectedReferences::Unavailable
-            } else {
-                collect_referenced_content(store, namespace_id, &self.live, budget).await?
-            });
-        }
-        Ok(match &self.collected {
-            None | Some(CollectedReferences::Unavailable) => ContentReference::Unknown,
-            Some(CollectedReferences::Deferred) => ContentReference::Deferred,
-            Some(CollectedReferences::Referenced(referenced)) => {
-                if referenced.contains(content_id) {
-                    ContentReference::Referenced
-                } else {
-                    ContentReference::Absent
-                }
-            }
-        })
-    }
-}
-
-/// Collects every content ID reachable from protected manifests and the
-/// retained WAL chain. Protected manifests include fork bases pinned by
-/// checkpoints. Other namespaces cannot reference these content IDs because
-/// each namespace publishes content created by its own upload sessions.
-///
-/// WAL references were collected while marking the chain. Manifest reads and
-/// revision pages consume the pass budget. If the budget runs out, the scan
-/// returns [`CollectedReferences::Deferred`] and completed content is retained
-/// until a later pass can finish the scan.
-pub(super) async fn collect_referenced_content<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    live: &LiveSet,
-    budget: &mut PassBudget,
-) -> Result<CollectedReferences> {
-    let mut referenced = BTreeSet::new();
-    for manifest_object_id in &live.manifests {
-        if !budget.try_charge() {
-            return Ok(CollectedReferences::Deferred);
-        }
-        let segments = match load_manifest_segments_for_inspection(
-            store,
-            None,
-            namespace_id,
-            manifest_object_id,
-        )
-        .await
-        {
-            Ok(segments) => segments,
-            Err(error) => match error.failure_class() {
-                ManifestLoadFailureClass::Store => {
-                    tracing::warn!(
-                        namespace_id = %namespace_id,
-                        manifest_object_id = %manifest_object_id,
-                        error = %error,
-                        "a content-reference manifest did not read; retaining completed content"
-                    );
-                    return Ok(CollectedReferences::Unavailable);
-                }
-                ManifestLoadFailureClass::Corrupt => {
-                    return Err(CoreError::NamespaceCorrupt(format!(
-                        "a content-reference manifest does not load: {error}"
-                    )));
-                }
-            },
-        };
-        let mut lower_bound = lookup_keys::REVISION_ROW_PREFIX.to_owned();
-        let upper_bound = string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX);
-        loop {
-            if !budget.try_charge() {
-                return Ok(CollectedReferences::Deferred);
-            }
-            let rows = match segments
-                .scan_range_page_with_keys(
-                    MetadataRowFamily::Revisions,
-                    &lower_bound,
-                    upper_bound.as_deref(),
-                    REVISION_SCAN_WAVE_ROWS,
-                )
-                .await
-            {
-                Ok(rows) => rows,
-                Err(error) => match error.failure_class() {
-                    ManifestLoadFailureClass::Store => {
-                        tracing::warn!(
-                            namespace_id = %namespace_id,
-                            manifest_object_id = %manifest_object_id,
-                            error = %error,
-                            "content-reference rows did not read; retaining completed content"
-                        );
-                        return Ok(CollectedReferences::Unavailable);
-                    }
-                    ManifestLoadFailureClass::Corrupt => {
-                        return Err(CoreError::NamespaceCorrupt(format!(
-                            "content-reference rows do not load: {error}"
-                        )));
-                    }
-                },
-            };
-            let exhausted = rows.len() < REVISION_SCAN_WAVE_ROWS;
-            match rows.last() {
-                Some((row_key, _)) => lower_bound = format!("{row_key}\0"),
-                None => break,
-            }
-            for (_, row) in rows {
-                if let MetadataRow::FileRevision(crate::metadata::RevisionRecord {
-                    content_ref,
-                    ..
-                }) = row
-                {
-                    referenced.insert(content_ref.content_id);
-                }
-            }
-            if exhausted {
-                break;
-            }
-        }
-    }
-
-    // The retained chain's own references came back with the marking that
-    // validated it, already paid for there, so no segment is fetched twice
-    // in one pass.
-    referenced.extend(live.wal_content_ids.iter().cloned());
-
-    Ok(CollectedReferences::Referenced(referenced))
 }

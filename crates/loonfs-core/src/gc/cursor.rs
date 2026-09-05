@@ -20,42 +20,16 @@ pub trait GcCursorKeyspace {
     fn prefix(&self, namespace_id: &NamespaceId) -> String;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum CandidateFamily {
-    WalSegments,
-    MetadataSegments,
-    /// Segments written under streaming compaction job prefixes.
-    CompactionStaging,
-    Manifests,
-    Checkpoints,
-    UploadSessions,
+pub(super) use loonfs_api::wire::gc::GcCandidateFamily as CandidateFamily;
+
+pub(super) trait CandidateFamilyExt {
+    fn recognizes(self, key: &str) -> bool;
+    fn prefix(self, namespace_id: &NamespaceId) -> String;
 }
 
-impl CandidateFamily {
-    pub(super) const ALL: [Self; 6] = [
-        Self::WalSegments,
-        Self::MetadataSegments,
-        Self::CompactionStaging,
-        Self::Manifests,
-        Self::Checkpoints,
-        Self::UploadSessions,
-    ];
-
-    /// This family's position in [`Self::ALL`], which is the sweep order.
-    pub(super) fn index(self) -> usize {
-        match self {
-            Self::WalSegments => 0,
-            Self::MetadataSegments => 1,
-            Self::CompactionStaging => 2,
-            Self::Manifests => 3,
-            Self::Checkpoints => 4,
-            Self::UploadSessions => 5,
-        }
-    }
-
+impl CandidateFamilyExt for CandidateFamily {
     /// Returns whether `key` matches this family's durable grammar.
-    pub(super) fn recognizes(self, key: &str) -> bool {
+    fn recognizes(self, key: &str) -> bool {
         let Some(family) = parse_object_key(key).map(|parsed| parsed.family()) else {
             return false;
         };
@@ -73,7 +47,7 @@ impl CandidateFamily {
         }
     }
 
-    pub(super) fn prefix(self, namespace_id: &NamespaceId) -> String {
+    fn prefix(self, namespace_id: &NamespaceId) -> String {
         match self {
             Self::WalSegments => wal_segment_prefix(namespace_id),
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
@@ -166,38 +140,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct CoreGcKeyspace {
-    pub(super) family: CandidateFamily,
-}
-
-impl GcCursorKeyspace for CoreGcKeyspace {
-    const CURSOR_KIND: &'static str = "core_gc";
-
-    fn prefix(&self, namespace_id: &NamespaceId) -> String {
-        self.family.prefix(namespace_id)
-    }
-}
-
-pub(super) type GcCursor = NamespaceGcCursor<CoreGcKeyspace>;
-
-pub(super) fn initial_cursor(namespace_id: &NamespaceId) -> GcCursor {
-    GcCursor::initial(
-        namespace_id,
-        CoreGcKeyspace {
-            family: CandidateFamily::WalSegments,
-        },
-    )
-}
-
-pub(super) fn cursor_after(
-    namespace_id: &NamespaceId,
-    family: CandidateFamily,
-    key: String,
-) -> GcCursor {
-    GcCursor::after(namespace_id, CoreGcKeyspace { family }, key)
-}
-
 fn invalid_cursor() -> CoreError {
     CoreError::InvalidGcConfig("cursor is malformed".to_owned())
 }
@@ -206,6 +148,25 @@ fn invalid_cursor() -> CoreError {
 mod tests {
     use super::*;
     use loonfs_api::wire::hex::hex_encode_bytes;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    struct TestKeyspace {
+        family: CandidateFamily,
+    }
+
+    impl GcCursorKeyspace for TestKeyspace {
+        const CURSOR_KIND: &'static str = "test_gc";
+
+        fn prefix(&self, namespace_id: &NamespaceId) -> String {
+            self.family.prefix(namespace_id)
+        }
+    }
+
+    type GcCursor = NamespaceGcCursor<TestKeyspace>;
+
+    fn cursor_after(namespace_id: &NamespaceId, family: CandidateFamily, key: String) -> GcCursor {
+        GcCursor::after(namespace_id, TestKeyspace { family }, key)
+    }
 
     fn token_over(payload: &serde_json::Value) -> String {
         hex_encode_bytes(&serde_json::to_vec(payload).expect("encode payload"))
@@ -216,7 +177,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let token = token_over(&serde_json::json!({
             "format_version": 1,
-            "kind": "core_gc",
+            "kind": "test_gc",
             "namespace_id": "demo",
             "family": "metadata_segments",
             "last_key": "namespaces/demo/metadata/segments/segment.sst.zst",
@@ -247,7 +208,7 @@ mod tests {
 
         let wrong_family_prefix = token_over(&serde_json::json!({
             "format_version": 1,
-            "kind": "core_gc",
+            "kind": "test_gc",
             "namespace_id": "demo",
             "family": "wal_segments",
             "last_key": "namespaces/demo/checkpoints/checkpoint.json"
@@ -256,7 +217,7 @@ mod tests {
 
         let removed_lease_family = token_over(&serde_json::json!({
             "format_version": 1,
-            "kind": "core_gc",
+            "kind": "test_gc",
             "namespace_id": "demo",
             "family": "compaction_leases",
             "last_key": "namespaces/demo/metadata/compaction_leases/bindings.json"

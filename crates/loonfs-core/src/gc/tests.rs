@@ -2,12 +2,9 @@
 
 #![allow(clippy::panic)]
 
-use super::budget::PassBudget;
 use super::config::GcConfig;
-use super::cursor::{cursor_after, CandidateFamily};
-use super::live_set::{recollect_live_set, select_reference_anchor, LiveSet, ReferenceAnchor};
-use super::run::{gc_namespace, gc_namespace_with_reverify_chunk, COMPACTION_LEASE_STAGE_UNITS};
-use super::uploads::{collect_referenced_content, CollectedReferences};
+use super::mark_table::MarkTables;
+use super::run::gc_namespace;
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::tests::{
@@ -31,14 +28,15 @@ use loonfs_api::wire::control::{
     ControlObjectKind, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
     UploadSessionState,
 };
+use loonfs_api::wire::gc::*;
 use loonfs_api::{
     ChangeSeq, CheckpointId, ContentRef, ContentStoreId, ManifestNo, ManifestObjectId, NamespaceId,
     UploadId,
 };
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_compaction_lease, metadata_compaction_segment,
-    metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_segment,
-    metadata_segment_object_key, metadata_segment_prefix, wal_floor, wal_head, wal_segment,
+    metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
+    metadata_segment_object_key, metadata_segment_prefix, wal_head, wal_segment,
     wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
@@ -97,18 +95,82 @@ async fn marking_units<S: ObjectStore + ?Sized>(
     marked(store, namespace_id, context).await.1
 }
 
+#[derive(Default)]
+struct LiveSet {
+    manifests: BTreeSet<ManifestObjectId>,
+    wal_segments: BTreeSet<String>,
+    segments: BTreeSet<String>,
+    checkpoint_keys: BTreeSet<String>,
+}
+
+async fn mark_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<(GcRunState, u64), CoreError> {
+    let mut state = GcRunState {
+        namespace_id: namespace_id.clone(),
+        gc_run_id: loonfs_api::GcRunId::generate(),
+        step_no: 0,
+        started_at_ms: context.now_ms,
+        grace_window_ms: GRACE_MS,
+        phase: GcPhase::Starting {},
+    };
+    let id = state.gc_run_id.clone();
+    let mut pass = super::run::Pass::new(store, namespace_id, &id, context);
+    let mut report = GcResponse::empty(namespace_id.clone());
+    let mut units = 0;
+    while !matches!(state.phase, GcPhase::Sweeping { .. }) {
+        pass.step(&mut state, &mut report).await?;
+        units += 1;
+        assert!(units < 100_000, "marking must converge");
+    }
+    Ok((state, units))
+}
+
 async fn marked<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> (LiveSet, u64) {
-    let mut budget = PassBudget::new(None);
-    let live = recollect_live_set(store, namespace_id, GRACE_MS, None, &mut budget, context)
+    let (state, units) = mark_state(store, namespace_id, context)
         .await
-        .expect("collect live set")
-        .complete()
-        .expect("an unbounded collection cannot run out");
-    (live, budget.spent())
+        .expect("mark roots");
+    let GcPhase::Sweeping { table, .. } = state.phase else {
+        panic!("mark_state must finish at sweeping")
+    };
+    let mut tables = MarkTables::new(store, namespace_id, &state.gc_run_id);
+    let mut position = GcMarkPosition::default();
+    let mut live = LiveSet::default();
+    while let Some(entry) = tables
+        .peek(&table, position)
+        .await
+        .expect("read marked page")
+    {
+        if let Some(key) = entry.key.strip_prefix("object/") {
+            use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+            match parse_object_key(key).map(|parsed| parsed.family()) {
+                Some(DurableObjectFamily::WalSegment) => {
+                    live.wal_segments.insert(key.to_owned());
+                }
+                Some(
+                    DurableObjectFamily::MetadataSegment
+                    | DurableObjectFamily::MetadataCompactionStaging,
+                ) => {
+                    live.segments.insert(key.to_owned());
+                }
+                Some(DurableObjectFamily::CheckpointRecord) => {
+                    live.checkpoint_keys.insert(key.to_owned());
+                }
+                _ => {}
+            }
+        }
+        if let GcMarkValue::Manifest { manifest } = entry.value {
+            live.manifests.insert(manifest.manifest_object_id);
+        }
+        MarkTables::<S>::advance(&table, &mut position);
+    }
+    (live, units)
 }
 
 /// The durable lifecycle of one checkpoint record, stamp included.
@@ -1323,19 +1385,23 @@ async fn a_corrupt_marked_manifest_fails_the_scan_and_an_unreadable_one_makes_it
     let manifest_key = metadata_manifest_object(&namespace_id, &manifest_object_id);
 
     store.fail_all();
-    let mut budget = PassBudget::new(None);
-    let references = collect_referenced_content(&store, &namespace_id, &live, &mut budget)
+    let (state, _) = mark_state(&store, &namespace_id, &setup)
         .await
         .expect("a manifest store failure remains conservative");
-    assert!(matches!(references, CollectedReferences::Unavailable));
+    assert!(matches!(
+        state.phase,
+        GcPhase::Sweeping {
+            roots: GcRoots { degraded: true, .. },
+            ..
+        }
+    ));
 
     store.clear();
     store
         .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
         .await
         .expect("corrupt marked manifest");
-    let mut budget = PassBudget::new(None);
-    let error = collect_referenced_content(&store, &namespace_id, &live, &mut budget)
+    let error = mark_state(&store, &namespace_id, &setup)
         .await
         .expect_err("corruption after marking must still surface");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -1370,11 +1436,9 @@ async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_cont
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
 
     store.fail_all();
-    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+    gc_namespace(&store, &namespace_id, &config(), &past)
         .await
-        .expect("a metadata-row store failure retains conservatively");
-    assert_eq!(report.deleted.content_objects, 0);
-    assert_eq!(report.deleted.upload_sessions, 0);
+        .expect_err("a failed revision read stops before sweeping");
     assert!(store
         .inner()
         .head(&content_key)
@@ -1416,274 +1480,6 @@ async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_cont
 }
 
 #[tokio::test]
-async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
-    let (upload_id, content_ref, content_store_id, _prepared) =
-        complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
-    let live = live_set(&store, &namespace_id, &setup).await;
-    assert!(
-        !live.manifests.is_empty() && !live.wal_segments.is_empty(),
-        "the fixture must give the scan more than one object to read"
-    );
-    // The smallest budget that gets through every stage: marking, the lease
-    // stage's reads, and one candidate. The sweep advances a key at a time
-    // until it reaches the session, and nothing is left over for the scan
-    // behind that session. The walk has to get past it anyway.
-    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-    let mut tiny = config();
-    tiny.max_objects =
-        Some(marking_units(&store, &namespace_id, &past).await + COMPACTION_LEASE_STAGE_UNITS + 1);
-    let mut cursor: Option<String> = None;
-    let mut deferred = false;
-    let mut passes = 0;
-    loop {
-        passes += 1;
-        assert!(
-            passes <= 64,
-            "a one-candidate budget must still walk the namespace to the end"
-        );
-        tiny.cursor.clone_from(&cursor);
-        let pass = gc_namespace(&store, &namespace_id, &tiny, &past)
-            .await
-            .expect("one-object pass");
-        assert_eq!(pass.deleted.upload_sessions, 0);
-        assert_eq!(pass.deleted.content_objects, 0);
-        deferred |= pass.content_reclamation_deferred;
-        let Some(next) = pass.next_cursor else {
-            break;
-        };
-        // A deferred pass must finish or return a cursor after its input
-        // cursor so repeated passes continue making progress.
-        assert_ne!(
-            Some(next.as_str()),
-            cursor.as_deref(),
-            "pass {passes} handed back the cursor it came in with"
-        );
-        cursor = Some(next);
-    }
-    assert!(
-        deferred,
-        "a budget spent on the roots cannot afford the scan, and the pass must say so"
-    );
-    assert!(
-        store.head(&content_key).await.expect("head").is_some(),
-        "a deferred pass reclaims nothing"
-    );
-    assert!(
-        read_upload_session(&store, &namespace_id, &upload_id)
-            .await
-            .is_some(),
-        "the session that triggered the scan is retained, not reclaimed"
-    );
-
-    // Try again with a budget the scan fits inside: now it decides.
-    let mut enough = config();
-    enough.max_objects = Some(1_024);
-    let resumed = gc_namespace(&store, &namespace_id, &enough, &past)
-        .await
-        .expect("pass with room for the scan");
-    assert!(!resumed.content_reclamation_deferred);
-    assert_eq!(resumed.deleted.upload_sessions, 1);
-    assert_eq!(resumed.deleted.content_objects, 1);
-    assert!(store.head(&content_key).await.expect("head").is_none());
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
-        .await
-        .is_none());
-}
-
-#[tokio::test]
-async fn a_budget_below_the_roots_reads_no_chain_and_says_it_ran_out() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
-    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
-    assert!(
-        live_set(&inner, &namespace_id, &aged)
-            .await
-            .wal_segments
-            .len()
-            > 1,
-        "the fixture must retain a chain worth more than one unit"
-    );
-
-    let store = RecordingStore::new(inner, KeyPredicate::any());
-    let mut tiny = config();
-    tiny.max_objects = Some(1);
-    let report = gc_namespace(&store, &namespace_id, &tiny, &aged)
-        .await
-        .expect("one-unit pass");
-
-    let mut exhausted_before_marking = GcResponse::empty(namespace_id.clone());
-    exhausted_before_marking.budget_exhausted = true;
-    exhausted_before_marking.content_reclamation_deferred = true;
-    assert_eq!(
-        report, exhausted_before_marking,
-        "a pass that never marked decides nothing and invents no cursor"
-    );
-    let mut read = store.take_get_keys();
-    read.sort();
-    assert_eq!(
-        read,
-        vec![
-            metadata_root(&namespace_id),
-            wal_floor(&namespace_id),
-            wal_head(&namespace_id)
-        ],
-        "one budget unit covers the concurrent control snapshot"
-    );
-}
-
-#[tokio::test]
-async fn a_budget_that_dies_at_the_chain_gate_sweeps_nothing() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
-    let (upload_id, ..) =
-        complete_upload_for_gc(&inner, &namespace_id, b"unpublished\n", &setup).await;
-    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-    let (live, marking) = marked(&inner, &namespace_id, &past).await;
-    let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
-    assert!(chain_units > 0, "the fixture must retain a chain");
-
-    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
-    let store = RecordingStore::new(inner, segment_reads);
-    let mut at_the_gate = config();
-    at_the_gate.max_objects = Some(marking - chain_units);
-    let report = gc_namespace(&store, &namespace_id, &at_the_gate, &past)
-        .await
-        .expect("pass stopped at the chain gate");
-
-    assert!(report.budget_exhausted);
-    assert_eq!(report.next_cursor, None);
-    assert_eq!(report.retained_candidates, 0, "no candidate was examined");
-    assert_eq!(report.deleted.upload_sessions, 0);
-    assert_eq!(
-        store.count(OperationClass::Read),
-        0,
-        "the gate holds before the chain is fetched, not after"
-    );
-
-    // The same namespace, unbounded. The work the gate deferred is exactly
-    // the work that gets done.
-    let resumed = gc_namespace(&store, &namespace_id, &config(), &past)
-        .await
-        .expect("unbounded rerun");
-    assert!(!resumed.budget_exhausted);
-    assert_eq!(resumed.deleted.upload_sessions, 1);
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
-        .await
-        .is_none());
-}
-
-#[tokio::test]
-async fn a_chain_longer_than_the_budget_is_not_read_past_the_budget() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
-    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
-    let (live, marking) = marked(&inner, &namespace_id, &aged).await;
-    let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
-    assert!(
-        chain_units > 2,
-        "the fixture must retain a chain longer than the budget below"
-    );
-    // Two units are left when the pass reaches the chain, and the chain
-    // wants more than two.
-    let at_the_gate = 2;
-
-    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
-    let store = RecordingStore::new(inner, segment_reads);
-    let mut bounded = config();
-    bounded.max_objects = Some(marking - chain_units + at_the_gate);
-    let report = gc_namespace(&store, &namespace_id, &bounded, &aged)
-        .await
-        .expect("pass over a chain it cannot afford");
-
-    let fetched = u64::try_from(store.take_get_keys().len()).expect("fetch count fits");
-    assert_eq!(
-        fetched, at_the_gate,
-        "the pass had {at_the_gate} units left at the chain and spent them"
-    );
-    assert!(report.budget_exhausted);
-    assert_eq!(
-        report.next_cursor, None,
-        "the pass echoes the cursor it was given, and it was given none"
-    );
-    assert_eq!(report.retained_candidates, 0);
-    assert_eq!(
-        (
-            report.deleted.wal_segments,
-            report.deleted.metadata_segments,
-            report.deleted.manifests,
-            report.deleted.checkpoint_records,
-            report.deleted.upload_sessions,
-            report.deleted.content_objects,
-        ),
-        (0, 0, 0, 0, 0, 0)
-    );
-}
-
-#[tokio::test]
-async fn a_chain_the_budget_cannot_cover_still_spends_what_the_budget_had_left() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let (live, marking) = marked(&store, &namespace_id, &aged).await;
-    let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
-    assert!(
-        chain_units > 1,
-        "the fixture must retain a chain a budget can fall short of"
-    );
-    // What the collection charges before it reaches the chain.
-    let roots = marking - chain_units;
-
-    for at_the_chain in 1..chain_units {
-        let mut budget = PassBudget::new(Some(roots + at_the_chain));
-        let collection =
-            recollect_live_set(&store, &namespace_id, GRACE_MS, None, &mut budget, &aged)
-                .await
-                .expect("bounded collection");
-        assert!(
-            collection.complete().is_none(),
-            "{at_the_chain} of {chain_units} segments is a partial chain and roots nothing"
-        );
-        assert_eq!(
-            budget.spent(),
-            roots + at_the_chain,
-            "the collection had {at_the_chain} units left at the chain and must spend them"
-        );
-    }
-
-    let mut budget = PassBudget::new(Some(marking));
-    let collected = recollect_live_set(&store, &namespace_id, GRACE_MS, None, &mut budget, &aged)
-        .await
-        .expect("bounded collection")
-        .complete()
-        .expect("a budget that covers the chain collects it");
-    assert_eq!(collected.wal_segments, live.wal_segments);
-    assert_eq!(
-        budget.spent(),
-        marking,
-        "the collection charges the requests the load issued, no more"
-    );
-}
-
-#[tokio::test]
 async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1714,10 +1510,9 @@ async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
         "this pass did finish marking, so it has a root set and a reference set"
     );
 
-    // One unit past the roots and the lease stage lets the pass decide a
-    // candidate and advance.
+    // After marking, another call spends its budget on candidate decisions.
     let mut one_more = config();
-    one_more.max_objects = Some(marking + COMPACTION_LEASE_STAGE_UNITS + 1);
+    one_more.max_objects = Some(marking + 1);
     let walked = gc_namespace(&store, &namespace_id, &one_more, &aged)
         .await
         .expect("pass with one candidate of room");
@@ -1725,52 +1520,6 @@ async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
     assert!(
         walked.next_cursor.is_some(),
         "a pass that decided a candidate reports where it walked to"
-    );
-}
-
-#[tokio::test]
-async fn a_pass_that_decides_nothing_echoes_its_cursor_verbatim() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let marking = marking_units(&store, &namespace_id, &aged).await;
-
-    let mut walking = config();
-    walking.max_objects = Some(marking + COMPACTION_LEASE_STAGE_UNITS + 2);
-    let first = gc_namespace(&store, &namespace_id, &walking, &aged)
-        .await
-        .expect("pass with two candidates of room");
-    let submitted = first
-        .next_cursor
-        .expect("two candidates leave more to walk");
-
-    let mut starved = config();
-    starved.max_objects = Some(marking);
-    starved.cursor = Some(submitted.clone());
-    let parked = gc_namespace(&store, &namespace_id, &starved, &aged)
-        .await
-        .expect("pass with no candidate of room");
-
-    assert!(parked.budget_exhausted);
-    assert_eq!(
-        parked.next_cursor,
-        Some(submitted),
-        "the token comes back unchanged, not re-encoded from the position"
-    );
-    assert_eq!(parked.retained_candidates, 0);
-    assert_eq!(
-        (
-            parked.deleted.wal_segments,
-            parked.deleted.metadata_segments,
-            parked.deleted.manifests,
-            parked.deleted.checkpoint_records,
-            parked.deleted.upload_sessions,
-            parked.deleted.content_objects,
-        ),
-        (0, 0, 0, 0, 0, 0)
     );
 }
 
@@ -1857,7 +1606,7 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
         .expect("pass stopped among the records");
 
     assert!(report.budget_exhausted);
-    assert_eq!(report.next_cursor, None);
+    assert!(report.next_cursor.is_some());
     assert_eq!(report.retained_candidates, 0);
     assert_eq!(
         (
@@ -1870,8 +1619,8 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     );
     assert_eq!(
         store.count(OperationClass::Read),
-        2,
-        "two units remain after the control snapshot"
+        1,
+        "the control snapshot and owned root precede the first checkpoint"
     );
 }
 
@@ -1899,77 +1648,42 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
     let content_key =
         loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-    let marking = marking_units(&seed, &namespace_id, &past).await;
-    let mut some_budget_reached_the_verdict = false;
-    let mut some_budget_deferred_instead = false;
-
-    // Every budget here covers marking and the compaction lease stage; the
-    // candidates on top are what the scan has to fit inside.
-    for candidates in 1..=16 {
-        let max_objects = marking + COMPACTION_LEASE_STAGE_UNITS + candidates;
-        let trial_root = temp_dir.path().join(format!("trial-{candidates}"));
+    for max_objects in [1, 2, 5, 17, 64] {
+        let trial_root = temp_dir.path().join(format!("trial-{max_objects}"));
         copy_tree(&seed_root, &trial_root);
         let store = LocalFsStore::new(&trial_root).expect("trial store");
         let mut bounded = config();
         bounded.max_objects = Some(max_objects);
-        let mut cursor: Option<String> = None;
-        let mut deferred = false;
-        let mut passes = 0;
-        loop {
-            passes += 1;
-            assert!(
-                passes <= 256,
-                "max_objects={max_objects}: the walk must reach its end"
-            );
-            bounded.cursor.clone_from(&cursor);
+        let mut previous = None;
+        for pass_no in 0..1000 {
             let pass = gc_namespace(&store, &namespace_id, &bounded, &past)
                 .await
                 .expect("bounded pass");
-            assert_eq!(pass.deleted.content_objects, 0, "max_objects={max_objects}");
-            assert!(
-                store.head(&content_key).await.expect("head").is_some(),
-                "max_objects={max_objects}: referenced content survives every budget"
-            );
-            deferred |= pass.content_reclamation_deferred;
-            let Some(next) = pass.next_cursor else {
-                break;
-            };
+            assert_eq!(pass.deleted.content_objects, 0);
+            assert!(store.head(&content_key).await.expect("head").is_some());
+            let state = super::run::load_run(&store, &namespace_id)
+                .await
+                .expect("progress")
+                .expect("run");
             assert_ne!(
-                Some(next.as_str()),
-                cursor.as_deref(),
-                "max_objects={max_objects}: pass {passes} handed back its own cursor"
+                previous.as_ref(),
+                Some(&state.state),
+                "budget {max_objects} must advance durable progress"
             );
-            cursor = Some(next);
+            previous = Some(state.state);
+            bounded.cursor = pass.next_cursor;
+            if bounded.cursor.is_none() {
+                break;
+            }
+            assert!(pass_no < 999, "budget {max_objects} must finish");
         }
         assert!(
-            store.head(&content_key).await.expect("head").is_some(),
-            "max_objects={max_objects}"
+            read_upload_session(&store, &namespace_id, &upload_id)
+                .await
+                .is_none(),
+            "every budget eventually decides the completed session"
         );
-        // Reaching the referenced verdict is what deletes the record: the
-        // content is metadata's from here on. A surviving record means the
-        // budget deferred instead — the case this test is really about —
-        // and the two must line up exactly, because a session this walk
-        // passed over is a session the reference scan could not afford.
-        let decided = read_upload_session(&store, &namespace_id, &upload_id)
-            .await
-            .is_none();
-        assert_eq!(
-            deferred, !decided,
-            "max_objects={max_objects}: the session survives exactly when the scan was deferred"
-        );
-        some_budget_reached_the_verdict |= decided;
-        some_budget_deferred_instead |= deferred;
     }
-
-    assert!(
-        some_budget_reached_the_verdict,
-        "a budget large enough to finish the scan must still decide the session"
-    );
-    assert!(
-        some_budget_deferred_instead,
-        "the sweep must actually run out mid-scan somewhere in this range, or \
-         the test proves nothing about partial reference sets"
-    );
 }
 
 #[tokio::test]
@@ -2015,6 +1729,7 @@ async fn namespace_key_set(store: &LocalFsStore, namespace_id: &NamespaceId) -> 
         .await
         .expect("list namespace")
         .into_iter()
+        .filter(|key| !key.starts_with(&format!("namespaces/{namespace_id}/gc/")))
         .collect()
 }
 
@@ -2594,20 +2309,10 @@ async fn a_budget_stop_leaves_the_terminal_group_slot() {
     let reclaimable = context(expires_at_ms.saturating_add(1));
     let marking = marking_units(&store, &namespace_id, &reclaimable).await;
 
-    // Resume immediately before compaction staging and buy exactly the lease
-    // stage and its staged segment. The manifest family is the lookahead that
-    // stops the pass.
+    // Stop during the sweep; a bounded return leaves the group slot intact.
     let mut bounded = config();
-    bounded.max_objects = Some(marking + COMPACTION_LEASE_STAGE_UNITS + 1);
-    bounded.cursor = Some(
-        cursor_after(
-            &namespace_id,
-            CandidateFamily::MetadataSegments,
-            format!("{}~", metadata_segment_prefix(&namespace_id)),
-        )
-        .encode()
-        .expect("encode cursor"),
-    );
+    bounded.max_objects = Some(marking + 1);
+
     let report = gc_namespace(&store, &namespace_id, &bounded, &reclaimable)
         .await
         .expect("bounded pass");
@@ -2633,7 +2338,7 @@ async fn a_budget_stop_leaves_the_terminal_group_slot() {
 }
 
 #[tokio::test]
-async fn a_budget_short_of_the_lease_stage_reads_no_lease() {
+async fn marking_reads_no_compaction_lease_before_the_sweep() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let (store, _staged_key, lease_key) =
@@ -2653,19 +2358,10 @@ async fn a_budget_short_of_the_lease_stage_reads_no_lease() {
     let marking = marking_units(&store, &namespace_id, &reclaimable).await;
     let store = RecordingStore::new(store, KeyPredicate::exact(lease_key.clone()));
 
-    // Resume immediately before compaction staging with one unit short of
-    // the lease stage. The stage is refused before its first read.
+    // Stop exactly after marking, before the sweep needs a compaction lease.
     let mut short = config();
-    short.max_objects = Some(marking + COMPACTION_LEASE_STAGE_UNITS - 1);
-    short.cursor = Some(
-        cursor_after(
-            &namespace_id,
-            CandidateFamily::MetadataSegments,
-            format!("{}~", metadata_segment_prefix(&namespace_id)),
-        )
-        .encode()
-        .expect("encode cursor"),
-    );
+    short.max_objects = Some(marking);
+
     let report = gc_namespace(&store, &namespace_id, &short, &reclaimable)
         .await
         .expect("refused pass");
@@ -3025,8 +2721,7 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
     let (live, marking) = marked(&inner, &namespace_id, &aged).await;
     let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
-    // Leave the pass one unit short of reading the reference manifest, the
-    // final marking cost before loading the WAL chain.
+    // Leave part of marking unfinished; no candidate may be decided.
     let mut starved = config();
     starved.max_objects = Some(marking - chain_units - 1);
     let report = gc_namespace(&inner, &namespace_id, &starved, &aged)
@@ -3034,7 +2729,7 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
         .expect("pass that could not finish its anchor");
 
     assert!(report.budget_exhausted);
-    assert_eq!(report.next_cursor, None);
+    assert!(report.next_cursor.is_some());
     assert_eq!(report.retained_candidates, 0, "no candidate was examined");
     assert_eq!(
         (
@@ -3127,12 +2822,17 @@ async fn gc_pass(
     namespace_id: &NamespaceId,
     config: &GcConfig,
     context: &MutationContext,
-    reverify_chunk: Option<usize>,
+    max_objects: Option<usize>,
 ) -> Result<GcResponse, CoreError> {
-    match reverify_chunk {
-        None => gc_namespace(store, namespace_id, config, context).await,
-        Some(chunk) => {
-            gc_namespace_with_reverify_chunk(store, namespace_id, config, context, chunk).await
+    let mut config = config.clone();
+    config.max_objects = max_objects.map(|value| value as u64);
+    let mut total = GcResponse::empty(namespace_id.clone());
+    loop {
+        let pass = gc_namespace(store, namespace_id, &config, context).await?;
+        config.cursor.clone_from(&pass.next_cursor);
+        accumulate_report(&mut total, &pass);
+        if config.cursor.is_none() {
+            return Ok(total);
         }
     }
 }
@@ -3201,7 +2901,7 @@ async fn a_chunked_sweep_reaches_the_same_dead_record_cascade() {
     assert_a_dead_records_cascade(Some(1)).await;
 }
 
-async fn assert_a_dead_records_cascade(reverify_chunk: Option<usize>) {
+async fn assert_a_dead_records_cascade(max_objects: Option<usize>) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -3228,7 +2928,7 @@ async fn assert_a_dead_records_cascade(reverify_chunk: Option<usize>) {
         .expect("mark first dead");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let first_pass = gc_pass(&store, &namespace_id, &config(), &aged, reverify_chunk)
+    let first_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_objects)
         .await
         .expect("first gc pass");
     assert_record_reaped_and_basis_kept(
@@ -3240,7 +2940,7 @@ async fn assert_a_dead_records_cascade(reverify_chunk: Option<usize>) {
     )
     .await;
 
-    let second_pass = gc_pass(&store, &namespace_id, &config(), &aged, reverify_chunk)
+    let second_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_objects)
         .await
         .expect("second gc pass");
     assert_basis_reaped(
@@ -4565,11 +4265,19 @@ async fn a_corrupt_reference_anchor_fails_and_an_unreadable_one_reads_as_missing
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
 
     store.fail_all();
-    let mut budget = PassBudget::new(None);
-    let anchor = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
+    let (state, _) = mark_state(&store, &namespace_id, &aged)
         .await
-        .expect("a store failure keeps a missing anchor");
-    assert!(matches!(anchor, ReferenceAnchor::Missing));
+        .expect("a store failure retains metadata");
+    assert!(matches!(
+        state.phase,
+        GcPhase::Sweeping {
+            roots: GcRoots {
+                anchor: GcReferenceAnchor::Missing {},
+                ..
+            },
+            ..
+        }
+    ));
 
     store.clear();
     let manifest_key = store
@@ -4585,13 +4293,9 @@ async fn a_corrupt_reference_anchor_fails_and_an_unreadable_one_reads_as_missing
         .await
         .expect("corrupt reference manifest");
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let mut budget = PassBudget::new(None);
-    let error = select_reference_anchor(&store, &namespace_id, GRACE_MS, &mut budget, &aged)
+    let error = mark_state(&store, &namespace_id, &aged)
         .await
         .expect_err("a corrupt reference anchor must surface");
-    let super::live_set::CollectStop::Core(error) = error else {
-        panic!("the unmetered anchor selection cannot exhaust its budget");
-    };
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
     assert!(error.message().contains(&manifest_key));
 }
@@ -4804,6 +4508,7 @@ async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTr
         .await
         .expect("list namespace")
         .into_iter()
+        .filter(|key| !key.starts_with(&format!("namespaces/{namespace_id}/gc/")))
         .collect()
 }
 
@@ -4855,14 +4560,8 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     )
     .await;
     let mut bounded_config = config();
-    // Three candidates a pass, on top of what marking this namespace's
-    // roots and the compaction lease stage cost every time the pass
-    // rebuilds them.
-    bounded_config.max_objects = Some(
-        marking_units(&bounded_store, &namespace_id, &context(bounded_now)).await
-            + COMPACTION_LEASE_STAGE_UNITS
-            + 3,
-    );
+    // Keep every invocation small, including marking and cleanup.
+    bounded_config.max_objects = Some(3);
     let mut bounded_report = GcResponse::empty(namespace_id.clone());
     let mut passes = 0;
     loop {
@@ -4939,8 +4638,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     );
     let mut bounded = config();
     // Two candidates a pass, plus the roots the pass marks before it walks.
-    bounded.max_objects =
-        Some(marking_units(&store, &namespace_id, &aged).await + COMPACTION_LEASE_STAGE_UNITS + 2);
+    bounded.max_objects = Some(marking_units(&store, &namespace_id, &aged).await + 2);
     store.reset();
 
     let first = gc_namespace(&store, &namespace_id, &bounded, &aged)
@@ -4961,6 +4659,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
 
     store.inner().take_calls();
     bounded.cursor = first.next_cursor;
+    bounded.max_objects = Some(2);
     store.reset();
     let second = gc_namespace(&store, &namespace_id, &bounded, &aged)
         .await
@@ -5003,7 +4702,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
 }
 
 #[tokio::test]
-async fn stale_cursor_rebuilds_roots_before_resuming() {
+async fn stale_cursor_preserves_new_publications_with_the_original_cutoff() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -5024,13 +4723,8 @@ async fn stale_cursor_rebuilds_roots_before_resuming() {
     }
     let first_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
     let mut bounded = config();
-    // One candidate a pass, on top of the roots the pass marks first and the
-    // lease stage it pays for.
-    bounded.max_objects = Some(
-        marking_units(&store, &namespace_id, &context(first_now)).await
-            + COMPACTION_LEASE_STAGE_UNITS
-            + 1,
-    );
+    // Stop shortly after marking so a publication lands before resumption.
+    bounded.max_objects = Some(marking_units(&store, &namespace_id, &context(first_now)).await + 1);
     let first = gc_namespace(&store, &namespace_id, &bounded, &context(first_now))
         .await
         .expect("first bounded pass");
@@ -5184,4 +4878,210 @@ async fn output_protection_survives_a_new_group_owner() {
     .expect("group")
     .expect("new job remains");
     assert_eq!(group.state.job_id, next_job);
+}
+
+#[tokio::test]
+async fn one_step_calls_resume_on_another_host_without_aging_new_objects() {
+    let dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(dir.path()).expect("store");
+    let ns = NamespaceId::parse("demo").expect("namespace");
+    let setup = context(1000);
+    namespace_with_a_scan_worth_bounding(&inner, &ns, &setup).await;
+    let old_keys = namespace_keys(&inner, &ns).await;
+    let start = context(now_after_newest_object(&inner, &ns, 0).await);
+    let store = aged_before_now(inner, old_keys);
+    let mut bounded = config();
+    bounded.max_objects = Some(1);
+    let first = gc_namespace(&store, &ns, &bounded, &start)
+        .await
+        .expect("reserve and capture");
+    bounded.cursor = first.next_cursor;
+    let late_key = wal_segment(
+        &ns,
+        &loonfs_api::WalSegmentId::parse("wal_00000000000000000000-ffffffffffffffff")
+            .expect("segment"),
+    );
+    store
+        .put_if_absent(&late_key, Bytes::from_static(b"new orphan"))
+        .await
+        .expect("late object");
+    let other_host = mutation_context("gc-host-two", start.now_ms + 10 * GRACE_MS);
+    let mut steps = 0;
+    loop {
+        let pass = gc_namespace(&store, &ns, &bounded, &other_host)
+            .await
+            .expect("resume on another host");
+        let run = super::run::load_run(&store, &ns)
+            .await
+            .expect("load")
+            .expect("run");
+        assert_eq!(run.state.started_at_ms, start.now_ms);
+        assert!(store
+            .head(&late_key)
+            .await
+            .expect("head new object")
+            .is_some());
+        steps += 1;
+        bounded.cursor = pass.next_cursor;
+        if bounded.cursor.is_none() {
+            break;
+        }
+        assert!(steps < 1000, "a one-step budget must finish");
+    }
+    assert!(steps > 20, "the scan and merges must require resumption");
+    assert!(store
+        .list_prefix(&loonfs_objectstore::keys::gc_runs_prefix(&ns))
+        .await
+        .expect("scratch")
+        .is_empty());
+    let fresh = gc_namespace(&store, &ns, &config(), &other_host)
+        .await
+        .expect("new collection");
+    assert!(fresh.deleted.wal_segments > 0);
+    assert!(
+        store.head(&late_key).await.expect("head").is_none(),
+        "the next run may use its newer cutoff"
+    );
+}
+
+#[tokio::test]
+async fn overlapping_collectors_share_progress_and_finish_the_same_run() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(dir.path()).expect("store");
+    let ns = NamespaceId::parse("demo").expect("namespace");
+    let setup = context(1000);
+    add_bounded_gc_fixture(&store, &ns, &setup).await;
+    let now = context(
+        now_after_newest_object(&store, &ns, UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1).await,
+    );
+    let mut bounded = config();
+    bounded.max_objects = Some(1);
+    bounded.cursor = gc_namespace(&store, &ns, &bounded, &now)
+        .await
+        .expect("start")
+        .next_cursor;
+    let second_host = mutation_context("second-collector", now.now_ms + GRACE_MS);
+    for step in 0..2000 {
+        let before = super::run::load_run(&store, &ns)
+            .await
+            .expect("load")
+            .expect("run");
+        let (left, right) = tokio::join!(
+            gc_namespace(&store, &ns, &bounded, &now),
+            gc_namespace(&store, &ns, &bounded, &second_host)
+        );
+        let left = left.expect("first collector");
+        let right = right.expect("second collector");
+        let after = super::run::load_run(&store, &ns)
+            .await
+            .expect("load")
+            .expect("run");
+        assert_eq!(after.state.gc_run_id, before.state.gc_run_id);
+        assert!(after.state.step_no > before.state.step_no);
+        if matches!(after.state.phase, GcPhase::Complete {}) {
+            break;
+        }
+        bounded.cursor = right.next_cursor.or(left.next_cursor);
+        assert!(step < 1999, "concurrent marking must converge");
+    }
+    let view = load_current_metadata_view(&store, &ns)
+        .await
+        .expect("current view");
+    view.resolve_path("/docs/5.txt", AttributeInclusion::Omit)
+        .await
+        .expect("published file remains readable");
+}
+
+#[tokio::test]
+async fn a_paused_old_worker_cannot_advance_a_newer_run() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(dir.path()).expect("store");
+    let ns = NamespaceId::parse("demo").expect("namespace");
+    let setup = context(1000);
+    namespace_with_a_scan_worth_bounding(&store, &ns, &setup).await;
+    let now = context(now_after_newest_object(&store, &ns, GRACE_MS + 1).await);
+    let mut bounded = config();
+    bounded.max_objects = Some(1);
+    let first = gc_namespace(&store, &ns, &bounded, &now)
+        .await
+        .expect("start");
+    bounded.cursor = first.next_cursor;
+    let gated = BlockingStore::new(
+        LocalFsStore::new(dir.path()).expect("second store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&ns)),
+        OperationClass::Read,
+    );
+    gated.block_next();
+    let (old, new_run) = tokio::join!(gc_namespace(&gated, &ns, &bounded, &now), async {
+        gated.wait_until_blocked().await;
+        let mut finish = config();
+        finish.cursor.clone_from(&bounded.cursor);
+        gc_namespace(&store, &ns, &finish, &now)
+            .await
+            .expect("another host finishes the reserved run");
+        let mut start_next = config();
+        start_next.max_objects = Some(1);
+        gc_namespace(&store, &ns, &start_next, &now)
+            .await
+            .expect("reserve next run");
+        let new_run = super::run::load_run(&store, &ns)
+            .await
+            .expect("load")
+            .expect("run");
+        gated.release();
+        new_run.state
+    });
+    old.expect("stale worker settles its lost CAS");
+    assert_eq!(
+        super::run::load_run(&store, &ns)
+            .await
+            .expect("load")
+            .expect("run")
+            .state,
+        new_run
+    );
+    gc_namespace(&store, &ns, &config(), &now)
+        .await
+        .expect("finish new run and old scratch");
+    assert!(store
+        .list_prefix(&loonfs_objectstore::keys::gc_runs_prefix(&ns))
+        .await
+        .expect("scratch")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_completed_mark_page_stops_before_deleting_candidates() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(dir.path()).expect("store");
+    let ns = NamespaceId::parse("demo").expect("namespace");
+    let setup = context(1000);
+    namespace_with_a_scan_worth_bounding(&store, &ns, &setup).await;
+    let now = context(now_after_newest_object(&store, &ns, GRACE_MS + 1).await);
+    let mut bounded = config();
+    bounded.max_objects = Some(1);
+    loop {
+        bounded.cursor = gc_namespace(&store, &ns, &bounded, &now)
+            .await
+            .expect("mark")
+            .next_cursor;
+        let state = super::run::load_run(&store, &ns)
+            .await
+            .expect("load")
+            .expect("run")
+            .state;
+        if let GcPhase::Sweeping { table, .. } = state.phase {
+            assert!(table.page_count > 0);
+            let page_key =
+                loonfs_objectstore::keys::gc_mark_page(&ns, &state.gc_run_id, &table.table_id, 0);
+            store.delete(&page_key).await.expect("remove page");
+            break;
+        }
+    }
+    let before = namespace_keys(&store, &ns).await;
+    bounded.max_objects = None;
+    gc_namespace(&store, &ns, &bounded, &now)
+        .await
+        .expect_err("missing evidence is never an absent reference");
+    assert_eq!(namespace_keys(&store, &ns).await, before);
 }

@@ -691,6 +691,18 @@ string_id! {
 }
 
 string_id! {
+    /// Durable identity for one namespace garbage-collection run.
+    GcRunId,
+    prefix = "gcr"
+}
+
+string_id! {
+    /// Identity for one immutable sorted table used during GC marking.
+    GcMarkTableId,
+    prefix = "gct"
+}
+
+string_id! {
     /// Durable id for one derived-index segment file.
     IndexSegmentId,
     prefix = "idx"

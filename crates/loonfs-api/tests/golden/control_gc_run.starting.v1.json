@@ -1,0 +1,1 @@
+{"kind":"gc_run","format_version":1,"payload_checksum":"sha256:83c6d992e478a1adb8418e91e738b6982a8550dc36d847f5b84f428efac597b6","payload":{"namespace_id":"demo","gc_run_id":"gcr_0123456789abcdef0123456789abcdef","step_no":0,"started_at_ms":1000000,"grace_window_ms":600000,"phase":{"kind":"starting"}}}

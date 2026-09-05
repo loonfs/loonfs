@@ -1175,10 +1175,8 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(stdout_string(&quiet_gc).starts_with("gc for demo:"));
         assert!(!stderr_string(&quiet_gc).contains("pass 1:"));
 
-        // The budget covers marking too, so one object buys the head and
-        // the root beside it and nothing else. That pass says it ran out
-        // rather than reporting a clean sweep, and returns no position
-        // it never reached.
+        // A one-step budget saves the control snapshot and returns a token
+        // that can finish marking on later calls.
         let starved_gc = harness.run(&[
             "--json",
             "maintenance",
@@ -1191,12 +1189,12 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_success(&starved_gc);
         let starved_data = json_data(&starved_gc);
         assert_eq!(starved_data["budget_exhausted"], true);
-        assert!(starved_data.get("next_cursor").is_none());
+        assert!(starved_data["next_cursor"]
+            .as_str()
+            .is_some_and(|cursor| !cursor.is_empty()));
 
-        // Supplying a budget with room for the roots, the seven-unit
-        // compaction lease stage, and some candidates requests exactly one
-        // pass and exposes the opaque cursor instead of the CLI's default
-        // completion loop.
+        // Supplying a budget requests one invocation and exposes durable
+        // progress instead of the CLI's default completion loop.
         let bounded_gc = harness.run(&[
             "--json",
             "maintenance",
@@ -1214,8 +1212,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .expect("bounded pass returns a cursor")
             .to_owned();
 
-        // Resumption skips the candidates the first pass enumerated. A
-        // restart over this unchanged keyspace would return the same token.
+        // Resumption advances the saved work and its reported progress number.
         let resumed_gc = harness.run(&[
             "--json",
             "maintenance",

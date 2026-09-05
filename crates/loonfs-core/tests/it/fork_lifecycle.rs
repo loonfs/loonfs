@@ -1055,8 +1055,11 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
     let surviving = namespace_keys(&store, &namespace_id).await;
     assert_eq!(
         surviving,
-        vec![wal_head(&namespace_id)],
-        "reclamation leaves the tombstone head and nothing else"
+        vec![
+            loonfs_objectstore::keys::gc_run(&namespace_id),
+            wal_head(&namespace_id)
+        ],
+        "reclamation leaves the tombstone and completed GC progress"
     );
     assert!(store
         .head(&wal_floor(&namespace_id))

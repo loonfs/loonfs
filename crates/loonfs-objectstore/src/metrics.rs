@@ -753,7 +753,9 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::CheckpointRecord
         | DurableObjectFamily::WalFloor
         | DurableObjectFamily::MetadataCompactionLease
-        | DurableObjectFamily::CompactionOutputProtection => KeyClass::GcControl,
+        | DurableObjectFamily::CompactionOutputProtection
+        | DurableObjectFamily::GcRun
+        | DurableObjectFamily::GcMarkPage => KeyClass::GcControl,
         DurableObjectFamily::UploadSession => KeyClass::Metadata,
     }
 }
