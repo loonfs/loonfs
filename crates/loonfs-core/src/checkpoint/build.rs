@@ -2,15 +2,15 @@
 //! segments a manifest references.
 
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq};
-use super::runs::{MetadataFamilySegments, CHECKPOINT_ROW_FAMILIES, MAX_MAINTENANCE_SEGMENT_IO};
+use super::runs::{MetadataFamilySegments, MetadataLsmPolicy, CHECKPOINT_ROW_FAMILIES};
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
 use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
-use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 #[cfg(test)]
 pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
+use loonfs_api::wire::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
 use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataSegmentId, NamespaceId};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -44,20 +44,20 @@ pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     metadata_state: &MetadataState,
-    max_rows_per_segment: NonZeroUsize,
+    policy: MetadataLsmPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
         namespace_id,
         |family| manifest_rows_for_family(metadata_state, family),
-        max_rows_per_segment,
+        policy,
     )
     .await
 }
 
 /// Checks newly built test segments for the same non-overlap invariant that
 /// manifest loading enforces. Production merges stream through
-/// [`super::compaction_output::MergeSegmentWriter`].
+/// [`MetadataSegmentWriter`].
 #[cfg(test)]
 pub(super) fn debug_assert_manifest_segments_do_not_overlap(
     _segments_by_family: &[MetadataFamilySegments],
@@ -83,19 +83,15 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
-    max_rows_per_segment: NonZeroUsize,
+    policy: MetadataLsmPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
         namespace_id,
         |family| manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
-        max_rows_per_segment,
+        policy,
     )
     .await
-}
-
-pub(super) struct MetadataSegmentRows {
-    rows: Vec<MetadataRow>,
 }
 
 #[tracing::instrument(
@@ -109,7 +105,7 @@ pub(super) async fn build_manifest_segments_from_rows<S, RowsForFamily>(
     store: &S,
     namespace_id: &NamespaceId,
     mut rows_for_family: RowsForFamily,
-    max_rows_per_segment: NonZeroUsize,
+    policy: MetadataLsmPolicy,
 ) -> Result<Vec<MetadataFamilySegments>>
 where
     S: ObjectStore + ?Sized,
@@ -118,32 +114,14 @@ where
     let destination = MetadataSegmentDestination::Published { namespace_id };
     let mut segments_by_family = Vec::with_capacity(CHECKPOINT_ROW_FAMILIES.len());
     for family in CHECKPOINT_ROW_FAMILIES {
-        let rows = rows_for_family(family);
-        if rows.is_empty() {
-            segments_by_family.push(MetadataFamilySegments {
-                family,
-                segments: Vec::new(),
-            });
-            continue;
+        let mut writer = MetadataSegmentWriter::new(family, destination);
+        for row in rows_for_family(family) {
+            writer.push(row, &mut |_| {})?;
+            writer.roll_full_segments(store, policy).await?;
         }
-
-        let segments = segment_rows_by_row_key_range(rows, max_rows_per_segment);
-        let mut requests = Vec::with_capacity(segments.len());
-        for (segment_index, segment_rows) in segments.into_iter().enumerate() {
-            let segment_index = u32::try_from(segment_index)
-                .map_err(|_| CoreError::Internal("metadata segment index overflow".to_owned()))?;
-            requests.push(destination.write_request(family, segment_index, segment_rows.rows));
-        }
-
-        let descriptors = write_segments_in_waves(
-            requests,
-            const { NonZeroUsize::new(MAX_MAINTENANCE_SEGMENT_IO).unwrap() },
-            |request| write_manifest_segment(store, request),
-        )
-        .await?;
         segments_by_family.push(MetadataFamilySegments {
             family,
-            segments: descriptors,
+            segments: writer.finish(store).await?,
         });
     }
     Ok(segments_by_family)
@@ -177,73 +155,24 @@ impl<'a> MetadataSegmentDestination<'a> {
             Self::CompactionStaging { job_id, .. } => Some(job_id.clone()),
         }
     }
-
-    pub(super) fn write_request(
-        self,
-        family: MetadataRowFamily,
-        segment_index: u32,
-        rows: Vec<MetadataRow>,
-    ) -> MetadataSegmentWriteRequest<'a> {
-        MetadataSegmentWriteRequest {
-            destination: self,
-            segment_id: MetadataSegmentId::generate(),
-            family,
-            segment_index,
-            rows,
-        }
-    }
 }
 
-pub(super) struct MetadataSegmentWriteRequest<'a> {
-    destination: MetadataSegmentDestination<'a>,
-    segment_id: MetadataSegmentId,
-    family: MetadataRowFamily,
-    segment_index: u32,
-    rows: Vec<MetadataRow>,
-}
-
-/// Builds and writes one metadata segment, then returns its descriptor.
+/// Writes the encoded segment and returns the descriptor that binds its bytes.
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
-    request: MetadataSegmentWriteRequest<'_>,
+    destination: MetadataSegmentDestination<'_>,
+    family: MetadataRowFamily,
+    segment_index: u32,
+    built: BuiltSegmentBlocks,
 ) -> Result<MetadataSegmentRef> {
-    write_manifest_segment_with_encoded_rows(store, request, |_| {}).await
-}
-
-pub(super) async fn write_manifest_segment_with_encoded_rows<
-    S: ObjectStore + ?Sized,
-    FoldEncodedRow: FnMut(&[u8]),
->(
-    store: &S,
-    request: MetadataSegmentWriteRequest<'_>,
-    mut fold_encoded_row: FoldEncodedRow,
-) -> Result<MetadataSegmentRef> {
-    let segment_id = request.segment_id;
-    let mut builder = SegmentBlocksBuilder::default();
-    for row in &request.rows {
-        let row_key = row.row_key_for_family(request.family);
-        let filter_key = row.filter_key_for_family(request.family);
-        let encoded_row = builder
-            .push_with_encoded_row(&row_key, &filter_key, row)
-            .map_err(|err| {
-                CoreError::Internal(format!(
-                    "failed to build metadata segment `{segment_id}`: {err}"
-                ))
-            })?;
-        fold_encoded_row(&encoded_row);
-    }
-    let built = builder.finish().map_err(|err| {
-        CoreError::Internal(format!(
-            "failed to build metadata segment `{segment_id}`: {err}"
-        ))
-    })?;
+    let segment_id = MetadataSegmentId::generate();
     let filter_inline = built.inline_filter_hex();
     let descriptor = MetadataSegmentRef {
-        owner_namespace_id: request.destination.namespace_id().clone(),
+        owner_namespace_id: destination.namespace_id().clone(),
         segment_id,
-        compaction_job_id: request.destination.compaction_job_id(),
-        family: request.family,
-        segment_index: request.segment_index,
+        compaction_job_id: destination.compaction_job_id(),
+        family,
+        segment_index,
         row_count: built.row_count,
         min_row_key: built.min_row_key,
         max_row_key: built.max_row_key,
@@ -261,13 +190,82 @@ pub(super) async fn write_manifest_segment_with_encoded_rows<
     Ok(descriptor)
 }
 
-pub(super) fn segment_rows_by_row_key_range(
-    rows: Vec<MetadataRow>,
-    max_rows_per_segment: NonZeroUsize,
-) -> Vec<MetadataSegmentRows> {
-    rows.chunks(max_rows_per_segment.get())
-        .map(|rows| MetadataSegmentRows {
-            rows: rows.to_vec(),
-        })
-        .collect()
+/// Encodes rows immediately and rolls at the byte target or row limit.
+/// One final row may cross the byte target; decoded rows are never buffered.
+pub(super) struct MetadataSegmentWriter<'a> {
+    family: MetadataRowFamily,
+    destination: MetadataSegmentDestination<'a>,
+    builder: SegmentBlocksBuilder,
+    segments: Vec<MetadataSegmentRef>,
+}
+
+impl<'a> MetadataSegmentWriter<'a> {
+    pub(super) fn new(
+        family: MetadataRowFamily,
+        destination: MetadataSegmentDestination<'a>,
+    ) -> Self {
+        Self {
+            family,
+            destination,
+            builder: SegmentBlocksBuilder::default(),
+            segments: Vec::new(),
+        }
+    }
+
+    pub(super) fn push(
+        &mut self,
+        row: MetadataRow,
+        fold_encoded_row: &mut impl FnMut(&[u8]),
+    ) -> Result<()> {
+        let encoded = self
+            .builder
+            .push_with_encoded_row(
+                &row.row_key_for_family(self.family),
+                &row.filter_key_for_family(self.family),
+                &row,
+            )
+            .map_err(|error| {
+                CoreError::Internal(format!("failed to encode metadata segment: {error}"))
+            })?;
+        fold_encoded_row(&encoded);
+        Ok(())
+    }
+
+    pub(super) async fn roll_full_segments<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        policy: MetadataLsmPolicy,
+    ) -> Result<()> {
+        if self.builder.row_count() >= policy.max_rows_per_segment.get() as u64
+            || self.builder.decoded_data_bytes() >= policy.target_segment_bytes.get()
+        {
+            self.write_segment(store).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn finish<S: ObjectStore + ?Sized>(
+        mut self,
+        store: &S,
+    ) -> Result<Vec<MetadataSegmentRef>> {
+        if self.builder.row_count() > 0 {
+            self.write_segment(store).await?;
+        }
+        Ok(self.segments)
+    }
+
+    async fn write_segment<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
+        let segment_index = u32::try_from(self.segments.len())
+            .map_err(|_| CoreError::Internal("metadata segment index overflow".to_owned()))?;
+        let built = std::mem::take(&mut self.builder)
+            .finish()
+            .map_err(|error| {
+                CoreError::Internal(format!("failed to encode metadata segment: {error}"))
+            })?;
+        self.segments.push(
+            write_manifest_segment(store, self.destination, self.family, segment_index, built)
+                .await?,
+        );
+        Ok(())
+    }
 }

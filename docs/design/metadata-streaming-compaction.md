@@ -8,6 +8,15 @@ LoonFS stores namespace metadata in immutable runs. The oldest data is stored in
 
 This design adds a background streaming compaction for oversized metadata family groups. The job reads a fixed snapshot of the selected runs and captures a retention floor, which is the sequence number below which obsolete history may be removed. It applies that floor throughout the job, writes output segments under a job-specific prefix, and publishes the result with one manifest update. Readers continue using the existing manifest until that final update succeeds.
 
+Metadata output uses the same incremental writer for WAL folds and compaction.
+Rows are encoded as they arrive; completed data blocks are compressed immediately.
+Each family rolls a segment at 8 MiB of decoded data or 65,536 rows. The last row
+may cross the byte target, and a row larger than an injected target is written as
+one segment. Output therefore stays proportional to the byte target plus one row,
+with bounded row-count overhead for filters and indexes. Flushes upload segments
+sequentially within each family, trading some upload concurrency for smaller buffers.
+This output bound does not by itself bound the number of merge input streams.
+
 ## Problem
 
 Metadata reorganization works on family groups because some families must remain consistent with related indexes. For example, bindings must be processed with the child-binding index, and revisions must be processed with the revisions-by-inode index.

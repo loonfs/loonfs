@@ -857,13 +857,8 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     let mut next_run_no = next_run_no_after(run_no)?;
     let (base_seq, runs) = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
-            let run_segments = build_manifest_segments(
-                store,
-                namespace_id,
-                metadata_state,
-                policy.max_rows_per_segment,
-            )
-            .await?;
+            let run_segments =
+                build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
             (
                 head_seq,
@@ -890,7 +885,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                             namespace_id,
                             previous.manifest.payload.head_seq,
                             metadata_state,
-                            policy.max_rows_per_segment,
+                            policy,
                         )
                         .await?,
                     ),
@@ -901,13 +896,8 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             (previous.manifest.payload.base_seq, runs)
         }
         Some(_) => {
-            let run_segments = build_manifest_segments(
-                store,
-                namespace_id,
-                metadata_state,
-                policy.max_rows_per_segment,
-            )
-            .await?;
+            let run_segments =
+                build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
             (
                 head_seq,
@@ -920,13 +910,8 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             )
         }
         _ => {
-            let run_segments = build_manifest_segments(
-                store,
-                namespace_id,
-                metadata_state,
-                policy.max_rows_per_segment,
-            )
-            .await?;
+            let run_segments =
+                build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
             (
                 head_seq,
                 vec![MetadataRunRef {
