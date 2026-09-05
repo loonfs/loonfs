@@ -279,8 +279,8 @@ fn concurrent_embedded_puts_land_or_report_the_fence() {
         .iter()
         .enumerate()
         .map(|(index, path)| {
-            Command::new(loon_binary_path())
-                .env("HOME", &harness.home_dir)
+            harness
+                .command()
                 .args([
                     "--json",
                     "put",
