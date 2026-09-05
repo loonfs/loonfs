@@ -2455,7 +2455,8 @@ publishing CAS) — under these rules:
    is immutable, so user and snapshot pins, the final replay chain, and the
    last manifest protect nothing and age out. The head survives as the
    id-retiring tombstone, together with the root and floor objects if the
-   namespace ever wrote them.
+   namespace ever wrote them. Completed GC progress also stays in its
+   singleton slot so a paused collector cannot replace a newer run.
 5. A root the pass cannot resolve causes retention, not deletion: a root
    manifest that is absent, or that the store will not hand over,
    suppresses manifest and segment deletion for the whole pass. A root that
