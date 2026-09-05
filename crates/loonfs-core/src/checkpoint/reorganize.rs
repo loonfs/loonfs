@@ -162,9 +162,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(&previous.payload);
-    if compaction_policy != MetadataCompactionPolicy::CompactImmediately
-        && !manifest_has_reorganization_work(&previous.payload, segments.scan_runs.as_ref(), policy)
-    {
+    if !manifest_has_reorganization_work(
+        &previous.payload,
+        segments.scan_runs.as_ref(),
+        policy,
+        compaction_policy,
+    ) {
         return Ok(report(
             namespace_id,
             MetadataReorganizeOutcome::NotNeeded { delta_runs },
@@ -294,6 +297,7 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     segment_cache: Option<&super::cache::MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     max_wal_tail_segments: u64,
+    compaction_policy: MetadataCompactionPolicy,
 ) -> Result<bool> {
     let snapshot = load_control_snapshot(store, namespace_id)
         .await
@@ -327,6 +331,7 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
         &segments.manifest().payload,
         segments.scan_runs.as_ref(),
         MetadataLsmPolicy::default(),
+        compaction_policy,
     ))
 }
 
@@ -710,16 +715,18 @@ fn manifest_has_reorganization_work(
     payload: &NamespaceManifestPayload,
     runs: &[MetadataRunManifest],
     policy: MetadataLsmPolicy,
+    compaction_policy: MetadataCompactionPolicy,
 ) -> bool {
-    let has_group_rows = !ranked_family_groups(payload).is_empty();
-    let triggered = (delta_run_count(payload) >= policy.max_delta_runs.get() && has_group_rows)
+    let groups = ranked_family_groups(payload);
+    let triggered = compaction_policy == MetadataCompactionPolicy::CompactImmediately
+        || (delta_run_count(payload) >= policy.max_delta_runs.get() && !groups.is_empty())
         || manifest_has_partial_reorganization(runs);
     triggered
-        && REORGANIZE_FAMILY_GROUPS.into_iter().any(|group| {
+        && groups.into_iter().any(|group| {
             select_merge_window(
                 &group_candidates(runs, group),
                 group,
-                MetadataCompactionPolicy::SizeTiered,
+                compaction_policy,
                 policy.small_run_bytes.get() as u64,
             )
             .is_some()

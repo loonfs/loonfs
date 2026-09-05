@@ -65,7 +65,11 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     }
 
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        match self.maintenance.metadata_probe(namespace_id).await {
+        match self
+            .maintenance
+            .metadata_probe(namespace_id, &self.options)
+            .await
+        {
             Ok(probe) => Ok(probe),
             Err(error) if metadata_has_nothing_to_maintain(&error) => Ok(MaintenanceProbe::Idle),
             Err(error) => Err(error),

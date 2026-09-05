@@ -323,7 +323,7 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         .create_namespace(&namespace)
         .await
         .expect("create namespace");
-    let snapshot = create_snapshot(&harness.server_url, namespace.as_str(), "brief", 500)
+    let snapshot = create_snapshot(&harness.server_url, namespace.as_str(), "brief", 60_000)
         .expect("create snapshot");
     let checkpoint = harness
         .client
