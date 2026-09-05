@@ -275,21 +275,26 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         expected_revision_no: None,
     };
 
+    let prepared = harness
+        .client
+        .prepare_file_bytes(&namespace, b"stable bytes\n")
+        .await
+        .expect("prepare the content once");
     let first = harness
         .client
-        .put_file_bytes(&target, b"stable bytes\n", &options("import batch"))
+        .put_file_prepared(&target, prepared.clone(), &options("import batch"))
         .await
         .expect("first put");
     let replay = harness
         .client
-        .put_file_bytes(&target, b"stable bytes\n", &options("import batch"))
+        .put_file_prepared(&target, prepared.clone(), &options("import batch"))
         .await
-        .expect("re-uploading an identical request is idempotent");
+        .expect("resubmitting prepared content is idempotent");
     assert_eq!(replay, first);
 
     match harness
         .client
-        .put_file_bytes(&target, b"stable bytes\n", &options("second thoughts"))
+        .put_file_prepared(&target, prepared.clone(), &options("second thoughts"))
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
@@ -298,10 +303,10 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
 
     // Absent and empty are different messages too: the fingerprint takes
     // the annotation as given, so `null` and `""` are different commits and
-    // the client compares them the same way.
+    // publication checks them before replay.
     match harness
         .client
-        .put_file_bytes(&target, b"stable bytes\n", &{
+        .put_file_prepared(&target, prepared.clone(), &{
             let mut options = options("unused");
             options.commit.message = None;
             options
