@@ -589,12 +589,12 @@ commit retries; that is the cheapest retry and the one the server can
 answer on its own.
 
 **Rust convenience calls.** Both the HTTP client and embedded runtime offer
-`prepare_file_bytes` / `prepare_file_stream`, followed by `put_file_prepared`.
+`prepare_file_bytes()` / `prepare_file_stream()`, followed by `put_file_prepared()`.
 Retain the prepared content and use the same explicit commit ID, path, and
 options on each publication attempt. Preparation alone does not publish a file
 or extend the completed upload's lifetime.
 
-Calling `put_file_bytes` or `put_file_stream` again uploads a new object; using
+Calling `put_file_bytes()` or `put_file_stream()` again uploads a new object; using
 an already-committed ID therefore returns `commit_id_reuse_conflict`, even for
 identical bytes. The unused upload can be reclaimed after its grace period.
 These helpers do not read the change feed or substitute an earlier content
