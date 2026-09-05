@@ -82,8 +82,8 @@ enum OperationFingerprintInput<'a> {
         path: &'a str,
         behavior: DestinationBehavior,
         content_ref: ContentRefFingerprintInput<'a>,
-        expected_revision_no: Option<RevisionNo>,
         expected_inode_id: Option<InodeId>,
+        expected_revision_no: Option<RevisionNo>,
     },
     CreateDirectoryByInode {
         parent_inode_id: InodeId,
@@ -214,8 +214,8 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             path: path.as_str(),
             behavior: *behavior,
             content_ref: content_ref_fingerprint_input(content_ref),
-            expected_revision_no: *expected_revision_no,
             expected_inode_id: *expected_inode_id,
+            expected_revision_no: *expected_revision_no,
         },
         FilesystemOperation::CreateDirectoryByInode {
             parent_inode_id,
@@ -865,7 +865,7 @@ mod tests {
                 )
                 .expect("retry fingerprint")
                 .as_str(),
-                "v2:sha256:917de14c60b9a93f138afb0c9d046af43553a9468d7de2803d0ba8e9866fd25e"
+                "v2:sha256:f83a2787fca6165732d4c92faef300ed2f1527ac2804ecb0b4d2ccf6b0a6da83"
             );
         }
     }

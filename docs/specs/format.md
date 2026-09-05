@@ -1431,7 +1431,7 @@ The remaining fields appear in this order:
 | --- | --- |
 | `create_directory` | `path`, `parents` |
 | `create_directory_by_inode` | `parent_inode_id`, `display_name` |
-| `put_file` | `path`, `behavior`, `content_ref`, `expected_revision_no`, `expected_inode_id` |
+| `put_file` | `path`, `behavior`, `content_ref`, `expected_inode_id`, `expected_revision_no` |
 | `put_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref` |
 | `put_file_revision_by_inode` | `inode_id`, `content_ref`, `expected_revision_no` |
 | `move_by_inode` | `inode_id`, `expected_binding_generation`, `to_parent_inode_id`, `to_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |

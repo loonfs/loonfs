@@ -25,8 +25,8 @@
         }
       }
     },
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"no_replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16},\"expected_revision_no\":null,\"expected_inode_id\":null}],\"message\":null}",
-    "fingerprint": "v2:sha256:917de14c60b9a93f138afb0c9d046af43553a9468d7de2803d0ba8e9866fd25e"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"no_replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16},\"expected_inode_id\":null,\"expected_revision_no\":null}],\"message\":null}",
+    "fingerprint": "v2:sha256:f83a2787fca6165732d4c92faef300ed2f1527ac2804ecb0b4d2ccf6b0a6da83"
   },
   {
     "name": "create_directory_by_inode_2",
@@ -201,8 +201,8 @@
       "expected_revision_no": 3,
       "expected_inode_id": "ino_42"
     },
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16},\"expected_revision_no\":3,\"expected_inode_id\":42}],\"message\":null}",
-    "fingerprint": "v2:sha256:7b28af5004666d44c3e2fc3a82f4ff996efb10af4d7287e068faf0c6b7e706eb"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"replace\",\"content_ref\":{\"kind\":\"blob_v1\",\"content_id\":\"con_0123456789abcdef0123456789abcdef\",\"size_bytes\":16},\"expected_inode_id\":42,\"expected_revision_no\":3}],\"message\":null}",
+    "fingerprint": "v2:sha256:22ff2ebebee0c6cd18f0af7194b1dfcf97268b86c143b69818f9378ad3d6746c"
   },
   {
     "name": "move_by_inode_15",
