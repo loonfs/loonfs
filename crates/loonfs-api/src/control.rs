@@ -407,7 +407,7 @@ pub struct WriterBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcquiredWriter {
     /// Stable writer label copied into the head's observability block.
-    pub writer_id: String,
+    pub writer_id: WriterId,
     /// Fencing epoch every commit publication from this session must match.
     pub writer_epoch: WriterEpoch,
 }

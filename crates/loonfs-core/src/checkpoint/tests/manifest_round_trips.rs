@@ -24,7 +24,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .await
         .expect("load head");
     let acquired_writer = loonfs_api::wire::control::AcquiredWriter {
-        writer_id: context.writer_id.to_string(),
+        writer_id: context.writer_id.clone(),
         writer_epoch: head.state.writer_epoch,
     };
     let (_, projection) = crate::protocol::load_publish_metadata_view(

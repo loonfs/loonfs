@@ -4,7 +4,7 @@
 //! rows require point reads because binds and unbinds use different key
 //! prefixes; [`super::streaming_compaction`] handles those reads.
 
-use super::frozen_floor::{bind_survives_frozen_floor, BindingGeneration};
+use super::frozen_floor::{bind_survives_frozen_floor, BindingIdentity};
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
 use loonfs_api::{AttributeRevisionNo, ChangeSeq};
@@ -234,11 +234,11 @@ pub(super) struct BindingRetention {
     /// One entry at most — every unbind in the group names the same
     /// generation — and it is the set both bind families are judged against, so
     /// bind families reach `bind_survives_frozen_floor` by the same route.
-    unbound_at_floor: BTreeSet<BindingGeneration>,
+    unbound_at_floor: BTreeSet<BindingIdentity>,
     /// The one bind at or below the floor in this slot that nothing retired,
     /// or `None` while the slot has none. A second one means the first was
     /// superseded without an unbind.
-    unretired_at_floor: Option<BindingGeneration>,
+    unretired_at_floor: Option<BindingIdentity>,
 }
 
 impl BindingRetention {
@@ -258,12 +258,12 @@ impl BindingRetention {
                 // A spent marker: the floor covers it, so nothing can observe
                 // the binding it retired, and it retires that binding for the
                 // bind row held above.
-                self.unbound_at_floor.insert((
-                    *parent_inode_id,
-                    name_key.clone(),
-                    *bind_seq,
-                    *bind_delta_index,
-                ));
+                self.unbound_at_floor.insert(BindingIdentity {
+                    parent_inode_id: *parent_inode_id,
+                    name_key: name_key.clone(),
+                    bind_seq: *bind_seq,
+                    bind_delta_index: *bind_delta_index,
+                });
                 None
             }
             // A bind above the floor survives whatever retired it later, so
@@ -296,12 +296,12 @@ impl BindingRetention {
         else {
             return Ok(Some(row));
         };
-        let generation = (
-            *parent_inode_id,
-            name_key.clone(),
-            *bind_seq,
-            *bind_delta_index,
-        );
+        let generation = BindingIdentity {
+            parent_inode_id: *parent_inode_id,
+            name_key: name_key.clone(),
+            bind_seq: *bind_seq,
+            bind_delta_index: *bind_delta_index,
+        };
         self.check_the_slot_invariant(&generation)?;
         let survives = bind_survives_frozen_floor(&row, floor_seq, &unbound_at_floor);
         self.unretired_at_floor = survives.then_some(generation);
@@ -315,11 +315,13 @@ impl BindingRetention {
     /// Generations arrive in ascending order, so a second unretired bind in
     /// the same slot proves that the earlier bind was superseded without an
     /// unbind. Cleanup is rejected when that occurs.
-    fn check_the_slot_invariant(&mut self, generation: &BindingGeneration) -> Result<()> {
+    fn check_the_slot_invariant(&mut self, generation: &BindingIdentity) -> Result<()> {
         let Some(previous) = self.unretired_at_floor.take() else {
             return Ok(());
         };
-        if (&previous.0, &previous.1) != (&generation.0, &generation.1) {
+        if previous.parent_inode_id != generation.parent_inode_id
+            || previous.name_key != generation.name_key
+        {
             // A different parent-and-name slot: the previous slot's latest
             // bind was its latest, which is exactly what the invariant
             // allows.
@@ -328,7 +330,7 @@ impl BindingRetention {
         Err(CoreError::NamespaceCorrupt(format!(
             "bind at seq `{}` delta {} for parent `{}` is superseded at or below the retention \
              floor without an unbind; refusing to drop rows",
-            previous.2, previous.3, previous.0
+            previous.bind_seq, previous.bind_delta_index, previous.parent_inode_id
         )))
     }
 }

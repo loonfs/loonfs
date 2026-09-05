@@ -12,13 +12,15 @@ use loonfs_api::wire::manifest::MetadataRow;
 use loonfs_api::{ChangeSeq, InodeId, NameKey};
 use std::collections::BTreeSet;
 
-/// Identifies one binding generation, which is what an unbind names and what
-/// the bind drop matches on.
-///
-/// Identity here omits `child_inode_id` (the read path also matches it); the
-/// 4-tuple is already unique for writer-produced rows, so the predicates
-/// agree on every legal history.
-pub(super) type BindingGeneration = (InodeId, NameKey, ChangeSeq, u32);
+/// Identifies one durable binding by its parent, name, and originating delta.
+/// The writer assigns this identity once; a matching unbind retires it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct BindingIdentity {
+    pub(super) parent_inode_id: InodeId,
+    pub(super) name_key: NameKey,
+    pub(super) bind_seq: ChangeSeq,
+    pub(super) bind_delta_index: u32,
+}
 
 /// The binding generations an unbind at or below `retention_floor_seq`
 /// retires.
@@ -30,7 +32,7 @@ pub(super) type BindingGeneration = (InodeId, NameKey, ChangeSeq, u32);
 pub(super) fn unbindings_at_or_below_floor(
     unbind_rows: &[MetadataRow],
     retention_floor_seq: ChangeSeq,
-) -> BTreeSet<BindingGeneration> {
+) -> BTreeSet<BindingIdentity> {
     unbind_rows
         .iter()
         .filter_map(|row| unbinding_at_or_below_floor(row, retention_floor_seq))
@@ -46,7 +48,7 @@ pub(super) fn unbindings_at_or_below_floor(
 pub(super) fn unbinding_at_or_below_floor(
     row: &MetadataRow,
     retention_floor_seq: ChangeSeq,
-) -> Option<BindingGeneration> {
+) -> Option<BindingIdentity> {
     let MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
         parent_inode_id,
         name_key,
@@ -58,13 +60,11 @@ pub(super) fn unbinding_at_or_below_floor(
     else {
         return None;
     };
-    (*unbind_seq <= retention_floor_seq).then(|| {
-        (
-            *parent_inode_id,
-            name_key.clone(),
-            *bind_seq,
-            *bind_delta_index,
-        )
+    (*unbind_seq <= retention_floor_seq).then(|| BindingIdentity {
+        parent_inode_id: *parent_inode_id,
+        name_key: name_key.clone(),
+        bind_seq: *bind_seq,
+        bind_delta_index: *bind_delta_index,
     })
 }
 
@@ -77,7 +77,7 @@ pub(super) fn unbinding_at_or_below_floor(
 pub(super) fn bind_survives_frozen_floor(
     row: &MetadataRow,
     retention_floor_seq: ChangeSeq,
-    unbound_at_floor: &BTreeSet<BindingGeneration>,
+    unbound_at_floor: &BTreeSet<BindingIdentity>,
 ) -> bool {
     let MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
         parent_inode_id,
@@ -90,10 +90,10 @@ pub(super) fn bind_survives_frozen_floor(
         return true;
     };
     *bind_seq > retention_floor_seq
-        || !unbound_at_floor.contains(&(
-            *parent_inode_id,
-            name_key.clone(),
-            *bind_seq,
-            *bind_delta_index,
-        ))
+        || !unbound_at_floor.contains(&BindingIdentity {
+            parent_inode_id: *parent_inode_id,
+            name_key: name_key.clone(),
+            bind_seq: *bind_seq,
+            bind_delta_index: *bind_delta_index,
+        })
 }

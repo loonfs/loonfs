@@ -216,7 +216,10 @@ async fn fenced_session_cannot_delete_namespace() {
             .await,
         "a fenced session must not delete the namespace",
     );
-    assert_eq!(fence.active_writer.as_deref(), Some("writer-b"));
+    assert_eq!(
+        fence.active_writer.as_ref().map(|writer| writer.as_str()),
+        Some("writer-b")
+    );
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
 
     // The namespace is untouched: same epoch, still active, still writer B's.
@@ -326,7 +329,10 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     );
     let head_after_fencing = head_state(&store, &ns_fence).await;
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
-    assert_eq!(fence.active_writer.as_deref(), Some("writer-b"));
+    assert_eq!(
+        fence.active_writer.as_ref().map(|writer| writer.as_str()),
+        Some("writer-b")
+    );
 
     // More budget pressure, now against a publisher whose session is fenced:
     // fencing is session state, so no eviction can reach it.

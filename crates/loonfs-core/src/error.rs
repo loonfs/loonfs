@@ -17,7 +17,7 @@ use crate::wal::{WalChainLoadError, WalSegmentError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
     ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, RevisionNo, UploadId,
-    WriterEpoch,
+    WriterEpoch, WriterId,
 };
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use thiserror::Error;
@@ -672,7 +672,7 @@ pub struct WriterFence {
     /// Epoch that owns the namespace now.
     pub active_epoch: WriterEpoch,
     /// Writer label recorded by the winning acquirer, when known.
-    pub active_writer: Option<String>,
+    pub active_writer: Option<WriterId>,
     /// When the winning acquirer took the epoch, in Unix milliseconds, when
     /// known.
     pub active_acquired_at_ms: Option<u64>,
@@ -698,7 +698,7 @@ impl std::fmt::Display for WriterFence {
         )?;
         // These fields normally appear together, but format a useful message when
         // only one is available.
-        match (self.active_writer.as_deref(), self.active_acquired_at_ms) {
+        match (self.active_writer.as_ref(), self.active_acquired_at_ms) {
             (Some(writer), Some(acquired_at_ms)) => {
                 write!(f, " (writer `{writer}`, acquired at {acquired_at_ms} ms)")
             }
@@ -839,13 +839,16 @@ mod tests {
         let fenced = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
-            active_writer: Some("writer-b".to_owned()),
+            active_writer: Some(loonfs_api::WriterId::parse("writer-b").expect("writer id")),
             active_acquired_at_ms: Some(2_000),
         });
         let details = fenced.details().expect("fence details");
         assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
-        assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
+        assert_eq!(
+            details.active_writer.as_ref().map(|writer| writer.as_str()),
+            Some("writer-b")
+        );
         assert_eq!(details.active_acquired_at_ms, Some(2_000));
 
         let anonymous = CoreError::WriterFenced(WriterFence {
