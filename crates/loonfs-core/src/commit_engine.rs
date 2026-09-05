@@ -670,12 +670,16 @@ mod tests {
             .estimated_retained_bytes()
             .expect("weight");
         let mut annotated = request.clone();
+        annotated.message = Some(String::new());
+        let empty_annotation = CommitCandidate::new(annotated.clone())
+            .estimated_retained_bytes()
+            .expect("weight");
         annotated.message = Some("x".repeat(4096));
         assert!(
             CommitCandidate::new(annotated)
                 .estimated_retained_bytes()
                 .expect("weight")
-                >= baseline + 4096
+                >= empty_annotation + 4096
         );
         let proof = PreparedContent::for_durable_content_write(
             NamespaceId::parse("demo").expect("namespace"),
