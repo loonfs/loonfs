@@ -148,10 +148,14 @@ async fn manifest<S: ObjectStore + ?Sized>(
         let key = metadata_segment_object_key(segment);
         entries.push(object(&key));
         if segment.family == MetadataRowFamily::Revisions {
+            // Full scans do not use bloom filters. Omitting the optional inline
+            // copy also makes otherwise identical references deduplicate.
+            let mut scan_segment = segment.clone();
+            scan_segment.filter_inline = None;
             entries.push(GcMarkEntry {
                 key: format!("revision/{key}"),
                 value: GcMarkValue::RevisionSegment {
-                    segment: segment.clone(),
+                    segment: scan_segment,
                     max_seq: payload.head_seq,
                 },
             });

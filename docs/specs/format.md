@@ -2685,7 +2685,9 @@ object key), content IDs (`content/`), revision-segment tasks (`revision/`),
 and missing manifest or checkpoint-basis observations (`missing-manifest/`
 and `missing-basis/`). Tagged values preserve their meaning. Manifest marks
 carry the complete verified manifest reference; revision tasks carry the
-segment descriptor and sequence bound. Equal keys must agree, except that
+segment descriptor and sequence bound. Scan descriptors omit the optional
+inline bloom filter because full revision scans do not consult it. Equal keys
+must agree, except that
 identical revision descriptors combine by taking the smaller sequence bound.
 
 The index holds at most one table per binary merge level and one pending
