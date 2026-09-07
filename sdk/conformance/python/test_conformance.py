@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -1683,7 +1684,7 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
     client = harness.client
     namespace_id = "conf-python-prepared"
     client.namespaces.create(namespace_id=namespace_id)
-    prepared = client.files.prepare_file_bytes(namespace_id, content=b"original bytes")
+    prepared = client.files.prepare_file_stream(namespace_id, content=io.BytesIO(b"original bytes"))
     assert isinstance(prepared, PreparedFileContent)
     inputs = dict(path="/original", prepared=prepared,
                   actor=ActorRef(kind="user", id="prepared-user"), commit_id="prepared-put")

@@ -2815,3 +2815,42 @@ none is supplied. TypeScript uses `timeoutInSeconds` (client default, otherwise
 request/client HTTPX timeout for I/O waits on both transports; its synchronous
 iterator closes the response on early exit from a `with` block. API authorization,
 cookies and API headers are not copied into presigned object-store requests.
+
+### SDK streaming uploads
+
+Streaming preparation accepts a caller-owned `io.Reader` in Go, a binary file
+object in synchronous Python, and a `Blob`, `ReadableStream<Uint8Array>`, or
+`AsyncIterable<Uint8Array>` in TypeScript. It returns the same prepared content
+used by the byte helpers, without publishing a filesystem entry:
+
+| SDK | Prepare once | Prepare and publish once |
+| --- | --- | --- |
+| Go | `Files.PrepareFileStream(ctx, namespaceID, reader, sizeBytes)` | `Files.UploadStream(ctx, files.StreamUploadInput{...})` |
+| Python | `files.prepare_file_stream(namespace_id, content=reader, size_bytes=size)` | `files.upload_stream(namespace_id, content=reader, ...)` |
+| TypeScript server/browser | `files.prepareFileStream({ ...namespace, content, size_bytes }, options)` | `files.uploadStream(input, options)` |
+
+The optional size is checked against the consumed bytes; TypeScript infers it
+for a Blob. Unknown nonempty sources use multipart when advertised, otherwise
+service-proxied uploads. SDK reads are limited to 64 KiB, and multipart uploads
+retain a provider-sized part plus at most 10,000 part descriptors. TypeScript
+retains the caller's current chunk, so callers should also produce bounded
+chunks. Known TypeScript sources up to 8 MiB use a bounded fixed request body to
+preserve browser compatibility; larger or unknown single-request uploads require
+runtime support for streaming request bodies. Multipart sends fixed part bodies
+and does not require that support. Existing byte helpers use these same paths.
+
+Upload preparation and publication use the same caller transport controls as
+downloads. Go and TypeScript deadlines cover the combined `UploadStream` /
+`uploadStream` operation. Python's timeout bounds HTTP I/O waits. A blocking
+caller-owned Go or Python source read must be interrupted by its owner; network
+cancellation cannot interrupt arbitrary source code. Callers close Go/Python
+sources; TypeScript cancels or returns its consumed source on completion or error.
+
+Payloads are consumed once and never automatically replayed. Source errors,
+size mismatches, and failed payload requests prevent completion and trigger a
+best-effort abort with a separate five-second cleanup timeout (an I/O timeout
+in synchronous Python). An ambiguous
+completion failure leaves the session available for inspection. After successful
+preparation, retain the result and retry `PutFilePrepared` / `put_file_prepared` /
+`putFilePrepared` with identical publication inputs; do not reread a stream or
+start a new upload to retry publication.

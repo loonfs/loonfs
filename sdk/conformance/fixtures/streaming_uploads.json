@@ -1,0 +1,284 @@
+[
+  {
+    "name": "sha256_service_proxied",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "service_proxied",
+    "size": 9
+  },
+  {
+    "name": "sha256_direct_put",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "direct_put",
+    "size": 9
+  },
+  {
+    "name": "sha256_direct_multipart",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "direct_multipart",
+    "size": null
+  },
+  {
+    "name": "crc32c_service_proxied",
+    "content": "123456789",
+    "algorithm": "crc32c",
+    "checksum": "e3069283",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "service_proxied",
+    "size": 9
+  },
+  {
+    "name": "crc32c_direct_put",
+    "content": "123456789",
+    "algorithm": "crc32c",
+    "checksum": "e3069283",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "direct_put",
+    "size": 9
+  },
+  {
+    "name": "crc32c_direct_multipart",
+    "content": "123456789",
+    "algorithm": "crc32c",
+    "checksum": "e3069283",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "direct_multipart",
+    "size": null
+  },
+  {
+    "name": "crc64nvme_service_proxied",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "service_proxied",
+    "size": 9
+  },
+  {
+    "name": "crc64nvme_direct_put",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "direct_put",
+    "size": 9
+  },
+  {
+    "name": "crc64nvme_direct_multipart",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "direct_multipart",
+    "size": null
+  },
+  {
+    "name": "empty_service_proxied",
+    "content": "",
+    "algorithm": "sha256",
+    "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "error": false,
+    "mode": "service_proxied",
+    "size": 0
+  },
+  {
+    "name": "service_proxied_source_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "service_proxied",
+    "size": 9,
+    "fault": "source_error"
+  },
+  {
+    "name": "service_proxied_payload_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "service_proxied",
+    "size": 9,
+    "fault": "payload_error"
+  },
+  {
+    "name": "service_proxied_completion_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "service_proxied",
+    "size": 9,
+    "fault": "completion_error"
+  },
+  {
+    "name": "service_proxied_size_8",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "service_proxied",
+    "size": 8
+  },
+  {
+    "name": "service_proxied_size_10",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "service_proxied",
+    "size": 10
+  },
+  {
+    "name": "proxy_unknown",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "service_proxied",
+    "size": null
+  },
+  {
+    "name": "direct_put_source_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_put",
+    "size": 9,
+    "fault": "source_error"
+  },
+  {
+    "name": "direct_put_payload_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_put",
+    "size": 9,
+    "fault": "payload_error"
+  },
+  {
+    "name": "direct_put_completion_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_put",
+    "size": 9,
+    "fault": "completion_error"
+  },
+  {
+    "name": "direct_put_size_8",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_put",
+    "size": 8
+  },
+  {
+    "name": "direct_put_size_10",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_put",
+    "size": 10
+  },
+  {
+    "name": "direct_multipart_source_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_multipart",
+    "size": null,
+    "fault": "source_error"
+  },
+  {
+    "name": "direct_multipart_payload_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_multipart",
+    "size": null,
+    "fault": "payload_error"
+  },
+  {
+    "name": "direct_multipart_completion_error",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_multipart",
+    "size": null,
+    "fault": "completion_error"
+  },
+  {
+    "name": "service_proxied_timeout",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "service_proxied",
+    "size": 9,
+    "fault": "timeout"
+  },
+  {
+    "name": "direct_put_timeout",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_put",
+    "size": 9,
+    "fault": "timeout"
+  },
+  {
+    "name": "direct_multipart_timeout",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "mode": "direct_multipart",
+    "size": null,
+    "fault": "timeout"
+  }
+]

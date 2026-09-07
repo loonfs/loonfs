@@ -1,8 +1,9 @@
-"""Synchronous file transfers with verified streaming downloads."""
+"""Synchronous streaming transfers and buffered convenience methods."""
 
 from __future__ import annotations
 
 import hashlib
+import io
 import typing
 from dataclasses import dataclass
 
@@ -19,6 +20,7 @@ from .types import (
     Checksum,
     CompletedUploadPart,
     ContentRef,
+    ContentToken,
     DestinationBehavior,
     FilesystemOperation_PutFile,
     ObjectTransferAccess,
@@ -84,7 +86,7 @@ class PreparedFileContent:
     """
 
     content_ref: ContentRef
-    content_token: str | None
+    content_token: ContentToken | None
 
 
 _TRANSFER_CHUNK_BYTES = 64 * 1024
@@ -200,7 +202,7 @@ class FileDownloadStream(typing.Iterator[bytes]):
 
 
 class FilesClient(_GeneratedFilesClient):
-    """The files group plus whole-file transfers."""
+    """The files group plus streaming and buffered transfers."""
 
     def __init__(self, *, client_wrapper, root: "LoonFS") -> None:
         super().__init__(client_wrapper=client_wrapper)
@@ -219,15 +221,47 @@ class FilesClient(_GeneratedFilesClient):
         expected_inode_id: str | None = None,
         expected_revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
+        request_options: RequestOptions | None = None,
     ) -> FileUploadResult:
-        """Upload fresh content and publish it.
+        """Upload fresh bytes through upload_stream."""
+        return self.upload_stream(
+            namespace_id,
+            path=path,
+            content=io.BytesIO(content),
+            size_bytes=len(content),
+            actor=actor,
+            commit_id=commit_id,
+            message=message,
+            behavior=behavior,
+            expected_inode_id=expected_inode_id,
+            expected_revision_no=expected_revision_no,
+            http_client=http_client,
+            request_options=request_options,
+        )
 
-        For publication retries, retain prepare_file_bytes() output and call
-        put_file_prepared() with unchanged inputs.
-        """
-
-        prepared = self.prepare_file_bytes(
-            namespace_id, content=content, http_client=http_client
+    def upload_stream(
+        self,
+        namespace_id: str,
+        *,
+        path: str,
+        content: typing.BinaryIO,
+        size_bytes: int | None = None,
+        actor: ActorRef,
+        commit_id: str,
+        message: str | None = None,
+        behavior: DestinationBehavior | None = None,
+        expected_inode_id: str | None = None,
+        expected_revision_no: RevisionNo | None = None,
+        http_client: httpx.Client | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> FileUploadResult:
+        """Consume a source once and publish it; the caller owns the source."""
+        prepared = self.prepare_file_stream(
+            namespace_id,
+            content=content,
+            size_bytes=size_bytes,
+            http_client=http_client,
+            request_options=request_options,
         )
         return self.put_file_prepared(
             namespace_id,
@@ -239,6 +273,7 @@ class FilesClient(_GeneratedFilesClient):
             behavior=behavior,
             expected_inode_id=expected_inode_id,
             expected_revision_no=expected_revision_no,
+            request_options=request_options,
         )
 
     def prepare_file_bytes(
@@ -247,20 +282,86 @@ class FilesClient(_GeneratedFilesClient):
         *,
         content: bytes,
         http_client: httpx.Client | None = None,
+        request_options: RequestOptions | None = None,
     ) -> PreparedFileContent:
-        """Upload bytes once without publishing; retain the result for retries."""
-        begin = _create_upload(self._root, namespace_id, content)
-        if http_client is None:
-            with httpx.Client() as transfer_client:
-                staged = _stage_upload(
-                    self._root, transfer_client, namespace_id, begin, content
-                )
-        else:
-            staged = _stage_upload(
-                self._root, http_client, namespace_id, begin, content
-            )
+        """Stage the streaming path for an existing byte buffer."""
+        return self.prepare_file_stream(
+            namespace_id,
+            content=io.BytesIO(content),
+            size_bytes=len(content),
+            http_client=http_client,
+            request_options=request_options,
+        )
 
-        return staged
+    def prepare_file_stream(
+        self,
+        namespace_id: str,
+        *,
+        content: typing.BinaryIO,
+        size_bytes: int | None = None,
+        http_client: httpx.Client | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> PreparedFileContent:
+        """Stage once with bounded memory; retain the result for publication retries.
+
+        The caller owns content. Payload requests are never retried. A known
+        size validates the source and selects the usual small-file transport.
+        """
+        if size_bytes is not None and size_bytes < 0:
+            raise ValueError("size_bytes must be nonnegative")
+        capabilities = self._root.capabilities.retrieve(request_options=request_options)
+        first = b""
+        if size_bytes is None:
+            first = content.read(1)
+            if not first:
+                size_bytes = 0
+        source = _UploadSource(content, first, size_bytes)
+        begin = _create_upload(
+            self._root, namespace_id, capabilities, size_bytes, request_options
+        )
+        client = http_client or self._root._client_wrapper.httpx_client.httpx_client
+        timeout = (request_options or {}).get(
+            "timeout", self._root._client_wrapper.get_timeout()
+        )
+        options = {**(request_options or {}), "max_retries": 0}
+        try:
+            if begin.mode == "service_proxied":
+                source.limit = (capabilities.limits or {}).get(_PROXY_UPLOAD_LIMIT)
+                self._root.uploads.put_content(
+                    namespace_id,
+                    begin.upload_id,
+                    request=source.chunks(),
+                    request_options=options,
+                )
+                completion = UploadCompletion_ServiceProxied()
+            elif begin.mode == "direct_put":
+                source.digest = _IncrementalChecksum(begin.checksum_algorithm)
+                _send_stream_presigned(
+                    client, begin.access, source.chunks(), timeout, size_bytes
+                )
+                completion = UploadCompletion_DirectPut(
+                    content=UploadContentClaim(
+                        size_bytes=source.count, checksum=source.digest.finish()
+                    )
+                )
+            elif begin.mode == "direct_multipart":
+                completion = _stream_multipart(
+                    self._root, client, namespace_id, begin, source, timeout, options
+                )
+            else:
+                raise RuntimeError(f"unsupported upload mode {begin.mode!r}")
+            source.finish()
+        except BaseException:
+            _abort_quietly(self._root, namespace_id, begin.upload_id)
+            raise
+        # Keep a session whose completion response was lost available for inspection.
+        completed = self._root.uploads.complete(
+            namespace_id, begin.upload_id, request=completion, request_options=options
+        )
+        result = _completed_content(completed)
+        if result.content_ref.size_bytes != source.count:
+            raise RuntimeError("completed upload size mismatch")
+        return result
 
     def put_file_prepared(
         self,
@@ -274,6 +375,7 @@ class FilesClient(_GeneratedFilesClient):
         behavior: DestinationBehavior | None = None,
         expected_inode_id: str | None = None,
         expected_revision_no: RevisionNo | None = None,
+        request_options: RequestOptions | None = None,
     ) -> FileUploadResult:
         """Publish retained content; reuse it with identical inputs to retry safely."""
         operation_arguments = {"path": path, "content_ref": prepared.content_ref}
@@ -294,7 +396,9 @@ class FilesClient(_GeneratedFilesClient):
         }
         if message is not None:
             commit_arguments["message"] = message
-        committed = self._root.commits.create(namespace_id, **commit_arguments)
+        committed = self._root.commits.create(
+            namespace_id, request_options=request_options, **commit_arguments
+        )
         return FileUploadResult(
             namespace_id=committed.namespace_id,
             commit_id=committed.commit_id,
@@ -439,181 +543,143 @@ def _proxied_claim(client, namespace_id, path, revision_no, request_options):
         cursor = page.next_cursor
 
 
-def _create_upload(client: _GeneratedLoonFS, namespace_id: str, content: bytes):
-    capabilities = client.capabilities.retrieve()
-    features = capabilities.features or {}
-    limits = capabilities.limits or {}
-    size_bytes = len(content)
-    if size_bytes >= _MULTIPART_MIN_BYTES and features.get(
+class _UploadSource:
+    def __init__(self, reader, prefix, expected):
+        self.reader, self.prefix, self.expected = reader, prefix, expected
+        self.count = 0
+        self.ended = False
+        self.limit = None
+        self.digest = None
+
+    def read(self, size):
+        if self.ended:
+            return b""
+        size = min(size, _TRANSFER_CHUNK_BYTES)
+        if self.prefix:
+            chunk, self.prefix = self.prefix[:size], self.prefix[size:]
+        else:
+            chunk = self.reader.read(size)
+        if not isinstance(chunk, bytes):
+            raise TypeError("upload source must return bytes")
+        self.count += len(chunk)
+        if self.limit is not None and self.count > self.limit:
+            raise ValueError("source exceeds advertised proxy upload limit")
+        if self.expected is not None and (
+            self.count > self.expected or (not chunk and self.count != self.expected)
+        ):
+            raise ValueError("source does not match declared size")
+        if self.digest is not None:
+            self.digest.update(chunk)
+        if not chunk:
+            self.ended = True
+        return chunk
+
+    def chunks(self):
+        while True:
+            chunk = self.read(_TRANSFER_CHUNK_BYTES)
+            if not chunk:
+                return
+            yield chunk
+
+    def finish(self):
+        if not self.ended:
+            raise RuntimeError("successful response before upload source reached EOF")
+
+
+def _create_upload(client, namespace_id, capabilities, size_bytes, request_options):
+    features, limits = capabilities.features or {}, capabilities.limits or {}
+    if (size_bytes is None or size_bytes >= _MULTIPART_MIN_BYTES) and features.get(
         _DIRECT_MULTIPART_FEATURE, False
     ):
         request = BeginUploadRequest_DirectMultipart()
     else:
         proxy_limit = limits.get(_PROXY_UPLOAD_LIMIT)
-        fits_proxy = proxy_limit is None or size_bytes <= proxy_limit
-        direct_put_limit = limits.get(_DIRECT_PUT_LIMIT)
-        fits_direct_put = direct_put_limit is None or size_bytes <= direct_put_limit
+        fits_proxy = (
+            size_bytes is None or proxy_limit is None or size_bytes <= proxy_limit
+        )
+        direct_limit = limits.get(_DIRECT_PUT_LIMIT)
+        fits_direct = size_bytes is not None and (
+            direct_limit is None or size_bytes <= direct_limit
+        )
         if (
             features.get(_DIRECT_PUT_FEATURE, False)
-            and fits_direct_put
+            and fits_direct
             and (size_bytes >= _MULTIPART_MIN_BYTES or not fits_proxy)
         ):
             request = BeginUploadRequest_DirectPut(size_bytes=size_bytes)
         elif fits_proxy:
             request = BeginUploadRequest_ServiceProxied()
         else:
-            raise ValueError(
-                f"{size_bytes} bytes exceed the advertised proxy and direct PUT limits, "
-                "and direct multipart is unavailable"
-            )
-    return client.uploads.create(namespace_id, request=request)
-
-
-def _stage_upload(
-    client: _GeneratedLoonFS,
-    transfer_client: httpx.Client,
-    namespace_id: str,
-    begin,
-    content: bytes,
-) -> PreparedFileContent:
-    if begin.mode == "service_proxied":
-        try:
-            client.uploads.put_content(namespace_id, begin.upload_id, request=content)
-            completion = client.uploads.complete(
-                namespace_id,
-                begin.upload_id,
-                request=UploadCompletion_ServiceProxied(),
-            )
-        except Exception:
-            _abort_quietly(client, namespace_id, begin.upload_id)
-            raise
-        return _completed_content(completion)
-    if begin.mode == "direct_put":
-        try:
-            _send_presigned(
-                transfer_client,
-                begin.access,
-                "PUT",
-                content=content,
-            )
-        except Exception:
-            _abort_quietly(client, namespace_id, begin.upload_id)
-            raise
-        completion = client.uploads.complete(
-            namespace_id,
-            begin.upload_id,
-            request=UploadCompletion_DirectPut(
-                content=UploadContentClaim(
-                    size_bytes=len(content),
-                    checksum=_checksum(begin.checksum_algorithm, content),
-                )
-            ),
-        )
-        return _completed_content(completion)
-    if begin.mode == "direct_multipart":
-        return _stage_multipart(
-            client,
-            transfer_client,
-            namespace_id,
-            begin.upload_id,
-            begin.part_size_bytes,
-            begin.checksum_algorithm,
-            content,
-        )
-    raise RuntimeError(f"unsupported upload mode {begin.mode!r}")
-
-
-def _stage_multipart(
-    client: _GeneratedLoonFS,
-    transfer_client: httpx.Client,
-    namespace_id: str,
-    upload_id: str,
-    part_size_bytes: int,
-    checksum_algorithm: str,
-    content: bytes,
-) -> PreparedFileContent:
-    if part_size_bytes <= 0:
-        raise RuntimeError("multipart response returned a non-positive part size")
-    parts = [
-        content[offset : offset + part_size_bytes]
-        for offset in range(0, len(content), part_size_bytes)
-    ]
-    claims = [
-        UploadPartChecksumClaim(
-            part_number=index,
-            checksum=_checksum(checksum_algorithm, part),
-        )
-        for index, part in enumerate(parts, start=1)
-    ]
-    try:
-        signed = client.uploads.sign_parts(
-            namespace_id,
-            upload_id,
-            parts=claims,
-        )
-        access_by_part = {part.part_number: part.access for part in signed.parts}
-        completed_parts = []
-        for claim, part in zip(claims, parts):
-            access = access_by_part.get(claim.part_number)
-            if access is None:
-                raise RuntimeError(
-                    f"server did not sign multipart part {claim.part_number}"
-                )
-            response = _send_presigned(
-                transfer_client,
-                access,
-                "PUT",
-                content=part,
-            )
-            etag = response.headers.get("etag")
-            if etag is None:
-                raise RuntimeError(
-                    f"multipart part {claim.part_number} returned no ETag"
-                )
-            completed_parts.append(
-                CompletedUploadPart(
-                    part_number=claim.part_number,
-                    etag=etag,
-                    checksum=claim.checksum,
-                )
-            )
-    except Exception:
-        _abort_quietly(client, namespace_id, upload_id)
-        raise
-    completion = client.uploads.complete(
-        namespace_id,
-        upload_id,
-        request=UploadCompletion_DirectMultipart(
-            content=UploadContentClaim(
-                size_bytes=len(content),
-                checksum=_checksum(checksum_algorithm, content),
-            ),
-            parts=completed_parts,
-        ),
+            raise ValueError("source fits no advertised upload transport")
+    return client.uploads.create(
+        namespace_id, request=request, request_options=request_options
     )
-    return _completed_content(completion)
 
 
-def _send_presigned(
-    client: httpx.Client,
-    access: ObjectTransferAccess,
-    expected_method: str,
-    *,
-    content: bytes | None = None,
-) -> httpx.Response:
-    if access.method.upper() != expected_method:
-        raise RuntimeError(
-            f"presigned access uses {access.method!r}, expected {expected_method!r}"
-        )
+def _send_stream_presigned(client, access, content, timeout, size_bytes=None):
+    if access.method.upper() != "PUT":
+        raise RuntimeError("upload grant must use PUT")
     headers = httpx.Headers(access.headers or {})
-    response = client.request(
-        expected_method,
+    if size_bytes is not None:
+        headers["Content-Length"] = str(size_bytes)
+    request = httpx.Request(
+        "PUT",
         access.url,
         headers=headers,
         content=content,
+        extensions={"timeout": httpx.Timeout(timeout).as_dict()},
     )
-    response.raise_for_status()
-    return response
+    response = client.send(request, stream=True, auth=None, follow_redirects=False)
+    try:
+        response.raise_for_status()
+        return response.headers.get("etag")
+    finally:
+        response.close()
+
+
+def _stream_multipart(
+    client, http, namespace_id, begin, source, timeout, request_options
+):
+    part_size = begin.part_size_bytes
+    if part_size <= 0:
+        raise RuntimeError("multipart part size must be positive")
+    source.digest = _IncrementalChecksum(begin.checksum_algorithm)
+    completed_parts = []
+    while True:
+        part = bytearray()
+        while len(part) < part_size:
+            chunk = source.read(part_size - len(part))
+            if not chunk:
+                break
+            part.extend(chunk)
+        if not part:
+            break
+        if len(completed_parts) == 10000:
+            raise ValueError("multipart upload exceeds 10000 parts")
+        number = len(completed_parts) + 1
+        checksum = _checksum(begin.checksum_algorithm, part)
+        signed = client.uploads.sign_parts(
+            namespace_id,
+            begin.upload_id,
+            parts=[UploadPartChecksumClaim(part_number=number, checksum=checksum)],
+            request_options=request_options,
+        )
+        if len(signed.parts) != 1 or signed.parts[0].part_number != number:
+            raise RuntimeError(f"server did not sign requested part {number}")
+        etag = _send_stream_presigned(
+            http, signed.parts[0].access, bytes(part), timeout
+        )
+        if not etag:
+            raise RuntimeError(f"part {number} returned no ETag")
+        completed_parts.append(
+            CompletedUploadPart(part_number=number, etag=etag, checksum=checksum)
+        )
+    return UploadCompletion_DirectMultipart(
+        content=UploadContentClaim(
+            size_bytes=source.count, checksum=source.digest.finish()
+        ),
+        parts=completed_parts,
+    )
 
 
 def _completed_content(response: UploadSession) -> PreparedFileContent:
@@ -627,23 +693,16 @@ def _completed_content(response: UploadSession) -> PreparedFileContent:
     )
 
 
-def _abort_quietly(client: _GeneratedLoonFS, namespace_id: str, upload_id: str) -> None:
+def _abort_quietly(client, namespace_id, upload_id):
     try:
-        client.uploads.abort(namespace_id, upload_id)
+        client.uploads.abort(
+            namespace_id, upload_id, request_options={"timeout": 5, "max_retries": 0}
+        )
     except Exception:
         pass
 
 
 def _checksum(algorithm: str, content: bytes) -> Checksum:
-    if algorithm == "sha256":
-        return Checksum(algorithm=algorithm, value=hashlib.sha256(content).hexdigest())
-    if algorithm == "crc64nvme":
-        table, mask, width = _CRC64_NVME_TABLE, _CRC64_NVME_MASK, 16
-    elif algorithm == "crc32c":
-        table, mask, width = _CRC32C_TABLE, _CRC32C_MASK, 8
-    else:
-        raise RuntimeError(f"unsupported checksum algorithm {algorithm!r}")
-    value = mask
-    for byte in content:
-        value = table[(value ^ byte) & 0xFF] ^ (value >> 8)
-    return Checksum(algorithm=algorithm, value=f"{value ^ mask:0{width}x}")
+    digest = _IncrementalChecksum(algorithm)
+    digest.update(content)
+    return digest.finish()
