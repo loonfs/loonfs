@@ -301,14 +301,15 @@ Start with enough memory for:
 
 ```text
 max_concurrent_uploads × 8 MiB
-+ max_concurrent_downloads × max_download_bytes
++ max_concurrent_downloads × 8 MiB
 + local_cache.memory_bytes
 + memory for metadata maintenance and the server
 ```
 
 The defaults allow 8 concurrent uploads, 16 concurrent downloads, and
-256 MiB per download. Set a memory limit comfortably above the calculated
-minimum.
+a 256 MiB transfer limit per proxied download. Content reads use 8 MiB chunks;
+the transfer limit does not reserve that much memory. Set a memory limit
+comfortably above the calculated minimum to allow for HTTP and store buffers.
 
 `max_writer_sessions` defaults to 10,000. A request that needs another writer
 session answers `writer_capacity_exceeded`; raise the limit if the deployment

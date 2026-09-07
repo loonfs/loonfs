@@ -255,101 +255,78 @@ impl ResolvedTarget {
         }
     }
 
-    /// Reads file content from a revision or snapshot.
-    pub(crate) async fn get_file_bytes_with_options(
-        &self,
-        spec: &NamespacePath,
-        options: &ReadFileOptions,
-    ) -> Result<Vec<u8>, CliError> {
-        match self {
-            Self::Embedded(target) => {
-                target
-                    .backend
-                    .get_file_bytes_with_options(spec, options)
-                    .await
-            }
-            Self::Remote(target) => Ok(target.client.get_file_bytes(spec, options).await?),
-        }
-    }
-
-    /// Opens a file download using the selected profile's best available path.
-    ///
-    /// Embedded profiles stream from their object store. Remote profiles use
-    /// direct object-store downloads above the proxy limit and buffer smaller
-    /// proxied responses. Every path verifies the complete file.
-    ///
-    /// `start_offset` resumes streaming downloads. Buffered responses and
-    /// retained revisions restart at zero; [`FileDownload::resumed_from`]
-    /// reports the offset actually used.
+    /// Opens a bounded download of the requested current, retained, or snapshot content.
+    /// Direct object-store access is preferred whenever the server offers it.
     pub(crate) async fn open_file_download(
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
         snapshot_id: Option<&CheckpointId>,
-        size_bytes: Option<u64>,
         start_offset: u64,
     ) -> Result<FileDownload, CliError> {
-        if let (Self::Remote(target), Some(size_bytes)) = (self, size_bytes) {
-            if target.client.offers_direct_download(size_bytes).await? {
-                let grant = target
-                    .client
-                    .create_download(
-                        spec,
-                        &DownloadOptions {
-                            revision_no,
-                            snapshot_id: snapshot_id.cloned(),
-                        },
-                    )
-                    .await?;
-                return Ok(FileDownload::Direct {
-                    stream: Box::new(
-                        target
-                            .client
-                            .open_direct_download_at(&grant, start_offset)
-                            .await?,
-                    ),
-                    resumed_from: start_offset,
-                });
-            }
-        }
-        if revision_no.is_some() || snapshot_id.is_some() {
-            return Ok(FileDownload::Whole(
-                self.get_file_bytes_with_options(
-                    spec,
-                    &ReadFileOptions {
-                        revision_no,
-                        snapshot_id: snapshot_id.cloned(),
-                    },
-                )
-                .await?,
-            ));
-        }
         match self {
-            Self::Embedded(target) => Ok(FileDownload::Streamed {
-                namespace_id: spec.namespace().clone(),
-                stream: Box::new(
-                    target
-                        .backend
-                        .reader
-                        .read_file_stream(
-                            spec.namespace(),
-                            spec.absolute_path().as_str(),
-                            ReadFileStreamOptions {
-                                start_offset,
-                                ..ReadFileStreamOptions::default()
-                            },
-                        )
+            Self::Embedded(target) => {
+                let options = ReadFileStreamOptions {
+                    revision_no,
+                    start_offset,
+                    ..ReadFileStreamOptions::default()
+                };
+                let reader = &target.backend.reader;
+                let stream = match snapshot_id {
+                    Some(snapshot_id) => reader
+                        .pin_namespace_at_snapshot(spec.namespace(), snapshot_id)
+                        .await
+                        .scoped(spec.namespace())?
+                        .read_file_stream(spec.absolute_path().as_str(), options)
                         .await
                         .scoped(spec.namespace())?,
-                ),
-                resumed_from: start_offset,
-            }),
-            Self::Remote(target) => Ok(FileDownload::Whole(
-                target
-                    .client
-                    .get_file_bytes(spec, &ReadFileOptions::default())
-                    .await?,
-            )),
+                    None => reader
+                        .read_file_stream(spec.namespace(), spec.absolute_path().as_str(), options)
+                        .await
+                        .scoped(spec.namespace())?,
+                };
+                Ok(FileDownload::Streamed {
+                    namespace_id: spec.namespace().clone(),
+                    stream: Box::new(stream),
+                    resumed_from: start_offset,
+                })
+            }
+            Self::Remote(target) => {
+                if target.client.offers_direct_download().await? {
+                    let grant = target
+                        .client
+                        .create_download(
+                            spec,
+                            &DownloadOptions {
+                                revision_no,
+                                snapshot_id: snapshot_id.cloned(),
+                            },
+                        )
+                        .await?;
+                    return Ok(FileDownload::Direct {
+                        revision_no: grant.revision_no,
+                        stream: Box::new(
+                            target
+                                .client
+                                .open_direct_download_at(&grant, start_offset)
+                                .await?,
+                        ),
+                        resumed_from: start_offset,
+                    });
+                }
+                Ok(FileDownload::Proxied(
+                    target
+                        .client
+                        .read_file_stream(
+                            spec,
+                            &ReadFileOptions {
+                                revision_no,
+                                snapshot_id: snapshot_id.cloned(),
+                            },
+                        )
+                        .await?,
+                ))
+            }
         }
     }
 

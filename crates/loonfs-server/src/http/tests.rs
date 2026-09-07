@@ -4471,3 +4471,103 @@ mod direct_download {
         }
     }
 }
+
+#[tokio::test]
+async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
+    use futures::StreamExt;
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let plain = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let ns = namespace_id("demo");
+    let seed_writer = bootstrap_namespace(&plain, "runtime-writer", &ns).await;
+    let payload = vec![42; loonfs::CONTENT_READ_CHUNK_BYTES as usize * 3 + 17];
+    write_file_bytes(
+        &seed_writer,
+        &ns,
+        "/large.bin",
+        &payload,
+        "download-stream-seed",
+    )
+    .await;
+    let watched = Arc::new(BufferWatchStore::watching_content(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+    ));
+    let (router, state) = app(
+        test_config(temp_dir.path(), "server-writer"),
+        options_with_store(watched.clone()),
+    )
+    .await
+    .expect("app");
+
+    for corrupt in [false, true] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v0/namespaces/demo/filesystem/content?path=%2Flarge.bin")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .is_none());
+        if !corrupt {
+            assert_eq!(
+                watched.peaks().total_bytes,
+                0,
+                "opening the response must not fetch the file"
+            );
+        }
+        let mut body = response.into_body().into_data_stream();
+        let first = body
+            .next()
+            .await
+            .expect("first chunk")
+            .expect("valid chunk");
+        assert!(first.len() as u64 <= loonfs::CONTENT_READ_CHUNK_BYTES);
+        drop(first);
+        if corrupt {
+            let reader = loonfs::FsReader::builder_with_store(plain.clone())
+                .build()
+                .await
+                .expect("reader");
+            let entry = reader
+                .get_path_entry(&ns, "/large.bin", Default::default())
+                .await
+                .expect("entry");
+            let catalog = loonfs::control::load_namespace_catalog_entry(&plain, &ns)
+                .await
+                .expect("catalog");
+            let key = loonfs_objectstore::keys::content_blob(
+                catalog.content_store_id(),
+                &entry.content_ref().expect("file").content_id,
+            );
+            let mut changed = payload.clone();
+            changed[loonfs::CONTENT_READ_CHUNK_BYTES as usize] ^= 1;
+            plain
+                .put_overwrite(&key, changed.into())
+                .await
+                .expect("corrupt unread bytes");
+        }
+        let mut failed = false;
+        while let Some(chunk) = body.next().await {
+            if chunk.is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert_eq!(failed, corrupt, "corruption must abort the HTTP body");
+        drop(body);
+        assert_eq!(
+            state.download_permits.available_permits(),
+            state.config.max_concurrent_downloads
+        );
+        assert!(watched.peaks().peak_live_bytes <= loonfs::CONTENT_READ_CHUNK_BYTES);
+    }
+}

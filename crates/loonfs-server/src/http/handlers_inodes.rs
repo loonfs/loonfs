@@ -1,6 +1,6 @@
 //! HTTP reads addressed by inode ID.
 
-use super::download_body::buffered_download_response;
+use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
 use super::handlers_filesystem::PageQuery;
 use super::query_params::{
@@ -248,10 +248,15 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let permit = acquire_download_permit(&state)?;
-    let bytes = state
+    let stream = state
         .reader
-        .get_file_revision_bytes_by_inode(&namespace_id, inode_id, revision_no)
+        .read_file_revision_stream_by_inode(&namespace_id, inode_id, revision_no)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    Ok(buffered_download_response(bytes, permit))
+    streamed_download_response(
+        stream,
+        permit,
+        state.config.max_download_bytes,
+        &namespace_id,
+    )
 }

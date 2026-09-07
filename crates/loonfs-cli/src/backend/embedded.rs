@@ -25,7 +25,7 @@ use loonfs_api::{
     ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceId,
     PaginationPolicy, PathEntry, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse,
 };
-use loonfs_client::{NamespacePath, ReadFileOptions};
+use loonfs_client::NamespacePath;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
     GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
@@ -234,44 +234,6 @@ impl EmbeddedBackend {
             )
             .await
             .scoped(spec.namespace())
-    }
-
-    pub(super) async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError> {
-        let result = self
-            .reader
-            .get_file_bytes(spec.namespace(), spec.absolute_path().as_str())
-            .await
-            .scoped(spec.namespace())?;
-        Ok(result.bytes)
-    }
-
-    pub(super) async fn get_file_bytes_with_options(
-        &self,
-        spec: &NamespacePath,
-        options: &ReadFileOptions,
-    ) -> Result<Vec<u8>, CliError> {
-        if options.revision_no.is_some() && options.snapshot_id.is_some() {
-            return Err(CliError::invalid_request(
-                "revision_no cannot be combined with snapshot_id",
-            )
-            .with_param("revision_no"));
-        }
-        if let Some(snapshot_id) = &options.snapshot_id {
-            let snapshot = self
-                .reader
-                .pin_namespace_at_snapshot(spec.namespace(), snapshot_id)
-                .await
-                .scoped(spec.namespace())?;
-            return snapshot
-                .get_file_bytes(spec.absolute_path().as_str())
-                .await
-                .map(|file| file.bytes)
-                .scoped(spec.namespace());
-        }
-        match options.revision_no {
-            Some(revision_no) => self.get_file_revision_bytes(spec, revision_no).await,
-            None => self.get_file_bytes(spec).await,
-        }
     }
 
     pub(super) async fn grep(
@@ -510,19 +472,6 @@ impl EmbeddedBackend {
                 },
             )),
         }
-    }
-
-    pub(super) async fn get_file_revision_bytes(
-        &self,
-        spec: &NamespacePath,
-        revision_no: RevisionNo,
-    ) -> Result<Vec<u8>, CliError> {
-        let result = self
-            .reader
-            .get_file_revision_bytes(spec.namespace(), spec.absolute_path().as_str(), revision_no)
-            .await
-            .scoped(spec.namespace())?;
-        Ok(result.bytes)
     }
 
     pub(super) async fn list_trash(

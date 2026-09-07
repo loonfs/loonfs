@@ -12,7 +12,7 @@ use super::output::{
     TrashListing,
 };
 use super::pagination::{
-    collect_or_stream_pages, collect_pages, write_jsonl_page, PagePlan, PagedListing,
+    collect_or_stream_pages, visit_pages, write_jsonl_page, PagePlan, PagedListing,
 };
 use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
@@ -32,12 +32,12 @@ use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
     AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq,
-    CheckpointId, CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior,
-    DestinationBehavior, InodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
+    CheckpointId, CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior,
+    InodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
 use loonfs_client::{
     CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
-    ReadFileOptions, UpdateAttributesOptions,
+    UpdateAttributesOptions,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -95,7 +95,8 @@ async fn follow_path_entry_pages(
     mut visit: impl FnMut(Vec<loonfs_api::PathEntry>) -> Result<(), CliError>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut heads = ListingHeadObservation::default();
-    let page = collect_pages(
+    let mut followed = None;
+    visit_pages(
         PagePlan::new(pagination),
         cursor.map(ToOwned::to_owned),
         async |cursor, limit| {
@@ -104,27 +105,21 @@ async fn follow_path_entry_pages(
                 .list_path_entries_page(spec, limit, cursor.as_deref(), snapshot_id)
                 .await
         },
-        |page: &ListPathEntriesResponse| heads.observe(page.head_seq),
+        |page: ListPathEntriesResponse| {
+            heads.observe(page.head_seq);
+            followed = Some(FollowedPathEntryPages {
+                namespace_id: page.namespace_id,
+                path: page.path,
+                head_seq: page.head_seq,
+                head_drift: heads.drift(),
+                next_cursor: page.next_cursor,
+            });
+            visit(page.entries)
+        },
     )
     .await
     .map_err(|error| context.fail(kind, error))?;
-    let ListPathEntriesResponse {
-        namespace_id,
-        path,
-        entries,
-        next_cursor,
-        ..
-    } = page;
-    visit(entries).map_err(|error| context.fail(kind, error))?;
-    Ok(FollowedPathEntryPages {
-        namespace_id,
-        path,
-        head_seq: heads
-            .last()
-            .expect("a listing should observe its first page"),
-        head_drift: heads.drift(),
-        next_cursor,
-    })
+    Ok(followed.expect("a listing should observe its first page"))
 }
 
 pub(crate) async fn run_filesystem_ls(
@@ -427,19 +422,15 @@ pub(crate) async fn run_filesystem_cat(
         .map_err(|error| context.fail(kind, error))?;
     let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
-    let bytes = context
+    let mut download = context
         .target
-        .get_file_bytes_with_options(
-            &spec,
-            &ReadFileOptions {
-                revision_no,
-                snapshot_id,
-            },
-        )
+        .open_file_download(&spec, revision_no, snapshot_id.as_ref(), 0)
         .await
         .map_err(|error| context.fail(kind, error))?;
-
-    Ok(context.output(kind, CommandData::StreamBytes(bytes)))
+    stream_download_to_stdout(&mut download)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+    Ok(context.output(kind, CommandData::StreamedToStdout))
 }
 
 pub(crate) async fn run_filesystem_get(
@@ -535,13 +526,7 @@ pub(crate) async fn run_filesystem_get(
         // and bytes already piped onward are somewhere this CLI cannot see.
         let mut download = context
             .target
-            .open_file_download(
-                &spec,
-                revision_no,
-                snapshot_id.as_ref(),
-                entry.size_bytes(),
-                0,
-            )
+            .open_file_download(&spec, revision_no, snapshot_id.as_ref(), 0)
             .await
             .map_err(|error| context.fail(kind, error))?;
         stream_download_to_stdout(&mut download)
@@ -561,9 +546,7 @@ pub(crate) async fn run_filesystem_get(
         &spec,
         revision_no,
         snapshot_id.as_ref(),
-        entry.size_bytes(),
         &destination,
-        entry.content_ref(),
     )
     .await
     .map_err(|error| context.fail(kind, error))?;
@@ -573,8 +556,11 @@ pub(crate) async fn run_filesystem_get(
         ProgressOp::Get,
         spec.absolute_path().as_str(),
     ));
-    progress.expect(entry.size_bytes(), Some(1));
-    progress.file_started(spec.absolute_path().as_str(), entry.size_bytes());
+    let size_bytes = download
+        .resume_identity()
+        .map(|(claim, _)| claim.size_bytes);
+    progress.expect(size_bytes, Some(1));
+    progress.file_started(spec.absolute_path().as_str(), size_bytes);
     // The local working copy is the one thing this CLI touches that has no
     // revision history behind it, so clobbering it is opt-in.
     // `persist_noclobber` closes the race between checking and installing
@@ -608,18 +594,36 @@ pub(super) async fn open_resumable_download(
     spec: &NamespacePath,
     revision_no: Option<RevisionNo>,
     snapshot_id: Option<&CheckpointId>,
-    size_bytes: Option<u64>,
     destination: &Path,
-    content_ref: Option<&ContentRef>,
 ) -> Result<(FileDownload, Option<PartialMeta>), CliError> {
-    let meta = content_ref.map(|content_ref| PartialMeta::describe(content_ref, revision_no));
+    let mut download = context
+        .target
+        .open_file_download(spec, revision_no, snapshot_id, 0)
+        .await?;
+    let identity = download.resume_identity();
+    let resolved_revision = identity.map(|(_, revision)| revision);
+    let meta = identity.map(|(claim, _)| PartialMeta::describe(claim, revision_no));
     let start_offset = meta
         .as_ref()
         .map_or(0, |meta| partial::resumable_bytes(destination, meta));
-    let download = context
-        .target
-        .open_file_download(spec, revision_no, snapshot_id, size_bytes, start_offset)
-        .await?;
+    if start_offset > 0 {
+        // Pin the content revision resolved by the first stream. A snapshot
+        // already pins its revision and cannot also take a revision selector.
+        drop(download);
+        download = context
+            .target
+            .open_file_download(
+                spec,
+                if snapshot_id.is_some() {
+                    None
+                } else {
+                    resolved_revision
+                },
+                snapshot_id,
+                start_offset,
+            )
+            .await?;
+    }
     Ok((download, meta))
 }
 

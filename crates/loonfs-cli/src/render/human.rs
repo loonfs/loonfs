@@ -129,9 +129,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             human_config_show_degraded(error, config_toml)
         }
         CommandData::Version { version } => version.clone(),
-        CommandData::CompletionScript(_)
-        | CommandData::StreamBytes(_)
-        | CommandData::StreamedToStdout => String::new(),
+        CommandData::CompletionScript(_) | CommandData::StreamedToStdout => String::new(),
     }
 }
 

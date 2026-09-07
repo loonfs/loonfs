@@ -19,11 +19,35 @@ pub(super) enum PagedListing<P> {
     Collected(P),
 }
 
+/// Visits and releases each page before requesting the next one.
+pub(super) async fn visit_pages<P, F, Fut, V>(
+    mut plan: PagePlan,
+    mut cursor: Option<P::Cursor>,
+    mut fetch: F,
+    mut visit: V,
+) -> Result<(), CliError>
+where
+    P: PagedResponse,
+    F: FnMut(Option<P::Cursor>, Option<u32>) -> Fut,
+    Fut: Future<Output = Result<P, CliError>>,
+    V: FnMut(P) -> Result<(), CliError>,
+{
+    loop {
+        let page = fetch(cursor, plan.request_size()).await?;
+        plan.record(page.items().len());
+        cursor = page.next_cursor();
+        visit(page)?;
+        if !plan.should_continue(cursor.is_some()) {
+            return Ok(());
+        }
+    }
+}
+
 /// Fetches pages until the plan is satisfied and returns them as one response.
 pub(super) async fn collect_pages<P, F, Fut, O>(
-    mut plan: PagePlan,
+    plan: PagePlan,
     cursor: Option<P::Cursor>,
-    mut fetch: F,
+    fetch: F,
     mut observe: O,
 ) -> Result<P, CliError>
 where
@@ -32,28 +56,26 @@ where
     Fut: Future<Output = Result<P, CliError>>,
     O: FnMut(&P),
 {
-    let mut collected = fetch(cursor, plan.request_size()).await?;
-    observe(&collected);
-    plan.record(collected.items().len());
-    loop {
-        let cursor = collected.next_cursor();
-        if !plan.should_continue(cursor.is_some()) {
-            return Ok(collected);
-        }
-        let page = fetch(cursor, plan.request_size()).await?;
+    let mut collected: Option<P> = None;
+    visit_pages(plan, cursor, fetch, |page| {
         observe(&page);
-        plan.record(page.items().len());
-        collected.absorb(page);
-    }
+        match &mut collected {
+            Some(collected) => collected.absorb(page),
+            None => collected = Some(page),
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(collected.expect("pagination should fetch at least one page"))
 }
 
 /// Writes each page to stdout as JSON lines when `jsonl` is set, and
 /// collects the pages otherwise.
 pub(super) async fn collect_or_stream_pages<P, F, Fut, O>(
-    mut plan: PagePlan,
+    plan: PagePlan,
     cursor: Option<P::Cursor>,
     jsonl: bool,
-    mut fetch: F,
+    fetch: F,
     mut observe: O,
 ) -> Result<PagedListing<P>, CliError>
 where
@@ -70,19 +92,12 @@ where
     }
     let stdout = io::stdout();
     let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
-    let mut page = fetch(cursor, plan.request_size()).await?;
-    observe(&page);
-    plan.record(page.items().len());
-    loop {
-        write_jsonl_page(&mut stdout, page.items()).map_err(CliError::io)?;
-        let cursor = page.next_cursor();
-        if !plan.should_continue(cursor.is_some()) {
-            return Ok(PagedListing::Streamed);
-        }
-        page = fetch(cursor, plan.request_size()).await?;
+    visit_pages(plan, cursor, fetch, |page| {
         observe(&page);
-        plan.record(page.items().len());
-    }
+        write_jsonl_page(&mut stdout, page.items()).map_err(CliError::io)
+    })
+    .await?;
+    Ok(PagedListing::Streamed)
 }
 
 /// Writes one JSON item per line and flushes the page before the next request.
@@ -146,6 +161,37 @@ impl PagePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_api::{AbsolutePath, ChangeSeq, ListPathEntriesResponse, NamespaceId};
+    use std::cell::Cell;
+
+    #[tokio::test]
+    async fn pages_are_delivered_before_the_next_fetch_even_if_it_fails() {
+        let delivered = Cell::new(false);
+        let result = visit_pages(
+            PagePlan::new(&args(None, Some(1), true)),
+            None,
+            async |cursor: Option<String>, _| {
+                if cursor.is_some() {
+                    assert!(delivered.get(), "the first page must already be delivered");
+                    return Err(CliError::invalid_request("second page failed"));
+                }
+                Ok(ListPathEntriesResponse {
+                    namespace_id: NamespaceId::parse("demo").expect("namespace"),
+                    path: AbsolutePath::parse("/").expect("root path"),
+                    head_seq: ChangeSeq(1),
+                    entries: Vec::new(),
+                    next_cursor: Some("next".to_owned()),
+                })
+            },
+            |_| {
+                delivered.set(true);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(delivered.get());
+    }
 
     fn args(limit: Option<u32>, page_size: Option<u32>, all: bool) -> PaginationArgs {
         PaginationArgs {

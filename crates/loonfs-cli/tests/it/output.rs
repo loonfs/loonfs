@@ -775,3 +775,30 @@ fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
     assert_eq!(conflicting_json.status.code(), Some(2));
     assert!(conflicting_json.stdout.is_empty());
 }
+
+#[test]
+fn ls_emits_completed_pages_even_when_a_later_page_fails() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["mkdir", "/first-page"]));
+    let listing = harness.run(&["--json", "ls", "/"]);
+    assert_success(&listing);
+    let mut first_page = json_data(&listing).clone();
+    first_page["next_cursor"] = Value::from("second-page");
+    for flag in ["--jsonl", "--all"] {
+        let (url, server) = json_response_server(vec![
+            first_page.clone(),
+            serde_json::json!({"invalid": "second page"}),
+        ]);
+        harness.write_remote_listing_config(&url);
+        let output = harness.run(&["ls", "/", flag]);
+        assert!(!output.status.success(), "the second page failed");
+        assert!(
+            stdout_string(&output).contains("first-page"),
+            "the first page remains visible"
+        );
+        server.join().expect("listing server");
+    }
+}

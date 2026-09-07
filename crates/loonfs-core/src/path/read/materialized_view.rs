@@ -312,7 +312,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         max_content_bytes: Option<u64>,
     ) -> Result<FileBytes> {
-        let (entry, content_ref) = self.resolve_file_content(absolute_path).await?;
+        let (entry, content_ref) = self.resolve_file_content(absolute_path, None).await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let bytes = get_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
         Ok(FileBytes { entry, bytes })
@@ -325,8 +325,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) async fn resolve_file_content(
         &self,
         absolute_path: &str,
+        revision_no: Option<RevisionNo>,
     ) -> Result<(PathEntry, ContentRef)> {
-        let entry = self
+        let mut entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit)
             .await?;
         let content_ref = match &entry.kind {
@@ -338,6 +339,17 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 });
             }
         };
+        if let Some(revision_no) = revision_no {
+            let revision = self.revision_for_inode(entry.inode_id, revision_no).await?;
+            entry.kind = PathEntryKind::File {
+                revision_no: revision.revision_no,
+                size_bytes: revision.content_ref.size_bytes,
+                content_ref: revision.content_ref.clone(),
+                revision_committed_by: revision.committed_by,
+                revision_committed_at_ms: revision.committed_at_ms,
+            };
+            return Ok((entry, revision.content_ref));
+        }
         Ok((entry, content_ref))
     }
 
@@ -554,26 +566,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
     ) -> Result<FileBytes> {
-        let mut entry = self
-            .resolve_path(absolute_path, AttributeInclusion::Omit)
+        let (entry, content_ref) = self
+            .resolve_file_content(absolute_path, Some(revision_no))
             .await?;
-        if matches!(entry.kind, PathEntryKind::Directory {}) {
-            return Err(CoreError::ExpectedFile {
-                target: entry.path.to_string(),
-                kind: InodeKind::Directory,
-            });
-        }
-        let revision = self.revision_for_inode(entry.inode_id, revision_no).await?;
-        entry.kind = PathEntryKind::File {
-            revision_no: revision.revision_no,
-            size_bytes: revision.content_ref.size_bytes,
-            content_ref: revision.content_ref.clone(),
-            revision_committed_by: revision.committed_by,
-            revision_committed_at_ms: revision.committed_at_ms,
-        };
-        ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
-        let bytes =
-            get_durable_content_bytes(store, &self.content_store_id, &revision.content_ref).await?;
+        ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
+        let bytes = get_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
         Ok(FileBytes { entry, bytes })
     }
 

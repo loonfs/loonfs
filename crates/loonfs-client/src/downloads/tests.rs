@@ -1,20 +1,18 @@
 //! Direct-download selection and verification tests.
 //!
-//! A file uses direct object-store access only when it exceeds the server's
-//! proxy limit and the deployment advertises direct downloads.
+//! Direct access is preferred whenever the deployment advertises it.
 
 use super::*;
 use crate::transport::test_transport::{self, Outcome};
 use loonfs_api::v0::ObjectTransferAccess;
 use loonfs_api::{
-    CapabilityDocument, ContentId, ContentRef, API_GROUP_FILESYSTEM_V0, PROTOCOL_VERSION,
+    CapabilityDocument, ContentId, ContentRef, API_GROUP_FILESYSTEM_V0,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
 
 /// Default maximum size of a proxied read response.
 const DEFAULT_PROXY_CAP_BYTES: u64 = 256 * 1024 * 1024;
-/// Test file larger than the default proxy limit.
-const AUDIT_FILE_BYTES: u64 = 300 * 1024 * 1024;
 
 fn client() -> Client {
     Client::new(ClientConfig {
@@ -41,21 +39,12 @@ fn capabilities(direct_get: bool, proxy_cap_bytes: Option<u64>) -> Outcome {
 }
 
 #[tokio::test]
-async fn a_file_past_the_default_proxy_cap_takes_the_grant() {
+async fn direct_download_selection_uses_the_cached_capability() {
     let client = client();
     let _guard = test_transport::script([capabilities(true, Some(DEFAULT_PROXY_CAP_BYTES))]);
-
+    assert!(client.offers_direct_download().await.expect("capabilities"));
     assert!(client
-        .offers_direct_download(AUDIT_FILE_BYTES)
-        .await
-        .expect("capabilities"));
-    // Cached document, so no second scripted response is needed.
-    assert!(!client
-        .offers_direct_download(DEFAULT_PROXY_CAP_BYTES)
-        .await
-        .expect("cached capabilities"));
-    assert!(!client
-        .offers_direct_download(1)
+        .offers_direct_download()
         .await
         .expect("cached capabilities"));
 }
@@ -65,21 +54,15 @@ async fn a_deployment_without_the_capability_never_takes_the_grant() {
     let client = client();
     let _guard = test_transport::script([capabilities(false, Some(DEFAULT_PROXY_CAP_BYTES))]);
 
-    assert!(!client
-        .offers_direct_download(AUDIT_FILE_BYTES)
-        .await
-        .expect("capabilities"));
+    assert!(!client.offers_direct_download().await.expect("capabilities"));
 }
 
 #[tokio::test]
-async fn a_deployment_that_advertises_no_cap_stays_proxied() {
+async fn direct_downloads_do_not_require_a_proxy_limit() {
     let client = client();
     let _guard = test_transport::script([capabilities(true, None)]);
 
-    assert!(!client
-        .offers_direct_download(AUDIT_FILE_BYTES)
-        .await
-        .expect("capabilities"));
+    assert!(client.offers_direct_download().await.expect("capabilities"));
 }
 
 #[tokio::test]
@@ -87,7 +70,7 @@ async fn a_capability_failure_is_not_reported_as_no_direct_download() {
     let client = client();
     let transport = test_transport::script([Outcome::Success(b"not json".to_vec())]);
 
-    let result = client.offers_direct_download(AUDIT_FILE_BYTES).await;
+    let result = client.offers_direct_download().await;
 
     assert!(matches!(result, Err(ClientError::Json(_))), "{result:?}");
     assert_eq!(transport.attempts(), 1);

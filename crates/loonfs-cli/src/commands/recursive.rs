@@ -31,8 +31,6 @@ struct FileJob {
     remote: String,
     /// File length, used for transfer selection and progress totals.
     size_bytes: Option<u64>,
-    /// Remote content identity used to resume downloads.
-    content_ref: Option<loonfs_api::ContentRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,20 +299,13 @@ pub(crate) async fn run_get_tree(
                 Ok(spec) => spec,
                 Err(error) => return (job.remote, Err(error)),
             };
-            let (mut download, meta) = match super::fs::open_resumable_download(
-                context,
-                &spec,
-                None,
-                snapshot_id,
-                job.size_bytes,
-                &local,
-                job.content_ref.as_ref(),
-            )
-            .await
-            {
-                Ok(opened) => opened,
-                Err(error) => return (job.remote, Err(error)),
-            };
+            let (mut download, meta) =
+                match super::fs::open_resumable_download(context, &spec, None, snapshot_id, &local)
+                    .await
+                {
+                    Ok(opened) => opened,
+                    Err(error) => return (job.remote, Err(error)),
+                };
             progress.file_started(&job.remote, job.size_bytes);
             let derived_name = false;
             let written = super::fs::stream_download_to_file(
@@ -549,7 +540,6 @@ fn collect_local_tree(
                 // The upload retries metadata lookup if this first lookup
                 // fails.
                 size_bytes: entry.metadata().ok().map(|metadata| metadata.len()),
-                content_ref: None,
             });
         } else {
             tally.fail(
@@ -643,15 +633,10 @@ async fn walk_remote_tree(
                             child_components,
                         ));
                     }
-                    PathEntryKind::File {
-                        size_bytes,
-                        content_ref,
-                        ..
-                    } => tree.files.push(FileJob {
+                    PathEntryKind::File { size_bytes, .. } => tree.files.push(FileJob {
                         local: PathBuf::from(child_components.join("/")),
                         remote: format!("{remote_dir}/{name}", name = name.as_str()),
                         size_bytes: Some(size_bytes),
-                        content_ref: Some(content_ref),
                     }),
                 }
             }
@@ -781,13 +766,17 @@ mod tests {
         );
 
         let spec = NamespacePath::parse("demo", "/up/docs/big.bin").expect("valid namespace path");
+        let mut download = context
+            .target
+            .open_file_download(&spec, None, None, 0)
+            .await
+            .expect("open uploaded file");
+        let mut read = Vec::new();
+        while let Some(chunk) = download.next_chunk().await.expect("read uploaded chunk") {
+            read.extend_from_slice(&chunk);
+        }
         assert_eq!(
-            context
-                .target
-                .get_file_bytes_with_options(&spec, &loonfs_client::ReadFileOptions::default())
-                .await
-                .expect("read the uploaded file back"),
-            large,
+            read, large,
             "the file that landed is the file that was walked"
         );
     }

@@ -131,9 +131,9 @@ Registered limit keys:
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `filesystem.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
 | `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds service-proxied uploads. A size hint above this limit returns `content_too_large` at begin, and completion checks the actual stored size. Advertised only alongside `filesystem.uploads.direct_put`. |
 | `upload.completion_max_body_bytes` | Largest JSON body accepted by `POST .../uploads/{upload_id}/complete`. Larger requests return `content_too_large`. |
-| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
-| `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
-| `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
+| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will stream and return in one response. Over-limit reads answer `content_too_large`; proxied reads use bounded chunks but do not support range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
+| `upload.max_concurrent` | How many service-proxied upload streams the deployment accepts at once; requests past the cap answer `server_busy`. |
+| `download.max_concurrent` | How many service-proxied content streams the deployment serves at once; requests past the cap answer `server_busy`. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_content_tokens` | Most content tokens one commit may carry. Over-limit requests answer `invalid_request` before planning. |
 | `commit.max_external_content_refs` | Most distinct external content refs one commit's operations may name. Over-limit requests answer `invalid_request` before planning. |
@@ -1636,11 +1636,18 @@ Those rows represent current state and are not removed when the retention floor 
 The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
 
-The server buffers the whole file for one response, so a file past
-`download.max_content_bytes` answers `content_too_large` here. That is not the
-end of the road: the download transport in section 6.10 reads the same bytes
-without the server holding them, and every deployment that could have let a
-client create such a file offers it.
+The server streams and verifies content in bounded chunks. A file past
+`download.max_content_bytes` answers `content_too_large` before content bytes
+are fetched; clients may use a download grant when direct GET is advertised.
+The limit is a transfer policy, not an allocation size.
+
+A successful end of the response body means length and checksum verification
+completed. The server omits `Content-Length` so receiving the expected byte
+count alone cannot signal success before verification. An I/O or verification
+failure after headers aborts the body instead of returning a JSON error.
+Consumers must require successful stream completion; file downloads should
+publish their temporary output only after that completion. Streaming to stdout
+can expose a partial or unverified prefix before a later error.
 
 Revision listings return newest revisions first and use the standard
 `limit`/`cursor` pattern. The path route resolves the current inode first; the
@@ -2196,9 +2203,8 @@ Representative complete-upload response:
 A deployment must be able to serve back whatever it let a client create.
 That is the whole rule, and it is why this exists: `direct_put` and
 `direct_multipart` let a client write an object of any size, while a proxied
-read buffers the file for one response and refuses anything past
-`download.max_content_bytes`. Without a read that does not buffer, a
-deployment could hold a file it had no way to return. So
+read enforces the transfer limit `download.max_content_bytes`. Direct reads
+bypass that service limit and keep object traffic off the server. So
 `filesystem.downloads.direct_get` is advertised by every deployment that offers
 any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.

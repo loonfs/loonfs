@@ -162,9 +162,8 @@ pub struct AppState {
     /// streamed part. Requests past the cap answer 503 `server_busy` before
     /// any transfer.
     pub(super) upload_permits: Arc<Semaphore>,
-    /// Bounds concurrently materialized proxied content reads the same way:
-    /// worst-case download memory is
-    /// `max_concurrent_downloads * max_download_bytes`.
+    /// Bounds live proxied download bodies until completion or cancellation.
+    /// Content memory follows this count times the internal read chunk size.
     pub(super) download_permits: Arc<Semaphore>,
     /// Shared recorder for runtime and request-level metrics. `GET /metrics`
     /// renders its snapshot. It is always installed.

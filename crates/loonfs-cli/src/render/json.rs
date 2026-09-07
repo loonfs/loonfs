@@ -21,9 +21,7 @@ where
 
 pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
     match &output.data {
-        CommandData::CompletionScript(_)
-        | CommandData::StreamBytes(_)
-        | CommandData::StreamedToStdout => Err(io::Error::new(
+        CommandData::CompletionScript(_) | CommandData::StreamedToStdout => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "raw output does not support json rendering",
         )),

@@ -1,41 +1,45 @@
-//! Buffered download response bodies and their admission permits.
+//! Streaming download response bodies and their admission permits.
 
+use super::error::ApiResponseError;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use futures::Stream;
-use std::convert::Infallible;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use loonfs::{FileContentStream, SharedObjectStore};
+use loonfs_api::NamespaceId;
 use tokio::sync::OwnedSemaphorePermit;
 
-/// One materialized download plus the permit accounting for its memory.
-///
-/// The stream owns the permit even after yielding its only chunk, so the
-/// response body releases admission only when it is fully consumed or
-/// abandoned and dropped.
-struct DownloadBodyStream {
-    bytes: Option<bytes::Bytes>,
-    _permit: OwnedSemaphorePermit,
-}
-
-pub(super) fn buffered_download_response(bytes: Vec<u8>, permit: OwnedSemaphorePermit) -> Response {
-    let body = Body::from_stream(DownloadBodyStream {
-        bytes: Some(bytes.into()),
-        _permit: permit,
+/// Keeps admission until the stream finishes or is abandoned. No Content-Length
+/// is sent: successful HTTP completion follows checksum verification, not merely
+/// delivery of the expected number of bytes. A late failure aborts the body.
+pub(super) fn streamed_download_response(
+    stream: FileContentStream<SharedObjectStore>,
+    permit: OwnedSemaphorePermit,
+    max_content_bytes: u64,
+    namespace_id: &NamespaceId,
+) -> Result<Response, ApiResponseError> {
+    if stream.size_bytes() > max_content_bytes {
+        return Err(ApiResponseError::runtime_for_namespace(
+            namespace_id,
+            loonfs::RuntimeError::Core(loonfs::CoreError::ContentTooLarge {
+                size_bytes: stream.size_bytes(),
+                max_bytes: max_content_bytes,
+            }),
+        ));
+    }
+    let body = futures::stream::try_unfold((stream, permit), |(mut stream, permit)| async move {
+        match stream.next_chunk().await {
+            Ok(Some(bytes)) => Ok(Some((bytes, (stream, permit)))),
+            Ok(None) => Ok(None),
+            Err(error) => {
+                tracing::warn!(code = %error.code(), error = %error, "download body failed verification or transfer");
+                Err(std::io::Error::other(error))
+            }
+        }
     });
-    (
+    Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        body,
+        Body::from_stream(body),
     )
-        .into_response()
-}
-
-impl Stream for DownloadBodyStream {
-    type Item = Result<bytes::Bytes, Infallible>;
-
-    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.bytes.take().map(Ok))
-    }
+        .into_response())
 }

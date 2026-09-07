@@ -2885,3 +2885,34 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 		t.Errorf("stub observed %d requests for excluded server routes", observedAfter-observedBefore)
 	}
 }
+
+func TestProxyPreservesAnAbortedUpstreamBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("provisional"), 8192))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	defer upstream.Close()
+	handler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
+		ServerBaseURL: upstream.URL, Token: "test-token", NamespaceAliases: map[string]string{"app": "demo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+	response, err := http.Get(proxy.URL + "/v0/namespace-aliases/app/filesystem/content?path=%2Ffile")
+	if err != nil {
+		t.Fatalf("read response headers: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err == nil {
+		t.Fatalf("aborted upstream became successful EOF after %d bytes", len(body))
+	}
+	if len(body) == 0 {
+		t.Fatal("expected a provisional prefix before the failure")
+	}
+}

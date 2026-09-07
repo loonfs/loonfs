@@ -626,7 +626,7 @@ Behavior notes
   Existing files are not overwritten unless --force is set. Downloads stream
   without buffering the entire file. The CLI writes to a temporary file and
   moves it into place after verification, so a failed download does not leave
-  a partial destination. When streaming to stdout with `-`, written bytes
+  a partial destination. For `cat` and streaming to stdout with `get ... -`, written bytes
   cannot be taken back; check the exit status to confirm verification
 
   A recursive put, get, or cp works file by file with bounded concurrency,
@@ -636,12 +636,10 @@ Behavior notes
 
   `loonfs mv` moves a directory in one commit and takes no -r
 
-  How much of a transfer is watchable follows how it travels. A streamed or
-  direct download reports bytes as they land, and so does a streamed
-  upload; a proxied download and a small buffered upload are one request
-  each, so they go from nothing to done in one step. A tree is the same
-  file by file: its byte count moves through a large file as that file is
-  read, and advances a whole file at a time over the small ones
+  Downloads report bytes as they arrive for current, historical, and snapshot
+  reads, through either direct or proxied transport. Streamed uploads report
+  incremental progress too; small buffered uploads report completion in one
+  step. Recursive transfers use those same paths for each file
 
   Embedded profiles do not run continuous maintenance. Run
   `loonfs maintenance loop --namespaces <ns>` for ongoing maintenance,
