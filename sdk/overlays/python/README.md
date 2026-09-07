@@ -42,6 +42,14 @@ Operations that LoonFS classifies as non-idempotent are never retried
 automatically. Use the `max_retries` client or request option to tune retries for
 safe operations.
 
+For publication retries, call `client.files.prepare_file_bytes(namespace_id,
+content=payload)` once and retain its `PreparedFileContent`. Pass it to
+`client.files.put_file_prepared(namespace_id, path=path, prepared=prepared,
+actor=actor, commit_id=commit_id)` on each attempt, keeping all publication
+inputs identical. Preparation does not create a visible file or extend the
+upload lifetime. Calling `upload` again starts a fresh upload and cannot replay
+a previously committed ID.
+
 ## Generated code
 
 This SDK is generated from the LoonFS OpenAPI specification. Please report SDK

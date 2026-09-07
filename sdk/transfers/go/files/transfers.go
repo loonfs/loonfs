@@ -55,6 +55,27 @@ type UploadInput struct {
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
 
+// PreparedFileContent is a completed upload retained for publication retries.
+// Preparation does not publish a file or extend the upload lifetime.
+// Treat its reference and token as immutable.
+type PreparedFileContent struct {
+	ContentRef   *loonfs.ContentRef
+	ContentToken *loonfs.ContentToken
+}
+
+// PreparedUploadInput publishes completed content without uploading again.
+type PreparedUploadInput struct {
+	NamespaceID        loonfs.NamespaceID
+	Path               loonfs.AbsolutePath
+	Prepared           *PreparedFileContent
+	Actor              *loonfs.ActorRef
+	CommitID           loonfs.CommitID
+	Message            *string
+	Behavior           loonfs.DestinationBehavior
+	ExpectedInodeID    *string
+	ExpectedRevisionNo *loonfs.RevisionNo
+}
+
 // UploadResult identifies the commit that made the new revision visible.
 type UploadResult struct {
 	NamespaceID  loonfs.NamespaceID
@@ -78,8 +99,8 @@ type DownloadResult struct {
 	ContentRef  *loonfs.ContentRef
 }
 
-// Upload uploads bytes, completes the upload, and commits the content to a path.
-// Streaming and resume are follow-ups.
+// Upload uploads fresh content and publishes it. For publication retries,
+// retain PrepareFileBytes output and use PutFilePrepared with unchanged inputs.
 func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, error) {
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
@@ -88,14 +109,32 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, err
 		return nil, fmt.Errorf("transfers: actor is required")
 	}
 
+	if in.CommitID == "" {
+		return nil, fmt.Errorf("transfers: commit id is required")
+	}
+	prepared, err := c.PrepareFileBytes(ctx, in.NamespaceID, in.Content)
+	if err != nil {
+		return nil, err
+	}
+	return c.PutFilePrepared(ctx, PreparedUploadInput{
+		NamespaceID: in.NamespaceID, Path: in.Path, Prepared: prepared, Actor: in.Actor,
+		CommitID: in.CommitID, Message: in.Message, Behavior: in.Behavior,
+		ExpectedInodeID: in.ExpectedInodeID, ExpectedRevisionNo: in.ExpectedRevisionNo,
+	})
+}
+
+// PrepareFileBytes uploads once without publishing; retain the result for retries.
+func (c *Client) PrepareFileBytes(ctx context.Context, namespaceID loonfs.NamespaceID, content []byte) (*PreparedFileContent, error) {
+	if c == nil {
+		return nil, fmt.Errorf("transfers: client is nil")
+	}
 	capabilitiesClient := capabilities.NewClient(c.options)
 	uploadsClient := uploads.NewClient(c.options)
-	commitsClient := commits.NewClient(c.options)
 	capabilities, err := capabilitiesClient.Retrieve(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
 	}
-	createRequest, err := createUploadRequest(capabilities, in.NamespaceID, int64(len(in.Content)))
+	createRequest, err := createUploadRequest(capabilities, namespaceID, int64(len(content)))
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +143,7 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, err
 		return nil, fmt.Errorf("transfers: begin upload: %w", err)
 	}
 
-	completed, err := transferAndComplete(ctx, uploadsClient, in.NamespaceID, in.Content, begin)
+	completed, err := transferAndComplete(ctx, uploadsClient, namespaceID, content, begin)
 	if err != nil {
 		return nil, err
 	}
@@ -112,17 +151,32 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, err
 	if err != nil {
 		return nil, err
 	}
+	return &PreparedFileContent{ContentRef: status.ContentRef, ContentToken: status.ContentToken}, nil
+}
 
-	if in.CommitID == "" {
-		return nil, fmt.Errorf("transfers: commit id is required; a caller that keeps its commit id can replay a lost response safely")
+// PutFilePrepared publishes retained content without starting another upload.
+// Reuse unchanged inputs to retry the same commit.
+func (c *Client) PutFilePrepared(ctx context.Context, in PreparedUploadInput) (*UploadResult, error) {
+	if c == nil {
+		return nil, fmt.Errorf("transfers: client is nil")
 	}
+	if in.Actor == nil {
+		return nil, fmt.Errorf("transfers: actor is required")
+	}
+	if in.CommitID == "" {
+		return nil, fmt.Errorf("transfers: commit id is required")
+	}
+	if in.Prepared == nil || in.Prepared.ContentRef == nil {
+		return nil, fmt.Errorf("transfers: prepared content is required")
+	}
+	commitsClient := commits.NewClient(c.options)
 	behavior := in.Behavior
 	if behavior == "" {
 		behavior = loonfs.DestinationBehaviorNoReplace
 	}
 	contentTokens := []*loonfs.ContentToken(nil)
-	if status.ContentToken != nil {
-		contentTokens = []*loonfs.ContentToken{status.ContentToken}
+	if in.Prepared.ContentToken != nil {
+		contentTokens = []*loonfs.ContentToken{in.Prepared.ContentToken}
 	}
 	committed, err := commitsClient.Create(ctx, &loonfs.CommitRequest{
 		NamespaceID:   string(in.NamespaceID),
@@ -134,7 +188,7 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, err
 			{
 				PutFile: &loonfs.FilesystemOperationPutFile{
 					Behavior:           &behavior,
-					ContentRef:         status.ContentRef,
+					ContentRef:         in.Prepared.ContentRef,
 					ExpectedInodeID:    in.ExpectedInodeID,
 					ExpectedRevisionNo: in.ExpectedRevisionNo,
 					Path:               in.Path,

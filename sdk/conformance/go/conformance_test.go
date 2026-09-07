@@ -294,6 +294,64 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		replayed.NamespaceID != first.NamespaceID {
 		t.Errorf("replayed commit = %#v, want %#v", replayed, first)
 	}
+	prepared, err := h.client.Files.PrepareFileBytes(context.Background(), loonfs.NamespaceID(request.NamespaceID), []byte("original bytes"))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	input := files.PreparedUploadInput{NamespaceID: loonfs.NamespaceID(request.NamespaceID), Path: "/prepared", Prepared: prepared,
+		Actor: &request.Actor, CommitID: "prepared-put"}
+	published, err := h.client.Files.PutFilePrepared(context.Background(), input)
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	_, err = h.client.Commits.Create(context.Background(), &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID, Actor: &request.Actor, CommitID: "prepared-rename",
+		Operations: []*loonfs.FilesystemOperation{{MovePath: &loonfs.FilesystemOperationMovePath{FromPath: input.Path, ToPath: "/renamed"}}},
+	})
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	replay, err := h.client.Files.PutFilePrepared(context.Background(), input)
+	if err != nil || replay == nil || *replay != *published {
+		t.Fatalf("replay = %#v, %v; want %#v", replay, err, published)
+	}
+	message := "changed"
+	changed := input
+	changed.Message = &message
+	_, err = h.client.Files.PutFilePrepared(context.Background(), changed)
+	var conflict *loonfs.ConflictError
+	if !errors.As(err, &conflict) || conflict.Body.Code != "commit_id_reuse_conflict" {
+		t.Fatalf("changed publication: %v", err)
+	}
+	fresh, err := h.client.Files.PrepareFileBytes(context.Background(), input.NamespaceID, []byte("original bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed = input
+	changed.Prepared = fresh
+	_, err = h.client.Files.PutFilePrepared(context.Background(), changed)
+	if !errors.As(err, &conflict) {
+		t.Fatalf("fresh content reused a committed id: %v", err)
+	}
+	entry, err := h.client.Files.Retrieve(context.Background(), &loonfs.GetPathEntryRequest{NamespaceID: request.NamespaceID, Path: "/renamed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inode := string(entry.File.InodeID)
+	input.Path = "/renamed"
+	input.CommitID = "prepared-replace"
+	input.Behavior = loonfs.DestinationBehaviorReplace
+	input.ExpectedInodeID = &inode
+	input.ExpectedRevisionNo = &entry.File.RevisionNo
+	published, err = h.client.Files.PutFilePrepared(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err = h.client.Files.PutFilePrepared(context.Background(), input)
+	if err != nil || replay == nil || *replay != *published {
+		t.Fatalf("guarded replay: %#v, %v", replay, err)
+	}
+
 }
 
 type directPutRequest struct {

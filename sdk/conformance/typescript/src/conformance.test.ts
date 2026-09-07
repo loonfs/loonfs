@@ -7,7 +7,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { test } from "node:test";
 
-import { LoonFS, LoonFSClient } from "../../../generated/typescript/index.js";
+import { LoonFS, LoonFSClient, type PreparedFileContent } from "../../../generated/typescript/index.js";
 import {
     LoonFS as BrowserLoonFS,
     LoonFSClient as BrowserLoonFSClient,
@@ -1192,6 +1192,32 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
     assert.equal(first.commit_id, request.commit_id);
     assert.equal(replayed.committed_seq, first.committed_seq);
     assert.deepEqual(replayed, first);
+    const prepared: PreparedFileContent = await activeHarness.client.files.prepareFileBytes({
+        namespace_id: request.namespace_id, content: new TextEncoder().encode("original bytes"),
+    });
+    const input = { namespace_id: request.namespace_id, path: "/prepared", prepared,
+        actor: request.actor, commit_id: "prepared-put" };
+    const published = await activeHarness.client.files.putFilePrepared(input);
+    await activeHarness.client.commits.create({namespace_id: request.namespace_id,
+        actor: request.actor, commit_id: "prepared-rename",
+        operations: [{kind: "move_path", from_path: input.path, to_path: "/renamed"}],
+    });
+    assert.deepEqual(await activeHarness.client.files.putFilePrepared(input), published);
+    for (const changed of [{message: "changed"}, {path: "/renamed"}, {behavior: "replace" as const}]) {
+        await assert.rejects(activeHarness.client.files.putFilePrepared({...input, ...changed}),
+            (error: unknown) => error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict");
+    }
+    const fresh = await activeHarness.client.files.prepareFileBytes({namespace_id: request.namespace_id,
+        content: new TextEncoder().encode("original bytes")});
+    await assert.rejects(activeHarness.client.files.putFilePrepared({...input, prepared: fresh}),
+        (error: unknown) => error instanceof LoonFS.ConflictError);
+    const entry = await activeHarness.client.files.retrieve({namespace_id: request.namespace_id, path: "/renamed"});
+    if (entry.inode_kind !== "file") throw new Error("expected file");
+    const guarded = {...input, path: "/renamed", commit_id: "prepared-replace", behavior: "replace" as const,
+        expected_inode_id: entry.inode_id, expected_revision_no: entry.revision_no};
+    const replaced = await activeHarness.client.files.putFilePrepared(guarded);
+    assert.deepEqual(await activeHarness.client.files.putFilePrepared(guarded), replaced);
+
 });
 
 conformanceTest("pagination", async (activeHarness, testCase) => {
@@ -2036,6 +2062,20 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         "browser multipart transfer",
     );
     assert.deepEqual(beginModes, ["service_proxied", "direct_put", "direct_multipart"]);
+
+    const prepared = await browserClient.files.prepareFileBytes({namespace_alias: request.namespace_alias, content: payload});
+    const input = {namespace_alias: request.namespace_alias, path: "/browser-prepared", prepared,
+        actor: request.actor, commit_id: "browser-prepared-put"};
+    const published = await browserClient.files.putFilePrepared(input);
+    assert.deepEqual(await browserClient.files.putFilePrepared(input), published);
+    await assert.rejects(browserClient.files.putFilePrepared({...input, message: "changed"}),
+        (error: unknown) => error instanceof BrowserLoonFS.ConflictError);
+    const entry = await browserClient.files.retrieve({namespace_alias: request.namespace_alias, path: input.path});
+    if (entry.inode_kind !== "file") throw new Error("expected file");
+    const guarded = {...input, commit_id: "browser-prepared-replace", behavior: "replace" as const,
+        expected_inode_id: entry.inode_id, expected_revision_no: entry.revision_no};
+    const replaced = await browserClient.files.putFilePrepared(guarded);
+    assert.deepEqual(await browserClient.files.putFilePrepared(guarded), replaced);
 
     // The rig fails only at begin. No session exists then, so mid-flow cleanup is not covered.
     await assert.rejects(
