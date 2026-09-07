@@ -295,6 +295,19 @@ The server writes JSON logs to standard output.
 
 The server rejects unsupported `LOONFS_TRACE` values instead of guessing.
 
+## Grep indexing
+
+Set `[grep].mode` to choose whether this server serves searches, maintains the
+index, or does both. Omit the table to disable grep. The optional
+`max_files_per_step` and `max_content_bytes_per_step` bound input work per
+indexing step; their defaults are 256 files and 64 MiB, and both must be positive.
+Indexing shares `max_concurrent_maintenance` with other maintenance work.
+
+Segment sizes, merge thresholds, and reorganization step sizes use engine
+defaults, like metadata compaction. The former `max_rows_per_segment`,
+`max_delta_runs`, `max_mid_runs`, and `max_decoded_input_rows_per_step` settings
+are rejected; remove them from existing pre-release configurations.
+
 ## Resource sizing
 
 Start with enough memory for:

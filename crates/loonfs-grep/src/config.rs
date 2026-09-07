@@ -10,7 +10,8 @@ use serde::Deserialize;
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
 
-/// Bounded-work policy shared by every host that runs grep steps.
+/// Operator-facing work budgets shared by hosts that run grep steps.
+/// Segment layout and merge policy remain engine defaults.
 ///
 /// Project-wide, zero may disable an explicitly documented cache. Work
 /// budgets instead reject zero at their construction boundaries.
@@ -21,14 +22,6 @@ pub struct GrepWorkerConfig {
     pub max_files_per_step: usize,
     /// Content bytes read per build step.
     pub max_content_bytes_per_step: u64,
-    /// Rows per written grep segment.
-    pub max_rows_per_segment: usize,
-    /// Delta-level runs that trigger a reorganization into a mid run.
-    pub max_delta_runs: usize,
-    /// Mid-level runs that trigger a reorganization into the base run.
-    pub max_mid_runs: usize,
-    /// Rows merged by one reorganize step.
-    pub max_decoded_input_rows_per_step: usize,
 }
 
 impl GrepWorkerConfig {
@@ -40,13 +33,7 @@ impl GrepWorkerConfig {
                 "max_content_bytes_per_step",
                 self.max_content_bytes_per_step,
             )?,
-            max_rows_per_segment: nonzero_usize("max_rows_per_segment", self.max_rows_per_segment)?,
-            max_delta_runs: nonzero_usize("max_delta_runs", self.max_delta_runs)?,
-            max_mid_runs: nonzero_usize("max_mid_runs", self.max_mid_runs)?,
-            max_decoded_input_rows_per_step: nonzero_usize(
-                "max_decoded_input_rows_per_step",
-                self.max_decoded_input_rows_per_step,
-            )?,
+            ..GramIndexBuildPolicy::default()
         })
     }
 
@@ -63,10 +50,6 @@ impl Default for GrepWorkerConfig {
         Self {
             max_files_per_step: policy.max_files_per_step.get(),
             max_content_bytes_per_step: policy.max_content_bytes_per_step.get(),
-            max_rows_per_segment: policy.max_rows_per_segment.get(),
-            max_delta_runs: policy.max_delta_runs.get(),
-            max_mid_runs: policy.max_mid_runs.get(),
-            max_decoded_input_rows_per_step: policy.max_decoded_input_rows_per_step.get(),
         }
     }
 }
@@ -117,34 +100,6 @@ mod tests {
                 "max_content_bytes_per_step",
                 GrepWorkerConfig {
                     max_content_bytes_per_step: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_rows_per_segment",
-                GrepWorkerConfig {
-                    max_rows_per_segment: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_delta_runs",
-                GrepWorkerConfig {
-                    max_delta_runs: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_mid_runs",
-                GrepWorkerConfig {
-                    max_mid_runs: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "max_decoded_input_rows_per_step",
-                GrepWorkerConfig {
-                    max_decoded_input_rows_per_step: 0,
                     ..GrepWorkerConfig::default()
                 },
             ),
