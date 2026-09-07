@@ -34,9 +34,9 @@ thiserror.workspace = true
 # how `loonfs put -` reads a payload of unknown length.
 tokio = { workspace = true, features = ["io-std"] }
 toml.workspace = true
-walkdir.workspace = true
 
 [dev-dependencies]
+walkdir.workspace = true
 ureq.workspace = true
 insta = { version = "1.39", features = ["json"] }
 loonfs-core = { workspace = true, features = ["test-support"] }

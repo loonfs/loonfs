@@ -629,8 +629,20 @@ Behavior notes
   a partial destination. For `cat` and streaming to stdout with `get ... -`, written bytes
   cannot be taken back; check the exit status to confirm verification
 
-  A recursive put, get, or cp works file by file with bounded concurrency,
-  so a partial failure reruns per file; --commit-id names one commit, so
+  Recursive put, get, and cp discover entries as transfers run, with at most
+  eight pending file operations. Discovery pauses when those slots are full.
+  Local traversal keeps one directory handle per depth; remote traversal keeps
+  up to 64 entries per depth. The existing path-depth limit bounds both.
+  Successful results are counted immediately; the final report retains every
+  failure, so failure-report memory still grows with the number of errors.
+  Overall totals become known when discovery finishes. Per-file progress starts
+  immediately, and traversal order is unspecified. A later listing failure
+  preserves completed work and reports the affected directory alongside file
+  failures. Current-state reads can observe changes between pages (including a
+  recursive copy's own commits); use a snapshot for a stable recursive get.
+  A recursive copy rejects destinations inside its source tree.
+
+  Each file commits independently, so a partial failure reruns per file; --commit-id names one commit, so
   `put -r` and `cp -r` reject it, and `get -r` rejects --revision for the
   same reason
 

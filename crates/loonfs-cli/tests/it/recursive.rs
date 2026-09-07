@@ -731,3 +731,54 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
     );
     server.join().expect("listing server");
 }
+
+#[test]
+fn recursive_copy_rejects_its_own_subtree_including_equivalent_names() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["mkdir", "-p", "/Straße/sub"]));
+    let before = harness.run(&["--json", "changes"]);
+    assert_success(&before);
+    for destination in ["/Straße/new", "/STRASSE/new", "/Straße", "/Straße/sub"] {
+        let copy = harness.run(&["--json", "cp", "-r", "/Straße", destination]);
+        assert_failure(&copy);
+        assert_eq!(json_error(&copy)["code"], "invalid_request");
+    }
+    let root_copy = harness.run(&["--json", "cp", "-r", "/", "/root-copy"]);
+    assert_failure(&root_copy);
+    assert_eq!(json_error(&root_copy)["code"], "invalid_request");
+    let after = harness.run(&["--json", "changes"]);
+    assert_success(&after);
+    assert_eq!(
+        json_data(&before),
+        json_data(&after),
+        "rejected copies must not write"
+    );
+    // A shared string prefix is not an ancestor relationship.
+    assert_success(&harness.run(&["cp", "-r", "/Straße", "/Straßen"]));
+}
+
+#[test]
+fn recursive_transfers_preserve_a_completely_empty_root() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let tree = harness.temp_dir.path().join("empty");
+    fs::create_dir(&tree).expect("empty tree");
+    let put = harness.run(&[
+        "--json",
+        "put",
+        "-r",
+        tree.to_str().expect("path"),
+        "/empty",
+    ]);
+    assert_success(&put);
+    assert_eq!(json_data(&put)["directories"], 1);
+    assert_success(&harness.run(&["cp", "-r", "/empty", "/copy"]));
+    let destination = harness.temp_dir.path().join("back");
+    assert_success(&harness.run(&["get", "-r", "/copy", destination.to_str().expect("path")]));
+    assert!(destination.is_dir());
+}

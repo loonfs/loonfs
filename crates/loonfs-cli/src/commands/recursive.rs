@@ -8,28 +8,31 @@ use super::context::{
     create_directory_tolerating_existing, CommandContext, RemoteDirectoryOutcome,
 };
 use super::output::{
-    CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
-    TreeTransferFailure,
+    CommandData, CommandFailure, CommandOutput, ListingHeadObservation, TreeTransferFailure,
 };
 use crate::args::{CommandKind, RuntimeBehavior};
 use crate::error::CliError;
 use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
-use futures::StreamExt;
-use loonfs_api::{CheckpointId, DestinationBehavior, PathEntryKind};
+use futures::{stream::FuturesUnordered, Stream, StreamExt};
+use loonfs_api::{CheckpointId, DestinationBehavior};
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+mod traversal;
+use traversal::{local_tree, remote_tree, TreeEntry};
 
 /// Maximum number of concurrent file operations.
 const TREE_TRANSFER_CONCURRENCY: usize = 8;
 
-/// One file or directory in a recursive transfer.
+/// One file in a recursive transfer.
 struct FileJob {
     local: PathBuf,
     remote: String,
-    /// File length, used for transfer selection and progress totals.
+    /// File length, used for progress totals.
     size_bytes: Option<u64>,
 }
 
@@ -52,6 +55,7 @@ struct TreeTally {
     files: u64,
     directories: u64,
     failures: Vec<TreeTransferFailure>,
+    heads: ListingHeadObservation,
 }
 
 impl TreeTally {
@@ -60,6 +64,25 @@ impl TreeTally {
             files: 0,
             directories: 0,
             failures: Vec::new(),
+            heads: ListingHeadObservation::default(),
+        }
+    }
+
+    fn record_file(
+        &mut self,
+        path: String,
+        result: Result<String, CliError>,
+        runtime: RuntimeBehavior,
+        verb: &str,
+    ) {
+        match result {
+            Ok(target) => {
+                self.files += 1;
+                if runtime.progress.human_lines_enabled() {
+                    write_stderr_progress(format_args!("{verb} {target}"));
+                }
+            }
+            Err(error) => self.fail(path, error),
         }
     }
 
@@ -85,13 +108,6 @@ fn create_local_directory(path: &Path) -> std::io::Result<DirectoryOutcome> {
     Ok(DirectoryOutcome::Created)
 }
 
-/// Returns the total size when every file length is known.
-fn tree_bytes(files: &[FileJob]) -> Option<u64> {
-    files
-        .iter()
-        .try_fold(0u64, |total, job| Some(total + job.size_bytes?))
-}
-
 fn joined_remote(root: &str, components: &[String]) -> String {
     let mut remote = root.trim_end_matches('/').to_owned();
     for component in components {
@@ -105,8 +121,145 @@ fn joined_remote(root: &str, components: &[String]) -> String {
     }
 }
 
-/// Uploads a local directory tree. File uploads create their parent
-/// directories, so this function creates directories only for empty subtrees.
+/// Runs discovery and transfers together. A full transfer set stops discovery;
+/// completed successes are counted and discarded immediately. Directory creation
+/// finishes before discovery resumes into its children.
+async fn transfer_tree<S, F, FF, D, DF>(
+    entries: S,
+    transfer: F,
+    create_directory: D,
+    progress: Option<&ProgressReporter>,
+    runtime: RuntimeBehavior,
+    verb: &str,
+) -> TreeTally
+where
+    S: Stream<Item = TreeEntry>,
+    F: Fn(FileJob) -> FF,
+    FF: Future<Output = (String, Result<String, CliError>)>,
+    D: Fn(PathBuf) -> DF,
+    DF: Future<Output = (String, Result<DirectoryOutcome, CliError>)>,
+{
+    futures::pin_mut!(entries);
+    let mut pending = FuturesUnordered::new();
+    let mut tally = TreeTally::new();
+    let mut discovered_files = 0;
+    let mut discovered_bytes = Some(0u64);
+    let mut finished_discovery = false;
+    let mut discovery_failed = false;
+    loop {
+        tokio::select! {
+            biased;
+            Some((path, result)) = pending.next(), if !pending.is_empty() => {
+                tally.record_file(path, result, runtime, verb);
+            }
+            entry = entries.next(), if !finished_discovery && pending.len() < TREE_TRANSFER_CONCURRENCY => {
+                match entry {
+                    Some(TreeEntry::File(job)) => {
+                        discovered_files += 1;
+                        discovered_bytes = discovered_bytes.zip(job.size_bytes)
+                            .and_then(|(total, bytes)| total.checked_add(bytes));
+                        pending.push(transfer(job));
+                    }
+                    Some(TreeEntry::Directory(relative)) => {
+                        let directory = create_directory(relative);
+                        futures::pin_mut!(directory);
+                        loop {
+                            // A file may hold the embedded writer's lock while
+                            // mkdir waits for it. Keep polling transfers here.
+                            tokio::select! {
+                                biased;
+                                Some((path, result)) = pending.next(), if !pending.is_empty() => {
+                                    tally.record_file(path, result, runtime, verb);
+                                }
+                                (path, result) = &mut directory => {
+                                    match result {
+                                        Ok(outcome) => {
+                                            tally.record_directory(outcome);
+                                            if runtime.progress.human_lines_enabled() {
+                                                write_stderr_progress(format_args!("{} {path}", outcome.progress_label()));
+                                            }
+                                        }
+                                        Err(error) => tally.fail(path, error),
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Some(TreeEntry::Head(head)) => tally.heads.observe(head),
+                    Some(TreeEntry::Failure(path, error)) => {
+                        discovery_failed = true;
+                        tally.fail(path, error);
+                    },
+                    None => {
+                        finished_discovery = true;
+                        if let Some(progress) = progress {
+                            if !discovery_failed {
+                                progress.expect(discovered_bytes, Some(discovered_files));
+                            }
+                        }
+                    }
+                }
+            }
+            else => break,
+        }
+    }
+    if let Some(progress) = progress {
+        progress.finish();
+    }
+    tally
+}
+
+async fn create_remote_directory(
+    context: &CommandContext,
+    remote: String,
+    parents: bool,
+    message: Option<String>,
+) -> (String, Result<DirectoryOutcome, CliError>) {
+    let result = async {
+        let spec = parse_remote(context, &remote, "destination_path")?;
+        create_directory_tolerating_existing(
+            context,
+            &spec,
+            &CreateDirectoryOptions {
+                commit: CommitOptions {
+                    actor: context.actor().clone(),
+                    commit_id: None,
+                    message,
+                },
+                parents,
+            },
+        )
+        .await
+        .map(|outcome| match outcome {
+            RemoteDirectoryOutcome::Created(_) => DirectoryOutcome::Created,
+            RemoteDirectoryOutcome::AlreadyExists { .. } => DirectoryOutcome::AlreadyExists,
+        })
+    }
+    .await;
+    (remote, result)
+}
+
+fn relative_remote(root: &str, relative: &Path) -> String {
+    joined_remote(
+        root,
+        &relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn warn_drift(tally: &TreeTally, runtime: RuntimeBehavior) {
+    if !runtime.json {
+        if let Some(drift) = tally.heads.drift() {
+            crate::render::write_listing_drift_warning(&drift);
+        }
+    }
+}
+
+/// Uploads files as they are discovered. Empty leaf directories create their
+/// ancestors; nonempty directories are created by file uploads.
 pub(crate) async fn run_put_tree(
     kind: CommandKind,
     context: &CommandContext,
@@ -116,66 +269,18 @@ pub(crate) async fn run_put_tree(
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let mut files = Vec::new();
-    let mut empty_dirs = Vec::new();
-    let mut tally = TreeTally::new();
-    collect_local_tree(local_root, &mut files, &mut empty_dirs, &mut tally)
-        .map_err(|error| context.fail(kind, error))?;
-
+    let entries = local_tree(local_root, remote_root).map_err(|error| context.fail(kind, error))?;
     let behavior = if force {
         DestinationBehavior::Replace
     } else {
         DestinationBehavior::NoReplace
     };
-
-    // Create empty subtrees before uploading files.
-    for components in empty_dirs {
-        let remote = joined_remote(remote_root, &components);
-        let spec = match parse_remote(context, &remote, "local_path") {
-            Ok(spec) => spec,
-            Err(error) => {
-                tally.fail(remote, error);
-                continue;
-            }
-        };
-        let outcome = match create_directory_tolerating_existing(
-            context,
-            &spec,
-            &CreateDirectoryOptions {
-                commit: CommitOptions {
-                    actor: context.actor().clone(),
-                    commit_id: None,
-                    message: message.clone(),
-                },
-                parents: true,
-            },
-        )
-        .await
-        {
-            Ok(RemoteDirectoryOutcome::Created(_)) => DirectoryOutcome::Created,
-            Ok(RemoteDirectoryOutcome::AlreadyExists { .. }) => DirectoryOutcome::AlreadyExists,
-            Err(error) => {
-                tally.fail(remote, error);
-                continue;
-            }
-        };
-        tally.record_directory(outcome);
-        if runtime.progress.human_lines_enabled() {
-            write_stderr_progress(format_args!(
-                "{} {}",
-                outcome.progress_label(),
-                spec_target(&spec)
-            ));
-        }
-    }
-
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Put,
         format!("{}:{}", context.namespace(), remote_root),
     ));
-    progress.expect(tree_bytes(&files), Some(files.len() as u64));
-    let outcomes = futures::stream::iter(files.into_iter().map(|job| {
+    let transfer = |job: FileJob| {
         let message = message.clone();
         let progress = Arc::clone(&progress);
         let remote = format!("{}/{}", remote_root.trim_end_matches('/'), job.remote);
@@ -220,23 +325,23 @@ pub(crate) async fn run_put_tree(
             }
             (remote, result)
         }
-    }))
-    .buffer_unordered(TREE_TRANSFER_CONCURRENCY)
-    .collect::<Vec<_>>()
+    };
+    let tally = transfer_tree(
+        futures::stream::iter(entries),
+        transfer,
+        |relative| {
+            create_remote_directory(
+                context,
+                relative_remote(remote_root, &relative),
+                true,
+                message.clone(),
+            )
+        },
+        Some(&progress),
+        runtime,
+        "stored",
+    )
     .await;
-    progress.finish();
-    for (remote, result) in outcomes {
-        match result {
-            Ok(target) => {
-                tally.files += 1;
-                if runtime.progress.human_lines_enabled() {
-                    write_stderr_progress(format_args!("stored {target}"));
-                }
-            }
-            Err(error) => tally.fail(remote, error),
-        }
-    }
-
     Ok(context.output(
         kind,
         CommandData::TreeTransfer {
@@ -250,8 +355,7 @@ pub(crate) async fn run_put_tree(
     ))
 }
 
-/// Downloads a directory tree. It creates the destination and all remote
-/// directories before downloading files.
+/// Downloads files as discovered, creating each parent before entering it.
 pub(crate) async fn run_get_tree(
     kind: CommandKind,
     context: &CommandContext,
@@ -261,37 +365,17 @@ pub(crate) async fn run_get_tree(
     runtime: RuntimeBehavior,
     snapshot_id: Option<&CheckpointId>,
 ) -> Result<CommandOutput, CommandFailure> {
-    let mut tally = TreeTally::new();
-    // Fail early if the destination cannot be created.
     let root_outcome = create_local_directory(local_root)
         .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
-    tally.record_directory(root_outcome);
-    let listing = walk_remote_tree(context, kind, "remote_path", remote_root, snapshot_id).await?;
-    if !runtime.json {
-        if let Some(drift) = listing.head_drift.as_ref() {
-            crate::render::write_listing_drift_warning(drift);
-        }
-    }
-    let head_drift = listing.head_drift;
-
-    for components in &listing.directories {
-        let local_dir = local_root.join(components.join("/"));
-        match create_local_directory(&local_dir) {
-            Ok(outcome) => tally.record_directory(outcome),
-            Err(error) => tally.fail(
-                local_dir.display().to_string(),
-                CliError::io_for_path(&local_dir, error),
-            ),
-        }
-    }
-
+    let entries = remote_tree(context, remote_root, "remote_path", snapshot_id)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Get,
         format!("{}:{}", context.namespace(), remote_root),
     ));
-    progress.expect(tree_bytes(&listing.files), Some(listing.files.len() as u64));
-    let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
+    let transfer = |job: FileJob| {
         let progress = Arc::clone(&progress);
         let local = local_root.join(job.local);
         async move {
@@ -322,23 +406,23 @@ pub(crate) async fn run_get_tree(
             }
             (job.remote, written.map(|_| local.display().to_string()))
         }
-    }))
-    .buffer_unordered(TREE_TRANSFER_CONCURRENCY)
-    .collect::<Vec<_>>()
+    };
+    let mut tally = transfer_tree(
+        entries,
+        transfer,
+        |relative| async move {
+            let local = local_root.join(relative);
+            let result = create_local_directory(&local)
+                .map_err(|error| CliError::io_for_path(&local, error));
+            (local.display().to_string(), result)
+        },
+        Some(&progress),
+        runtime,
+        "wrote",
+    )
     .await;
-    progress.finish();
-    for (remote, result) in outcomes {
-        match result {
-            Ok(local) => {
-                tally.files += 1;
-                if runtime.progress.human_lines_enabled() {
-                    write_stderr_progress(format_args!("wrote {local}"));
-                }
-            }
-            Err(error) => tally.fail(remote, error),
-        }
-    }
-
+    tally.record_directory(root_outcome);
+    warn_drift(&tally, runtime);
     Ok(context.output(
         kind,
         CommandData::TreeTransfer {
@@ -346,7 +430,7 @@ pub(crate) async fn run_get_tree(
             destination: local_root.display().to_string(),
             files: tally.files,
             directories: tally.directories,
-            head_drift,
+            head_drift: tally.heads.drift(),
             failures: tally.failures,
         },
     ))
@@ -362,72 +446,38 @@ pub(crate) async fn run_copy_tree(
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let listing = walk_remote_tree(context, kind, "source_path", source_root, None).await?;
-    if !runtime.json {
-        if let Some(drift) = listing.head_drift.as_ref() {
-            crate::render::write_listing_drift_warning(drift);
-        }
+    let source = parse_remote(context, source_root, "source_path")
+        .map_err(|error| context.fail(kind, error))?;
+    let destination = parse_remote(context, destination_root, "destination_path")
+        .map_err(|error| context.fail(kind, error))?;
+    let source_key = loonfs_api::name_key_for_display_name(source.absolute_path().as_str());
+    let source_path = source_key.trim_end_matches('/');
+    let destination_key =
+        loonfs_api::name_key_for_display_name(destination.absolute_path().as_str());
+    let destination_path = destination_key.trim_end_matches('/');
+    if destination_path == source_path || destination_path.starts_with(&format!("{source_path}/")) {
+        return Err(context.fail(
+            kind,
+            CliError::invalid_request(
+                "a recursive copy destination must be outside the source tree",
+            )
+            .with_param("destination_path"),
+        ));
     }
-    let head_drift = listing.head_drift;
-    let mut tally = TreeTally::new();
-
-    // Create the destination root and then its child directories in order.
-    let mut directories = vec![Vec::new()];
-    directories.extend(listing.directories);
-    for components in &directories {
-        let remote = joined_remote(destination_root, components);
-        let spec = match parse_remote(context, &remote, "destination_path") {
-            Ok(spec) => spec,
-            Err(error) => {
-                tally.fail(remote, error);
-                continue;
-            }
-        };
-        let outcome = match create_directory_tolerating_existing(
-            context,
-            &spec,
-            &CreateDirectoryOptions {
-                commit: CommitOptions {
-                    actor: context.actor().clone(),
-                    commit_id: None,
-                    message: message.clone(),
-                },
-                parents: components.is_empty(),
-            },
-        )
+    // Read the source before creating the destination so a missing source has
+    // no remote write side effects.
+    let entries = remote_tree(context, source_root, "source_path", None)
         .await
-        {
-            Ok(RemoteDirectoryOutcome::Created(_)) => DirectoryOutcome::Created,
-            Ok(RemoteDirectoryOutcome::AlreadyExists { .. }) => DirectoryOutcome::AlreadyExists,
-            Err(error) => {
-                tally.fail(remote, error);
-                continue;
-            }
-        };
-        tally.record_directory(outcome);
-        if runtime.progress.human_lines_enabled() {
-            write_stderr_progress(format_args!(
-                "{} {}",
-                outcome.progress_label(),
-                spec_target(&spec)
-            ));
-        }
-    }
-
+        .map_err(|error| context.fail(kind, error))?;
+    let entries = futures::stream::iter([TreeEntry::Directory(PathBuf::new())]).chain(entries);
     let behavior = if force {
         DestinationBehavior::Replace
     } else {
         DestinationBehavior::NoReplace
     };
-    let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
+    let transfer = |job: FileJob| {
         let message = message.clone();
-        let destination = joined_remote(
-            destination_root,
-            &job.local
-                .components()
-                .map(|component| component.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-        );
+        let destination = relative_remote(destination_root, &job.local);
         async move {
             let from = parse_remote(context, &job.remote, "source_path");
             let to = parse_remote(context, &destination, "destination_path");
@@ -455,22 +505,24 @@ pub(crate) async fn run_copy_tree(
                 .map(|_| spec_target(&to));
             (job.remote, result)
         }
-    }))
-    .buffer_unordered(TREE_TRANSFER_CONCURRENCY)
-    .collect::<Vec<_>>()
+    };
+    let tally = transfer_tree(
+        entries,
+        transfer,
+        |relative| {
+            create_remote_directory(
+                context,
+                relative_remote(destination_root, &relative),
+                relative.as_os_str().is_empty(),
+                message.clone(),
+            )
+        },
+        None,
+        runtime,
+        "copied",
+    )
     .await;
-    for (remote, result) in outcomes {
-        match result {
-            Ok(target) => {
-                tally.files += 1;
-                if runtime.progress.human_lines_enabled() {
-                    write_stderr_progress(format_args!("copied {target}"));
-                }
-            }
-            Err(error) => tally.fail(remote, error),
-        }
-    }
-
+    warn_drift(&tally, runtime);
     Ok(context.output(
         kind,
         CommandData::TreeTransfer {
@@ -478,7 +530,7 @@ pub(crate) async fn run_copy_tree(
             destination: format!("{}:{}", context.namespace(), destination_root),
             files: tally.files,
             directories: tally.directories,
-            head_drift,
+            head_drift: tally.heads.drift(),
             failures: tally.failures,
         },
     ))
@@ -495,158 +547,6 @@ fn parse_remote(
 
 fn spec_target(spec: &NamespacePath) -> String {
     super::context::render_target(spec.namespace(), spec.absolute_path())
-}
-
-/// Collects upload jobs and empty directories from a local tree. Symlinks and
-/// special files are reported as failures.
-fn collect_local_tree(
-    root: &Path,
-    files: &mut Vec<FileJob>,
-    empty_dirs: &mut Vec<Vec<String>>,
-    tally: &mut TreeTally,
-) -> Result<(), CliError> {
-    let mut dirs_with_files = std::collections::BTreeSet::new();
-    let mut all_dirs = Vec::new();
-    for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
-        let entry = entry.map_err(|error| {
-            CliError::new(
-                "io_error",
-                format!(
-                    "failed to read directory tree `{}`: {error}",
-                    root.display()
-                ),
-            )
-        })?;
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .expect("walkdir yields paths under its root");
-        if relative.as_os_str().is_empty() {
-            continue;
-        }
-        let components: Vec<String> = relative
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        if entry.file_type().is_dir() {
-            all_dirs.push(components);
-        } else if entry.file_type().is_file() {
-            for depth in 1..components.len() {
-                dirs_with_files.insert(components[..depth].to_vec());
-            }
-            files.push(FileJob {
-                local: entry.path().to_path_buf(),
-                remote: components.join("/"),
-                // The upload retries metadata lookup if this first lookup
-                // fails.
-                size_bytes: entry.metadata().ok().map(|metadata| metadata.len()),
-            });
-        } else {
-            tally.fail(
-                entry.path().display().to_string(),
-                CliError::invalid_request(
-                    "only regular files and directories transfer; symlinks and special \
-                     files do not",
-                )
-                .with_param("local_path"),
-            );
-        }
-    }
-    // Files create ancestor directories, so only empty subtrees need mkdir.
-    let mut candidates: Vec<Vec<String>> = all_dirs
-        .into_iter()
-        .filter(|dir| {
-            !dirs_with_files
-                .iter()
-                .any(|with_files| with_files.starts_with(dir.as_slice()))
-        })
-        .collect();
-    // Creating the deepest directory also creates its empty parents.
-    candidates.sort();
-    let deepest: Vec<Vec<String>> = candidates
-        .iter()
-        .filter(|dir| {
-            !candidates
-                .iter()
-                .any(|other| other.len() > dir.len() && other.starts_with(dir.as_slice()))
-        })
-        .cloned()
-        .collect();
-    empty_dirs.extend(deepest);
-    Ok(())
-}
-
-struct RemoteTree {
-    /// Relative component paths of every directory, parent-first.
-    directories: Vec<Vec<String>>,
-    /// File jobs: `local` holds the relative path, `remote` the absolute
-    /// namespace path.
-    files: Vec<FileJob>,
-    head_drift: Option<ListingHeadDrift>,
-}
-
-/// Walks a remote tree breadth-first. Each directory is listed separately, so
-/// concurrent changes may appear in the results.
-async fn walk_remote_tree(
-    context: &CommandContext,
-    kind: CommandKind,
-    remote_param: &str,
-    root: &str,
-    snapshot_id: Option<&CheckpointId>,
-) -> Result<RemoteTree, CommandFailure> {
-    let mut tree = RemoteTree {
-        directories: Vec::new(),
-        files: Vec::new(),
-        head_drift: None,
-    };
-    let mut heads = ListingHeadObservation::default();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back((root.trim_end_matches('/').to_owned(), Vec::<String>::new()));
-    while let Some((remote_dir, components)) = queue.pop_front() {
-        let listed = if remote_dir.is_empty() {
-            "/"
-        } else {
-            &remote_dir
-        };
-        let spec = parse_remote(context, listed, remote_param)
-            .map_err(|error| context.fail(kind, error))?;
-        let mut cursor = None;
-        loop {
-            let response = context
-                .target
-                .list_path_entries_page(&spec, None, cursor.as_deref(), snapshot_id)
-                .await
-                .map_err(|error| context.fail(kind, error))?;
-            heads.observe(response.head_seq);
-            cursor = response.next_cursor;
-            for entry in response.entries {
-                let Some(name) = entry.display_name.as_ref() else {
-                    continue;
-                };
-                let mut child_components = components.clone();
-                child_components.push(name.as_str().to_owned());
-                match entry.kind {
-                    PathEntryKind::Directory {} => {
-                        tree.directories.push(child_components.clone());
-                        queue.push_back((
-                            format!("{remote_dir}/{name}", name = name.as_str()),
-                            child_components,
-                        ));
-                    }
-                    PathEntryKind::File { size_bytes, .. } => tree.files.push(FileJob {
-                        local: PathBuf::from(child_components.join("/")),
-                        remote: format!("{remote_dir}/{name}", name = name.as_str()),
-                        size_bytes: Some(size_bytes),
-                    }),
-                }
-            }
-            if cursor.is_none() {
-                break;
-            }
-        }
-    }
-    tree.head_drift = heads.drift();
-    Ok(tree)
 }
 
 #[cfg(test)]
@@ -710,6 +610,205 @@ mod tests {
             .await
             .expect("create namespace");
         (context, watched)
+    }
+
+    #[tokio::test]
+    async fn recursive_discovery_waits_for_a_free_transfer_slot() {
+        use std::cell::Cell;
+        use std::task::Poll;
+
+        let discovered = Cell::new(0usize);
+        let started = Cell::new(0usize);
+        let completed = Cell::new(0usize);
+        let entries = futures::stream::iter((0..100).map(|index| {
+            discovered.set(discovered.get() + 1);
+            assert!(
+                discovered.get() - completed.get() <= TREE_TRANSFER_CONCURRENCY,
+                "discovery outran the transfer slots"
+            );
+            TreeEntry::File(FileJob {
+                local: PathBuf::new(),
+                remote: index.to_string(),
+                size_bytes: Some(1),
+            })
+        }));
+        let tally = transfer_tree(
+            entries,
+            |job| {
+                let started = &started;
+                let completed = &completed;
+                async move {
+                    started.set(started.get() + 1);
+                    futures::future::poll_fn(|cx| {
+                        // Hold the first batch until all slots are occupied. This
+                        // tests both backpressure and real concurrent scheduling.
+                        if started.get() < TREE_TRANSFER_CONCURRENCY {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(())
+                    })
+                    .await;
+                    completed.set(completed.get() + 1);
+                    (job.remote.clone(), Ok(job.remote))
+                }
+            },
+            |_| async { panic!("no directories in this stream") },
+            None,
+            unwatched(),
+            "stored",
+        )
+        .await;
+        assert_eq!(tally.files, 100);
+        assert!(tally.failures.is_empty());
+        assert_eq!(completed.get(), 100);
+    }
+
+    #[tokio::test]
+    async fn recursive_directory_creation_keeps_in_flight_files_running() {
+        let directory_started = tokio::sync::Notify::new();
+        let file_finished = tokio::sync::Notify::new();
+        let entries = futures::stream::iter([
+            TreeEntry::File(FileJob {
+                local: PathBuf::new(),
+                remote: "first".to_owned(),
+                size_bytes: Some(1),
+            }),
+            TreeEntry::Directory(PathBuf::from("second")),
+        ]);
+        let tally = transfer_tree(
+            entries,
+            |job| {
+                let directory_started = &directory_started;
+                let file_finished = &file_finished;
+                async move {
+                    directory_started.notified().await;
+                    file_finished.notify_one();
+                    (job.remote.clone(), Ok(job.remote))
+                }
+            },
+            |_| async {
+                directory_started.notify_one();
+                file_finished.notified().await;
+                ("second".to_owned(), Ok(DirectoryOutcome::Created))
+            },
+            None,
+            unwatched(),
+            "stored",
+        )
+        .await;
+        assert_eq!(tally.files, 1);
+        assert_eq!(tally.directories, 1);
+    }
+
+    #[tokio::test]
+    async fn recursive_discovery_preserves_successes_and_continues_after_a_listing_failure() {
+        let entries = futures::stream::iter([
+            TreeEntry::File(FileJob {
+                local: PathBuf::new(),
+                remote: "first".to_owned(),
+                size_bytes: Some(1),
+            }),
+            TreeEntry::Failure(
+                "broken".to_owned(),
+                CliError::invalid_request("cannot list"),
+            ),
+            TreeEntry::Directory(PathBuf::from("sibling")),
+            TreeEntry::File(FileJob {
+                local: PathBuf::new(),
+                remote: "sibling/last".to_owned(),
+                size_bytes: Some(1),
+            }),
+        ]);
+        let parent_created = std::cell::Cell::new(false);
+        let tally = transfer_tree(
+            entries,
+            |job| {
+                let parent_created = &parent_created;
+                async move {
+                    if job.remote == "sibling/last" {
+                        assert!(
+                            parent_created.get(),
+                            "parent must exist before its file starts"
+                        );
+                    }
+                    (job.remote.clone(), Ok(job.remote))
+                }
+            },
+            |_| {
+                parent_created.set(true);
+                async { ("sibling".to_owned(), Ok(DirectoryOutcome::Created)) }
+            },
+            None,
+            unwatched(),
+            "stored",
+        )
+        .await;
+        assert_eq!(tally.files, 2);
+        assert_eq!(tally.directories, 1);
+        assert_eq!(tally.failures.len(), 1);
+        assert_eq!(tally.failures[0].path, "broken");
+    }
+
+    #[tokio::test]
+    async fn recursive_remote_discovery_resumes_parent_pages_after_a_child_listing_fails() {
+        let store_dir = tempfile::tempdir().expect("tempdir");
+        let (context, _) = watched_context(store_dir.path()).await;
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tree.path().join("broken")).expect("empty directory");
+        std::fs::create_dir(tree.path().join("good")).expect("good directory");
+        std::fs::write(tree.path().join("a-first"), b"first").expect("first file");
+        std::fs::write(tree.path().join("good/child"), b"child").expect("nested file");
+        for index in 0..130 {
+            std::fs::write(tree.path().join(format!("z-{index:03}")), b"file").expect("root file");
+        }
+        run_put_tree(
+            CommandKind::FilesystemPut,
+            &context,
+            tree.path(),
+            "/up",
+            false,
+            None,
+            unwatched(),
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("populate tree: {:?}", failure.error));
+        // Only the first root page has been read. Removing a child after that
+        // must be observed when descent reaches it, and must not lose later
+        // siblings or the remaining root pages.
+        let entries = remote_tree(&context, "/up", "remote_path", None)
+            .await
+            .expect("start discovery");
+        let broken = parse_remote(&context, "/up/broken", "remote_path").expect("path");
+        context
+            .target
+            .delete_path(
+                &broken,
+                &loonfs_client::DeleteOptions::new(context.actor().clone()),
+            )
+            .await
+            .expect("delete child");
+        let tally = transfer_tree(
+            entries,
+            |job| async move { (job.remote.clone(), Ok(job.remote)) },
+            |relative| async move {
+                (
+                    relative.display().to_string(),
+                    Ok(DirectoryOutcome::AlreadyExists),
+                )
+            },
+            None,
+            unwatched(),
+            "wrote",
+        )
+        .await;
+        assert_eq!(
+            tally.files, 132,
+            "every root page and the surviving child was visited"
+        );
+        assert_eq!(tally.failures.len(), 1);
+        assert_eq!(tally.failures[0].path, "/up/broken");
+        assert!(tally.heads.drift().is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
