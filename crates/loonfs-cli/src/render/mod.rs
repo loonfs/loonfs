@@ -19,8 +19,12 @@ use loonfs_api::{
 use serde::Serialize;
 use std::io::{self, Write};
 
-pub(crate) use human::{human_path_entry, human_success};
-pub(crate) use json::{json_error, json_success, render_parse_error};
+pub(crate) use human::human_path_entry;
+#[cfg(test)]
+use human::human_success;
+#[cfg(test)]
+use json::json_success;
+pub(crate) use json::{json_error, render_parse_error};
 pub(crate) use summaries::{
     gc_pass_line, store_probe_summary_line, store_probe_verdict, StoreProbeVerdict,
 };
@@ -32,27 +36,25 @@ pub(crate) enum OutputFormat {
 }
 
 pub(crate) fn render_success(output: &CommandOutput, format: OutputFormat) -> io::Result<()> {
+    write_success(output, format, io::stdout().lock())
+}
+
+pub(crate) fn write_success(
+    output: &CommandOutput,
+    format: OutputFormat,
+    mut writer: impl Write,
+) -> io::Result<()> {
     if format == OutputFormat::Json {
-        let body = json_success(output)?;
-        let mut stdout = io::stdout().lock();
-        stdout.write_all(body.as_bytes())?;
-        stdout.write_all(b"\n")?;
+        json::write_json_success(output, &mut writer)?;
+        writer.write_all(b"\n")?;
         return Ok(());
     }
-
     match &output.data {
-        CommandData::CompletionScript(bytes) => {
-            let mut stdout = io::stdout().lock();
-            stdout.write_all(bytes)?;
-        }
-        // Already written, chunk by chunk, by the command itself.
+        CommandData::CompletionScript(bytes) => writer.write_all(bytes)?,
         CommandData::StreamedToStdout => {}
         _ => {
-            let rendered = human_success(output);
-            let mut stdout = io::stdout().lock();
-            stdout.write_all(rendered.as_bytes())?;
-            if !rendered.ends_with('\n') {
-                stdout.write_all(b"\n")?;
+            if !human::write_human_success(output, &mut writer)? {
+                writer.write_all(b"\n")?;
             }
         }
     }

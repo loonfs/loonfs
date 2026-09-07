@@ -2,7 +2,7 @@
 
 use crate::config::NAMESPACE_ENV;
 use loonfs_api::ErrorCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 macro_rules! cli_error_codes {
     (@count) => { 0 };
@@ -60,7 +60,7 @@ cli_error_codes! {
 /// same code. Validation after argument parsing uses `invalid_request`.
 /// Parser errors use the CLI-local `invalid_usage` code. Other local codes are
 /// created by the constructors below.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CliError {
     pub code: String,
     /// Feature key for `not_supported` errors.

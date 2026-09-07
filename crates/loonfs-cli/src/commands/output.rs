@@ -1,5 +1,6 @@
 //! The typed command results the renderer turns into text or JSON.
 
+use super::tree_failures::TreeTransferFailures;
 use crate::args::CommandKind;
 use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
@@ -14,7 +15,7 @@ use loonfs_api::{
     FileRevision, GrepMatch, InodeId, ListCheckpointsResponse, Namespace, NamespaceId, PathEntry,
     ReleaseCheckpointResponse, RunMaintenanceResponse,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct ListingHeadDrift {
@@ -45,7 +46,7 @@ impl ListingHeadObservation {
 }
 
 /// One failed item inside a recursive transfer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TreeTransferFailure {
     /// The path that failed — remote for uploads and copies, whichever side
     /// failed for downloads.
@@ -169,7 +170,7 @@ impl Serialize for MaintenanceRan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CommandData {
     Capabilities(CapabilityDocument),
@@ -294,7 +295,7 @@ pub(crate) enum CommandData {
         /// Heads observed while listing the source tree.
         #[serde(skip_serializing_if = "Option::is_none")]
         head_drift: Option<ListingHeadDrift>,
-        failures: Vec<TreeTransferFailure>,
+        failures: TreeTransferFailures,
     },
     FileMutation {
         target: String,

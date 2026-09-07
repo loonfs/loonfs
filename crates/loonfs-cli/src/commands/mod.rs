@@ -13,10 +13,12 @@ mod profile;
 mod profile_config;
 mod recursive;
 mod snapshot;
+mod tree_failures;
+pub(crate) use tree_failures::TreeTransferFailures;
 
 pub(crate) use self::output::{
     CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus, ListingHeadDrift,
-    MaintenanceKeyReport, MaintenanceRan, TrashListing, TreeTransferFailure,
+    MaintenanceKeyReport, MaintenanceRan, TrashListing,
 };
 
 use crate::args::{Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior};

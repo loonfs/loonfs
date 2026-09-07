@@ -10,6 +10,7 @@ use super::context::{
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadObservation, TreeTransferFailure,
 };
+use super::tree_failures::TreeTransferFailures;
 use crate::args::{CommandKind, RuntimeBehavior};
 use crate::error::CliError;
 use crate::payload::LocalPayload;
@@ -54,7 +55,7 @@ impl DirectoryOutcome {
 struct TreeTally {
     files: u64,
     directories: u64,
-    failures: Vec<TreeTransferFailure>,
+    failures: TreeTransferFailures,
     heads: ListingHeadObservation,
 }
 
@@ -63,7 +64,7 @@ impl TreeTally {
         Self {
             files: 0,
             directories: 0,
-            failures: Vec::new(),
+            failures: TreeTransferFailures::default(),
             heads: ListingHeadObservation::default(),
         }
     }
@@ -74,7 +75,7 @@ impl TreeTally {
         result: Result<String, CliError>,
         runtime: RuntimeBehavior,
         verb: &str,
-    ) {
+    ) -> Result<(), CliError> {
         match result {
             Ok(target) => {
                 self.files += 1;
@@ -82,8 +83,9 @@ impl TreeTally {
                     write_stderr_progress(format_args!("{verb} {target}"));
                 }
             }
-            Err(error) => self.fail(path, error),
+            Err(error) => self.fail(path, error)?,
         }
+        Ok(())
     }
 
     fn record_directory(&mut self, outcome: DirectoryOutcome) {
@@ -92,11 +94,18 @@ impl TreeTally {
         }
     }
 
-    fn fail(&mut self, path: impl Into<String>, error: CliError) {
-        self.failures.push(TreeTransferFailure {
-            path: path.into(),
-            error,
-        });
+    fn fail(&mut self, path: impl Into<String>, error: CliError) -> Result<(), CliError> {
+        self.failures
+            .push(TreeTransferFailure {
+                path: path.into(),
+                error,
+            })
+            .map_err(|error| {
+                CliError::new(
+                    "io_error",
+                    format!("could not save recursive failure report: {error}"),
+                )
+            })
     }
 }
 
@@ -131,7 +140,7 @@ async fn transfer_tree<S, F, FF, D, DF>(
     progress: Option<&ProgressReporter>,
     runtime: RuntimeBehavior,
     verb: &str,
-) -> TreeTally
+) -> Result<TreeTally, CliError>
 where
     S: Stream<Item = TreeEntry>,
     F: Fn(FileJob) -> FF,
@@ -150,7 +159,7 @@ where
         tokio::select! {
             biased;
             Some((path, result)) = pending.next(), if !pending.is_empty() => {
-                tally.record_file(path, result, runtime, verb);
+                tally.record_file(path, result, runtime, verb)?;
             }
             entry = entries.next(), if !finished_discovery && pending.len() < TREE_TRANSFER_CONCURRENCY => {
                 match entry {
@@ -169,7 +178,7 @@ where
                             tokio::select! {
                                 biased;
                                 Some((path, result)) = pending.next(), if !pending.is_empty() => {
-                                    tally.record_file(path, result, runtime, verb);
+                                    tally.record_file(path, result, runtime, verb)?;
                                 }
                                 (path, result) = &mut directory => {
                                     match result {
@@ -179,7 +188,7 @@ where
                                                 write_stderr_progress(format_args!("{} {path}", outcome.progress_label()));
                                             }
                                         }
-                                        Err(error) => tally.fail(path, error),
+                                        Err(error) => tally.fail(path, error)?,
                                     }
                                     break;
                                 }
@@ -189,7 +198,7 @@ where
                     Some(TreeEntry::Head(head)) => tally.heads.observe(head),
                     Some(TreeEntry::Failure(path, error)) => {
                         discovery_failed = true;
-                        tally.fail(path, error);
+                        tally.fail(path, error)?;
                     },
                     None => {
                         finished_discovery = true;
@@ -207,7 +216,7 @@ where
     if let Some(progress) = progress {
         progress.finish();
     }
-    tally
+    Ok(tally)
 }
 
 async fn create_remote_directory(
@@ -341,7 +350,8 @@ pub(crate) async fn run_put_tree(
         runtime,
         "stored",
     )
-    .await;
+    .await
+    .map_err(|error| context.fail(kind, error))?;
     Ok(context.output(
         kind,
         CommandData::TreeTransfer {
@@ -420,7 +430,8 @@ pub(crate) async fn run_get_tree(
         runtime,
         "wrote",
     )
-    .await;
+    .await
+    .map_err(|error| context.fail(kind, error))?;
     tally.record_directory(root_outcome);
     warn_drift(&tally, runtime);
     Ok(context.output(
@@ -521,7 +532,8 @@ pub(crate) async fn run_copy_tree(
         runtime,
         "copied",
     )
-    .await;
+    .await
+    .map_err(|error| context.fail(kind, error))?;
     warn_drift(&tally, runtime);
     Ok(context.output(
         kind,
@@ -658,7 +670,8 @@ mod tests {
             unwatched(),
             "stored",
         )
-        .await;
+        .await
+        .expect("transfer report");
         assert_eq!(tally.files, 100);
         assert!(tally.failures.is_empty());
         assert_eq!(completed.get(), 100);
@@ -696,7 +709,8 @@ mod tests {
             unwatched(),
             "stored",
         )
-        .await;
+        .await
+        .expect("transfer report");
         assert_eq!(tally.files, 1);
         assert_eq!(tally.directories, 1);
     }
@@ -743,11 +757,22 @@ mod tests {
             unwatched(),
             "stored",
         )
-        .await;
+        .await
+        .expect("transfer report");
         assert_eq!(tally.files, 2);
         assert_eq!(tally.directories, 1);
         assert_eq!(tally.failures.len(), 1);
-        assert_eq!(tally.failures[0].path, "broken");
+        assert_eq!(
+            tally
+                .failures
+                .iter()
+                .expect("read report")
+                .next()
+                .expect("failure")
+                .expect("decode failure")
+                .path,
+            "broken"
+        );
     }
 
     #[tokio::test]
@@ -801,13 +826,24 @@ mod tests {
             unwatched(),
             "wrote",
         )
-        .await;
+        .await
+        .expect("transfer report");
         assert_eq!(
             tally.files, 132,
             "every root page and the surviving child was visited"
         );
         assert_eq!(tally.failures.len(), 1);
-        assert_eq!(tally.failures[0].path, "/up/broken");
+        assert_eq!(
+            tally
+                .failures
+                .iter()
+                .expect("read report")
+                .next()
+                .expect("failure")
+                .expect("decode failure")
+                .path,
+            "/up/broken"
+        );
         assert!(tally.heads.drift().is_some());
     }
 
