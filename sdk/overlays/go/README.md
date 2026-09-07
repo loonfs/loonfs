@@ -53,6 +53,14 @@ The Go SDK makes one HTTP attempt by default. You can opt into retries with
 `option.WithMaxAttempts`, but only do so for operations your application can
 safely repeat.
 
+For publication retries, call `client.Files.PrepareFileBytes(ctx, namespaceID,
+payload)` once and retain the returned `*files.PreparedFileContent`. Publish it
+with `client.Files.PutFilePrepared(ctx, files.PreparedUploadInput{...})`, keeping
+the prepared content, commit ID, path, actor, and options identical on every
+attempt. Preparation does not create a visible file or extend the upload
+lifetime. Calling `Upload` again starts a fresh upload and cannot replay a
+previously committed ID.
+
 ## Generated code
 
 This SDK is generated from the LoonFS OpenAPI specification. Please report SDK

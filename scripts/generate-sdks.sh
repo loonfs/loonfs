@@ -338,7 +338,7 @@ source = source.replace(
     generated_import,
     "    from .client import AsyncLoonFS\n"
     "    from .core.api_error import ApiError\n"
-    "    from .transfers import FileDownloadResult, FileUploadResult, LoonFS\n",
+    "    from .transfers import FileDownloadResult, FileUploadResult, PreparedFileContent, LoonFS\n",
 )
 generated_mapping = '    "LoonFS": ".client",\n'
 assert source.count(generated_mapping) == 1, "generated server.py client mapping not found"
@@ -346,6 +346,7 @@ source = source.replace(generated_mapping, '    "LoonFS": ".transfers",\n')
 for anchor, insertion, label in (
     ('    "AsyncLoonFS": ".client",\n', '    "ApiError": ".core.api_error",\n', "ApiError mapping"),
     ('    "FileRevision": ".types",\n', '    "FileDownloadResult": ".transfers",\n', "FileDownloadResult mapping"),
+    ('    "FileRevision": ".types",\n', '    "PreparedFileContent": ".transfers",\n', "PreparedFileContent mapping"),
     ('    "FilesystemChange": ".types",\n', '    "FileUploadResult": ".transfers",\n', "FileUploadResult mapping"),
 ):
     assert source.count(anchor) == 1, f"generated server.py anchor for {label} not found exactly once"
@@ -353,6 +354,7 @@ for anchor, insertion, label in (
 for anchor, insertion, label in (
     ('    "AsyncLoonFS",\n', '    "ApiError",\n', "ApiError __all__ entry"),
     ('    "FileRevision",\n', '    "FileDownloadResult",\n', "FileDownloadResult __all__ entry"),
+    ('    "FileRevision",\n', '    "PreparedFileContent",\n', "PreparedFileContent __all__ entry"),
     ('    "FilesystemChange",\n', '    "FileUploadResult",\n', "FileUploadResult __all__ entry"),
 ):
     assert source.count(anchor) == 1, f"generated server.py anchor for {label} not found exactly once"
@@ -454,6 +456,8 @@ source = replace_once(
     '    FileDownloadResult,\n'
     '    FileUploadInput,\n'
     '    FileUploadResult,\n'
+    '    PreparedFileContent,\n'
+    '    PreparedFileUploadInput,\n'
     '} from "./transfers.js";\n',
 )
 index_path.write_text(source)

@@ -79,7 +79,13 @@ class FileDownloadResult:
 
 
 @dataclass(frozen=True)
-class _StagedContent:
+class PreparedFileContent:
+    """Completed content retained for repeated publication of the same request.
+
+    Preparation does not publish a file or extend the upload lifetime.
+    Treat the content reference and token as immutable.
+    """
+
     content_ref: ContentRef
     content_token: str | None
 
@@ -105,8 +111,35 @@ class FilesClient(_GeneratedFilesClient):
         expected_revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
     ) -> FileUploadResult:
-        """Upload in-memory bytes, complete the upload, and commit the file."""
+        """Upload fresh content and publish it.
 
+        For publication retries, retain prepare_file_bytes() output and call
+        put_file_prepared() with unchanged inputs.
+        """
+
+        prepared = self.prepare_file_bytes(
+            namespace_id, content=content, http_client=http_client
+        )
+        return self.put_file_prepared(
+            namespace_id,
+            path=path,
+            prepared=prepared,
+            actor=actor,
+            commit_id=commit_id,
+            message=message,
+            behavior=behavior,
+            expected_inode_id=expected_inode_id,
+            expected_revision_no=expected_revision_no,
+        )
+
+    def prepare_file_bytes(
+        self,
+        namespace_id: str,
+        *,
+        content: bytes,
+        http_client: httpx.Client | None = None,
+    ) -> PreparedFileContent:
+        """Upload bytes once without publishing; retain the result for retries."""
         begin = _create_upload(self._root, namespace_id, content)
         if http_client is None:
             with httpx.Client() as transfer_client:
@@ -118,7 +151,23 @@ class FilesClient(_GeneratedFilesClient):
                 self._root, http_client, namespace_id, begin, content
             )
 
-        operation_arguments = {"path": path, "content_ref": staged.content_ref}
+        return staged
+
+    def put_file_prepared(
+        self,
+        namespace_id: str,
+        *,
+        path: str,
+        prepared: PreparedFileContent,
+        actor: ActorRef,
+        commit_id: str,
+        message: str | None = None,
+        behavior: DestinationBehavior | None = None,
+        expected_inode_id: str | None = None,
+        expected_revision_no: RevisionNo | None = None,
+    ) -> FileUploadResult:
+        """Publish retained content; reuse it with identical inputs to retry safely."""
+        operation_arguments = {"path": path, "content_ref": prepared.content_ref}
         if behavior is not None:
             operation_arguments["behavior"] = behavior
         if expected_inode_id is not None:
@@ -130,8 +179,8 @@ class FilesClient(_GeneratedFilesClient):
             "actor": actor,
             "commit_id": commit_id,
             "operations": [operation],
-            "content_tokens": [staged.content_token]
-            if staged.content_token is not None
+            "content_tokens": [prepared.content_token]
+            if prepared.content_token is not None
             else [],
         }
         if message is not None:
@@ -207,7 +256,13 @@ class LoonFS(_GeneratedLoonFS):
         return self._transfer_files
 
 
-__all__ = ["FileDownloadResult", "FileUploadResult", "FilesClient", "LoonFS"]
+__all__ = [
+    "FileDownloadResult",
+    "FileUploadResult",
+    "PreparedFileContent",
+    "FilesClient",
+    "LoonFS",
+]
 
 
 def _get_file_proxied(
@@ -298,7 +353,7 @@ def _stage_upload(
     namespace_id: str,
     begin,
     content: bytes,
-) -> _StagedContent:
+) -> PreparedFileContent:
     if begin.mode == "service_proxied":
         try:
             client.uploads.put_content(namespace_id, begin.upload_id, request=content)
@@ -354,7 +409,7 @@ def _stage_multipart(
     part_size_bytes: int,
     checksum_algorithm: str,
     content: bytes,
-) -> _StagedContent:
+) -> PreparedFileContent:
     if part_size_bytes <= 0:
         raise RuntimeError("multipart response returned a non-positive part size")
     parts = [
@@ -439,13 +494,13 @@ def _send_presigned(
     return response
 
 
-def _completed_content(response: UploadSession) -> _StagedContent:
+def _completed_content(response: UploadSession) -> PreparedFileContent:
     if response.status != "completed":
         raise RuntimeError(
             f"upload {response.upload_id!r} completed with status "
             f"{response.status!r}"
         )
-    return _StagedContent(
+    return PreparedFileContent(
         content_ref=response.content_ref,
         content_token=response.content_token,
     )

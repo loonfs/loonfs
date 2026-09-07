@@ -28,6 +28,10 @@ export interface FileUploadInput {
     expected_revision_no?: LoonFS.RevisionNo;
 }
 
+export interface PreparedFileUploadInput extends Omit<FileUploadInput, "content"> {
+    prepared: PreparedFileContent;
+}
+
 export interface FileUploadResult {
     namespace_id: LoonFS.NamespaceId;
     commit_id: LoonFS.CommitId;
@@ -48,9 +52,10 @@ export interface FileDownloadResult {
     content: Uint8Array;
 }
 
-interface StagedContent {
-    contentRef: LoonFS.ContentRef;
-    contentToken?: LoonFS.ContentToken;
+/** Completed content; preparation does not publish or extend the upload lifetime. */
+export interface PreparedFileContent {
+    readonly contentRef: LoonFS.ContentRef;
+    readonly contentToken?: LoonFS.ContentToken;
 }
 
 interface DirectPutBody {
@@ -81,19 +86,30 @@ export class FilesClient extends GeneratedFilesClient {
         super(options);
     }
 
-    /** Uploads in-memory bytes and commits them at one path. Streaming and resume are follow-ups. */
+    /** Uploads fresh content and publishes it. For publication retries, retain prepareFileBytes() output and use putFilePrepared(). */
     public async upload(input: FileUploadInput): Promise<FileUploadResult> {
-        const staged = await stageBytes(this.root, input.namespace_id, input.content);
+        const { content, ...publication } = input;
+        const prepared = await this.prepareFileBytes({ namespace_id: input.namespace_id, content });
+        return this.putFilePrepared({ ...publication, prepared });
+    }
+
+    /** Upload once without publishing; retain the result for publication retries. */
+    public async prepareFileBytes(input: Pick<FileUploadInput, "namespace_id" | "content">): Promise<PreparedFileContent> {
+        return stageBytes(this.root, input.namespace_id, input.content);
+    }
+
+    /** Reuse prepared content and identical publication inputs to retry the same commit. */
+    public async putFilePrepared(input: PreparedFileUploadInput): Promise<FileUploadResult> {
         const request: LoonFS.CommitRequest = {
             namespace_id: input.namespace_id,
             actor: input.actor,
             commit_id: input.commit_id,
-            content_tokens: staged.contentToken === undefined ? [] : [staged.contentToken],
+            content_tokens: input.prepared.contentToken === undefined ? [] : [input.prepared.contentToken],
             operations: [
                 {
                     kind: "put_file",
                     path: input.path,
-                    content_ref: staged.contentRef,
+                    content_ref: input.prepared.contentRef,
                     behavior: input.behavior ?? "no_replace",
                     expected_inode_id: input.expected_inode_id,
                     expected_revision_no: input.expected_revision_no,
@@ -213,7 +229,7 @@ async function stageBytes(
     client: GeneratedLoonFSClient,
     namespaceId: LoonFS.NamespaceId,
     bytes: Uint8Array,
-): Promise<StagedContent> {
+): Promise<PreparedFileContent> {
     const capabilities = await client.capabilities.retrieve();
     const beginRequest = selectBeginRequest(capabilities, bytes);
     const begin = await client.uploads.create({
@@ -268,7 +284,7 @@ async function stageServiceProxied(
     namespaceId: LoonFS.NamespaceId,
     bytes: Uint8Array,
     begin: LoonFS.BeginUploadResponse.ServiceProxied,
-): Promise<StagedContent> {
+): Promise<PreparedFileContent> {
     try {
         await client.uploads.putContent(arrayBuffer(bytes), namespaceId, begin.upload_id);
         return stagedContent(
@@ -289,7 +305,7 @@ async function stageDirectPut(
     namespaceId: LoonFS.NamespaceId,
     bytes: Uint8Array,
     begin: LoonFS.BeginUploadResponse.DirectPut,
-): Promise<StagedContent> {
+): Promise<PreparedFileContent> {
     let upload: DirectPutBody;
     try {
         requirePresignedMethod(begin.access, "PUT", "direct PUT");
@@ -319,7 +335,7 @@ async function stageMultipart(
     namespaceId: LoonFS.NamespaceId,
     bytes: Uint8Array,
     begin: LoonFS.BeginUploadResponse.DirectMultipart,
-): Promise<StagedContent> {
+): Promise<PreparedFileContent> {
     const { checksum_algorithm: algorithm, part_size_bytes: partSize } = begin;
     if (!Number.isSafeInteger(partSize) || partSize <= 0) {
         throw new Error(`invalid multipart part size ${partSize}`);
@@ -396,7 +412,7 @@ function splitBytes(bytes: Uint8Array, partSize: number): Uint8Array[] {
     return parts;
 }
 
-function stagedContent(response: LoonFS.UploadSession): StagedContent {
+function stagedContent(response: LoonFS.UploadSession): PreparedFileContent {
     if (response.status !== "completed") {
         throw new Error(`upload ${response.upload_id} completed with status ${response.status}`);
     }

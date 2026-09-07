@@ -1677,6 +1677,36 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert downloaded.content == payload
 
 
+def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
+    from loonfs.server import PreparedFileContent
+
+    client = harness.client
+    namespace_id = "conf-python-prepared"
+    client.namespaces.create(namespace_id=namespace_id)
+    prepared = client.files.prepare_file_bytes(namespace_id, content=b"original bytes")
+    assert isinstance(prepared, PreparedFileContent)
+    inputs = dict(path="/original", prepared=prepared,
+                  actor=ActorRef(kind="user", id="prepared-user"), commit_id="prepared-put")
+    with pytest.raises(NotFoundError):
+        client.files.retrieve(namespace_id, path="/original")
+    first = client.files.put_file_prepared(namespace_id, **inputs)
+    _apply(client, namespace_id, "prepared-rename", inputs["actor"],
+           FilesystemOperation_MovePath(from_path="/original", to_path="/renamed"))
+    assert client.files.put_file_prepared(namespace_id, **inputs) == first
+    for changed in [dict(message="changed"), dict(path="/renamed"), dict(behavior="replace")]:
+        with pytest.raises(ConflictError) as conflict:
+            client.files.put_file_prepared(namespace_id, **(inputs | changed))
+        assert conflict.value.body.code == "commit_id_reuse_conflict"
+    fresh = client.files.prepare_file_bytes(namespace_id, content=b"original bytes")
+    with pytest.raises(ConflictError):
+        client.files.put_file_prepared(namespace_id, **(inputs | dict(prepared=fresh)))
+    entry = client.files.retrieve(namespace_id, path="/renamed")
+    guarded = inputs | dict(path="/renamed", commit_id="prepared-replace", behavior="replace",
+                           expected_inode_id=entry.inode_id, expected_revision_no=entry.revision_no)
+    replaced = client.files.put_file_prepared(namespace_id, **guarded)
+    assert client.files.put_file_prepared(namespace_id, **guarded) == replaced
+
+
 def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(
         cases["end_to_end"], EndToEndRequest, EndToEndExpected

@@ -588,18 +588,26 @@ Keep the `content_ref` a completed upload returned and reuse it across
 commit retries; that is the cheapest retry and the one the server can
 answer on its own.
 
-**Rust convenience calls.** Both the HTTP client and embedded runtime offer
-`prepare_file_bytes()` / `prepare_file_stream()`, followed by `put_file_prepared()`.
-Retain the prepared content and use the same explicit commit ID, path, and
-options on each publication attempt. Preparation alone does not publish a file
-or extend the completed upload's lifetime.
+**Prepared content.** Prepare bytes once, retain the returned content, then publish
+with the same explicit commit ID, path, actor, and options on each attempt.
+Preparation alone does not publish a file or extend the completed upload's
+lifetime.
 
-Calling `put_file_bytes()` or `put_file_stream()` again uploads a new object; using
-an already-committed ID therefore returns `commit_id_reuse_conflict`, even for
-identical bytes. The unused upload can be reclaimed after its grace period.
-These helpers do not read the change feed or substitute an earlier content
-reference. To recover across processes, the remote CLI saves the full request
-before submission and resends it directly.
+| Client | Prepare content | Publish retained content |
+| --- | --- | --- |
+| Rust HTTP and embedded runtime | `prepare_file_bytes()` / `prepare_file_stream()` | `put_file_prepared()` |
+| Python synchronous client | `files.prepare_file_bytes()` | `files.put_file_prepared()` |
+| Go | `Files.PrepareFileBytes()` | `Files.PutFilePrepared()` |
+| TypeScript server and browser clients | `files.prepareFileBytes()` | `files.putFilePrepared()` |
+
+The whole-file convenience calls (`upload` / `Upload` in generated SDKs,
+`put_file_bytes()` / `put_file_stream()` in Rust) prepare a new object on each
+invocation. Reusing an already-committed ID with fresh content therefore returns
+`commit_id_reuse_conflict`, even for identical bytes. The unused upload can be
+reclaimed after its grace period. These helpers do not read the change feed or
+substitute an earlier content reference. To recover across processes, retain the
+complete publication request; the remote CLI saves that request before
+submission and resends it directly.
 
 Identical resubmission is the reconciliation mechanism. There is no separate
 commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
