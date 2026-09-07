@@ -27,7 +27,7 @@ use loonfs::{
     select_next_iterator, write_segments_in_waves, CheckpointFilesPageCursor, CoreError,
     CreateCheckpointOptions, FsMaintenance, FsReader, GcCursorKeyspace, GraceAge,
     NamespaceGcCursor, PassBudget, RuntimeError, SegmentBlockLoader, SegmentRowIterator,
-    StoreFailureClass, DEFAULT_GC_MAX_OBJECTS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    StoreFailureClass, DEFAULT_GC_MAX_STEPS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
@@ -1256,12 +1256,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             None => NamespaceGcCursor::initial(namespace_id, GrepGcKeyspace {}),
         };
         let mut report = GrepGcReport::default();
-        // An absent budget is the per-pass default, resolved here — the
-        // entry point an operator calls — because that is where the runtime
-        // resolves its own, and one authority is what keeps the two the
-        // same number.
-        let mut budget =
-            PassBudget::new(Some(request.max_objects.unwrap_or(DEFAULT_GC_MAX_OBJECTS)));
+        // Each object read is one work step for grep collection. Use the shared
+        // default work budget when the caller does not supply a read limit.
+        let mut budget = PassBudget::new(Some(request.max_objects.unwrap_or(DEFAULT_GC_MAX_STEPS)));
         let reads = self.reads(namespace_id);
         // Liveness is decided once per pass and refreshed in bounded chunks
         // below. This first read is charged like any other.

@@ -105,7 +105,7 @@ async fn run_maintenance_metadata(
     ))
 }
 
-/// Runs garbage collection until it finishes unless `--max-objects` requests
+/// Runs garbage collection until it finishes unless `--max-steps` requests
 /// one bounded pass. Multi-pass human output writes progress to stderr and a
 /// combined summary to stdout. JSON and single-pass output contain no progress
 /// lines.
@@ -116,8 +116,8 @@ async fn run_maintenance_gc(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let single_pass = args.max_objects.is_some();
-    let max_objects = Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS));
+    let single_pass = args.max_steps.is_some();
+    let max_steps = Some(args.max_steps.unwrap_or(loonfs::DEFAULT_GC_MAX_STEPS));
     let response = run_cursor_passes(
         PassProgress::new(runtime),
         single_pass,
@@ -129,7 +129,7 @@ async fn run_maintenance_gc(
                     context.namespace(),
                     RunMaintenanceRequest::Gc(GcRequest {
                         grace_window_ms: args.grace_window_ms,
-                        max_objects,
+                        max_steps,
                         cursor,
                     }),
                 )
@@ -668,7 +668,7 @@ async fn run_maintenance_index_status(
 }
 
 /// Collects the namespace's grep keyspace, looping the cursor exactly like
-/// `maintenance gc`: bounded passes through completion, unless `--max-objects`
+/// Grep collection runs bounded passes through completion, unless `--max-objects`
 /// asks for one pass and its resume token.
 async fn run_maintenance_index_gc(
     kind: CommandKind,

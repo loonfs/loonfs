@@ -848,10 +848,11 @@ pub struct GcRequest {
     /// server's advertised safety floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Maximum durable GC work steps in this call, or `None` to finish the run.
+    /// Maximum durable GC work steps in this call; the default is 1024.
     /// Even a budget of one saves progress through marking and sweeping.
+    /// This is not a limit on object-store requests or memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_objects: Option<u64>,
+    pub max_steps: Option<u64>,
     /// The opaque `next_cursor` returned by an earlier call for this namespace.
     /// Omitting it joins any active run; scan positions remain server-owned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -882,8 +883,6 @@ pub struct RetainedCandidates {
     pub upload_session_window: u64,
     /// Upload sessions whose deletion safety could not be determined.
     pub upload_session_undecided: u64,
-    /// Completed sessions retained because their reference scan exceeded `max_objects`.
-    pub content_scan_deferred: u64,
 }
 
 /// Object counts deleted by one garbage-collection pass, grouped by family.
@@ -971,9 +970,9 @@ pub struct GcResponse {
     pub retained: RetainedCandidates,
     /// True when ambiguous roots suppressed manifest/segment deletion.
     pub retention_degraded: bool,
-    /// Whether `max_objects` prevented a complete reference scan for content reclamation.
+    /// Whether reference marking is unfinished, so content reclamation has not started.
     pub content_reclamation_deferred: bool,
-    /// Whether the pass reached `max_objects` before completion.
+    /// Whether the pass reached `max_steps` before completion.
     pub budget_exhausted: bool,
     /// The opaque run token for remaining marking, sweeping, or cleanup work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1035,8 +1034,6 @@ pub enum RetainedReason {
     UploadSessionWindow,
     /// Counts into [`RetainedCandidates::upload_session_undecided`].
     UploadSessionUndecided,
-    /// Counts into [`RetainedCandidates::content_scan_deferred`].
-    ContentScanDeferred,
 }
 
 impl RetainedReason {
@@ -1051,14 +1048,13 @@ impl RetainedReason {
             Self::CheckpointNotReleasable => &mut retained.checkpoint_not_releasable,
             Self::UploadSessionWindow => &mut retained.upload_session_window,
             Self::UploadSessionUndecided => &mut retained.upload_session_undecided,
-            Self::ContentScanDeferred => &mut retained.content_scan_deferred,
         }
     }
 }
 
 impl RetainedCandidates {
     /// Returns every reason and count in a fixed order.
-    pub fn by_reason(&self) -> [(&'static str, u64); 10] {
+    pub fn by_reason(&self) -> [(&'static str, u64); 9] {
         let Self {
             referenced,
             within_grace_window,
@@ -1069,7 +1065,6 @@ impl RetainedCandidates {
             checkpoint_not_releasable,
             upload_session_window,
             upload_session_undecided,
-            content_scan_deferred,
         } = *self;
         [
             ("referenced", referenced),
@@ -1081,7 +1076,6 @@ impl RetainedCandidates {
             ("checkpoint_not_releasable", checkpoint_not_releasable),
             ("upload_session_window", upload_session_window),
             ("upload_session_undecided", upload_session_undecided),
-            ("content_scan_deferred", content_scan_deferred),
         ]
     }
 
@@ -1097,7 +1091,6 @@ impl RetainedCandidates {
             checkpoint_not_releasable,
             upload_session_window,
             upload_session_undecided,
-            content_scan_deferred,
         } = other;
         self.referenced += referenced;
         self.within_grace_window += within_grace_window;
@@ -1108,7 +1101,6 @@ impl RetainedCandidates {
         self.checkpoint_not_releasable += checkpoint_not_releasable;
         self.upload_session_window += upload_session_window;
         self.upload_session_undecided += upload_session_undecided;
-        self.content_scan_deferred += content_scan_deferred;
     }
 
     /// The reason with the highest count, and that count. `None` when
@@ -2118,13 +2110,13 @@ mod tests {
             (
                 serde_json::json!({
                     "kind": "gc",
-                    "max_objects": 10_000,
+                    "max_steps": 10_000,
                     "grace_window_ms": 600_000,
                     "cursor": "..."
                 }),
                 Some(RunMaintenanceRequest::Gc(GcRequest {
                     grace_window_ms: Some(600_000),
-                    max_objects: Some(10_000),
+                    max_steps: Some(10_000),
                     cursor: Some("...".to_owned()),
                 })),
             ),
@@ -2135,6 +2127,7 @@ mod tests {
             (serde_json::json!({}), None),
             (serde_json::json!({"kind": "nope"}), None),
             (serde_json::json!({"kind": "gc", "bogus": 1}), None),
+            (serde_json::json!({"kind": "gc", "max_objects": 1}), None),
             (serde_json::json!({"kind": "retention", "bogus": 1}), None),
             (
                 serde_json::json!({"kind": "metadata_compaction", "bogus": 1}),

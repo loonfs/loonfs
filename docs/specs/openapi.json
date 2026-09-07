@@ -3262,12 +3262,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "content_scan_deferred": {
-            "description": "Completed sessions retained because their reference scan exceeded `max_objects`.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "degraded_roots": {
             "description": "Candidates retained because root resolution failed.",
             "format": "int64",
@@ -3326,8 +3320,7 @@
           "unrecognized_key",
           "checkpoint_not_releasable",
           "upload_session_window",
-          "upload_session_undecided",
-          "content_scan_deferred"
+          "upload_session_undecided"
         ],
         "type": "object"
       },
@@ -3389,8 +3382,8 @@
             ],
             "type": "string"
           },
-          "max_objects": {
-            "description": "Maximum durable GC work steps in this call, or `None` to finish the run.\nEven a budget of one saves progress through marking and sweeping.",
+          "max_steps": {
+            "description": "Maximum durable GC work steps in this call; the default is 1024.\nEven a budget of one saves progress through marking and sweeping.\nThis is not a limit on object-store requests or memory.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -3488,11 +3481,11 @@
         "description": "Result of one bounded mark-and-sweep garbage-collection pass.",
         "properties": {
           "budget_exhausted": {
-            "description": "Whether the pass reached `max_objects` before completion.",
+            "description": "Whether the pass reached `max_steps` before completion.",
             "type": "boolean"
           },
           "content_reclamation_deferred": {
-            "description": "Whether `max_objects` prevented a complete reference scan for content reclamation.",
+            "description": "Whether reference marking is unfinished, so content reclamation has not started.",
             "type": "boolean"
           },
           "deleted": {
@@ -5107,7 +5100,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` run inspects up to 1024 objects unless `max_objects` says otherwise, and returns a cursor when more remain.",
+        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call performs up to 1024 durable work steps unless `max_steps` says otherwise, and returns a cursor when work remains. Steps include marking, merging, and sweeping; the budget does not count object-store requests.",
         "operationId": "run_maintenance",
         "parameters": [
           {

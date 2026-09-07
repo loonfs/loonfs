@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// window a completed session's content is protected for is derived in
 /// `limits`, not configured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
     /// Maximum durable work steps in this invocation. One source object,
@@ -21,7 +22,7 @@ pub struct GcConfig {
     /// is saved between calls, including with a budget of one.
     /// `None` runs the active collection to completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_objects: Option<u64>,
+    pub max_steps: Option<u64>,
     /// Opaque namespace-bound run identity returned by an earlier invocation.
     /// Progress and deletion evidence live on the server. Omitting the token
     /// joins any active run; an old token never starts a new collection.
@@ -33,7 +34,7 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-            max_objects: None,
+            max_steps: None,
             cursor: None,
         }
     }
@@ -51,11 +52,33 @@ impl GcConfig {
                 self.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
             )));
         }
-        if self.max_objects == Some(0) {
+        if self.max_steps == Some(0) {
             return Err(CoreError::InvalidGcConfig(
-                "max_objects must be greater than zero".to_owned(),
+                "max_steps must be greater than zero".to_owned(),
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GcConfig;
+
+    #[test]
+    fn an_unknown_budget_name_cannot_become_an_unlimited_run() {
+        let config = GcConfig {
+            max_steps: Some(1),
+            ..GcConfig::default()
+        };
+        let mut encoded = serde_json::to_value(&config).expect("encode config");
+        assert_eq!(
+            serde_json::from_value::<GcConfig>(encoded.clone()).expect("decode config"),
+            config
+        );
+        let fields = encoded.as_object_mut().expect("config object");
+        let budget = fields.remove("max_steps").expect("budget");
+        fields.insert("max_objects".to_owned(), budget);
+        assert!(serde_json::from_value::<GcConfig>(encoded).is_err());
     }
 }

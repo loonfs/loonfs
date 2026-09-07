@@ -255,8 +255,8 @@ impl FsMaintenance {
                 self.load_maintenance_status(namespace_id, true).await?;
                 let mut config = crate::options::gc_config_from_request(request);
                 config
-                    .max_objects
-                    .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
+                    .max_steps
+                    .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_STEPS);
                 self.gc_namespace(namespace_id, &config)
                     .await
                     .map(RunMaintenanceResponse::Gc)

@@ -140,7 +140,7 @@ references, then CAS-publishes its pointer. The old objects become candidates fo
 the disable call never deletes them synchronously. Grep GC retains every
 object named by a verified live root and deletes unreferenced grep objects
 only after its grace window. It walks the prefix as a stream under a read
-budget, like core collection: `max_objects` bounds what one pass spends —
+budget: `max_objects` bounds the object reads one pass spends —
 each key's listing plus the liveness or root re-read that authorizes its
 deletion and the probe that reads its age — and the pass answers an opaque,
 namespace-bound cursor when keys remain. That cursor skips enumeration and
