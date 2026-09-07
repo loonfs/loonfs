@@ -164,13 +164,13 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     let index = load_segment_index(store, segment_cache, memo, descriptor).await?;
     let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
 
-    // A paged scan marches onward through the segment: read ahead so the
-    // following pages are served from the memo instead of their own GETs.
-    let extended_end = if readahead == Readahead::Enabled {
+    // Align the read-ahead end to a fixed window. Advancing within a cached
+    // window must not fetch one more speculative block on every lookup.
+    let extended_end = if readahead == Readahead::Enabled && !needed.is_empty() {
         needed
-            .start
-            .saturating_add(RANGE_SCAN_READAHEAD_BLOCKS)
-            .max(needed.end)
+            .end
+            .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
+            .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
             .min(index.len())
     } else {
         needed.end
