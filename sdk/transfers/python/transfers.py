@@ -1,8 +1,4 @@
-"""Synchronous, in-memory file transfer orchestration.
-
-Streaming and resume are follow-ups. The async client does not have these
-methods yet.
-"""
+"""Synchronous file transfers with verified streaming downloads."""
 
 from __future__ import annotations
 
@@ -14,6 +10,7 @@ import httpx
 
 from .client import LoonFS as _GeneratedLoonFS
 from .files.client import FilesClient as _GeneratedFilesClient
+from .core.request_options import RequestOptions
 from .types import (
     ActorRef,
     BeginUploadRequest_DirectMultipart,
@@ -88,6 +85,118 @@ class PreparedFileContent:
 
     content_ref: ContentRef
     content_token: str | None
+
+
+_TRANSFER_CHUNK_BYTES = 64 * 1024
+
+
+class _IncrementalChecksum:
+    def __init__(self, algorithm: str):
+        self.algorithm = algorithm
+        self.sha = hashlib.sha256() if algorithm == "sha256" else None
+        if algorithm == "crc32c":
+            self.value, self.table, self.mask = (
+                _CRC32C_MASK,
+                _CRC32C_TABLE,
+                _CRC32C_MASK,
+            )
+        elif algorithm == "crc64nvme":
+            self.value, self.table, self.mask = (
+                _CRC64_NVME_MASK,
+                _CRC64_NVME_TABLE,
+                _CRC64_NVME_MASK,
+            )
+        elif algorithm != "sha256":
+            raise ValueError(f"unsupported checksum algorithm {algorithm!r}")
+
+    def update(self, content: bytes) -> None:
+        if self.sha is not None:
+            self.sha.update(content)
+        else:
+            for byte in content:
+                self.value = self.table[(self.value ^ byte) & 0xFF] ^ (self.value >> 8)
+
+    def finish(self) -> Checksum:
+        value = (
+            self.sha.hexdigest()
+            if self.sha is not None
+            else format(
+                self.value ^ self.mask, "08x" if self.algorithm == "crc32c" else "016x"
+            )
+        )
+        return Checksum(algorithm=self.algorithm, value=value)
+
+
+class FileDownloadStream(typing.Iterator[bytes]):
+    """A single-use verified iterator. Close or leave its with block to cancel.
+
+    A caller that stops early has not verified the complete file. Bytes already
+    consumed cannot be recalled if a checksum or transport error occurs later.
+    """
+
+    def __init__(self, chunks, close, namespace_id, path, revision_no, content_ref):
+        self._chunks, self._close = iter(chunks), close
+        self.namespace_id, self.path, self.revision_no = namespace_id, path, revision_no
+        self.content_ref = content_ref
+        self._checksum = _IncrementalChecksum(content_ref.checksum.algorithm)
+        self._expected_checksum = content_ref.checksum.value
+        self._expected_size = content_ref.size_bytes
+        self._count = 0
+        self._closed = False
+        self._verified = False
+        self._terminal_error = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        if self._terminal_error is not None:
+            raise self._terminal_error
+        if self._closed:
+            if self._verified:
+                raise StopIteration
+            raise ValueError("download stream was closed before verification")
+        try:
+            chunk = next(self._chunks)
+            self._count += len(chunk)
+            if self._count > self._expected_size:
+                raise RuntimeError(
+                    f"download exceeded expected size {self._expected_size}"
+                )
+            self._checksum.update(chunk)
+            return chunk
+        except StopIteration:
+            try:
+                if self._count != self._expected_size:
+                    raise RuntimeError(
+                        f"download returned {self._count} bytes, expected {self._expected_size}"
+                    )
+                if self._checksum.finish().value != self._expected_checksum:
+                    raise RuntimeError(
+                        "download checksum did not match its content reference"
+                    )
+                self._verified = True
+            except BaseException as error:
+                self._terminal_error = error
+                raise
+            finally:
+                self.close()
+            raise
+        except BaseException as error:
+            self._terminal_error = error
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._close()
 
 
 class FilesClient(_GeneratedFilesClient):
@@ -192,6 +301,72 @@ class FilesClient(_GeneratedFilesClient):
             committed_seq=committed.committed_seq,
         )
 
+    def download_stream(
+        self,
+        namespace_id: str,
+        *,
+        path: str,
+        revision_no: RevisionNo | None = None,
+        http_client: httpx.Client | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> FileDownloadStream:
+        """Open a verified stream; use a with block to close on early exit.
+
+        Size and checksum verification complete only at successful exhaustion.
+        Request timeouts apply to metadata and payload I/O on either transport.
+        """
+        capabilities = self._root.capabilities.retrieve(request_options=request_options)
+        if not (capabilities.features or {}).get(_DIRECT_GET_FEATURE, False):
+            claim, revision_no = _proxied_claim(
+                self._root, namespace_id, path, revision_no, request_options
+            )
+            chunks = self._root.files.content(
+                namespace_id,
+                path=path,
+                revision_no=revision_no,
+                request_options={
+                    **(request_options or {}),
+                    "chunk_size": _TRANSFER_CHUNK_BYTES,
+                },
+            )
+            return FileDownloadStream(
+                chunks, chunks.close, namespace_id, path, revision_no, claim
+            )
+        grant = self.create_download(
+            namespace_id,
+            path=path,
+            revision_no=revision_no,
+            request_options=request_options,
+        )
+        if grant.access.method.upper() != "GET":
+            raise RuntimeError("download grant must use GET")
+        client = http_client or self._root._client_wrapper.httpx_client.httpx_client
+        timeout = (request_options or {}).get(
+            "timeout", self._root._client_wrapper.get_timeout()
+        )
+        # Construct a fresh request: SDK authorization, cookies and custom
+        # API headers must never be forwarded to the object-store capability.
+        request = httpx.Request(
+            "GET",
+            grant.access.url,
+            headers=grant.access.headers or {},
+            extensions={"timeout": httpx.Timeout(timeout).as_dict()},
+        )
+        response = client.send(request, stream=True, auth=None, follow_redirects=False)
+        try:
+            response.raise_for_status()
+            return FileDownloadStream(
+                response.iter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES),
+                response.close,
+                grant.namespace_id,
+                grant.path,
+                grant.revision_no,
+                grant.content_ref,
+            )
+        except BaseException:
+            response.close()
+            raise
+
     def download(
         self,
         namespace_id: str,
@@ -199,47 +374,24 @@ class FilesClient(_GeneratedFilesClient):
         path: str,
         revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
+        request_options: RequestOptions | None = None,
     ) -> FileDownloadResult:
-        """Download one file revision into memory and verify its checksum."""
-
-        capabilities = self._root.capabilities.retrieve()
-        if not capabilities.features.get(_DIRECT_GET_FEATURE, False):
-            return _get_file_proxied(
-                self._root,
-                namespace_id=namespace_id,
-                path=path,
-                revision_no=revision_no,
+        """Collect download_stream for callers that want all bytes in memory."""
+        with self.download_stream(
+            namespace_id,
+            path=path,
+            revision_no=revision_no,
+            http_client=http_client,
+            request_options=request_options,
+        ) as stream:
+            content = b"".join(stream)
+            return FileDownloadResult(
+                content=content,
+                namespace_id=stream.namespace_id,
+                path=stream.path,
+                revision_no=stream.revision_no,
+                content_ref=stream.content_ref,
             )
-        if revision_no is None:
-            grant = self.create_download(namespace_id, path=path)
-        else:
-            grant = self.create_download(
-                namespace_id,
-                path=path,
-                revision_no=revision_no,
-            )
-        if http_client is None:
-            with httpx.Client() as transfer_client:
-                response = _send_presigned(transfer_client, grant.access, "GET")
-        else:
-            response = _send_presigned(http_client, grant.access, "GET")
-        content = response.content
-        if len(content) != grant.content_ref.size_bytes:
-            raise RuntimeError(
-                f"download returned {len(content)} bytes, expected {grant.content_ref.size_bytes}"
-            )
-        if (
-            _checksum(grant.content_ref.checksum.algorithm, content)
-            != grant.content_ref.checksum
-        ):
-            raise RuntimeError("download checksum did not match its content reference")
-        return FileDownloadResult(
-            content=content,
-            namespace_id=grant.namespace_id,
-            path=grant.path,
-            revision_no=grant.revision_no,
-            content_ref=grant.content_ref,
-        )
 
 
 class LoonFS(_GeneratedLoonFS):
@@ -258,6 +410,7 @@ class LoonFS(_GeneratedLoonFS):
 
 __all__ = [
     "FileDownloadResult",
+    "FileDownloadStream",
     "FileUploadResult",
     "PreparedFileContent",
     "FilesClient",
@@ -265,56 +418,25 @@ __all__ = [
 ]
 
 
-def _get_file_proxied(
-    client: _GeneratedLoonFS,
-    *,
-    namespace_id: str,
-    path: str,
-    revision_no: RevisionNo | None,
-) -> FileDownloadResult:
-    """Read through LoonFS when direct reads are unavailable.
-
-    Load the content reference first, then request the exact revision so the
-    reference and returned bytes describe the same file version.
-    """
+def _proxied_claim(client, namespace_id, path, revision_no, request_options):
     if revision_no is None:
-        entry = client.files.retrieve(namespace_id, path=path)
+        entry = client.files.retrieve(
+            namespace_id, path=path, request_options=request_options
+        )
         if entry.inode_kind != "file":
             raise RuntimeError(f"path {path!r} is a {entry.inode_kind}, not a file")
-        claim = entry.content_ref
-        revision_no = entry.revision_no
-    else:
-        claim = None
-        cursor = None
-        while True:
-            page = client.files.list_revisions(
-                namespace_id, path=path, cursor=cursor
-            )
-            for revision in page.revisions:
-                if revision.revision_no == revision_no:
-                    claim = revision.content_ref
-                    break
-            if claim is not None or page.next_cursor is None:
-                break
-            cursor = page.next_cursor
-        if claim is None:
-            raise RuntimeError(f"revision {revision_no} not found for {path!r}")
-    content = b"".join(
-        client.files.content(namespace_id, path=path, revision_no=revision_no)
-    )
-    if len(content) != claim.size_bytes:
-        raise RuntimeError(
-            f"proxied read returned {len(content)} bytes, expected {claim.size_bytes}"
+        return entry.content_ref, entry.revision_no
+    cursor = None
+    while True:
+        page = client.files.list_revisions(
+            namespace_id, path=path, cursor=cursor, request_options=request_options
         )
-    if _checksum(claim.checksum.algorithm, content) != claim.checksum:
-        raise RuntimeError("proxied read checksum did not match its content reference")
-    return FileDownloadResult(
-        content=content,
-        namespace_id=namespace_id,
-        path=path,
-        revision_no=revision_no,
-        content_ref=claim,
-    )
+        for revision in page.revisions:
+            if revision.revision_no == revision_no:
+                return revision.content_ref, revision_no
+        if page.next_cursor is None:
+            raise RuntimeError(f"revision {revision_no} not found for {path!r}")
+        cursor = page.next_cursor
 
 
 def _create_upload(client: _GeneratedLoonFS, namespace_id: str, content: bytes):
@@ -497,8 +619,7 @@ def _send_presigned(
 def _completed_content(response: UploadSession) -> PreparedFileContent:
     if response.status != "completed":
         raise RuntimeError(
-            f"upload {response.upload_id!r} completed with status "
-            f"{response.status!r}"
+            f"upload {response.upload_id!r} completed with status {response.status!r}"
         )
     return PreparedFileContent(
         content_ref=response.content_ref,
@@ -506,9 +627,7 @@ def _completed_content(response: UploadSession) -> PreparedFileContent:
     )
 
 
-def _abort_quietly(
-    client: _GeneratedLoonFS, namespace_id: str, upload_id: str
-) -> None:
+def _abort_quietly(client: _GeneratedLoonFS, namespace_id: str, upload_id: str) -> None:
     try:
         client.uploads.abort(namespace_id, upload_id)
     except Exception:
