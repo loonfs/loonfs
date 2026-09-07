@@ -2,14 +2,41 @@
 
 use super::summaries::*;
 use super::*;
-use crate::commands::{TrashListing, TreeTransferFailure};
+use crate::commands::{TrashListing, TreeTransferFailures};
 use crate::config::{CliConfig, ProfileConfig};
 use crate::profiles::ProfileSummary;
 use loonfs_api::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
 
 use super::human_maintenance::*;
 
+#[cfg(test)]
 pub(crate) fn human_success(output: &CommandOutput) -> String {
+    let mut bytes = Vec::new();
+    write_human_success(output, &mut bytes).expect("render human output");
+    String::from_utf8(bytes).expect("human output is UTF-8")
+}
+
+pub(crate) fn write_human_success(
+    output: &CommandOutput,
+    mut writer: impl Write,
+) -> io::Result<bool> {
+    if let CommandData::TreeTransfer { failures, .. } = &output.data {
+        for failure in failures.iter()? {
+            let failure = failure?;
+            writeln!(
+                writer,
+                "failed {}: {}",
+                failure.path,
+                human_error(&failure.error)
+            )?;
+        }
+    }
+    let text = human_success_text(output);
+    writer.write_all(text.as_bytes())?;
+    Ok(text.ends_with('\n'))
+}
+
+fn human_success_text(output: &CommandOutput) -> String {
     match &output.data {
         CommandData::Capabilities(document) => human_capabilities(document),
         CommandData::Doctor { checks } => human_doctor(checks),
@@ -327,18 +354,13 @@ fn human_tree_transfer(
     destination: &str,
     files: u64,
     directories: u64,
-    failures: &[TreeTransferFailure],
+    failures: &TreeTransferFailures,
 ) -> String {
     let verb = match kind {
         CommandKind::FilesystemGet => "downloaded",
         CommandKind::FilesystemCp => "copied",
         _ => "stored",
     };
-    let mut lines = Vec::new();
-    for failure in failures {
-        let rendered = human_error(&failure.error);
-        lines.push(format!("failed {}: {rendered}", failure.path));
-    }
     let directory_noun = if directories == 1 {
         "directory"
     } else {
@@ -350,8 +372,7 @@ fn human_tree_transfer(
     if !failures.is_empty() {
         summary.push_str(&format!("; {} failed", failures.len()));
     }
-    lines.push(summary);
-    lines.join("\n")
+    summary
 }
 
 fn human_file_mutation(

@@ -19,21 +19,33 @@ where
     error: Option<&'a CliError>,
 }
 
+#[cfg(test)]
 pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    write_json_success(output, &mut bytes)?;
+    String::from_utf8(bytes).map_err(io::Error::other)
+}
+
+pub(crate) fn write_json_success(output: &CommandOutput, writer: impl Write) -> io::Result<()> {
     match &output.data {
         CommandData::CompletionScript(_) | CommandData::StreamedToStdout => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "raw output does not support json rendering",
         )),
-        data => serde_json::to_string_pretty(&JsonEnvelope {
-            kind: output.kind.as_str(),
-            format_version: CLI_JSON_FORMAT_VERSION,
-            profile: output.profile.as_deref(),
-            mode: output.mode.as_deref(),
-            data: Some(data),
-            error: None,
-        })
-        .map_err(io::Error::other),
+        data => serde_json::to_writer_pretty(
+            writer,
+            &JsonEnvelope {
+                kind: output.kind.as_str(),
+                format_version: CLI_JSON_FORMAT_VERSION,
+                profile: output.profile.as_deref(),
+                mode: output.mode.as_deref(),
+                data: Some(data),
+                error: None,
+            },
+        )
+        .map_err(|error| {
+            io::Error::new(error.io_error_kind().unwrap_or(io::ErrorKind::Other), error)
+        }),
     }
 }
 

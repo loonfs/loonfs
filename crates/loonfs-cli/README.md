@@ -633,8 +633,11 @@ Behavior notes
   eight pending file operations. Discovery pauses when those slots are full.
   Local traversal keeps one directory handle per depth; remote traversal keeps
   up to 64 entries per depth. The existing path-depth limit bounds both.
-  Successful results are counted immediately; the final report retains every
-  failure, so failure-report memory still grows with the number of errors.
+  Successful results are counted immediately. Failures are spooled to a local
+  temporary file and rendered incrementally, preserving every error without
+  keeping the report in memory. Temporary disk usage grows with the error
+  report, and the file is removed when the command exits normally. A report
+  write failure stops the command and is reported as an I/O error.
   Overall totals become known when discovery finishes. Per-file progress starts
   immediately, and traversal order is unspecified. A later listing failure
   preserves completed work and reports the affected directory alongside file
