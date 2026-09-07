@@ -32,6 +32,11 @@ pub struct DirectDownloadStream {
 }
 
 impl DirectDownloadStream {
+    /// The immutable content claim this stream verifies.
+    pub fn content_ref(&self) -> &ContentRef {
+        &self.expected
+    }
+
     /// Adds existing prefix bytes to the checksum for a resumed download.
     ///
     /// The caller must provide bytes in order from the start of the object.
@@ -108,19 +113,13 @@ impl DirectDownloadStream {
 }
 
 impl Client {
-    /// Returns whether this file should use a direct download.
-    ///
-    /// Files within the proxy limit use the simpler proxied path. Larger files
-    /// use direct object-store access when the deployment advertises it.
-    ///
-    /// If the server advertises no proxy limit, this keeps the proxied path.
-    pub async fn offers_direct_download(&self, size_bytes: u64) -> Result<bool> {
-        let capabilities = self.get_capabilities().await?;
-        Ok(capabilities.supports(FEATURE_DOWNLOADS_DIRECT_GET)
-            && capabilities
-                .limits
-                .get(LIMIT_DOWNLOAD_MAX_CONTENT_BYTES)
-                .is_some_and(|proxy_cap| size_bytes > *proxy_cap))
+    /// Returns whether the deployment offers direct object-store downloads.
+    /// Selection does not depend on the size of a different, current revision.
+    pub async fn offers_direct_download(&self) -> Result<bool> {
+        Ok(self
+            .get_capabilities()
+            .await?
+            .supports(FEATURE_DOWNLOADS_DIRECT_GET))
     }
 
     /// Requests short-lived direct access to a revision or snapshot.

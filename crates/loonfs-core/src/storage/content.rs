@@ -355,7 +355,7 @@ impl<S: ObjectStore> FileContentStream<S> {
         .await
     }
 
-    async fn open_inner(
+    pub(crate) async fn open_inner(
         store: S,
         content_store_id: &ContentStoreId,
         entry: Option<PathEntry>,
@@ -413,11 +413,15 @@ impl<S: ObjectStore> FileContentStream<S> {
         Ok(())
     }
 
-    /// The authoritative metadata entry the path resolved to.
-    pub fn entry(&self) -> &PathEntry {
-        self.entry
-            .as_ref()
-            .expect("path content stream should carry its metadata entry")
+    /// The authoritative metadata entry for a path read. Inode-only reads
+    /// have no path entry, including when the file has been deleted.
+    pub fn entry(&self) -> Option<&PathEntry> {
+        self.entry.as_ref()
+    }
+
+    /// The immutable content claim this stream verifies.
+    pub fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
     }
 
     /// Complete length of the content this stream reads.

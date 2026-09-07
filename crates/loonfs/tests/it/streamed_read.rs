@@ -92,7 +92,7 @@ async fn a_streamed_read_holds_one_chunk_of_its_file() {
         .await
         .expect("open stream");
     assert_eq!(stream.size_bytes(), PAYLOAD_BYTES as u64);
-    assert_eq!(stream.entry().path.as_str(), PATH);
+    assert_eq!(stream.entry().expect("path metadata").path.as_str(), PATH);
 
     let mut read = Vec::with_capacity(PAYLOAD_BYTES);
     let mut chunks = 0u64;
@@ -185,4 +185,89 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
     }
     .expect("corrupted content must not report a verified end");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+}
+
+#[tokio::test]
+async fn historical_and_snapshot_reads_stream_the_selected_revision() {
+    use loonfs::{CreateSnapshotOptions, RevisionNo};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let payload = payload(PAYLOAD_BYTES);
+    let (namespace_id, watched, reader) = written_file(temp_dir.path(), &payload).await;
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
+    let snapshot = runtime
+        .writer
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "before-replace".to_owned(),
+                expires_at_ms: u64::MAX,
+            },
+        )
+        .await
+        .expect("snapshot");
+    runtime
+        .writer
+        .put_file_bytes(
+            &namespace_id,
+            PATH,
+            b"tiny",
+            PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
+            },
+        )
+        .await
+        .expect("replace");
+
+    let historical = reader
+        .read_file_stream(
+            &namespace_id,
+            PATH,
+            ReadFileStreamOptions {
+                revision_no: Some(RevisionNo(1)),
+                ..chunked()
+            },
+        )
+        .await
+        .expect("historical stream");
+    let pinned = reader
+        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .await
+        .expect("pin snapshot");
+    let snapshot_stream = pinned
+        .read_file_stream(PATH, chunked())
+        .await
+        .expect("snapshot stream");
+    for mut stream in [historical, snapshot_stream] {
+        assert_eq!(stream.size_bytes(), payload.len() as u64);
+        assert_eq!(
+            stream
+                .entry()
+                .expect("path metadata")
+                .content_ref()
+                .expect("file")
+                .size_bytes,
+            payload.len() as u64
+        );
+        let mut read = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+            read.extend_from_slice(&chunk);
+        }
+        assert_eq!(read, payload);
+    }
+    assert!(watched.peaks().peak_live_bytes <= CHUNK_BYTES);
+    assert!(
+        pinned
+            .read_file_stream(
+                PATH,
+                ReadFileStreamOptions {
+                    revision_no: Some(RevisionNo(1)),
+                    ..chunked()
+                }
+            )
+            .await
+            .is_err(),
+        "snapshot and revision cannot be combined"
+    );
 }

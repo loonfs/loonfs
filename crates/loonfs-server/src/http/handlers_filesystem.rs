@@ -2,7 +2,7 @@
 //! reads, revision listings, filesystem mutations, and the committed-change
 //! feed.
 
-use super::download_body::buffered_download_response;
+use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
 use super::handlers_uploads::{
     content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
@@ -140,24 +140,21 @@ impl ReadTarget {
         }
     }
 
-    pub(super) async fn get_file_bytes(
+    pub(super) async fn read_file_stream(
         &self,
         path: &str,
         revision_no: Option<RevisionNo>,
-    ) -> loonfs::Result<loonfs::FileBytes> {
+    ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
+        let options = loonfs::ReadFileStreamOptions {
+            revision_no,
+            ..Default::default()
+        };
         match self {
-            Self::Snapshot(snapshot) => snapshot.get_file_bytes(path).await,
+            Self::Snapshot(snapshot) => snapshot.read_file_stream(path, options).await,
             Self::Live {
                 reader,
                 namespace_id,
-            } => match revision_no {
-                Some(revision_no) => {
-                    reader
-                        .get_file_revision_bytes(namespace_id, path, revision_no)
-                        .await
-                }
-                None => reader.get_file_bytes(namespace_id, path).await,
-            },
+            } => reader.read_file_stream(namespace_id, path, options).await,
         }
     }
 
@@ -333,14 +330,19 @@ pub(super) async fn get_file_bytes(
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
     let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
-    let file = target
-        .get_file_bytes(&path, revision_no)
+    let stream = target
+        .read_file_stream(&path, revision_no)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
                 .with_invalid_request_param("path")
         })?;
-    Ok(buffered_download_response(file.bytes, permit))
+    streamed_download_response(
+        stream,
+        permit,
+        state.config.max_download_bytes,
+        &namespace_id,
+    )
 }
 
 #[cfg_attr(

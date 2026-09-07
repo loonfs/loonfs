@@ -28,7 +28,7 @@ const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Issues a short-lived download URL for a file.
 ///
-/// This endpoint reads metadata but does not proxy the file bytes, so buffered
+/// This endpoint reads metadata but does not proxy the file bytes, so service-proxied
 /// download limits do not apply.
 #[cfg_attr(
     feature = "openapi",

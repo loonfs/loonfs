@@ -455,6 +455,23 @@ impl Client {
         spec: &NamespacePath,
         options: &ReadFileOptions,
     ) -> Result<Vec<u8>> {
+        self.request_bytes(&self.file_content_url(spec, options))
+            .await
+    }
+
+    /// Streams content through the server. Successful completion means the server
+    /// verified the whole object; a late verification failure aborts the body.
+    /// Bytes already consumed remain provisional until the stream ends cleanly.
+    pub async fn read_file_stream(
+        &self,
+        spec: &NamespacePath,
+        options: &ReadFileOptions,
+    ) -> Result<PayloadStream> {
+        self.call_for_response_stream(&self.get(&self.file_content_url(spec, options)))
+            .await
+    }
+
+    fn file_content_url(&self, spec: &NamespacePath, options: &ReadFileOptions) -> String {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{}/filesystem/content",
             self.base_url,
@@ -467,8 +484,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        let url = query.finish();
-        self.request_bytes(&url).await
+        query.finish()
     }
 
     /// Reads and verifies one retained file revision by inode identity.

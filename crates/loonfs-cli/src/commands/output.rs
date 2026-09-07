@@ -34,10 +34,6 @@ impl ListingHeadObservation {
         self.last_head_seq = Some(head_seq);
     }
 
-    pub(crate) fn last(&self) -> Option<ChangeSeq> {
-        self.last_head_seq
-    }
-
     pub(crate) fn drift(&self) -> Option<ListingHeadDrift> {
         let first_head_seq = self.first_head_seq?;
         let last_head_seq = self.last_head_seq?;
@@ -352,7 +348,6 @@ pub(crate) enum CommandData {
     },
     /// A generated shell completion script, rendered byte-for-byte.
     CompletionScript(Vec<u8>),
-    StreamBytes(Vec<u8>),
     /// The payload already went to standard output as it arrived, so there is
     /// nothing left to render. `get -` reports this: a download that is
     /// written chunk by chunk cannot also be handed to the renderer at the
@@ -415,7 +410,6 @@ mod tests {
     fn listing_head_drift_serializes_only_after_the_head_moves() {
         let mut heads = ListingHeadObservation::default();
         heads.observe(ChangeSeq(5));
-        assert_eq!(heads.last(), Some(ChangeSeq(5)));
         assert_eq!(heads.drift(), None);
 
         let settled = serde_json::to_value(path_entries(heads.drift())).expect("serialize listing");

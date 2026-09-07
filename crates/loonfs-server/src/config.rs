@@ -127,8 +127,8 @@ pub struct ServerConfig {
     #[serde(default = "default_max_upload_bytes")]
     pub max_upload_bytes: u64,
     /// Largest file content a service-proxied read (`GET .../filesystem/
-    /// content` and inode revision content) will buffer and return. Checked
-    /// against resolved metadata before any content fetch; over-limit reads
+    /// content` and inode revision content) will stream and return. Checked
+    /// against resolved metadata before fetching content bytes; over-limit reads
     /// answer `content_too_large`. Advertised to clients as the
     /// `download.max_content_bytes` capability limit.
     #[serde(default = "default_max_download_bytes")]
@@ -152,9 +152,11 @@ pub struct ServerConfig {
     /// bodies forward to the store incrementally instead of buffering.
     #[serde(default = "default_max_concurrent_uploads")]
     pub max_concurrent_uploads: usize,
-    /// How many proxied content reads the server will materialize at once;
+    /// How many proxied content streams the server will serve at once;
     /// requests past the cap answer `server_busy` before any fetch.
-    /// Worst-case download memory is this times `max_download_bytes`.
+    /// Content memory follows this count times the internal read chunk size,
+    /// independent of `max_download_bytes`. Admission lasts until the body
+    /// finishes or is dropped.
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
     /// How many runner-scheduled maintenance runs may execute at once across

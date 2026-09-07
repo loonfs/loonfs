@@ -2090,3 +2090,40 @@ fn a_remote_put_replays_its_exact_request_after_the_upload_session_is_gone() {
     );
     assert_eq!(download(&harness, "/file", "readback"), b"retained request");
 }
+
+#[test]
+fn a_historical_download_resumes_using_its_own_content_identity() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = streaming_payload();
+    let source = harness.temp_dir.path().join("source.bin");
+    fs::write(&source, &payload).expect("payload");
+    assert_success(&harness.run(&["put", source.to_str().expect("path"), "/big.bin"]));
+    let destination = harness.temp_dir.path().join("historical.bin");
+    let held = 3 * 1024 * 1024;
+    leave_a_partial_download(&harness, "/big.bin", &destination, &payload, held);
+    let (_, meta_path) = partial_paths(&destination);
+    let mut meta: Value =
+        serde_json::from_slice(&fs::read(&meta_path).expect("meta")).expect("json");
+    meta["revision_no"] = Value::from(1);
+    fs::write(&meta_path, serde_json::to_vec(&meta).expect("json")).expect("historical meta");
+    fs::write(&source, b"tiny current revision").expect("replacement");
+    assert_success(&harness.run(&["put", source.to_str().expect("path"), "/big.bin", "--force"]));
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "/big.bin",
+        destination.to_str().expect("path"),
+        "--revision",
+        "1",
+    ]);
+    assert_success(&get);
+    assert_eq!(fs::read(&destination).expect("download"), payload);
+    let resuming = events_of_kind(&get, "phase")
+        .into_iter()
+        .find(|event| event["phase"] == "resuming")
+        .expect("resume event");
+    assert_eq!(resuming["bytes_done"], held as u64);
+}

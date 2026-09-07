@@ -287,6 +287,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
+        revision_no: Option<RevisionNo>,
         chunk_bytes: NonZeroU64,
         start_offset: u64,
     ) -> Result<FileContentStream<S>>
@@ -294,7 +295,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         S: Clone,
     {
         let view = self.load_read_view(context).await?;
-        let (entry, content_ref) = view.resolve_file_content(path.as_ref()).await?;
+        let (entry, content_ref) = view
+            .resolve_file_content(path.as_ref(), revision_no)
+            .await?;
         if start_offset > content_ref.size_bytes {
             return Err(CoreError::ResumeOffsetOutOfRange {
                 start_offset,
@@ -308,6 +311,32 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             content_ref,
             chunk_bytes,
             start_offset,
+        )
+        .await?)
+    }
+
+    /// Streams one retained inode revision without requiring a visible path.
+    pub async fn read_file_revision_stream_by_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        context: &RuntimeReadContext,
+    ) -> Result<FileContentStream<S>>
+    where
+        S: Clone,
+    {
+        let view = self.load_read_view(context).await?;
+        let target = view
+            .direct_download_target_by_inode(inode_id, revision_no)
+            .await?;
+        Ok(FileContentStream::open_inner(
+            self.store.clone(),
+            view.content_store_id(),
+            None,
+            target.content_ref,
+            NonZeroU64::new(crate::CONTENT_READ_CHUNK_BYTES)
+                .expect("content read chunk size should be nonzero"),
+            0,
         )
         .await?)
     }

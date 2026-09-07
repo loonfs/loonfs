@@ -175,6 +175,31 @@ impl FsReadSnapshot {
             .await?)
     }
 
+    /// Streams the file selected by this snapshot in bounded chunks.
+    /// Complete verification requires consuming the stream to its end.
+    pub async fn read_file_stream(
+        &self,
+        absolute_path: &str,
+        options: ReadFileStreamOptions,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        if options.revision_no.is_some() {
+            return Err(CoreError::InvalidCheckpointRequest(
+                "revision_no cannot be combined with a snapshot read".to_owned(),
+            )
+            .into());
+        }
+        Ok(self
+            .engine
+            .read_file_stream(
+                absolute_path,
+                &self.context,
+                None,
+                options.chunk_bytes,
+                options.start_offset,
+            )
+            .await?)
+    }
+
     /// Resolves the file selected by this snapshot for a direct download.
     pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
         Ok(self
@@ -625,6 +650,7 @@ impl FsReader {
             .read_file_stream(
                 absolute_path,
                 &read_context,
+                options.revision_no,
                 options.chunk_bytes,
                 options.start_offset,
             )
@@ -998,6 +1024,34 @@ impl FsReader {
             )
             .await?;
         Ok(read)
+    }
+
+    /// Streams a retained inode revision, including content without a visible path.
+    /// Complete verification requires consuming the stream to its end.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.get_file_revision_bytes_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "get_file_revision_bytes_by_inode",
+            method = "read_file_revision_stream_by_inode",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn read_file_revision_stream_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        Ok(engine
+            .read_file_revision_stream_by_inode(inode_id, revision_no, &context)
+            .await?)
     }
 
     /// Reads and verifies one retained file revision by inode identity.

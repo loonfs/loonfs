@@ -37,7 +37,7 @@ writer_id = "loonfs-server-local"
 # `upload.max_content_bytes` capability limit. Defaults to 256 MiB.
 #max_upload_bytes = 268435456
 
-# Largest file content a service-proxied read will buffer and return, in
+# Largest file content a service-proxied read will stream and return, in
 # bytes; over-limit reads answer `content_too_large`. Advertised to clients
 # as the `download.max_content_bytes` capability limit. Defaults to 256 MiB.
 #max_download_bytes = 268435456
@@ -49,7 +49,7 @@ writer_id = "loonfs-server-local"
 #snapshot_max_live_per_namespace = 16
 
 # How many proxied upload bodies the server will stream at once and how many
-# content reads it will buffer at once. Requests past a cap answer 503
+# content streams it will serve at once. Requests past a cap answer 503
 # `server_busy`. Upload memory tracks one transfer part per admitted body.
 # Download memory tracks the bounded file size of each admitted read.
 #max_concurrent_uploads = 8

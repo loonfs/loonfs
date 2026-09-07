@@ -171,7 +171,11 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 	responseHeaders.Del("Set-Cookie")
 	copyHeaders(responseWriter.Header(), responseHeaders)
 	responseWriter.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(responseWriter, response.Body)
+	if _, err := io.Copy(responseWriter, response.Body); err != nil {
+		// A truncated or unverified upstream body must not become a successful
+		// downstream EOF. net/http aborts the response for this sentinel.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func (h *handler) rewritePath(method, path string) (string, bool) {

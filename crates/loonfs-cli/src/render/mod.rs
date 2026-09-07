@@ -41,7 +41,7 @@ pub(crate) fn render_success(output: &CommandOutput, format: OutputFormat) -> io
     }
 
     match &output.data {
-        CommandData::CompletionScript(bytes) | CommandData::StreamBytes(bytes) => {
+        CommandData::CompletionScript(bytes) => {
             let mut stdout = io::stdout().lock();
             stdout.write_all(bytes)?;
         }

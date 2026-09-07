@@ -44,8 +44,7 @@ use loonfs_api::{
     NamespaceDiagnostics, NamespaceId, PathEntry, ReleaseCheckpointResponse, RevisionNo,
     RunMaintenanceRequest, RunMaintenanceResponse, SecretString, StreamingChecksum, UploadId,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
