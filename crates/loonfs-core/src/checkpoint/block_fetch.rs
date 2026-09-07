@@ -191,7 +191,7 @@ pub(super) fn segment_codec_error(
 /// publishes every section to the memo and shared cache. Sized to catch
 /// delta-run segments (one or two data blocks) while leaving base segments
 /// on the per-section path.
-const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 128 * 1024;
+const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 256 * 1024;
 
 /// A segment object's total stored length: the index block is the last
 /// section, so it ends the object.
