@@ -10,9 +10,10 @@
 //! durable owner and status.
 
 use crate::context::MutationContext;
+use crate::control_object::LoadedControl;
 use crate::control_update::{
     create_control_object_under_generated_id, load_upload_session_state, update_upload_session,
-    UploadSessionUpdate,
+    update_upload_session_from_initial, UploadSessionUpdate,
 };
 use crate::error::{CoreError, Result};
 use crate::limits::{
@@ -44,7 +45,8 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
-    ByteStream, MultipartCompletion, MultipartPart, ObjectStore, PROVIDER_MULTIPART_PART_BYTES,
+    ByteStream, MultipartCompletion, MultipartPart, ObjectMetadata, ObjectStore,
+    PROVIDER_MULTIPART_PART_BYTES,
 };
 use std::num::NonZeroU64;
 
@@ -417,6 +419,17 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     session: NewUploadSession,
     context: &MutationContext,
 ) -> Result<UploadId> {
+    let (state, _) =
+        create_upload_session_with_state(store, namespace_id, session, context).await?;
+    Ok(state.upload_id)
+}
+
+async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    session: NewUploadSession,
+    context: &MutationContext,
+) -> Result<(UploadSessionState, ObjectMetadata)> {
     let upload_id = UploadId::generate();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
@@ -436,8 +449,9 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
                 message: error.to_string(),
             }
         })?;
-    create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
-    Ok(upload_id)
+    let metadata =
+        create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
+    Ok((state, metadata))
 }
 
 /// Verifies that the namespace exists and accepts writes.
@@ -847,7 +861,28 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
     verified: &ContentRef,
     now_ms: u64,
 ) -> Result<CompletedUpload> {
-    update_upload_session(store, namespace_id, upload_id, |mut state| {
+    freeze_completed_session_from_initial(
+        store,
+        namespace_id,
+        content_store_id,
+        upload_id,
+        verified,
+        now_ms,
+        None,
+    )
+    .await
+}
+
+async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    upload_id: &UploadId,
+    verified: &ContentRef,
+    now_ms: u64,
+    initial: Option<LoadedControl<UploadSessionState>>,
+) -> Result<CompletedUpload> {
+    update_upload_session_from_initial(store, namespace_id, upload_id, initial, |mut state| {
         let namespace_id = namespace_id.clone();
         let content_store_id = content_store_id.clone();
         let upload_id = upload_id.to_owned();
@@ -892,6 +927,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
 struct OwnedStagingSession {
     upload_id: UploadId,
     content_id: ContentId,
+    initial: Option<LoadedControl<UploadSessionState>>,
 }
 
 /// Stores in-process bytes through an upload session and returns prepared
@@ -920,6 +956,7 @@ pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
         &session.upload_id,
         stored.into_content_ref(),
         context,
+        session.initial,
     )
     .await
 }
@@ -961,6 +998,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         &session.upload_id,
         staged.content_ref,
         context,
+        session.initial,
     )
     .await
 }
@@ -979,11 +1017,24 @@ async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     // the namespace is deleted first, garbage collection removes the
     // unreferenced completed session and content.
     let session = NewUploadSession::service_proxied();
-    let content_id = session.content_id.clone();
-    let upload_id = create_upload_session(store, catalog.namespace_id(), session, context).await?;
+    let (state, metadata) =
+        create_upload_session_with_state(store, catalog.namespace_id(), session, context).await?;
+    let upload_id = state.upload_id.clone();
+    let content_id = state.content_id.clone();
+    // If a provider cannot return a usable compare token, retain the old load path.
+    // The creation helper also confirms ambiguous successes before returning it.
+    let initial = metadata
+        .etag
+        .filter(|etag| !etag.trim().is_empty())
+        .map(|etag| LoadedControl {
+            object_key: upload_session(catalog.namespace_id(), &upload_id),
+            etag,
+            state,
+        });
     Ok(OwnedStagingSession {
         upload_id,
         content_id,
+        initial,
     })
 }
 
@@ -999,14 +1050,16 @@ async fn complete_owned_staging<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     content_ref: ContentRef,
     context: &MutationContext,
+    initial: Option<LoadedControl<UploadSessionState>>,
 ) -> Result<PreparedContent> {
-    Ok(freeze_completed_session(
+    Ok(freeze_completed_session_from_initial(
         store,
         catalog.namespace_id(),
         catalog.content_store_id(),
         upload_id,
         &content_ref,
         context.now_ms,
+        initial,
     )
     .await?
     .prepared)

@@ -222,9 +222,34 @@ where
     F: Fn(UploadSessionState) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
+    update_upload_session_from_initial(store, namespace_id, upload_id, None, update).await
+}
+
+/// Reuses a confirmed state/ETag pair for only the first conditional attempt.
+/// Contention reloads authoritative state through the usual retry loop.
+pub(crate) async fn update_upload_session_from_initial<S, T, F, Fut>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    mut initial: Option<LoadedControl<UploadSessionState>>,
+    update: F,
+) -> crate::error::Result<T>
+where
+    S: ObjectStore + ?Sized,
+    F: Fn(UploadSessionState) -> Fut,
+    Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
+{
     let update = &update;
     retry_while_contended(
-        || async move { try_update_upload_session(store, namespace_id, upload_id, update).await },
+        || {
+            let initial = initial.take();
+            async move {
+                match initial {
+                    Some(loaded) => try_update_loaded_upload_session(store, loaded, update).await,
+                    None => try_update_upload_session(store, namespace_id, upload_id, update).await,
+                }
+            }
+        },
         |_, ()| async { Ok::<_, CoreError>(WriteEvidence::Unknown) },
     )
     .await?
@@ -243,6 +268,19 @@ where
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     let loaded = load_upload_session_object(store, namespace_id, upload_id).await?;
+    try_update_loaded_upload_session(store, loaded, update).await
+}
+
+async fn try_update_loaded_upload_session<S, T, F, Fut>(
+    store: &S,
+    loaded: LoadedControl<UploadSessionState>,
+    update: F,
+) -> crate::error::Result<CasAttempt<T, CoreError>>
+where
+    S: ObjectStore + ?Sized,
+    F: FnOnce(UploadSessionState) -> Fut,
+    Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
+{
     match update(loaded.state).await? {
         UploadSessionUpdate::Noop(outcome) => Ok(CasAttempt::Settled(outcome)),
         UploadSessionUpdate::Replace { next, outcome } => {
