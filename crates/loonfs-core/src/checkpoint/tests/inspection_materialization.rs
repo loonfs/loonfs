@@ -234,6 +234,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         run_seq,
         "",
         None,
+        usize::MAX,
         Readahead::Disabled,
     )
     .await?;
