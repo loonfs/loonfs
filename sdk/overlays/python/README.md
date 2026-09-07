@@ -44,7 +44,23 @@ never follow redirects. Closing the stream or interrupting its `with` block is
 the synchronous cancellation mechanism.
 
 `client.files.download` collects the same verified stream into memory.
-`client.files.upload` accepts in-memory bytes. `AsyncLoonFS` provides the same generated API for async applications; it does not have the transfer methods yet.
+`client.files.upload` accepts in-memory bytes through the same transfer path.
+Use `prepare_file_stream` to retain prepared content for publication retries:
+
+```python
+with open("large.bin", "rb") as source:
+    prepared = client.files.prepare_file_stream("demo", content=source,
+                                                request_options={"timeout": 60})
+```
+
+Pass `size_bytes` when known to validate the source and choose the usual transport.
+Unknown nonempty sources use multipart when available; memory is bounded by a
+provider-sized part. `upload_stream` prepares and publishes in one operation.
+The HTTP I/O timeout applies to both transports. Source and payload failures abort
+without replaying bytes. The caller owns the source and must interrupt any
+blocking source read; an HTTP timeout cannot interrupt arbitrary Python code.
+
+ `AsyncLoonFS` provides the same generated API for async applications; it does not have the transfer methods yet.
 
 ## Proxy
 

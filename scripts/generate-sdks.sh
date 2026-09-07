@@ -459,6 +459,8 @@ source = replace_once(
     '    FileDownloadResult,\n'
     '    FileDownloadStream,\n'
     '    FileUploadInput,\n'
+    '    FileStreamUploadInput,\n'
+    '    PrepareFileStreamInput,\n'
     '    FileUploadResult,\n'
     '    PreparedFileContent,\n'
     '    PreparedFileUploadInput,\n'

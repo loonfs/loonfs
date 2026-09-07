@@ -294,7 +294,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		replayed.NamespaceID != first.NamespaceID {
 		t.Errorf("replayed commit = %#v, want %#v", replayed, first)
 	}
-	prepared, err := h.client.Files.PrepareFileBytes(context.Background(), loonfs.NamespaceID(request.NamespaceID), []byte("original bytes"))
+	prepared, err := h.client.Files.PrepareFileStream(context.Background(), loonfs.NamespaceID(request.NamespaceID), strings.NewReader("original bytes"), nil)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}

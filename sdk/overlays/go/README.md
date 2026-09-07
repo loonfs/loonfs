@@ -48,7 +48,14 @@ proxied transfers use the configured HTTP client and the same context. Direct
 requests carry only the presigned headers, and do not follow redirects.
 
 `client.Files.Download` collects that stream into memory. `client.Files.Upload`
-accepts an in-memory byte slice. See [reference.md](./reference.md) for the
+accepts an in-memory byte slice through the same transfer path.
+`client.Files.PrepareFileStream(ctx, namespaceID, reader, sizeBytes)` consumes an
+`io.Reader` once and returns prepared content for publication retries. Pass nil
+for an unknown size; multipart retains one provider-sized part.
+`client.Files.UploadStream(ctx, files.StreamUploadInput{...})` prepares and
+publishes in one operation. The context covers metadata, bytes and publication;
+source and payload failures abort without replaying bytes. The caller owns and
+closes the reader, including interrupting any blocking source read. See [reference.md](./reference.md) for the
 generated API reference.
 
 ## Proxy

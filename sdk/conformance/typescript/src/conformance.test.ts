@@ -1192,8 +1192,8 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
     assert.equal(first.commit_id, request.commit_id);
     assert.equal(replayed.committed_seq, first.committed_seq);
     assert.deepEqual(replayed, first);
-    const prepared: PreparedFileContent = await activeHarness.client.files.prepareFileBytes({
-        namespace_id: request.namespace_id, content: new TextEncoder().encode("original bytes"),
+    const prepared: PreparedFileContent = await activeHarness.client.files.prepareFileStream({
+        namespace_id: request.namespace_id, content: new Blob(["original bytes"]),
     });
     const input = { namespace_id: request.namespace_id, path: "/prepared", prepared,
         actor: request.actor, commit_id: "prepared-put" };
@@ -2063,7 +2063,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.deepEqual(beginModes, ["service_proxied", "direct_put", "direct_multipart"]);
 
-    const prepared = await browserClient.files.prepareFileBytes({namespace_alias: request.namespace_alias, content: payload});
+    const prepared = await browserClient.files.prepareFileStream({namespace_alias: request.namespace_alias, content: new Blob([arrayBuffer(payload)])});
     const input = {namespace_alias: request.namespace_alias, path: "/browser-prepared", prepared,
         actor: request.actor, commit_id: "browser-prepared-put"};
     const published = await browserClient.files.putFilePrepared(input);

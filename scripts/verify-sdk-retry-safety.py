@@ -51,7 +51,9 @@ def verify_group(group: str) -> None:
     generated = GENERATED_ROOT / group
 
     if group in {"typescript", "typescript-client"}:
-        actual = count_token(generated, ".ts", "maxRetries: 0,")
+        # Only generated endpoint clients correspond to operations in the spec.
+        # Handwritten transfer helpers independently disable payload retries.
+        actual = count_token(generated / "api" / "resources", ".ts", "maxRetries: 0,")
         if actual != expected:
             raise SystemExit(
                 f"{group} disables retries at {actual} call sites; expected {expected}"

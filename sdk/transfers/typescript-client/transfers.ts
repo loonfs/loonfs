@@ -1,4 +1,13 @@
-import { TransferScope, verifiedDownload } from "./transfer-runtime.js";
+import {
+    TransferScope,
+    verifiedDownload,
+    UploadSource,
+    bytesSource,
+    IncrementalChecksum,
+    type UploadContent,
+    streamingFetch,
+    uploadBody,
+} from "./transfer-runtime.js";
 import { LoonFSClient as GeneratedLoonFSClient } from "./Client.js";
 import { FilesClient as GeneratedFilesClient } from "./api/resources/files/client/Client.js";
 import * as core from "./core/index.js";
@@ -11,15 +20,6 @@ const DIRECT_PUT_MAX_BYTES = "upload.direct_put_max_content_bytes";
 const PROXY_UPLOAD_MAX_BYTES = "upload.max_content_bytes";
 const MULTIPART_MIN_BYTES = 8 * 1024 * 1024;
 
-// The CRC constants, tables, and functions are copied from
-// sdk/transfers/typescript/transfers.ts.
-const CRC32C_POLYNOMIAL = 0x82f63b78;
-const CRC64_NVME_POLYNOMIAL = 0x9a6c9329ac4bc9b5n;
-const CRC64_MASK = 0xffffffffffffffffn;
-
-const CRC32C_TABLE = makeCrc32cTable();
-const CRC64_NVME_TABLE = makeCrc64NvmeTable();
-
 export interface FileUploadInput {
     namespace_alias: string;
     path: LoonFS.AbsolutePath;
@@ -30,6 +30,17 @@ export interface FileUploadInput {
     behavior?: LoonFS.DestinationBehavior;
     expected_inode_id?: string;
     expected_revision_no?: LoonFS.RevisionNo;
+}
+
+export interface FileStreamUploadInput extends Omit<FileUploadInput, "content"> {
+    content: UploadContent;
+    size_bytes?: number;
+}
+
+export interface PrepareFileStreamInput {
+    namespace_alias: string;
+    content: UploadContent;
+    size_bytes?: number;
 }
 
 export interface PreparedFileUploadInput extends Omit<FileUploadInput, "content"> {
@@ -67,11 +78,6 @@ export interface PreparedFileContent {
     readonly contentToken?: LoonFS.ContentToken;
 }
 
-interface DirectPutBody {
-    body: ArrayBuffer;
-    content: LoonFS.UploadContentClaim;
-}
-
 export declare namespace LoonFSClient {
     /** The generated client options with `baseUrl` in place of `environment`. */
     export type Options = Omit<GeneratedLoonFSClient.Options, "environment"> & {
@@ -86,7 +92,7 @@ export declare namespace FilesClient {
     export interface RequestOptions extends GeneratedFilesClient.RequestOptions {}
 }
 
-/** The files group plus whole-file transfers. */
+/** The files group plus streaming and buffered transfers. */
 export class FilesClient extends GeneratedFilesClient {
     constructor(
         options: GeneratedFilesClient.Options,
@@ -95,22 +101,78 @@ export class FilesClient extends GeneratedFilesClient {
         super(options);
     }
 
-    /** Uploads fresh content and publishes it. For publication retries, retain prepareFileBytes() output and use putFilePrepared(). */
-    public async upload(input: FileUploadInput): Promise<FileUploadResult> {
-        const { content, ...publication } = input;
-        const prepared = await this.prepareFileBytes({ namespace_alias: input.namespace_alias, content });
-        return this.putFilePrepared({ ...publication, prepared });
+    /** Upload bytes through the same streaming path. */
+    public async upload(
+        input: FileUploadInput,
+        requestOptions: FilesClient.RequestOptions = {},
+    ): Promise<FileUploadResult> {
+        return this.uploadStream(
+            { ...input, content: bytesSource(input.content), size_bytes: input.content.length },
+            requestOptions,
+        );
     }
 
-    /** Upload once without publishing; retain the result for publication retries. */
+    /** Consume a source once and publish it. For publication retries, prepare separately. */
+    public async uploadStream(
+        input: FileStreamUploadInput,
+        requestOptions: FilesClient.RequestOptions = {},
+    ): Promise<FileUploadResult> {
+        const scope = new TransferScope(requestOptions, this._options.timeoutInSeconds);
+        const options = { ...requestOptions, abortSignal: scope.signal };
+        try {
+            const prepared = await this.prepareFileStream(
+                {
+                    namespace_alias: input.namespace_alias,
+                    content: input.content,
+                    size_bytes: input.size_bytes,
+                },
+                options,
+            );
+            const { content, size_bytes, ...publication } = input;
+            return await this.putFilePrepared({ ...publication, prepared }, options);
+        } finally {
+            scope.close();
+        }
+    }
+
     public async prepareFileBytes(
         input: Pick<FileUploadInput, "namespace_alias" | "content">,
+        requestOptions: FilesClient.RequestOptions = {},
     ): Promise<PreparedFileContent> {
-        return stageBytes(this.root, input.namespace_alias, input.content);
+        return this.prepareFileStream(
+            { ...input, content: bytesSource(input.content), size_bytes: input.content.length },
+            requestOptions,
+        );
+    }
+
+    /** Stage a source once with bounded memory; retain the result for publication retries. */
+    public async prepareFileStream(
+        input: PrepareFileStreamInput,
+        requestOptions: FilesClient.RequestOptions = {},
+    ): Promise<PreparedFileContent> {
+        const scope = new TransferScope(requestOptions, this._options.timeoutInSeconds);
+        let source: UploadSource | undefined;
+        try {
+            source = new UploadSource(input.content, scope, input.size_bytes);
+            return await stageStream(
+                this.root,
+                input.namespace_alias,
+                source,
+                scope,
+                { ...requestOptions, abortSignal: scope.signal, maxRetries: 0 },
+                this._options.fetch ?? fetch,
+            );
+        } finally {
+            source?.close();
+            scope.close();
+        }
     }
 
     /** Reuse prepared content and identical publication inputs to retry the same commit. */
-    public async putFilePrepared(input: PreparedFileUploadInput): Promise<FileUploadResult> {
+    public async putFilePrepared(
+        input: PreparedFileUploadInput,
+        requestOptions: FilesClient.RequestOptions = {},
+    ): Promise<FileUploadResult> {
         const request: LoonFS.CommitRequest = {
             namespace_alias: input.namespace_alias,
             actor: input.actor,
@@ -130,7 +192,7 @@ export class FilesClient extends GeneratedFilesClient {
         if (input.message !== undefined) {
             request.message = input.message;
         }
-        return this.root.commits.create(request);
+        return this.root.commits.create(request, requestOptions);
     }
 
     /** Opens a verified stream; cancel its reader to release an unfinished download. */
@@ -184,12 +246,16 @@ export class FilesClient extends GeneratedFilesClient {
     }
 }
 
-/** The generated client with `files.upload` and `files.download`. */
+/** The generated client with streaming and buffered transfer helpers. */
 export class LoonFSClient extends GeneratedLoonFSClient {
     private _transferFiles: FilesClient | undefined;
 
     constructor(options: LoonFSClient.Options) {
-        super({ ...options, environment: options.baseUrl });
+        super({
+            ...options,
+            environment: options.baseUrl,
+            fetch: streamingFetch(options.fetch ?? globalThis.fetch.bind(globalThis)),
+        });
     }
 
     public override get files(): FilesClient {
@@ -261,211 +327,150 @@ async function downloadProxied(
     };
 }
 
-async function stageBytes(
+async function stageStream(
     client: GeneratedLoonFSClient,
-    namespaceAlias: string,
-    bytes: Uint8Array,
+    namespace: string,
+    source: UploadSource,
+    scope: TransferScope,
+    options: FilesClient.RequestOptions,
+    send: typeof fetch,
 ): Promise<PreparedFileContent> {
-    const capabilities = await client.capabilities.retrieve();
-    const beginRequest = selectBeginRequest(capabilities, bytes);
-    const begin = await client.uploads.create({
-        namespace_alias: namespaceAlias,
-        body: beginRequest,
-    });
-
-    switch (begin.mode) {
-        case "direct_put":
-            return stageDirectPut(client, namespaceAlias, bytes, begin);
-        case "direct_multipart":
-            return stageMultipart(client, namespaceAlias, bytes, begin);
-        case "service_proxied":
-            return stageServiceProxied(client, namespaceAlias, bytes, begin);
+    scope.check();
+    const capabilities = await client.capabilities.retrieve(options);
+    const size = source.expected ?? ((await source.empty()) ? 0 : undefined);
+    const features = capabilities.features ?? {},
+        limits = capabilities.limits ?? {};
+    let request: LoonFS.BeginUploadRequest;
+    if ((size === undefined || size >= MULTIPART_MIN_BYTES) && features[DIRECT_MULTIPART_FEATURE]) {
+        request = { mode: "direct_multipart" };
+    } else {
+        const fitsProxy =
+            size === undefined ||
+            limits[PROXY_UPLOAD_MAX_BYTES] === undefined ||
+            size <= limits[PROXY_UPLOAD_MAX_BYTES]!;
+        const fitsDirect =
+            size !== undefined &&
+            (limits[DIRECT_PUT_MAX_BYTES] === undefined || size <= limits[DIRECT_PUT_MAX_BYTES]!);
+        if (features[DIRECT_PUT_FEATURE] && fitsDirect && (size! >= MULTIPART_MIN_BYTES || !fitsProxy))
+            request = { mode: "direct_put", size_bytes: size };
+        else if (fitsProxy) request = { mode: "service_proxied" };
+        else throw new Error("source fits no advertised upload transport");
     }
-}
-
-function selectBeginRequest(
-    capabilities: LoonFS.CapabilityDocument,
-    bytes: Uint8Array,
-): LoonFS.BeginUploadRequest {
-    const features = capabilities.features ?? {};
-    const limits = capabilities.limits ?? {};
-    const supportsMultipart = features[DIRECT_MULTIPART_FEATURE] === true;
-    const worthCutting = bytes.byteLength >= MULTIPART_MIN_BYTES;
-    if (worthCutting && supportsMultipart) {
-        return { mode: "direct_multipart" };
-    }
-
-    const proxyLimit = limits[PROXY_UPLOAD_MAX_BYTES];
-    const fitsProxy = proxyLimit === undefined || bytes.byteLength <= proxyLimit;
-    const directPutLimit = limits[DIRECT_PUT_MAX_BYTES];
-    const fitsDirectPut = directPutLimit === undefined || bytes.byteLength <= directPutLimit;
-    if (features[DIRECT_PUT_FEATURE] === true && fitsDirectPut && (worthCutting || !fitsProxy)) {
-        return {
-            mode: "direct_put",
-            size_bytes: bytes.byteLength,
-        };
-    }
-    if (fitsProxy) {
-        return { mode: "service_proxied" };
-    }
-    throw new Error(`${bytes.byteLength} bytes fit no advertised upload transport`);
-}
-
-async function stageServiceProxied(
-    client: GeneratedLoonFSClient,
-    namespaceAlias: string,
-    bytes: Uint8Array,
-    begin: LoonFS.BeginUploadResponse.ServiceProxied,
-): Promise<PreparedFileContent> {
+    const begin = await client.uploads.create({ namespace_alias: namespace, body: request }, options);
+    let completion: LoonFS.UploadCompletion;
     try {
-        await client.uploads.putContent(arrayBuffer(bytes), namespaceAlias, begin.upload_id);
-        return stagedContent(
-            await client.uploads.complete({
-                namespace_alias: namespaceAlias,
-                upload_id: begin.upload_id,
-                body: { mode: "service_proxied" },
-            }),
-        );
-    } catch (error) {
-        await abortQuietly(client, namespaceAlias, begin.upload_id);
-        throw error;
-    }
-}
-
-async function stageDirectPut(
-    client: GeneratedLoonFSClient,
-    namespaceAlias: string,
-    bytes: Uint8Array,
-    begin: LoonFS.BeginUploadResponse.DirectPut,
-): Promise<PreparedFileContent> {
-    let upload: DirectPutBody;
-    try {
-        requirePresignedMethod(begin.access, "PUT", "direct PUT");
-        upload = await directPutBody(begin.checksum_algorithm, bytes);
-        const response = await fetch(begin.access.url, {
-            redirect: "error",
-            method: begin.access.method,
-            headers: begin.access.headers,
-            body: upload.body,
-        });
-        requireSuccessfulResponse(response, "direct PUT");
-    } catch (error) {
-        await abortQuietly(client, namespaceAlias, begin.upload_id);
-        throw error;
-    }
-    return stagedContent(
-        await client.uploads.complete({
-            namespace_alias: namespaceAlias,
-            upload_id: begin.upload_id,
-            body: { mode: "direct_put", content: upload.content },
-        }),
-    );
-}
-
-async function stageMultipart(
-    client: GeneratedLoonFSClient,
-    namespaceAlias: string,
-    bytes: Uint8Array,
-    begin: LoonFS.BeginUploadResponse.DirectMultipart,
-): Promise<PreparedFileContent> {
-    const { checksum_algorithm: algorithm, part_size_bytes: partSize } = begin;
-    if (!Number.isSafeInteger(partSize) || partSize <= 0) {
-        throw new Error(`invalid multipart part size ${partSize}`);
-    }
-    if (bytes.byteLength === 0) {
-        throw new Error("direct multipart upload cannot carry an empty payload");
-    }
-
-    const chunks = splitBytes(bytes, partSize);
-    const claims: LoonFS.UploadPartChecksumClaim[] = [];
-    for (const [index, chunk] of chunks.entries()) {
-        claims.push({
-            part_number: index + 1,
-            checksum: await checksum(algorithm, chunk),
-        });
-    }
-    const completedParts: LoonFS.CompletedUploadPart[] = [];
-    try {
-        const signed = await client.uploads.signParts({
-            namespace_alias: namespaceAlias,
-            upload_id: begin.upload_id,
-            parts: claims,
-        });
-        const accessByPart = new Map(signed.parts.map((part) => [part.part_number, part.access]));
-        for (const [index, claim] of claims.entries()) {
-            const access = accessByPart.get(claim.part_number);
-            if (access === undefined) {
-                throw new Error(`server did not sign part ${claim.part_number}`);
-            }
-            requirePresignedMethod(access, "PUT", `part ${claim.part_number}`);
-            const response = await fetch(access.url, {
-                redirect: "error",
-                method: access.method,
-                headers: access.headers,
-                body: arrayBuffer(chunks[index]!),
-            });
-            requireSuccessfulResponse(response, `part ${claim.part_number}`);
-            const etag = response.headers.get("etag");
-            if (etag === null) {
-                throw new Error(`part ${claim.part_number} upload returned no etag`);
-            }
-            completedParts.push({
-                part_number: claim.part_number,
-                checksum: claim.checksum,
-                etag,
-            });
-        }
-    } catch (error) {
-        await abortQuietly(client, namespaceAlias, begin.upload_id);
-        throw error;
-    }
-
-    return stagedContent(
-        await client.uploads.complete({
-            namespace_alias: namespaceAlias,
-            upload_id: begin.upload_id,
-            body: {
-                mode: "direct_multipart",
-                content: {
-                    size_bytes: bytes.byteLength,
-                    checksum: await checksum(algorithm, bytes),
+        if (begin.mode === "service_proxied") {
+            source.limit = limits[PROXY_UPLOAD_MAX_BYTES];
+            const response = await client.fetch(
+                `v0/namespace-aliases/${encodeURIComponent(namespace)}/uploads/${encodeURIComponent(begin.upload_id)}/content`,
+                {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/octet-stream" },
+                    body: await uploadBody(source),
+                    duplex: "half",
+                } as RequestInit,
+                {
+                    timeoutInSeconds: options.timeoutInSeconds,
+                    maxRetries: 0,
+                    abortSignal: options.abortSignal,
+                    headers: await resolvedHeaders(options.headers),
                 },
-                parts: completedParts,
-            },
-        }),
+            );
+            requireSuccessfulResponse(response, "proxied upload");
+            await response.body?.cancel();
+            completion = { mode: "service_proxied" };
+        } else if (begin.mode === "direct_put") {
+            source.digest = new IncrementalChecksum(begin.checksum_algorithm);
+            await putStream(send, begin.access, await uploadBody(source), scope);
+            completion = {
+                mode: "direct_put",
+                content: { size_bytes: source.count, checksum: source.digest.finish() },
+            };
+        } else {
+            const partSize = begin.part_size_bytes;
+            if (!Number.isSafeInteger(partSize) || partSize <= 0)
+                throw new Error("invalid multipart part size");
+            source.digest = new IncrementalChecksum(begin.checksum_algorithm);
+            const parts: LoonFS.CompletedUploadPart[] = [];
+            while (true) {
+                const buffer = new Uint8Array(partSize);
+                let length = 0;
+                while (length < partSize) {
+                    const chunk = await source.read(partSize - length);
+                    if (!chunk) break;
+                    buffer.set(chunk, length);
+                    length += chunk.length;
+                }
+                if (!length) break;
+                if (parts.length === 10000) throw new Error("multipart upload exceeds 10000 parts");
+                const part = buffer.subarray(0, length),
+                    partNumber = parts.length + 1;
+                const digest = new IncrementalChecksum(begin.checksum_algorithm);
+                digest.update(part);
+                const checksum = digest.finish();
+                const signed = await client.uploads.signParts(
+                    {
+                        namespace_alias: namespace,
+                        upload_id: begin.upload_id,
+                        parts: [{ part_number: partNumber, checksum }],
+                    },
+                    options,
+                );
+                if (signed.parts.length !== 1 || signed.parts[0]!.part_number !== partNumber)
+                    throw new Error(`server did not sign requested part ${partNumber}`);
+                const etag = await putStream(send, signed.parts[0]!.access, part, scope);
+                if (!etag) throw new Error(`part ${partNumber} returned no ETag`);
+                parts.push({ part_number: partNumber, checksum, etag });
+            }
+            completion = {
+                mode: "direct_multipart",
+                content: { size_bytes: source.count, checksum: source.digest.finish() },
+                parts,
+            };
+        }
+        source.finish();
+    } catch (error) {
+        try {
+            await client.uploads.abort(
+                { namespace_alias: namespace, upload_id: begin.upload_id },
+                { timeoutInSeconds: 5, maxRetries: 0, abortSignal: AbortSignal.timeout(5000) },
+            );
+        } catch {
+            /* Preserve the transfer error. */
+        }
+        throw error;
+    }
+    // A lost completion response may still have completed the session.
+    const completed = await client.uploads.complete(
+        { namespace_alias: namespace, upload_id: begin.upload_id, body: completion },
+        options,
     );
+    if (completed.status !== "completed") throw new Error(`upload is ${completed.status}, not completed`);
+    if (completed.content_ref.size_bytes !== source.count) throw new Error("completed upload size mismatch");
+    return { contentRef: completed.content_ref, contentToken: completed.content_token ?? undefined };
 }
 
-function splitBytes(bytes: Uint8Array, partSize: number): Uint8Array[] {
-    const parts: Uint8Array[] = [];
-    for (let offset = 0; offset < bytes.byteLength; offset += partSize) {
-        parts.push(bytes.subarray(offset, Math.min(offset + partSize, bytes.byteLength)));
-    }
-    return parts;
-}
-
-function stagedContent(response: LoonFS.UploadSession): PreparedFileContent {
-    if (response.status !== "completed") {
-        throw new Error(`upload ${response.upload_id} completed with status ${response.status}`);
-    }
-    return {
-        contentRef: response.content_ref,
-        contentToken: response.content_token,
-    };
-}
-
-async function abortQuietly(
-    client: GeneratedLoonFSClient,
-    namespaceAlias: string,
-    uploadId: LoonFS.UploadId,
-): Promise<void> {
+async function putStream(
+    send: typeof fetch,
+    access: LoonFS.ObjectTransferAccess,
+    body: BodyInit,
+    scope: TransferScope,
+): Promise<string | null> {
+    requirePresignedMethod(access, "PUT", "upload");
+    scope.check();
+    const response = await send(access.url, {
+        redirect: "error",
+        method: "PUT",
+        headers: access.headers,
+        body,
+        signal: scope.signal,
+        duplex: "half",
+    } as RequestInit);
     try {
-        await client.uploads.abort({
-            namespace_alias: namespaceAlias,
-            upload_id: uploadId,
-        });
-    } catch {
-        // Preserve the transfer error.
+        requireSuccessfulResponse(response, "upload");
+        return response.headers.get("etag");
+    } finally {
+        await response.body?.cancel();
     }
 }
 
@@ -474,89 +479,21 @@ function requirePresignedMethod(
     expected: "GET" | "PUT",
     operation: string,
 ): void {
-    if (access.method !== expected) {
+    if (access.method !== expected)
         throw new Error(`${operation} received unsupported presigned method ${access.method}`);
-    }
 }
 
 function requireSuccessfulResponse(response: Response, operation: string): void {
-    if (!response.ok) {
-        throw new Error(`${operation} failed with HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`${operation} failed with HTTP ${response.status}`);
+}
+
+async function resolvedHeaders(
+    headers: FilesClient.RequestOptions["headers"],
+): Promise<Record<string, string>> {
+    const result: Record<string, string> = {};
+    for (const [name, supplier] of Object.entries(headers ?? {})) {
+        const value = await core.Supplier.get(supplier);
+        if (value != null) result[name] = value;
     }
-}
-
-async function directPutBody(algorithm: LoonFS.ChecksumAlgorithm, bytes: Uint8Array): Promise<DirectPutBody> {
-    const body = arrayBuffer(bytes);
-    const sentBytes = new Uint8Array(body);
-    return {
-        body,
-        content: {
-            size_bytes: sentBytes.byteLength,
-            checksum: await checksum(algorithm, sentBytes),
-        },
-    };
-}
-
-async function checksum(algorithm: LoonFS.ChecksumAlgorithm, bytes: Uint8Array): Promise<LoonFS.Checksum> {
-    switch (algorithm) {
-        case "sha256": {
-            const digest = await globalThis.crypto.subtle.digest("SHA-256", arrayBuffer(bytes));
-            return { algorithm, value: hex(new Uint8Array(digest)) };
-        }
-        case "crc32c":
-            return { algorithm, value: crc32c(bytes).toString(16).padStart(8, "0") };
-        case "crc64nvme":
-            return { algorithm, value: crc64Nvme(bytes).toString(16).padStart(16, "0") };
-    }
-}
-
-function hex(bytes: Uint8Array): string {
-    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
-    const copy = new Uint8Array(bytes.byteLength);
-    copy.set(bytes);
-    return copy.buffer;
-}
-
-function makeCrc32cTable(): Uint32Array {
-    const table = new Uint32Array(256);
-    for (let index = 0; index < table.length; index += 1) {
-        let value = index;
-        for (let bit = 0; bit < 8; bit += 1) {
-            value = (value >>> 1) ^ ((value & 1) === 0 ? 0 : CRC32C_POLYNOMIAL);
-        }
-        table[index] = value >>> 0;
-    }
-    return table;
-}
-
-function crc32c(bytes: Uint8Array): number {
-    let value = 0xffffffff;
-    for (const byte of bytes) {
-        value = CRC32C_TABLE[(value ^ byte) & 0xff]! ^ (value >>> 8);
-    }
-    return (value ^ 0xffffffff) >>> 0;
-}
-
-function makeCrc64NvmeTable(): bigint[] {
-    const table: bigint[] = [];
-    for (let index = 0; index < 256; index += 1) {
-        let value = BigInt(index);
-        for (let bit = 0; bit < 8; bit += 1) {
-            value = (value >> 1n) ^ ((value & 1n) === 0n ? 0n : CRC64_NVME_POLYNOMIAL);
-        }
-        table.push(value & CRC64_MASK);
-    }
-    return table;
-}
-
-function crc64Nvme(bytes: Uint8Array): bigint {
-    let value = CRC64_MASK;
-    for (const byte of bytes) {
-        const index = Number((value ^ BigInt(byte)) & 0xffn);
-        value = CRC64_NVME_TABLE[index]! ^ (value >> 8n);
-    }
-    return (value ^ CRC64_MASK) & CRC64_MASK;
+    return result;
 }

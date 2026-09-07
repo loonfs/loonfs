@@ -258,3 +258,173 @@ export function verifiedDownload(
         { highWaterMark: 0 },
     );
 }
+
+export type UploadContent = Blob | ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
+
+function streamIterator(stream: ReadableStream<Uint8Array>): AsyncIterator<Uint8Array> {
+    const reader = stream.getReader();
+    let closed = false;
+    return {
+        async next() {
+            const next = await reader.read();
+            if (next.done) {
+                closed = true;
+                reader.releaseLock();
+            }
+            return next;
+        },
+        async return() {
+            if (!closed) {
+                closed = true;
+                try {
+                    await reader.cancel();
+                } finally {
+                    reader.releaseLock();
+                }
+            }
+            return { done: true, value: undefined };
+        },
+    };
+}
+
+async function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+    if (signal.aborted) throw signal.reason;
+    let abort: () => void;
+    const cancelled = new Promise<never>((_, reject) => {
+        abort = () => reject(signal.reason);
+        signal.addEventListener("abort", abort, { once: true });
+    });
+    try {
+        return await Promise.race([promise, cancelled]);
+    } finally {
+        signal.removeEventListener("abort", abort!);
+    }
+}
+
+/** One source chunk and one bounded consumer chunk; no replay or whole-source copy. */
+export class UploadSource {
+    readonly expected?: number;
+    private readonly iterator: AsyncIterator<Uint8Array>;
+    private pending?: Uint8Array;
+    private offset = 0;
+    private closed = false;
+    count = 0;
+    ended = false;
+    digest?: IncrementalChecksum;
+    limit?: number;
+
+    constructor(
+        content: UploadContent,
+        private readonly scope: TransferScope,
+        size?: number,
+    ) {
+        this.expected = size ?? ("size" in content ? content.size : undefined);
+        if (this.expected !== undefined && (!Number.isSafeInteger(this.expected) || this.expected < 0))
+            throw new Error("upload size must be a nonnegative safe integer");
+        this.iterator =
+            "size" in content && "stream" in content
+                ? streamIterator(content.stream())
+                : "getReader" in content
+                  ? streamIterator(content)
+                  : content[Symbol.asyncIterator]();
+    }
+
+    async empty(): Promise<boolean> {
+        await this.fill();
+        return this.ended;
+    }
+
+    private async fill(): Promise<void> {
+        while (!this.ended && (!this.pending || this.offset === this.pending.length)) {
+            this.scope.check();
+            const next = await withAbort(Promise.resolve(this.iterator.next()), this.scope.signal);
+            if (next.done) {
+                this.ended = true;
+                if (this.expected !== undefined && this.count !== this.expected)
+                    throw new Error("source does not match declared size");
+            } else {
+                if (!(next.value instanceof Uint8Array))
+                    throw new Error("upload source must yield Uint8Array chunks");
+                this.pending = next.value;
+                this.offset = 0;
+            }
+        }
+    }
+
+    async read(maximum = TRANSFER_CHUNK_BYTES): Promise<Uint8Array | undefined> {
+        await this.fill();
+        if (this.ended) return undefined;
+        const chunk = this.pending!.subarray(
+            this.offset,
+            this.offset + Math.min(maximum, TRANSFER_CHUNK_BYTES),
+        );
+        this.offset += chunk.length;
+        this.count += chunk.length;
+        if (this.expected !== undefined && this.count > this.expected)
+            throw new Error("source does not match declared size");
+        if (this.limit !== undefined && this.count > this.limit)
+            throw new Error("source exceeds advertised proxy upload limit");
+        this.digest?.update(chunk);
+        return chunk;
+    }
+
+    stream(): ReadableStream<Uint8Array> {
+        return new ReadableStream(
+            {
+                pull: async (controller) => {
+                    try {
+                        const chunk = await this.read();
+                        if (chunk) controller.enqueue(chunk);
+                        else controller.close();
+                    } catch (error) {
+                        controller.error(error);
+                    }
+                },
+                cancel: () => this.close(),
+            },
+            { highWaterMark: 0 },
+        );
+    }
+
+    finish(): void {
+        if (!this.ended) throw new Error("successful response before upload source reached EOF");
+    }
+    close(): void {
+        if (this.closed) return;
+        this.closed = true;
+        // A caller-owned async iterator may itself be stalled; its cleanup
+        // must not hold up transport cancellation indefinitely.
+        void this.iterator.return?.().catch(() => {});
+        this.pending = undefined;
+    }
+}
+
+export function bytesSource(bytes: Uint8Array): UploadContent {
+    return {
+        async *[Symbol.asyncIterator]() {
+            yield bytes;
+        },
+    };
+}
+
+/** Preserve streaming request bodies through the generated passthrough transport. */
+export function streamingFetch(send: typeof fetch): typeof fetch {
+    return (input, init) =>
+        send(
+            input,
+            init?.body instanceof ReadableStream ? ({ ...init, duplex: "half" } as RequestInit) : init,
+        );
+}
+
+/** Small known sources use a portable fixed body; large/unknown ones stream. */
+export async function uploadBody(source: UploadSource): Promise<BodyInit> {
+    if (source.expected === undefined || source.expected > 8 * 1024 * 1024) return source.stream();
+    const bytes = new Uint8Array(source.expected);
+    let offset = 0;
+    for (;;) {
+        const chunk = await source.read();
+        if (!chunk) return bytes;
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+    }
+}
