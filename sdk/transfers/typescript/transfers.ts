@@ -1,3 +1,4 @@
+import { TransferScope, verifiedDownload } from "./transfer-runtime.js";
 import { LoonFSClient as GeneratedLoonFSClient } from "./Client.js";
 import { FilesClient as GeneratedFilesClient } from "./api/resources/files/client/Client.js";
 import * as core from "./core/index.js";
@@ -52,6 +53,11 @@ export interface FileDownloadResult {
     content: Uint8Array;
 }
 
+/** A live stream; consume through successful EOF to verify the content. */
+export interface FileDownloadStream extends Omit<FileDownloadResult, "content"> {
+    content: ReadableStream<Uint8Array>;
+}
+
 /** Completed content; preparation does not publish or extend the upload lifetime. */
 export interface PreparedFileContent {
     readonly contentRef: LoonFS.ContentRef;
@@ -94,7 +100,9 @@ export class FilesClient extends GeneratedFilesClient {
     }
 
     /** Upload once without publishing; retain the result for publication retries. */
-    public async prepareFileBytes(input: Pick<FileUploadInput, "namespace_id" | "content">): Promise<PreparedFileContent> {
+    public async prepareFileBytes(
+        input: Pick<FileUploadInput, "namespace_id" | "content">,
+    ): Promise<PreparedFileContent> {
         return stageBytes(this.root, input.namespace_id, input.content);
     }
 
@@ -122,37 +130,54 @@ export class FilesClient extends GeneratedFilesClient {
         return this.root.commits.create(request);
     }
 
-    /** Downloads one revision into memory and verifies its content claim. Streaming and resume are follow-ups. */
-    public async download(input: FileDownloadInput): Promise<FileDownloadResult> {
-        const capabilities = await this.root.capabilities.retrieve();
-        if ((capabilities.features ?? {})[DIRECT_GET_FEATURE] !== true) {
-            return downloadProxied(this.root, input);
+    /** Opens a verified stream; cancel its reader to release an unfinished download. */
+    public async downloadStream(
+        input: FileDownloadInput,
+        requestOptions: FilesClient.RequestOptions = {},
+    ): Promise<FileDownloadStream> {
+        const scope = new TransferScope(requestOptions, this._options.timeoutInSeconds);
+        const options = { ...requestOptions, abortSignal: scope.signal };
+        let body: ReadableStream<Uint8Array> | null | undefined;
+        try {
+            scope.check();
+            const capabilities = await this.root.capabilities.retrieve(options);
+            if ((capabilities.features ?? {})[DIRECT_GET_FEATURE] !== true) {
+                const result = await downloadProxied(this.root, input, options);
+                body = result.content;
+                return { ...result, content: verifiedDownload(body, result.content_ref, scope) };
+            }
+            const grant = await this.createDownload(input, options);
+            requirePresignedMethod(grant.access, "GET", "download");
+            const response = await (this._options.fetch ?? fetch)(grant.access.url, {
+                redirect: "error",
+                method: grant.access.method,
+                headers: grant.access.headers,
+                signal: scope.signal,
+            });
+            body = response.body;
+            requireSuccessfulResponse(response, "download");
+            return {
+                namespace_id: input.namespace_id,
+                path: grant.path,
+                revision_no: grant.revision_no,
+                content_ref: grant.content_ref,
+                content: verifiedDownload(body, grant.content_ref, scope),
+            };
+        } catch (error) {
+            scope.close();
+            await body?.cancel(error).catch(() => {});
+            throw error;
         }
-        const grant = await this.createDownload(input);
-        requirePresignedMethod(grant.access, "GET", "download");
-        const response = await fetch(grant.access.url, {
-            redirect: "error",
-            method: grant.access.method,
-            headers: grant.access.headers,
-        });
-        requireSuccessfulResponse(response, "download");
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.byteLength !== grant.content_ref.size_bytes) {
-            throw new Error(
-                `download returned ${bytes.byteLength} bytes, expected ${grant.content_ref.size_bytes}`,
-            );
-        }
-        const actual = await checksum(grant.content_ref.checksum.algorithm, bytes);
-        if (actual.value !== grant.content_ref.checksum.value) {
-            throw new Error(`download checksum did not match ${grant.content_ref.checksum.algorithm} claim`);
-        }
-        return {
-            namespace_id: input.namespace_id,
-            path: grant.path,
-            revision_no: grant.revision_no,
-            content_ref: grant.content_ref,
-            content: bytes,
-        };
+    }
+
+    /** Collects downloadStream for callers that want all bytes in memory. */
+    public async download(
+        input: FileDownloadInput,
+        requestOptions: FilesClient.RequestOptions = {},
+    ): Promise<FileDownloadResult> {
+        const stream = await this.downloadStream(input, requestOptions);
+        const content = new Uint8Array(await new Response(stream.content).arrayBuffer());
+        return { ...stream, content };
     }
 }
 
@@ -175,24 +200,31 @@ export class LoonFSClient extends GeneratedLoonFSClient {
 async function downloadProxied(
     client: GeneratedLoonFSClient,
     input: FileDownloadInput,
-): Promise<FileDownloadResult> {
+    requestOptions: FilesClient.RequestOptions,
+): Promise<FileDownloadStream> {
     let revisionNo = input.revision_no;
     let claim: LoonFS.ContentRef | undefined;
     if (revisionNo === undefined) {
-        const entry = await client.files.retrieve({
-            namespace_id: input.namespace_id,
-            path: input.path,
-        });
+        const entry = await client.files.retrieve(
+            {
+                namespace_id: input.namespace_id,
+                path: input.path,
+            },
+            requestOptions,
+        );
         if (entry.inode_kind !== "file") {
             throw new Error(`path ${input.path} is a ${entry.inode_kind}, not a file`);
         }
         claim = entry.content_ref;
         revisionNo = entry.revision_no;
     } else {
-        const page = await client.files.listRevisions({
-            namespace_id: input.namespace_id,
-            path: input.path,
-        });
+        const page = await client.files.listRevisions(
+            {
+                namespace_id: input.namespace_id,
+                path: input.path,
+            },
+            requestOptions,
+        );
         for await (const revision of page) {
             if (revision.revision_no === revisionNo) {
                 claim = revision.content_ref;
@@ -203,25 +235,26 @@ async function downloadProxied(
             throw new Error(`revision ${revisionNo} not found for ${input.path}`);
         }
     }
-    const body = await client.files.content({
-        namespace_id: input.namespace_id,
-        path: input.path,
-        revision_no: revisionNo,
-    });
-    const bytes = new Uint8Array(await body.arrayBuffer());
-    if (bytes.byteLength !== claim.size_bytes) {
-        throw new Error(`proxied read returned ${bytes.byteLength} bytes, expected ${claim.size_bytes}`);
-    }
-    const actual = await checksum(claim.checksum.algorithm, bytes);
-    if (actual.value !== claim.checksum.value) {
-        throw new Error(`proxied read checksum did not match ${claim.checksum.algorithm} claim`);
-    }
+    const body = await client.files.content(
+        {
+            namespace_id: input.namespace_id,
+            path: input.path,
+            revision_no: revisionNo,
+        },
+        requestOptions,
+    );
     return {
         namespace_id: input.namespace_id,
         path: input.path,
         revision_no: revisionNo,
         content_ref: claim,
-        content: bytes,
+        content:
+            body.stream() ??
+            new ReadableStream({
+                start(controller) {
+                    controller.error(new Error("download response has no body"));
+                },
+            }),
     };
 }
 
@@ -263,11 +296,7 @@ function selectBeginRequest(
     const fitsProxy = proxyLimit === undefined || bytes.byteLength <= proxyLimit;
     const directPutLimit = limits[DIRECT_PUT_MAX_BYTES];
     const fitsDirectPut = directPutLimit === undefined || bytes.byteLength <= directPutLimit;
-    if (
-        features[DIRECT_PUT_FEATURE] === true &&
-        fitsDirectPut &&
-        (worthCutting || !fitsProxy)
-    ) {
+    if (features[DIRECT_PUT_FEATURE] === true && fitsDirectPut && (worthCutting || !fitsProxy)) {
         return {
             mode: "direct_put",
             size_bytes: bytes.byteLength,
@@ -450,10 +479,7 @@ function requireSuccessfulResponse(response: Response, operation: string): void 
     }
 }
 
-async function directPutBody(
-    algorithm: LoonFS.ChecksumAlgorithm,
-    bytes: Uint8Array,
-): Promise<DirectPutBody> {
+async function directPutBody(algorithm: LoonFS.ChecksumAlgorithm, bytes: Uint8Array): Promise<DirectPutBody> {
     const body = arrayBuffer(bytes);
     const sentBytes = new Uint8Array(body);
     return {
@@ -465,10 +491,7 @@ async function directPutBody(
     };
 }
 
-async function checksum(
-    algorithm: LoonFS.ChecksumAlgorithm,
-    bytes: Uint8Array,
-): Promise<LoonFS.Checksum> {
+async function checksum(algorithm: LoonFS.ChecksumAlgorithm, bytes: Uint8Array): Promise<LoonFS.Checksum> {
     switch (algorithm) {
         case "sha256": {
             const digest = await globalThis.crypto.subtle.digest("SHA-256", arrayBuffer(bytes));

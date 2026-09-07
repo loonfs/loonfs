@@ -1,0 +1,67 @@
+[
+  {
+    "name": "sha256",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": false
+  },
+  {
+    "name": "crc32c",
+    "content": "123456789",
+    "algorithm": "crc32c",
+    "checksum": "e3069283",
+    "size_bytes": 9,
+    "error": false
+  },
+  {
+    "name": "crc64nvme",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "error": false
+  },
+  {
+    "name": "truncated",
+    "content": "12345678",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true
+  },
+  {
+    "name": "too_long",
+    "content": "123456789x",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true
+  },
+  {
+    "name": "corrupt",
+    "content": "12345678x",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true
+  },
+  {
+    "name": "empty",
+    "content": "",
+    "algorithm": "sha256",
+    "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0,
+    "error": false
+  },
+  {
+    "name": "transport_failure_after_last_byte",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": true,
+    "transport_error": true
+  }
+]

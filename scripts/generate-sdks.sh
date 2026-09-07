@@ -16,6 +16,9 @@ cd "$(dirname "$0")/../sdk"
 npx --yes "fern-api@${FERN_CLI_VERSION}" check
 
 overlay_handwritten() {
+    case "$1" in
+        typescript|typescript-client) cp transfers/typescript-shared/*.ts "generated/$1/" ;;
+    esac
     if [ -d "transfers/$1" ]; then
         cp -R "transfers/$1/." "generated/$1/"
     fi
@@ -338,14 +341,14 @@ source = source.replace(
     generated_import,
     "    from .client import AsyncLoonFS\n"
     "    from .core.api_error import ApiError\n"
-    "    from .transfers import FileDownloadResult, FileUploadResult, PreparedFileContent, LoonFS\n",
+    "    from .transfers import FileDownloadResult, FileDownloadStream, FileUploadResult, PreparedFileContent, LoonFS\n",
 )
 generated_mapping = '    "LoonFS": ".client",\n'
 assert source.count(generated_mapping) == 1, "generated server.py client mapping not found"
 source = source.replace(generated_mapping, '    "LoonFS": ".transfers",\n')
 for anchor, insertion, label in (
     ('    "AsyncLoonFS": ".client",\n', '    "ApiError": ".core.api_error",\n', "ApiError mapping"),
-    ('    "FileRevision": ".types",\n', '    "FileDownloadResult": ".transfers",\n', "FileDownloadResult mapping"),
+    ('    "FileRevision": ".types",\n', '    "FileDownloadResult": ".transfers",\n    "FileDownloadStream": ".transfers",\n', "FileDownloadResult mapping"),
     ('    "FileRevision": ".types",\n', '    "PreparedFileContent": ".transfers",\n', "PreparedFileContent mapping"),
     ('    "FilesystemChange": ".types",\n', '    "FileUploadResult": ".transfers",\n', "FileUploadResult mapping"),
 ):
@@ -353,7 +356,7 @@ for anchor, insertion, label in (
     source = source.replace(anchor, insertion + anchor)
 for anchor, insertion, label in (
     ('    "AsyncLoonFS",\n', '    "ApiError",\n', "ApiError __all__ entry"),
-    ('    "FileRevision",\n', '    "FileDownloadResult",\n', "FileDownloadResult __all__ entry"),
+    ('    "FileRevision",\n', '    "FileDownloadResult",\n    "FileDownloadStream",\n', "FileDownloadResult __all__ entry"),
     ('    "FileRevision",\n', '    "PreparedFileContent",\n', "PreparedFileContent __all__ entry"),
     ('    "FilesystemChange",\n', '    "FileUploadResult",\n', "FileUploadResult __all__ entry"),
 ):
@@ -454,6 +457,7 @@ source = replace_once(
     'export type {\n'
     '    FileDownloadInput,\n'
     '    FileDownloadResult,\n'
+    '    FileDownloadStream,\n'
     '    FileUploadInput,\n'
     '    FileUploadResult,\n'
     '    PreparedFileContent,\n'

@@ -2791,3 +2791,27 @@ New client-visible operations arrive as API group ops or named features here;
 new durable state arrives in `format.md`; new scheduling machinery is
 implementation freedom. Cross-store discovery — naming authority, search,
 ownership, quotas — is out of scope for this specification.
+
+### SDK streaming downloads
+
+The handwritten transfer helpers expose verified download streams in every SDK:
+
+| SDK | Open a stream | Cancel or release it |
+| --- | --- | --- |
+| Go | `client.Files.DownloadStream(ctx, input)` | Close `Content` or cancel `ctx` |
+| Python (synchronous) | `client.files.download_stream(namespace_id, path=path, request_options=options)` | Use a `with` block or call `close()` |
+| TypeScript server/browser | `client.files.downloadStream(input, requestOptions)` | Cancel the `content` reader or abort `requestOptions.abortSignal` |
+
+The existing buffered download helpers collect these streams. Streams verify size
+and checksum incrementally and report a verification error on the same iterator,
+reader, or stream that carries the bytes. Only successful exhaustion verifies the
+file; cancellation and early close do not. Consumers must handle late errors even
+after some bytes have been delivered. A failed body is never automatically replayed.
+
+Both direct and proxied downloads propagate the caller's transport controls.
+Go respects a caller context deadline, with a 60-second operation deadline when
+none is supplied. TypeScript uses `timeoutInSeconds` (client default, otherwise
+60 seconds) across metadata and the body, plus `abortSignal`. Python uses the
+request/client HTTPX timeout for I/O waits on both transports; its synchronous
+iterator closes the response on early exit from a `with` block. API authorization,
+cookies and API headers are not copied into presigned object-store requests.

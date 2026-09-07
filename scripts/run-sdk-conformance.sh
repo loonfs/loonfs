@@ -79,7 +79,7 @@ case "$LANGUAGE" in
         fi
         "$PYTHON_HARNESS/.venv/bin/pip" install -q -r "$PYTHON_HARNESS/requirements.txt"
         PYTHONPATH="$PYTHON_HARNESS" \
-            "$PYTHON_HARNESS/.venv/bin/python" -m pytest "$PYTHON_HARNESS/test_conformance.py"
+            "$PYTHON_HARNESS/.venv/bin/python" -m pytest "$PYTHON_HARNESS"/test_*.py
         ;;
     typescript)
         TYPESCRIPT_HARNESS="$REPO_ROOT/sdk/conformance/typescript"

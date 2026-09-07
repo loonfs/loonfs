@@ -15,6 +15,7 @@ import (
 	loonfs "github.com/loonfs/loonfs-sdk-go"
 	"github.com/loonfs/loonfs-sdk-go/capabilities"
 	"github.com/loonfs/loonfs-sdk-go/commits"
+	"github.com/loonfs/loonfs-sdk-go/core"
 	"github.com/loonfs/loonfs-sdk-go/option"
 	"github.com/loonfs/loonfs-sdk-go/uploads"
 )
@@ -206,131 +207,18 @@ func (c *Client) PutFilePrepared(ctx context.Context, in PreparedUploadInput) (*
 	}, nil
 }
 
-// Download reads one revision into memory and verifies its content claim.
-// Streaming and resume are follow-ups.
+// Download collects DownloadStream for callers that want a whole byte slice.
 func (c *Client) Download(ctx context.Context, in DownloadInput) (*DownloadResult, error) {
-	if c == nil {
-		return nil, fmt.Errorf("transfers: client is nil")
-	}
-	capabilitiesClient := capabilities.NewClient(c.options)
-	capabilities, err := capabilitiesClient.Retrieve(ctx)
+	stream, err := c.DownloadStream(ctx, in)
 	if err != nil {
-		return nil, fmt.Errorf("transfers: read capabilities: %w", err)
+		return nil, err
 	}
-	if capabilities == nil || !capabilities.Features[featureDirectGet] {
-		return downloadProxied(ctx, c, in)
-	}
-	grant, err := c.CreateDownload(ctx, &loonfs.BeginDownloadRequest{
-		NamespaceID: string(in.NamespaceID),
-		Path:        in.Path,
-		RevisionNo:  in.RevisionNo,
-	})
+	defer stream.Content.Close()
+	content, err := io.ReadAll(stream.Content)
 	if err != nil {
-		return nil, fmt.Errorf("transfers: begin download: %w", err)
+		return nil, err
 	}
-	if grant.ContentRef == nil {
-		return nil, fmt.Errorf("transfers: download grant has no content reference")
-	}
-
-	payload, err := getPresigned(ctx, grant.Access)
-	if err != nil {
-		return nil, fmt.Errorf("transfers: download content: %w", err)
-	}
-	if int64(len(payload)) != grant.ContentRef.SizeBytes {
-		return nil, fmt.Errorf(
-			"transfers: downloaded %d bytes, expected %d",
-			len(payload),
-			grant.ContentRef.SizeBytes,
-		)
-	}
-	if err := verifyChecksum(grant.ContentRef.Checksum, payload); err != nil {
-		return nil, fmt.Errorf("transfers: verify download: %w", err)
-	}
-
-	return &DownloadResult{
-		Content:     payload,
-		NamespaceID: grant.NamespaceID,
-		Path:        grant.Path,
-		RevisionNo:  grant.RevisionNo,
-		ContentRef:  grant.ContentRef,
-	}, nil
-}
-
-// downloadProxied reads through LoonFS when direct reads are unavailable.
-// It loads the content reference first, then requests the exact revision so
-// the reference and returned bytes describe the same file version.
-func downloadProxied(ctx context.Context, c *Client, in DownloadInput) (*DownloadResult, error) {
-	revisionNo := in.RevisionNo
-	var claim *loonfs.ContentRef
-	if revisionNo == nil {
-		entry, err := c.Retrieve(ctx, &loonfs.GetPathEntryRequest{
-			NamespaceID: string(in.NamespaceID),
-			Path:        string(in.Path),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("transfers: stat path: %w", err)
-		}
-		file, err := fileProjection(entry)
-		if err != nil {
-			return nil, err
-		}
-		headRevision := file.RevisionNo
-		revisionNo = &headRevision
-		claim = file.ContentRef
-	} else {
-		page, err := c.ListRevisions(ctx, &loonfs.ListFileRevisionsRequest{
-			NamespaceID: string(in.NamespaceID),
-			Path:        string(in.Path),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("transfers: list file revisions: %w", err)
-		}
-		iterator := page.Iterator()
-		for iterator.Next(ctx) {
-			revision := iterator.Current()
-			if revision.RevisionNo == *revisionNo {
-				claim = revision.ContentRef
-				break
-			}
-		}
-		if claim == nil {
-			return nil, fmt.Errorf("transfers: revision %d not found for %s", *revisionNo, in.Path)
-		}
-	}
-	if claim == nil {
-		return nil, fmt.Errorf("transfers: revision has no content reference")
-	}
-
-	reader, err := c.Content(ctx, &loonfs.GetFileBytesRequest{
-		NamespaceID: string(in.NamespaceID),
-		Path:        string(in.Path),
-		RevisionNo:  revisionNo,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("transfers: read content: %w", err)
-	}
-	payload, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("transfers: read content: %w", err)
-	}
-	if int64(len(payload)) != claim.SizeBytes {
-		return nil, fmt.Errorf(
-			"transfers: proxied read returned %d bytes, expected %d",
-			len(payload),
-			claim.SizeBytes,
-		)
-	}
-	if err := verifyChecksum(claim.Checksum, payload); err != nil {
-		return nil, fmt.Errorf("transfers: verify proxied read: %w", err)
-	}
-
-	return &DownloadResult{
-		Content:     payload,
-		NamespaceID: in.NamespaceID,
-		Path:        in.Path,
-		RevisionNo:  *revisionNo,
-		ContentRef:  claim,
-	}, nil
+	return &DownloadResult{Content: content, NamespaceID: stream.NamespaceID, Path: stream.Path, RevisionNo: stream.RevisionNo, ContentRef: stream.ContentRef}, nil
 }
 
 // fileProjection reads the file half of a path entry union.
@@ -606,22 +494,6 @@ func putPresigned(
 	return response.Header.Get("ETag"), nil
 }
 
-func getPresigned(ctx context.Context, access *loonfs.ObjectTransferAccess) ([]byte, error) {
-	response, err := sendPresigned(ctx, access, http.MethodGet, nil, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, responseStatusError(response)
-	}
-	payload, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read presigned GET response: %w", err)
-	}
-	return payload, nil
-}
-
 func sendPresigned(
 	ctx context.Context,
 	access *loonfs.ObjectTransferAccess,
@@ -629,6 +501,10 @@ func sendPresigned(
 	body io.Reader,
 	contentLength int64,
 ) (*http.Response, error) {
+	return sendPresignedWithClient(ctx, presignedHTTPClient, access, expectedMethod, body, contentLength)
+}
+
+func sendPresignedWithClient(ctx context.Context, client core.HTTPClient, access *loonfs.ObjectTransferAccess, expectedMethod string, body io.Reader, contentLength int64) (*http.Response, error) {
 	if access == nil || access.PresignedURL == nil {
 		return nil, fmt.Errorf("unsupported object transfer access")
 	}
@@ -650,7 +526,7 @@ func sendPresigned(
 		}
 		request.Header.Set(name, value)
 	}
-	response, err := presignedHTTPClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("send presigned request: %w", err)
 	}
@@ -664,20 +540,6 @@ func responseStatusError(response *http.Response) error {
 		return fmt.Errorf("presigned request returned %s", response.Status)
 	}
 	return fmt.Errorf("presigned request returned %s: %s", response.Status, detail)
-}
-
-func verifyChecksum(expected *loonfs.Checksum, payload []byte) error {
-	if expected == nil {
-		return fmt.Errorf("content reference has no checksum")
-	}
-	actual, err := computeChecksum(expected.Algorithm, payload)
-	if err != nil {
-		return err
-	}
-	if actual.Value != expected.Value {
-		return fmt.Errorf("checksum mismatch: got %s, expected %s", actual.Value, expected.Value)
-	}
-	return nil
 }
 
 func computeChecksum(algorithm loonfs.ChecksumAlgorithm, payload []byte) (*loonfs.Checksum, error) {

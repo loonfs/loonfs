@@ -39,8 +39,17 @@ func main() {
 }
 ```
 
-`client.Files.Upload` and `client.Files.Download` transfer whole files in memory. See
-[reference.md](./reference.md) for the generated API reference.
+`client.Files.DownloadStream(ctx, input)` opens a live, verified `io.ReadCloser`
+in its `Content` field. Consume it through successful EOF to verify size and
+checksum, and always close it. Closing early or cancelling the context releases
+the response without claiming verification. A caller deadline covers metadata
+and body reads; without one, the operation has a 60-second deadline. Direct and
+proxied transfers use the configured HTTP client and the same context. Direct
+requests carry only the presigned headers, and do not follow redirects.
+
+`client.Files.Download` collects that stream into memory. `client.Files.Upload`
+accepts an in-memory byte slice. See [reference.md](./reference.md) for the
+generated API reference.
 
 ## Proxy
 
