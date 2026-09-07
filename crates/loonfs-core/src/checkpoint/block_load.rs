@@ -159,40 +159,64 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     max_seq: ChangeSeq,
     lower_bound: &str,
     upper_bound: Option<&str>,
+    row_limit: usize,
     readahead: Readahead,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let index = load_segment_index(store, segment_cache, memo, descriptor).await?;
     let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
 
-    // Align the read-ahead end to a fixed window. Advancing within a cached
-    // window must not fetch one more speculative block on every lookup.
-    let extended_end = if readahead == Readahead::Enabled && !needed.is_empty() {
-        needed
-            .end
-            .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
-            .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
-            .min(index.len())
-    } else {
-        needed.end
-    };
-    let blocks: Vec<_> = load_segment_data_block_span(
-        store,
-        segment_cache,
-        memo,
-        descriptor,
-        &index[needed.start..extended_end],
-    )
-    .await?
-    .into_iter()
-    .take(needed.len())
-    .collect();
+    let mut result = SegmentKeyRangeBlocks { blocks: Vec::new() };
+    let mut remaining_rows = row_limit;
+    let mut start = needed.start;
+    while start < needed.end && remaining_rows > 0 {
+        // A page only needs the first `row_limit` matching rows from each
+        // segment before the global merge truncates it. Count actual decoded
+        // matches one aligned window at a time; byte size is not a row count.
+        // Unbounded scans retain their existing coalesced range fetch.
+        let required_end = if row_limit == usize::MAX {
+            needed.end
+        } else {
+            (start + 1)
+                .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
+                .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
+                .min(needed.end)
+        };
+        // Preserve the aligned read-ahead policy for subsequent pages.
+        let extended_end = if readahead == Readahead::Enabled {
+            required_end
+                .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
+                .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
+                .min(index.len())
+        } else {
+            required_end
+        };
+        let batch = SegmentKeyRangeBlocks {
+            blocks: load_segment_data_block_span(
+                store,
+                segment_cache,
+                memo,
+                descriptor,
+                &index[start..extended_end],
+            )
+            .await?
+            .into_iter()
+            .take(required_end - start)
+            .collect(),
+        };
+        if row_limit != usize::MAX {
+            remaining_rows = remaining_rows
+                .saturating_sub(batch.rows_in_key_range(lower_bound, upper_bound).count());
+        }
+        result.blocks.extend(batch.blocks);
+        start = required_end;
+    }
 
     validate_manifest_row_seq_range(
         &metadata_segment_object_key(descriptor),
-        blocks.iter().flat_map(|block| block.rows.iter()),
+        result.blocks.iter().flat_map(|block| block.rows.iter()),
         max_seq,
     )?;
-    Ok(SegmentKeyRangeBlocks { blocks })
+    Ok(result)
 }
 
 #[cfg(test)]

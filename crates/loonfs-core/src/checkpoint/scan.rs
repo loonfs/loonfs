@@ -327,7 +327,13 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 matching_descriptors[next_descriptor_index..chunk_end]
                     .iter()
                     .map(|scan_descriptor| {
-                        self.segment_rows(scan_descriptor, lower_bound, upper_bound, readahead)
+                        self.segment_rows(
+                            scan_descriptor,
+                            lower_bound,
+                            upper_bound,
+                            limit,
+                            readahead,
+                        )
                     }),
             )
             .await?;
@@ -389,6 +395,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         scan_descriptor: &ScanDescriptor<'_>,
         lower_bound: &str,
         upper_bound: Option<&str>,
+        row_limit: usize,
         readahead: Readahead,
     ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
         load_manifest_segment_rows_in_key_range_with_cache(
@@ -399,6 +406,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             scan_descriptor.max_seq,
             lower_bound,
             upper_bound,
+            row_limit,
             readahead,
         )
         .await
