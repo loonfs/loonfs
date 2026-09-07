@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// window a completed session's content is protected for is derived in
 /// `limits`, not configured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
     /// Maximum durable work steps in this invocation. One source object,
@@ -57,5 +58,27 @@ impl GcConfig {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GcConfig;
+
+    #[test]
+    fn an_unknown_budget_name_cannot_become_an_unlimited_run() {
+        let config = GcConfig {
+            max_steps: Some(1),
+            ..GcConfig::default()
+        };
+        let mut encoded = serde_json::to_value(&config).expect("encode config");
+        assert_eq!(
+            serde_json::from_value::<GcConfig>(encoded.clone()).expect("decode config"),
+            config
+        );
+        let fields = encoded.as_object_mut().expect("config object");
+        let budget = fields.remove("max_steps").expect("budget");
+        fields.insert("max_objects".to_owned(), budget);
+        assert!(serde_json::from_value::<GcConfig>(encoded).is_err());
     }
 }
