@@ -13,7 +13,7 @@ use crate::context::MutationContext;
 use crate::control_object::{
     expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::namespace::control_snapshot::load_control_snapshot;
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind};
@@ -68,13 +68,14 @@ fn encoded(state: &GcRunState) -> Result<Bytes> {
         .map_err(|error| CoreError::NamespaceCorrupt(format!("cannot encode GC progress: {error}")))
 }
 
-/// Conditional writes are settled only by re-reading durable progress. A
-/// transport failure never licenses sweeping an uncommitted partial mark set.
+/// A confirmed write supplies the next compare token. Conflicts and uncertain
+/// writes require readback; a transport failure alone never confirms progress.
 async fn save<S: ObjectStore + ?Sized>(
     store: &S,
     previous: Option<&LoadedControl<GcRunState>>,
     state: &GcRunState,
 ) -> Result<LoadedControl<GcRunState>> {
+    super::validate::run(state)?;
     let key = run_key(&state.namespace_id);
     let bytes = encoded(state)?;
     let result = match previous {
@@ -82,7 +83,22 @@ async fn save<S: ObjectStore + ?Sized>(
         None => store.put_if_absent(&key, bytes).await,
     };
     match result {
-        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
+        Ok(metadata) => {
+            let etag = metadata
+                .etag
+                .filter(|etag| !etag.is_empty())
+                .ok_or_else(|| CoreError::Store {
+                    object_key: key.clone(),
+                    message: "object store returned no usable GC progress etag".to_owned(),
+                    class: StoreFailureClass::Other,
+                })?;
+            return Ok(LoadedControl {
+                object_key: key,
+                etag,
+                state: state.clone(),
+            });
+        }
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {}
         Err(error @ ObjectStoreError::Transport { .. }) => {
             let current = load_run(store, &state.namespace_id).await?;
             return match current {
@@ -464,6 +480,175 @@ fn scratch_page(key: &str) -> bool {
 mod tests {
     use super::*;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_test_support::stores::{
+        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationKind, RecordingStore,
+    };
+
+    fn starting() -> GcRunState {
+        GcRunState {
+            namespace_id: NamespaceId::parse("demo").expect("namespace"),
+            gc_run_id: GcRunId::generate(),
+            step_no: 0,
+            started_at_ms: 1000,
+            grace_window_ms: GcConfig::default().grace_window_ms,
+            phase: GcPhase::Starting {},
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmed_writes_return_durable_state_and_tokens_without_readback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = starting();
+        let store = RecordingStore::new(
+            LocalFsStore::new(dir.path()).expect("store"),
+            KeyPredicate::exact(run_key(&state.namespace_id)),
+        );
+        let created = save(&store, None, &state).await.expect("create");
+        state.step_no = 1;
+        state.phase = GcPhase::Complete {};
+        let updated = save(&store, Some(&created), &state).await.expect("update");
+        assert_ne!(created.etag, updated.etag);
+        assert_eq!(store.counts().puts, 2);
+        assert_eq!(store.counts().gets_with_metadata, 0);
+        assert_eq!(
+            load_run(store.inner(), &state.namespace_id)
+                .await
+                .expect("load"),
+            Some(updated)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_write_reads_the_winner_instead_of_returning_proposed_progress() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = starting();
+        let store = RecordingStore::new(
+            LocalFsStore::new(dir.path()).expect("store"),
+            KeyPredicate::exact(run_key(&state.namespace_id)),
+        );
+        let original = save(&store, None, &state).await.expect("create");
+        state.step_no = 1;
+        let winner = save(&store, Some(&original), &state).await.expect("winner");
+        state.step_no = 2;
+        store.reset();
+        let settled = save(&store, Some(&original), &state)
+            .await
+            .expect("lost CAS");
+        assert_eq!(settled, winner);
+        assert_eq!(store.counts().gets_with_metadata, 1);
+        let joined = save(&store, None, &starting()).await.expect("lost create");
+        assert_eq!(joined, winner);
+        assert_eq!(store.counts().gets_with_metadata, 2);
+    }
+
+    #[tokio::test]
+    async fn uncertain_creates_and_updates_require_matching_durable_progress() {
+        for updating in [false, true] {
+            for landed in [false, true] {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let inner = LocalFsStore::new(dir.path()).expect("store");
+                let mut state = starting();
+                let previous = if updating {
+                    Some(save(&inner, None, &state).await.expect("initial state"))
+                } else {
+                    None
+                };
+                state.step_no = 1;
+                let failing = FailStore::matching(
+                    inner,
+                    |op| {
+                        matches!(
+                            op.kind(),
+                            OperationKind::Put { .. } | OperationKind::CompareAndSwap { .. }
+                        )
+                    },
+                    InjectedError::Transport("lost write response".to_owned()),
+                );
+                let failing = if landed {
+                    failing.apply_then_fail()
+                } else {
+                    failing
+                };
+                failing.fail_all();
+                let store =
+                    RecordingStore::new(failing, KeyPredicate::exact(run_key(&state.namespace_id)));
+                let result = save(&store, previous.as_ref(), &state).await;
+                if landed {
+                    assert_eq!(result.expect("readback confirms write").state, state);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(CoreError::Store {
+                            class: StoreFailureClass::Other,
+                            ..
+                        })
+                    ));
+                    assert_eq!(
+                        load_run(store.inner().inner(), &state.namespace_id)
+                            .await
+                            .expect("load"),
+                        previous
+                    );
+                }
+                assert_eq!(store.counts().gets_with_metadata, 1);
+                assert_eq!(
+                    store.counts().puts,
+                    1,
+                    "uncertainty must not trigger another write"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_write_tokens_fail_without_readback() {
+        for etag in [None, Some(String::new())] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let state = starting();
+            let key = run_key(&state.namespace_id);
+            let store = RecordingStore::new(
+                MetadataMapStore::new(
+                    LocalFsStore::new(dir.path()).expect("store"),
+                    KeyPredicate::exact(&key),
+                    move |mut metadata| {
+                        metadata.etag.clone_from(&etag);
+                        metadata
+                    },
+                ),
+                KeyPredicate::exact(&key),
+            );
+            let error = save(&store, None, &state)
+                .await
+                .expect_err("write token required");
+            assert!(matches!(
+                error,
+                CoreError::Store {
+                    class: StoreFailureClass::Other,
+                    ..
+                }
+            ));
+            assert_eq!(store.counts().puts, 1);
+            assert_eq!(store.counts().gets_with_metadata, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_proposed_progress_is_rejected_before_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = starting();
+        state.phase = GcPhase::Cleaning {
+            last_key: Some("another-namespace/key".to_owned()),
+        };
+        let store = RecordingStore::new(
+            LocalFsStore::new(dir.path()).expect("store"),
+            KeyPredicate::exact(run_key(&state.namespace_id)),
+        );
+        assert!(matches!(
+            save(&store, None, &state).await,
+            Err(CoreError::NamespaceCorrupt(_))
+        ));
+        assert!(store.snapshot().is_empty());
+    }
 
     #[tokio::test]
     async fn cursor_progress_cannot_skip_server_owned_marking() {
