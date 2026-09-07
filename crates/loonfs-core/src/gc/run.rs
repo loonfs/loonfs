@@ -160,7 +160,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         now_ms: loaded.state.started_at_ms,
     };
     let mut pass = Pass::new(store, namespace_id, &run_id, &fixed_context);
-    let mut budget = PassBudget::new(config.max_objects);
+    let mut budget = PassBudget::new(config.max_steps);
     while !matches!(loaded.state.phase, GcPhase::Complete {}) && budget.try_charge() {
         let mut next = loaded.state.clone();
         pass.step(&mut next, &mut report).await?;
@@ -478,7 +478,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let mut config = GcConfig {
-            max_objects: Some(1),
+            max_steps: Some(1),
             ..GcConfig::default()
         };
         let first = gc_namespace(&store, &ns, &config, &context)

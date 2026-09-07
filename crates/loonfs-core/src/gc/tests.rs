@@ -66,7 +66,7 @@ const GRACE_MS: u64 = 60 * 60 * 1000;
 fn config() -> GcConfig {
     GcConfig {
         grace_window_ms: GRACE_MS,
-        max_objects: None,
+        max_steps: None,
         cursor: None,
     }
 }
@@ -419,7 +419,7 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
     );
 
     let zero_budget = GcConfig {
-        max_objects: Some(0),
+        max_steps: Some(0),
         ..config()
     };
     let error = gc_namespace(&store, &namespace_id, &zero_budget, &context(1_000))
@@ -1494,7 +1494,7 @@ async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
     let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
     let store = RecordingStore::new(inner, segment_reads);
     let mut exact = config();
-    exact.max_objects = Some(marking);
+    exact.max_steps = Some(marking);
     let report = gc_namespace(&store, &namespace_id, &exact, &aged)
         .await
         .expect("pass with a budget for the roots");
@@ -1512,7 +1512,7 @@ async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
 
     // After marking, another call spends its budget on candidate decisions.
     let mut one_more = config();
-    one_more.max_objects = Some(marking + 1);
+    one_more.max_steps = Some(marking + 1);
     let walked = gc_namespace(&store, &namespace_id, &one_more, &aged)
         .await
         .expect("pass with one candidate of room");
@@ -1600,7 +1600,7 @@ async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
     let record_reads = KeyPredicate::prefix(checkpoint_prefix(&namespace_id));
     let store = RecordingStore::new(inner, record_reads);
     let mut bounded = config();
-    bounded.max_objects = Some(3);
+    bounded.max_steps = Some(3);
     let report = gc_namespace(&store, &namespace_id, &bounded, &aged)
         .await
         .expect("pass stopped among the records");
@@ -1648,12 +1648,12 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
     let content_key =
         loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-    for max_objects in [1, 2, 5, 17, 64] {
-        let trial_root = temp_dir.path().join(format!("trial-{max_objects}"));
+    for max_steps in [1, 2, 5, 17, 64] {
+        let trial_root = temp_dir.path().join(format!("trial-{max_steps}"));
         copy_tree(&seed_root, &trial_root);
         let store = LocalFsStore::new(&trial_root).expect("trial store");
         let mut bounded = config();
-        bounded.max_objects = Some(max_objects);
+        bounded.max_steps = Some(max_steps);
         let mut previous = None;
         for pass_no in 0..1000 {
             let pass = gc_namespace(&store, &namespace_id, &bounded, &past)
@@ -1668,14 +1668,14 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
             assert_ne!(
                 previous.as_ref(),
                 Some(&state.state),
-                "budget {max_objects} must advance durable progress"
+                "budget {max_steps} must advance durable progress"
             );
             previous = Some(state.state);
             bounded.cursor = pass.next_cursor;
             if bounded.cursor.is_none() {
                 break;
             }
-            assert!(pass_no < 999, "budget {max_objects} must finish");
+            assert!(pass_no < 999, "budget {max_steps} must finish");
         }
         assert!(
             read_upload_session(&store, &namespace_id, &upload_id)
@@ -2311,7 +2311,7 @@ async fn a_budget_stop_leaves_the_terminal_group_slot() {
 
     // Stop during the sweep; a bounded return leaves the group slot intact.
     let mut bounded = config();
-    bounded.max_objects = Some(marking + 1);
+    bounded.max_steps = Some(marking + 1);
 
     let report = gc_namespace(&store, &namespace_id, &bounded, &reclaimable)
         .await
@@ -2360,7 +2360,7 @@ async fn marking_reads_no_compaction_lease_before_the_sweep() {
 
     // Stop exactly after marking, before the sweep needs a compaction lease.
     let mut short = config();
-    short.max_objects = Some(marking);
+    short.max_steps = Some(marking);
 
     let report = gc_namespace(&store, &namespace_id, &short, &reclaimable)
         .await
@@ -2723,7 +2723,7 @@ async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
     let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
     // Leave part of marking unfinished; no candidate may be decided.
     let mut starved = config();
-    starved.max_objects = Some(marking - chain_units - 1);
+    starved.max_steps = Some(marking - chain_units - 1);
     let report = gc_namespace(&inner, &namespace_id, &starved, &aged)
         .await
         .expect("pass that could not finish its anchor");
@@ -2822,10 +2822,10 @@ async fn gc_pass(
     namespace_id: &NamespaceId,
     config: &GcConfig,
     context: &MutationContext,
-    max_objects: Option<usize>,
+    max_steps: Option<usize>,
 ) -> Result<GcResponse, CoreError> {
     let mut config = config.clone();
-    config.max_objects = max_objects.map(|value| value as u64);
+    config.max_steps = max_steps.map(|value| value as u64);
     let mut total = GcResponse::empty(namespace_id.clone());
     loop {
         let pass = gc_namespace(store, namespace_id, &config, context).await?;
@@ -2901,7 +2901,7 @@ async fn a_chunked_sweep_reaches_the_same_dead_record_cascade() {
     assert_a_dead_records_cascade(Some(1)).await;
 }
 
-async fn assert_a_dead_records_cascade(max_objects: Option<usize>) {
+async fn assert_a_dead_records_cascade(max_steps: Option<usize>) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -2928,7 +2928,7 @@ async fn assert_a_dead_records_cascade(max_objects: Option<usize>) {
         .expect("mark first dead");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let first_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_objects)
+    let first_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_steps)
         .await
         .expect("first gc pass");
     assert_record_reaped_and_basis_kept(
@@ -2940,7 +2940,7 @@ async fn assert_a_dead_records_cascade(max_objects: Option<usize>) {
     )
     .await;
 
-    let second_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_objects)
+    let second_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_steps)
         .await
         .expect("second gc pass");
     assert_basis_reaped(
@@ -4041,7 +4041,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     // lease decides, not the ages.
     let tight = GcConfig {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-        max_objects: None,
+        max_steps: None,
         cursor: None,
     };
     // The crash window itself: the fork wrote its leased source record and
@@ -4561,7 +4561,7 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     .await;
     let mut bounded_config = config();
     // Keep every invocation small, including marking and cleanup.
-    bounded_config.max_objects = Some(3);
+    bounded_config.max_steps = Some(3);
     let mut bounded_report = GcResponse::empty(namespace_id.clone());
     let mut passes = 0;
     loop {
@@ -4638,7 +4638,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
     );
     let mut bounded = config();
     // Two candidates a pass, plus the roots the pass marks before it walks.
-    bounded.max_objects = Some(marking_units(&store, &namespace_id, &aged).await + 2);
+    bounded.max_steps = Some(marking_units(&store, &namespace_id, &aged).await + 2);
     store.reset();
 
     let first = gc_namespace(&store, &namespace_id, &bounded, &aged)
@@ -4659,7 +4659,7 @@ async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
 
     store.inner().take_calls();
     bounded.cursor = first.next_cursor;
-    bounded.max_objects = Some(2);
+    bounded.max_steps = Some(2);
     store.reset();
     let second = gc_namespace(&store, &namespace_id, &bounded, &aged)
         .await
@@ -4724,7 +4724,7 @@ async fn stale_cursor_preserves_new_publications_with_the_original_cutoff() {
     let first_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
     let mut bounded = config();
     // Stop shortly after marking so a publication lands before resumption.
-    bounded.max_objects = Some(marking_units(&store, &namespace_id, &context(first_now)).await + 1);
+    bounded.max_steps = Some(marking_units(&store, &namespace_id, &context(first_now)).await + 1);
     let first = gc_namespace(&store, &namespace_id, &bounded, &context(first_now))
         .await
         .expect("first bounded pass");
@@ -4891,7 +4891,7 @@ async fn one_step_calls_resume_on_another_host_without_aging_new_objects() {
     let start = context(now_after_newest_object(&inner, &ns, 0).await);
     let store = aged_before_now(inner, old_keys);
     let mut bounded = config();
-    bounded.max_objects = Some(1);
+    bounded.max_steps = Some(1);
     let first = gc_namespace(&store, &ns, &bounded, &start)
         .await
         .expect("reserve and capture");
@@ -4955,7 +4955,7 @@ async fn overlapping_collectors_share_progress_and_finish_the_same_run() {
         now_after_newest_object(&store, &ns, UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1).await,
     );
     let mut bounded = config();
-    bounded.max_objects = Some(1);
+    bounded.max_steps = Some(1);
     bounded.cursor = gc_namespace(&store, &ns, &bounded, &now)
         .await
         .expect("start")
@@ -5001,7 +5001,7 @@ async fn a_paused_old_worker_cannot_advance_a_newer_run() {
     namespace_with_a_scan_worth_bounding(&store, &ns, &setup).await;
     let now = context(now_after_newest_object(&store, &ns, GRACE_MS + 1).await);
     let mut bounded = config();
-    bounded.max_objects = Some(1);
+    bounded.max_steps = Some(1);
     let first = gc_namespace(&store, &ns, &bounded, &now)
         .await
         .expect("start");
@@ -5020,7 +5020,7 @@ async fn a_paused_old_worker_cannot_advance_a_newer_run() {
             .await
             .expect("another host finishes the reserved run");
         let mut start_next = config();
-        start_next.max_objects = Some(1);
+        start_next.max_steps = Some(1);
         gc_namespace(&store, &ns, &start_next, &now)
             .await
             .expect("reserve next run");
@@ -5059,7 +5059,7 @@ async fn a_missing_completed_mark_page_stops_before_deleting_candidates() {
     namespace_with_a_scan_worth_bounding(&store, &ns, &setup).await;
     let now = context(now_after_newest_object(&store, &ns, GRACE_MS + 1).await);
     let mut bounded = config();
-    bounded.max_objects = Some(1);
+    bounded.max_steps = Some(1);
     loop {
         bounded.cursor = gc_namespace(&store, &ns, &bounded, &now)
             .await
@@ -5079,7 +5079,7 @@ async fn a_missing_completed_mark_page_stops_before_deleting_candidates() {
         }
     }
     let before = namespace_keys(&store, &ns).await;
-    bounded.max_objects = None;
+    bounded.max_steps = None;
     gc_namespace(&store, &ns, &bounded, &now)
         .await
         .expect_err("missing evidence is never an absent reference");

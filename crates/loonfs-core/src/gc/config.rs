@@ -21,7 +21,7 @@ pub struct GcConfig {
     /// is saved between calls, including with a budget of one.
     /// `None` runs the active collection to completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_objects: Option<u64>,
+    pub max_steps: Option<u64>,
     /// Opaque namespace-bound run identity returned by an earlier invocation.
     /// Progress and deletion evidence live on the server. Omitting the token
     /// joins any active run; an old token never starts a new collection.
@@ -33,7 +33,7 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-            max_objects: None,
+            max_steps: None,
             cursor: None,
         }
     }
@@ -51,9 +51,9 @@ impl GcConfig {
                 self.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
             )));
         }
-        if self.max_objects == Some(0) {
+        if self.max_steps == Some(0) {
             return Err(CoreError::InvalidGcConfig(
-                "max_objects must be greater than zero".to_owned(),
+                "max_steps must be greater than zero".to_owned(),
             ));
         }
         Ok(())

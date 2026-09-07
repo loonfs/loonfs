@@ -1,7 +1,7 @@
 //! Work limits for a garbage-collection pass.
 
-/// Limits durable work steps in one invocation. A source step reads one
-/// root, checkpoint (including fork probes and its basis), anchor candidate,
+/// Counts caller-defined work steps in one invocation. Namespace GC charges
+/// a source step for one root, checkpoint (including fork probes and its basis), anchor candidate,
 /// or WAL segment. A merge step writes at most 512 entries. A revision step
 /// reads one data block, and a sweep step decides one candidate.
 ///
@@ -11,15 +11,15 @@
 /// A budget of one always permits one resumable step.
 #[derive(Debug)]
 pub struct PassBudget {
-    max_objects: Option<u64>,
+    max_steps: Option<u64>,
     spent: u64,
 }
 
 impl PassBudget {
-    /// Meters a pass at `max_objects` units, or at nothing when absent.
-    pub fn new(max_objects: Option<u64>) -> Self {
+    /// Limits a pass to `max_steps` units; an absent limit allows the run to finish.
+    pub fn new(max_steps: Option<u64>) -> Self {
         Self {
-            max_objects,
+            max_steps,
             spent: 0,
         }
     }
@@ -31,9 +31,8 @@ impl PassBudget {
 
     /// Returns the remaining allowance. An unlimited pass returns `u64::MAX`.
     pub(super) fn remaining(&self) -> u64 {
-        self.max_objects.map_or(u64::MAX, |max_objects| {
-            max_objects.saturating_sub(self.spent)
-        })
+        self.max_steps
+            .map_or(u64::MAX, |max_steps| max_steps.saturating_sub(self.spent))
     }
 
     /// Charges one unit for work already done.

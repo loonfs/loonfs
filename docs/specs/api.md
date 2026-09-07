@@ -777,14 +777,14 @@ A maintenance run body names exactly one job with `kind`:
 | --- | --- | --- |
 | `metadata` | Optional `max_wal_tail_segments` | `wal_flush` and `reorganize` outcomes |
 | `metadata_compaction` | None | `compaction`, tagged by `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
-| `gc` | Optional `grace_window_ms`, `max_objects`, and `cursor` | The collection result |
+| `gc` | Optional `grace_window_ms`, `max_steps`, and `cursor` | The collection result |
 | `retention` | None | `retention_floor_seq` |
 
 The response carries the same `kind`, the addressed `namespace_id`, and that
 job's result. None of the jobs creates a checkpoint record.
 
 ```json
-{"kind":"gc","max_objects":1024}
+{"kind":"gc","max_steps":1024}
 ```
 
 Races and supersessions are outcomes, not errors.
@@ -812,8 +812,8 @@ manifest. `cancelled` means cancellation stopped the run before publication.
 run lost its compaction lease. `superseded` means every publication attempt lost
 the metadata-root race.
 
-For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the run uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window, `max_objects` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
-`max_objects` limits durable work steps in one invocation: one source object
+For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the run uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window, `max_steps` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
+`max_steps` limits durable work steps in one invocation: one source object
 (including a checkpoint's fork probes and basis), one merge page, one revision
 data block, or one sweep candidate. Listing, progress writes, and reference
 lookups are supporting work, so this is not a literal count of provider
@@ -837,7 +837,7 @@ reported progress number. Responses contain counts for that invocation;
 concurrent calls can overlap attempts, so counts are operational summaries,
 not an exactly-once deletion ledger.
 
-Step-driven GC defaults `max_objects` to 1024 and returns any `next_cursor`
+Step-driven GC defaults `max_steps` to 1024 and returns any `next_cursor`
 for a later step rather than looping internally. Nothing sweeps unless `gc`
 is present.
 
@@ -990,7 +990,6 @@ that reason, and the fields sum to the total:
 | `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork record its target may still reach, a released record still inside its grace, or an active pin doing its job. |
 | `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, or a reference set the pass could not establish. |
-| `content_scan_deferred` | A completed session whose content reclamation was skipped because the reference scan did not fit in `max_objects`. `content_reclamation_deferred` is set too. |
 
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.

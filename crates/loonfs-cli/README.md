@@ -341,9 +341,9 @@ Maintenance
     Advance the retention floor. This removes change-feed replay history
     below the flushed manifest head but does not remove file revisions.
 
-  loonfs maintenance gc [--grace-window-ms <ms>] [--max-objects <n>] [--cursor <token>]
+  loonfs maintenance gc [--grace-window-ms <ms>] [--max-steps <n>] [--cursor <token>]
     Run mark-and-sweep collection, looping bounded passes through
-    completion; --max-objects examines at most that many candidates and
+    completion; --max-steps performs at most that many durable work steps and
     returns after one pass, --cursor resumes from a previous pass's
     next_cursor for the same namespace, and --grace-window-ms protects
     objects younger than the window. A run that takes more than one pass

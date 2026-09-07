@@ -115,8 +115,8 @@ pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 /// plus scheduling slop around the budget checks.
 pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 
-/// Default candidate budget for one step-driven garbage-collection pass.
-pub const DEFAULT_GC_MAX_OBJECTS: u64 = 1024;
+/// Default work budget for one garbage-collection invocation.
+pub const DEFAULT_GC_MAX_STEPS: u64 = 1024;
 
 /// Interval between streaming-compaction lease refreshes.
 ///
