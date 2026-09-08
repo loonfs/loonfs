@@ -224,7 +224,11 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(repeated.expires_at_ms, first.expires_at_ms);
     assert!(repeated.created_at_ms >= first.created_at_ms);
     client
-        .fork_namespace(&namespace, &namespace_id("fork"))
+        .fork_namespace(
+            &namespace,
+            &namespace_id("fork"),
+            &loonfs_client::ForkNamespaceOptions::default(),
+        )
         .await
         .expect("fork namespace");
     let diagnostics = client

@@ -160,9 +160,19 @@ async fn run_namespace_fork(
     let new_namespace_id = parse_namespace_id(&args.new_namespace_id)
         .map_err(|error| error.with_param("new_namespace_id"))
         .map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = args
+        .snapshot_id
+        .as_deref()
+        .map(super::snapshot::parse_snapshot_id)
+        .transpose()
+        .map_err(|error| context.fail(kind, error))?;
     let namespace = context
         .target
-        .fork_namespace(&source_namespace_id, &new_namespace_id)
+        .fork_namespace(
+            &source_namespace_id,
+            &new_namespace_id,
+            loonfs::ForkNamespaceOptions { snapshot_id },
+        )
         .await
         .map_err(|error| context.fail(kind, error))?;
 

@@ -158,6 +158,10 @@ pub struct CreateNamespaceRequest {
 pub struct ForkNamespaceRequest {
     /// Durable namespace id for the fork target.
     pub new_namespace_id: NamespaceId,
+    /// Fork from this live snapshot instead of the current head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub snapshot_id: Option<CheckpointId>,
 }
 
 /// Current state for one namespace.

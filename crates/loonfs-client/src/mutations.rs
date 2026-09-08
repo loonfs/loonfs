@@ -608,7 +608,9 @@ mod tests {
 
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
-            client.fork_namespace(&namespace_id, &fork_id).await,
+            client
+                .fork_namespace(&namespace_id, &fork_id, &ForkNamespaceOptions::default())
+                .await,
             &transport,
         );
         drop(transport);

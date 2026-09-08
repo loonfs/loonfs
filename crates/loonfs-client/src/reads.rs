@@ -169,12 +169,13 @@ impl Client {
             .await
     }
 
-    /// Creates a new namespace from the source namespace's current state and
+    /// Creates a new namespace from the selected current head or live snapshot and
     /// returns the target's state at the fork point.
     pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
+        options: &ForkNamespaceOptions,
     ) -> Result<Namespace> {
         let url = format!(
             "{}/v0/namespaces/{source_namespace_id}/forks",
@@ -185,6 +186,7 @@ impl Client {
             self.post(&url),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),
+                snapshot_id: options.snapshot_id.clone(),
             }),
             SendPolicy::Once,
         )

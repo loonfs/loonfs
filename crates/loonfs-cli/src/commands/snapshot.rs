@@ -26,7 +26,7 @@ async fn resolve_snapshot_context(
     Ok(context)
 }
 
-fn parse_snapshot_id(value: &str) -> Result<CheckpointId, CliError> {
+pub(super) fn parse_snapshot_id(value: &str) -> Result<CheckpointId, CliError> {
     CheckpointId::parse(value).map_err(|error| {
         CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
             .with_param("snapshot_id")

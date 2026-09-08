@@ -230,15 +230,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Creates a new namespace at the current head of this namespace.
+    /// Creates a new namespace at this namespace's current head or a live snapshot.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
     /// Returns the target's status at the fork point.
-    pub async fn fork_namespace(&self, target: &NamespaceId) -> Result<Namespace> {
+    pub async fn fork_namespace(
+        &self,
+        target: &NamespaceId,
+        snapshot_id: Option<&CheckpointId>,
+    ) -> Result<Namespace> {
         fork::fork_namespace(
             &self.store,
             &self.namespace_id,
             target,
+            snapshot_id,
             &self.mutation_context()?,
         )
         .await

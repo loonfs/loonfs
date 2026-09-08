@@ -270,3 +270,10 @@ pub struct DirectMultipartUploadOptions {
     /// default; providers allow at most 10,000 parts.
     pub part_size_bytes: Option<u64>,
 }
+
+/// Selects the source state for a namespace fork.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForkNamespaceOptions {
+    /// Fork from this live snapshot instead of the current head.
+    pub snapshot_id: Option<crate::CheckpointId>,
+}

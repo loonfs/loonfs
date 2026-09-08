@@ -2419,17 +2419,23 @@ Representative response:
 }
 ```
 
-The server forks from the source namespace's current head. The new namespace
-shares the source namespace's content store and starts with independent future
-namespace metadata. The fork creates a fork-owned source checkpoint so the
+The optional `snapshot_id` request field selects a live user snapshot of the
+source namespace. Without it, the server captures the current head. The
+snapshot must remain live until the fork-owned checkpoint is written. Missing
+snapshots and ids owned by another namespace or checkpoint kind return
+`snapshot_not_found`; released or expired snapshots return `snapshot_gone`.
+Forking does not extend the snapshot, and later release does not affect the fork.
+
+The new namespace shares the source namespace's content store and starts with
+independent future namespace metadata. The fork creates a fork-owned source checkpoint so the
 source-owned immutable metadata segments stay available for as long as the
 target may still read them. It renews the checkpoint with compare-and-swap,
 then installs the target namespace's head in one conditional write. That head
 records the source checkpoint for the target's lifetime.
 
 The response contains the new namespace's initial state. Its head
-sequence and retention floor are set to the source namespace's sequence at
-the fork point.
+sequence and retention floor are set to the captured basis's sequence. For a
+fresh fork, `head_seq` reports the captured basis, including a current-head fork.
 
 If the target ID already exists or has been deleted, the server returns the
 same `namespace_exists` or `namespace_deleted` error as namespace creation.

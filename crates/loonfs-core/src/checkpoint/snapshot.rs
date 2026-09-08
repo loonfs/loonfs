@@ -118,7 +118,7 @@ pub(crate) async fn release_snapshot<S: ObjectStore + ?Sized>(
     })
 }
 
-fn classify_live_snapshot(
+pub(crate) fn classify_live_snapshot(
     loaded: Option<LoadedCheckpointRecord>,
     checkpoint_id: &CheckpointId,
     now_ms: u64,

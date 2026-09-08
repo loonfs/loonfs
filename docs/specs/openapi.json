@@ -2034,6 +2034,10 @@
           "new_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id for the fork target."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Fork from this live snapshot instead of the current head."
           }
         },
         "required": [
@@ -6460,7 +6464,7 @@
     },
     "/v0/namespaces/{namespace_id}/forks": {
       "post": {
-        "description": "Creates a new namespace as a fork from the source namespace's current durable view.",
+        "description": "Creates a new namespace from the source current head or a live snapshot.",
         "operationId": "fork_namespace",
         "parameters": [
           {
@@ -6522,7 +6526,7 @@
                 }
               }
             },
-            "description": "Source namespace not found"
+            "description": "Source namespace or snapshot not found"
           },
           "409": {
             "content": {
@@ -6542,7 +6546,7 @@
                 }
               }
             },
-            "description": "Source namespace deleted"
+            "description": "Source namespace deleted or snapshot gone"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

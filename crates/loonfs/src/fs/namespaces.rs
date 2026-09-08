@@ -3,7 +3,8 @@
 use super::core::{should_invalidate_after_result, ReadCore, WriterIdentity};
 use crate::FsWriter;
 use crate::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, Namespace, NamespaceId,
+    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
+    Namespace, NamespaceId,
 };
 use crate::{Result, RuntimeError};
 
@@ -41,9 +42,16 @@ impl FsWriter {
     }
 
     /// Forks `source` into `target` at the source's current head.
-    ///
-    /// The fork shares immutable file bytes but gets its own metadata history,
-    /// and the response reports the target at the fork point.
+    pub async fn fork_namespace(
+        &self,
+        source: &NamespaceId,
+        target: &NamespaceId,
+    ) -> Result<Namespace> {
+        self.fork_namespace_with(source, target, ForkNamespaceOptions::default())
+            .await
+    }
+
+    /// Forks `source` into `target` at the selected current head or live snapshot.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.fork_namespace",
@@ -56,15 +64,16 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn fork_namespace(
+    pub async fn fork_namespace_with(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
+        options: ForkNamespaceOptions,
     ) -> Result<Namespace> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(source)
-            .fork_namespace(target)
+            .fork_namespace(target, options.snapshot_id.as_ref())
             .await
             .map_err(RuntimeError::from);
         if should_invalidate_after_result(&result) {

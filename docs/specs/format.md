@@ -1716,17 +1716,21 @@ first flush and first retention advance need them.
 
 #### 3.9.2 Forking a namespace
 
-A fork creates a new namespace from the source namespace's current head. The
-request supplies only the new namespace id; the server supplies the mutation
-context. The protocol is:
+A fork creates a new namespace from the source namespace's current head or a
+live user snapshot selected by `snapshot_id`. The request supplies the new
+namespace id; the server supplies the mutation context. The protocol is:
 
 1. Read and verify the source head and its WAL visibility chain.
-2. Create a verified fork-owned source checkpoint at that head under a freshly
-   generated id. Its owner carries the target namespace id and
+2. Create a verified fork-owned source checkpoint at that head, or at the selected
+   snapshot's manifest and `head_commit_id`, under a freshly generated id.
+   Its owner carries the target namespace id and
    `expires_at_ms = now + FORK_CHECKPOINT_LEASE_MS`. This record is the
    reachability root that keeps the source's basis manifest and segments alive
    for as long as the target or a nested descendant may need them. Each attempt
-   creates a new record.
+   creates a new record. When a snapshot is selected, verify it is live before
+   writing, then read it again after the fork record is durable. If it is no
+   longer live, release the fork record and return `snapshot_gone` without
+   installing a target head. The snapshot record is unchanged.
 3. Read the pinned manifest to get the target's next inode id. Build the active target head with the source's `content_store_id` and a `fork_basis` containing the record's `manifest` reference and checkpoint id. The reference's `manifest_head_seq` is the target's fork sequence.
 4. Renew the source checkpoint with compare-and-swap. The record must be active, fork-owned, and assigned to this target. The new expiry must be later than the stored expiry and at least `now + FORK_CHECKPOINT_LEASE_MS`. The remaining lease must cover the target-head write. If either check fails, the fork stops before creating the target.
 5. Write the target head with create-if-absent.

@@ -165,10 +165,11 @@ impl EmbeddedBackend {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
+        options: loonfs::ForkNamespaceOptions,
     ) -> Result<Namespace, CliError> {
         let result = self
             .writer
-            .fork_namespace(source_namespace_id, new_namespace_id)
+            .fork_namespace_with(source_namespace_id, new_namespace_id, options)
             .await
             .scoped(source_namespace_id);
         self.drain_runner_after(result).await
