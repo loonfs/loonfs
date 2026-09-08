@@ -6,7 +6,7 @@
 //! [`PreparedContent`] and checked again when a publish batch admits the
 //! proof.
 
-use crate::limits::CONTENT_RECEIPT_TTL_MS;
+use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use base64::Engine as _;
 use loonfs_api::v0::ContentToken;
@@ -26,6 +26,7 @@ pub struct CompletedUploadReceipt {
     namespace_id: NamespaceId,
     content_store_id: ContentStoreId,
     content_ref: ContentRef,
+    completed_at_ms: u64,
 }
 
 impl CompletedUploadReceipt {
@@ -33,11 +34,13 @@ impl CompletedUploadReceipt {
         namespace_id: NamespaceId,
         content_store_id: ContentStoreId,
         content_ref: ContentRef,
+        completed_at_ms: u64,
     ) -> Self {
         Self {
             namespace_id,
             content_store_id,
             content_ref,
+            completed_at_ms,
         }
     }
 
@@ -168,6 +171,13 @@ pub fn mint_content_token(
     receipt: &CompletedUploadReceipt,
     now_ms: u64,
 ) -> Result<ContentToken, ContentTokenError> {
+    let issuance_deadline_ms = receipt
+        .completed_at_ms
+        .checked_add(COMPLETED_UPLOAD_RECEIPT_WINDOW_MS)
+        .ok_or(ContentTokenError::TimeOverflow)?;
+    if now_ms >= issuance_deadline_ms {
+        return Err(ContentTokenError::Expired);
+    }
     let expires_at_ms = now_ms
         .checked_add(CONTENT_RECEIPT_TTL_MS)
         .ok_or(ContentTokenError::TimeOverflow)?;
@@ -288,6 +298,7 @@ mod tests {
             namespace_id.clone(),
             ContentStoreId::parse(content_store).expect("content store id"),
             content_ref.clone(),
+            1_000,
         )
     }
 

@@ -2,7 +2,10 @@
 //! plus one head compare-and-swap, with outcomes fanned back to every
 //! candidate slot.
 
-use super::candidates::{prepare_candidate_request, BatchDedup, CandidateAdmission};
+use super::candidates::{
+    prepare_candidate_request, validate_candidate_content_references, BatchDedup,
+    CandidateAdmission,
+};
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
@@ -93,6 +96,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
     timer: &dyn MonotonicTimer,
+    attempt_started_ms: u64,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(Vec::new());
@@ -225,6 +229,25 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             budget_ms: WAL_PUBLISH_BUDGET_MS,
         });
         return abort_batch(slots, &error);
+    }
+    let elapsed_ms = timer.monotonic_now_ms().saturating_sub(attempt_started_ms);
+    let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
+        return abort_batch(
+            slots,
+            &CoreError::Internal("publication time overflow".to_owned()),
+        );
+    };
+    for (candidate, slot) in candidates.iter().zip(&slots) {
+        if matches!(slot, BatchOutcomeSlot::Accepted) {
+            if let Err(error) = validate_candidate_content_references(
+                candidate,
+                namespace_id,
+                view.content_store_id(),
+                publication_now_ms,
+            ) {
+                return abort_batch(slots, &error);
+            }
+        }
     }
     let head_etag = match cas_batch_head(
         store,
@@ -493,6 +516,7 @@ mod tests {
             &context,
             &view,
             &StdMonotonicTimer::default(),
+            0,
         )
         .await;
 
