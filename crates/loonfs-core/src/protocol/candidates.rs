@@ -115,13 +115,11 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         Ok(None) => {}
         Err(error) => return CandidateAdmission::independent(Err(error)),
     }
-    let admissions = match validate_new_primary(candidate) {
-        Ok(admissions) => admissions,
-        Err(error) => return CandidateAdmission::independent(Err(error)),
-    };
-    if let Err(error) = validate_commit_content_references(
-        mutation,
-        admissions,
+    if let Err(error) = candidate.validate_request_limits() {
+        return CandidateAdmission::independent(Err(error));
+    }
+    if let Err(error) = validate_candidate_content_references(
+        candidate,
         namespace_id,
         view.content_store_id(),
         committed_at_ms,
@@ -150,11 +148,20 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     }
 }
 
-fn validate_new_primary(candidate: &CommitCandidate) -> Result<&[ContentAdmission]> {
-    // Check request limits before content preparation errors.
-    candidate.validate_request_limits()?;
+pub(super) fn validate_candidate_content_references(
+    candidate: &CommitCandidate,
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    now_ms: u64,
+) -> Result<()> {
     match candidate.content_preparation() {
-        ContentPreparation::Ready(admissions) => Ok(admissions),
+        ContentPreparation::Ready(admissions) => validate_commit_content_references(
+            candidate.request(),
+            admissions,
+            namespace_id,
+            content_store_id,
+            now_ms,
+        ),
         ContentPreparation::Rejected(error) => Err(error.clone().into()),
     }
 }

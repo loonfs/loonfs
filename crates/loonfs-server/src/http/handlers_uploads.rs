@@ -78,13 +78,16 @@ impl<'a> ContentTokenVerifier<'a> {
     fn mint_receipt(
         self,
         receipt: Option<&CompletedUploadReceipt>,
+        now_ms: u64,
     ) -> Result<Option<ContentToken>, ApiResponseError> {
         let Some(receipt) = receipt else {
             return Ok(None);
         };
-        let token = mint_content_token(self.secret, receipt, current_unix_ms()?)
-            .map_err(content_token_error)?;
-        Ok(Some(token))
+        match mint_content_token(self.secret, receipt, now_ms) {
+            Ok(token) => Ok(Some(token)),
+            Err(ContentTokenError::Expired) => Ok(None),
+            Err(error) => Err(content_token_error(error)),
+        }
     }
 }
 
@@ -455,9 +458,10 @@ fn with_content_token(
     mut response: UploadSession,
     verifier: ContentTokenVerifier<'_>,
     receipt: Option<&CompletedUploadReceipt>,
+    now_ms: u64,
 ) -> Result<UploadSession, ApiResponseError> {
     if let UploadSessionStatus::Completed { content_token, .. } = &mut response.status {
-        *content_token = verifier.mint_receipt(receipt)?;
+        *content_token = verifier.mint_receipt(receipt, now_ms)?;
     }
     Ok(response)
 }
@@ -593,6 +597,7 @@ pub(super) async fn complete_upload(
         completed.response,
         ContentTokenVerifier::new(state.config.content_token_secret()),
         completed.receipt.as_ref(),
+        current_unix_ms()?,
     )?))
 }
 
@@ -661,6 +666,7 @@ pub(super) async fn get_upload(
         response,
         ContentTokenVerifier::new(state.config.content_token_secret()),
         receipt.as_ref(),
+        current_unix_ms()?,
     )?))
 }
 
@@ -714,6 +720,53 @@ mod completion_body_tests {
 
     const CONTENT: &str =
         r#"{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}"#;
+
+    #[tokio::test]
+    async fn completed_status_omits_the_token_when_the_receipt_expires_before_minting() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store =
+            loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
+        let writer = FsWriter::builder_with_store(std::sync::Arc::new(store))
+            .writer_id("writer")
+            .build()
+            .await
+            .expect("writer");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        writer
+            .create_namespace(&namespace_id, Default::default())
+            .await
+            .expect("namespace");
+        let upload = writer.create_upload(&namespace_id).await.expect("upload");
+        writer
+            .put_upload_content(&namespace_id, upload.upload_id(), b"content")
+            .await
+            .expect("content");
+        let completed = writer
+            .complete_upload(
+                &namespace_id,
+                upload.upload_id(),
+                ResolvedUploadCompletion::KnownContent,
+            )
+            .await
+            .expect("complete");
+        let (status, receipt) = writer
+            .get_upload(&namespace_id, upload.upload_id())
+            .await
+            .expect("eligible status");
+        let receipt = receipt.expect("receipt eligible at status read");
+        let response = with_content_token(
+            status,
+            ContentTokenVerifier::new("secret"),
+            Some(&receipt),
+            u64::MAX,
+        )
+        .ok()
+        .expect("completed status must survive mint expiry");
+        assert_eq!(response, completed.response);
+        let json = serde_json::to_value(response).expect("HTTP response");
+        assert_eq!(json["status"], "completed");
+        assert!(json.get("content_token").is_none());
+    }
 
     #[test]
     fn stored_mode_selects_a_precise_completion_schema_error() {

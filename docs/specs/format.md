@@ -2710,7 +2710,11 @@ publishing CAS) — under these rules:
 
    *The grace is derived, not tuned.* A reference can enter metadata only
    through a receipt, a receipt is minted only from a durable `completed`
-   session, and minting stops a fixed window after completion. So:
+   session, and minting stops a fixed window after completion. The signer checks
+   the completion time carried by the receipt on every mint. A retained receipt
+   cannot extend the issuance window: minting refuses `now_ms` at or after
+   `completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS`. A token expires at
+   `now_ms + CONTENT_RECEIPT_TTL_MS`. So:
 
    ```
    CONTENT_RECLAMATION_GRACE
@@ -2728,9 +2732,13 @@ publishing CAS) — under these rules:
    holds its admission directly instead of carrying a receipt, but that proof
    carries a deadline no later than the expiry of the last token the session
    could issue.
-   Batch admission checks the deadline again, so the same inequality covers
-   both local proofs and remote tokens. The reasoning above assumes a content
-   object is referenced only by the namespace whose session created it and by
+   Immediately before the head swap, publication checks every newly accepted
+   primary's content references for a matching, unexpired proof. This check uses
+   the request clock plus the attempt's elapsed monotonic time, including the
+   writer check, view load, planning, and WAL preparation. Durable receipt replays
+   need no fresh proof. The same inequality covers local proofs and remote
+   tokens. The reasoning above assumes a content object is referenced only by
+   the namespace whose session created it and by
    fork descendants reading through a pinned basis. Prepared evidence is
    therefore namespace-bound even when catalogs share a content store, and an
    embedded raw-ref import (section 2.8) writes the verified bytes under a

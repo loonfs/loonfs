@@ -263,7 +263,10 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
 
 /// Minimum age of unreferenced content from a completed upload before
 /// collection. The value covers the receipt window, receipt lifetime, and a
-/// final publication with the clock-error and scheduling allowance.
+/// final publication with the clock-error and scheduling allowance. Every mint
+/// checks the upload's receipt issuance window. Immediately before the head
+/// swap, content proofs are checked against the request clock plus the whole
+/// attempt's elapsed monotonic time.
 pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;
 

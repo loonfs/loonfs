@@ -451,6 +451,7 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
+        let attempt_started_ms = self.timer.monotonic_now_ms();
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
@@ -521,6 +522,7 @@ impl NamespaceCommitEngine {
             context,
             &publish_view,
             self.timer.as_ref(),
+            attempt_started_ms,
         )
         .await;
         let resulting_head = match &published.effect {
@@ -636,6 +638,10 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         .delete_namespace(store, options, context)
         .await
 }
+
+#[cfg(test)]
+#[path = "commit_engine_content_tests.rs"]
+mod content_tests;
 
 #[cfg(test)]
 mod tests {

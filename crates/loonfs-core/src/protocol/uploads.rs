@@ -1333,6 +1333,7 @@ fn receipt_within_window(
             namespace_id.clone(),
             content_store_id.clone(),
             content_ref.clone(),
+            completed_at_ms,
         )
     })
 }
