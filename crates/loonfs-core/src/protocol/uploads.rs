@@ -24,9 +24,10 @@ use crate::limits::{
 use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::namespace::control::load_namespace_head_control;
 use crate::storage::content::{
-    abort_unpublished_multipart_upload, delete_unpublished_content_object,
-    identify_streamed_payload, stage_bytes_under_content_id, stage_streamed_under_content_id,
-    verify_durable_content_checksum, DurableContentValidationError, StreamedPayloadKind,
+    abort_unpublished_multipart_upload, complete_content_multipart_upload, content_key_for_id,
+    create_content_multipart_upload, delete_unpublished_content_object, identify_streamed_payload,
+    stage_bytes_under_content_id, stage_streamed_under_content_id, verify_durable_content_checksum,
+    DurableContentValidationError, StreamedPayloadKind,
 };
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use bytes::Bytes;
@@ -43,7 +44,7 @@ use loonfs_api::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId,
     NamespaceId, UploadId,
 };
-use loonfs_objectstore::keys::{content_blob, upload_session};
+use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::{
     ByteStream, MultipartCompletion, MultipartPart, ObjectMetadata, ObjectStore,
     PROVIDER_MULTIPART_PART_BYTES,
@@ -146,7 +147,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     ensure_upload_namespace_available(store, namespace_id).await?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
-    let object_key = content_blob(&content_store_id, &content_id);
+    let object_key = content_key_for_id(&content_store_id, &content_id);
     let upload_id = create_upload_session(
         store,
         namespace_id,
@@ -177,12 +178,10 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
-    let object_key = content_blob(&content_store_id, &content_id);
+    let object_key = content_key_for_id(&content_store_id, &content_id);
 
-    let provider_upload_id = store
-        .create_multipart_upload(&object_key)
-        .await
-        .map_err(|err| CoreError::store(&object_key, &err))?;
+    let provider_upload_id =
+        create_content_multipart_upload(store, &content_store_id, &content_id).await?;
     let session = NewUploadSession::direct_multipart(
         content_id.clone(),
         &provider_upload_id,
@@ -275,7 +274,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     }
 
     Ok(MultipartPartTargets {
-        object_key: content_blob(&content_store_id, &session.content_id),
+        object_key: content_key_for_id(&content_store_id, &session.content_id),
         provider_upload_id: provider_upload_id.to_owned(),
         parts,
     })
@@ -989,7 +988,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         // replay, and it fails loudly.
         return Err(CoreError::Internal(format!(
             "content object `{}` already holds bytes under a freshly minted identity",
-            content_blob(catalog.content_store_id(), &staged.content_ref.content_id)
+            content_key_for_id(catalog.content_store_id(), &staged.content_ref.content_id)
         )));
     }
     complete_owned_staging(
@@ -1504,26 +1503,14 @@ async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     expected: &ContentRef,
 ) -> Result<CompletionOutcome> {
     let parts = multipart_parts(parts, checksum_algorithm)?;
-    let object_key = content_blob(content_store_id, &expected.content_id);
-
-    let completion = match store
-        .complete_multipart_upload(&object_key, provider_upload_id, &parts, &expected.checksum)
-        .await
-    {
-        Ok(completion @ (MultipartCompletion::Assembled | MultipartCompletion::UnknownUpload)) => {
-            completion
-        }
-        Err(err) => {
-            // The object was not assembled on this call. The provider may
-            // have refused the parts, or the call may not have completed at
-            // all: a refusal arrives as the same transport failure as a lost
-            // response, so this cannot tell them apart and does not guess.
-            // Reporting the store failure leaves the session open and the
-            // object, if the provider did assemble one, in place — which is
-            // what a repeated completion reconciles from.
-            return Err(CoreError::store(&object_key, &err));
-        }
-    };
+    let completion = complete_content_multipart_upload(
+        store,
+        content_store_id,
+        expected,
+        provider_upload_id,
+        &parts,
+    )
+    .await?;
 
     match verify_durable_content_checksum(store, content_store_id, expected).await {
         Ok(()) => Ok(CompletionOutcome::Verified(expected.clone())),
@@ -1559,6 +1546,7 @@ mod tests {
     use super::*;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use loonfs_api::wire::control::decode_control_object;
+    use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{
