@@ -471,13 +471,24 @@ pub enum NamespaceStatus {
     Active {},
     /// Terminal: the namespace's history has ended. Reads, commits, forks,
     /// and re-creation of the same id are all refused.
-    Deleted {},
+    Deleted {
+        /// Earliest owner-prefix collection time once dependencies are gone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reclaim_after_ms: Option<u64>,
+    },
 }
 
 impl NamespaceStatus {
     /// Returns whether the namespace is permanently deleted.
     pub const fn is_deleted(&self) -> bool {
-        matches!(self, Self::Deleted {})
+        matches!(self, Self::Deleted { .. })
+    }
+    /// Returns the irrevocable collection deadline, if retirement is established.
+    pub const fn reclaim_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::Deleted { reclaim_after_ms } => *reclaim_after_ms,
+            Self::Active {} => None,
+        }
     }
 }
 
@@ -630,6 +641,14 @@ impl HeadState {
         }
         if successor.fork_basis != self.fork_basis {
             return drift("fork_basis");
+        }
+        if self.status.is_deleted() && !successor.status.is_deleted() {
+            return drift("status");
+        }
+        if self.status.reclaim_after_ms().is_some()
+            && self.status.reclaim_after_ms() != successor.status.reclaim_after_ms()
+        {
+            return drift("reclaim_after_ms");
         }
         Ok(())
     }
@@ -1357,6 +1376,36 @@ mod tests {
         successor.seq = ChangeSeq(4);
         head.ensure_successor_identity(&successor)
             .expect("advancing the sequence keeps the identity");
+
+        let mut deleted = head.clone();
+        deleted.status = NamespaceStatus::Deleted {
+            reclaim_after_ms: None,
+        };
+        assert!(deleted.ensure_successor_identity(&head).is_err());
+        let mut retired = deleted.clone();
+        retired.status = NamespaceStatus::Deleted {
+            reclaim_after_ms: Some(100),
+        };
+        deleted
+            .ensure_successor_identity(&retired)
+            .expect("retirement is allowed");
+        retired
+            .ensure_successor_identity(&retired)
+            .expect("deadline is preserved");
+        assert!(retired.ensure_successor_identity(&head).is_err());
+        for deadline in [None, Some(99), Some(101)] {
+            successor = retired.clone();
+            successor.status = NamespaceStatus::Deleted {
+                reclaim_after_ms: deadline,
+            };
+            assert_eq!(
+                retired
+                    .ensure_successor_identity(&successor)
+                    .expect_err("deadline cannot change")
+                    .field,
+                "reclaim_after_ms"
+            );
+        }
 
         let mut drifted = head.clone();
         drifted.content_store_id = ContentStoreId::parse("cs_fedcba9876543210fedcba9876543210")

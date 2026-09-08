@@ -339,7 +339,9 @@ mod tests {
         // The tombstone names the deleting writer in its writer block: even
         // that writer must be refused, so the guard precedes the bump.
         let mut tombstone = head_owned_by(&namespace_id, "writer-a", WriterEpoch(7));
-        tombstone.status = NamespaceStatus::Deleted {};
+        tombstone.status = NamespaceStatus::Deleted {
+            reclaim_after_ms: None,
+        };
         write_head(&store, &namespace_id, tombstone).await;
         let etag_before = head_etag(&store, &namespace_id).await;
 
@@ -365,7 +367,12 @@ mod tests {
             .await
             .expect("read head")
             .state;
-        assert_eq!(head.status, NamespaceStatus::Deleted {});
+        assert_eq!(
+            head.status,
+            NamespaceStatus::Deleted {
+                reclaim_after_ms: None
+            }
+        );
         assert_eq!(head.writer_epoch, WriterEpoch(7));
     }
 

@@ -909,6 +909,33 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("fork descendant");
 
+    write_file_bytes(
+        &store,
+        &descendant,
+        "/docs/own.txt",
+        b"own",
+        &context,
+        Some("descendant-write"),
+    )
+    .await
+    .expect("write descendant");
+    let engine = namespace_engine(&store, &descendant, &context);
+    engine.flush_wal().await.expect("flush descendant");
+    let mut compacted = false;
+    for _ in 0..16 {
+        match engine
+            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately)
+            .await
+            .expect("compact descendant")
+            .outcome
+        {
+            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => compacted = true,
+            other => panic!("expected compaction, got {other:?}"),
+        }
+    }
+    assert!(compacted);
+
     namespace_engine(&store, &parent, &context)
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
         .await
@@ -931,6 +958,56 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
             .bytes,
         b"base"
     );
+    let config = loonfs_core::GcConfig::default();
+    let parent_waiting = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
+        .await
+        .expect("parent waits");
+    assert_eq!(parent_waiting.reclaim_after_ms, None);
+    let ancestor_waiting = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
+        .await
+        .expect("ancestor waits");
+    assert_eq!(ancestor_waiting.released_checkpoints.fork, 0);
+    namespace_engine(&store, &descendant, &aged)
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete descendant");
+    let retired = loonfs_core::gc_namespace(&store, &descendant, &config, &aged)
+        .await
+        .expect("retire descendant");
+    let descendant_deadline = retired
+        .reclaim_after_ms
+        .expect("descendant retired despite compaction");
+    assert_eq!(retired.deleted.content_objects, 0);
+    let waiting = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
+        .await
+        .expect("wait for descendant grace");
+    assert_eq!(waiting.released_checkpoints.fork, 0);
+    aged.now_ms = descendant_deadline;
+    let released = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
+        .await
+        .expect("release descendant record");
+    assert_eq!(released.released_checkpoints.fork, 1);
+    assert_eq!(released.reclaim_after_ms, None);
+    let retained = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
+        .await
+        .expect("released record keeps parent unretired");
+    assert_eq!(retained.reclaim_after_ms, None);
+    aged.now_ms += config.grace_window_ms;
+    let retired = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
+        .await
+        .expect("delete record and retire parent");
+    assert_eq!(retired.deleted.checkpoint_records, 1);
+    let parent_deadline = retired.reclaim_after_ms.expect("parent retired");
+    let waiting = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
+        .await
+        .expect("wait for parent grace");
+    assert_eq!(waiting.released_checkpoints.fork, 0);
+    aged.now_ms = parent_deadline;
+    let released = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
+        .await
+        .expect("release parent record");
+    assert_eq!(released.released_checkpoints.fork, 1);
+    assert_eq!(released.reclaim_after_ms, None);
 }
 
 #[tokio::test]

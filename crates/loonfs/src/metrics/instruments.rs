@@ -1618,6 +1618,7 @@ mod tests {
             budget_exhausted: false,
             next_cursor: None,
             next_reclamation_at_ms: None,
+            reclaim_after_ms: None,
         };
 
         instruments.gc_pass(&gc);

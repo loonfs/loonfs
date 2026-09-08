@@ -1047,11 +1047,14 @@ pub struct GcResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_cursor: Option<String>,
-    /// The earliest known reclamation time for an upload session inspected by this
-    /// pass, in Unix milliseconds.
+    /// The earliest known future reclamation time observed by this pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,
+    /// The deleted head's irrevocable owner-prefix collection deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub reclaim_after_ms: Option<u64>,
 }
 
 impl GcResponse {
@@ -1068,6 +1071,7 @@ impl GcResponse {
             budget_exhausted: false,
             next_cursor: None,
             next_reclamation_at_ms: None,
+            reclaim_after_ms: None,
         }
     }
 
@@ -2109,9 +2113,21 @@ mod tests {
         let gc = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
         let gc_json = serde_json::to_value(gc).expect("serialize gc response");
         assert!(gc_json.get("next_reclamation_at_ms").is_none());
+        assert!(gc_json.get("reclaim_after_ms").is_none());
         let gc: GcResponse =
             serde_json::from_value(gc_json).expect("decode gc response without optional fields");
         assert_eq!(gc.next_reclamation_at_ms, None);
+        assert_eq!(gc.reclaim_after_ms, None);
+        let retired = GcResponse {
+            reclaim_after_ms: Some(2_000_000),
+            ..gc
+        };
+        let json = serde_json::to_value(&retired).expect("encode retirement");
+        assert_eq!(json["reclaim_after_ms"], 2_000_000);
+        assert_eq!(
+            serde_json::from_value::<GcResponse>(json).expect("decode retirement"),
+            retired
+        );
     }
 
     #[test]

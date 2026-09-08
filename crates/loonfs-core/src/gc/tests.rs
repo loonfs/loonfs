@@ -121,7 +121,7 @@ async fn mark_state<S: ObjectStore + ?Sized>(
     let mut report = GcResponse::empty(namespace_id.clone());
     let mut units = 0;
     while !matches!(state.phase, GcPhase::Sweeping { .. }) {
-        pass.step(&mut state, &mut report).await?;
+        pass.step(&mut state, &mut report, context.now_ms).await?;
         units += 1;
         assert!(units < 100_000, "marking must converge");
     }
@@ -727,14 +727,15 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("clone reads through the deleted source");
 
-    // Once the clone is terminally deleted too, the record stops rooting at
-    // collection time: its target is provably gone, and both namespaces are
-    // immutable tombstones, so nothing will ever read through it again. One
-    // pass reclaims the basis and releases the record.
     delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
         .await
         .expect("delete clone");
-    let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+    let retired = gc_namespace(&store, &clone, &config(), &aged)
+        .await
+        .expect("retire clone");
+    let deadline = retired.reclaim_after_ms.expect("clone retired");
+
+    let aged = context(deadline);
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect("gc pass after clone delete");
@@ -747,7 +748,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
 
     // Idempotent: the released record ages out on later passes and
     // nothing resurrects.
-    let again = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+    let again = context(deadline + GRACE_MS);
     let report = gc_namespace(&store, &source, &config(), &again)
         .await
         .expect("idempotent pass");
@@ -3765,6 +3766,12 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork");
+    let target_pin = create_checkpoint(&store, &clone, &setup)
+        .await
+        .expect("materialize target root");
+    release_checkpoint_record(&store, &clone, &target_pin.checkpoint_id, setup.now_ms)
+        .await
+        .expect("release target pin");
     let fork_record = read_fork_record(&store, &source).await;
     // Advance the source root past the fork basis so the basis is
     // reachable only through the fork-owned record.
@@ -3783,6 +3790,20 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
         .await
         .expect("terminal delete of the fork target");
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+
+    let waiting = gc_namespace(&store, &source, &config(), &aged)
+        .await
+        .expect("wait for retirement");
+    assert_eq!(waiting.released_checkpoints.fork, 0);
+    let retired = gc_namespace(&store, &clone, &config(), &aged)
+        .await
+        .expect("retire materialized target");
+    let deadline = retired.reclaim_after_ms.expect("target retired");
+    let waiting = gc_namespace(&store, &source, &config(), &context(deadline - 1))
+        .await
+        .expect("wait for grace");
+    assert_eq!(waiting.released_checkpoints.fork, 0);
+    let aged = context(deadline);
 
     // Pass one flips the record; the record still roots its basis.
     let first_pass = gc_namespace(&store, &source, &config(), &aged)
@@ -5331,4 +5352,171 @@ async fn host_clock_error_advances_record_expiry_but_release_keeps_its_grace() {
     .expect("at release grace cutoff");
     assert_eq!(store.counts().deletes, 1);
     assert!(store.head(&key).await.expect("head checkpoint").is_none());
+}
+
+#[tokio::test]
+async fn retirement_requires_deleted_roots_and_uses_the_resuming_invocation_clock() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("retirement").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let bounded = GcConfig {
+        max_steps: Some(1),
+        ..config()
+    };
+    let started = gc_namespace(&store, &namespace_id, &bounded, &setup)
+        .await
+        .expect("reserve active roots");
+    delete_namespace(
+        &store,
+        &namespace_id,
+        DeleteNamespaceOptions::default(),
+        &setup,
+    )
+    .await
+    .expect("delete");
+    let resume = GcConfig {
+        cursor: started.next_cursor,
+        ..config()
+    };
+    let finished = gc_namespace(&store, &namespace_id, &resume, &context(GRACE_MS * 10))
+        .await
+        .expect("finish old run");
+    assert_eq!(finished.reclaim_after_ms, None);
+    let started = gc_namespace(&store, &namespace_id, &bounded, &context(GRACE_MS * 11))
+        .await
+        .expect("reserve deleted roots");
+    let resume = GcConfig {
+        cursor: started.next_cursor,
+        ..config()
+    };
+    let fresh = GRACE_MS * 100;
+    let finished = gc_namespace(&store, &namespace_id, &resume, &context(fresh))
+        .await
+        .expect("retire");
+    assert_eq!(finished.reclaim_after_ms, Some(fresh + GRACE_MS));
+    assert_eq!(finished.next_reclamation_at_ms, finished.reclaim_after_ms);
+    let finished = gc_namespace(&store, &namespace_id, &config(), &context(fresh + GRACE_MS))
+        .await
+        .expect("deadline reached");
+    assert_eq!(finished.reclaim_after_ms, Some(fresh + GRACE_MS));
+    assert_eq!(finished.next_reclamation_at_ms, None);
+}
+
+#[tokio::test]
+async fn competing_collectors_preserve_the_winning_retirement_deadline() {
+    let directory = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("retirement-race").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    delete_namespace(
+        &inner,
+        &namespace_id,
+        DeleteNamespaceOptions::default(),
+        &setup,
+    )
+    .await
+    .expect("delete");
+    let store = BlockingStore::new(
+        inner,
+        KeyPredicate::exact(wal_head(&namespace_id)),
+        OperationClass::CompareAndSwap,
+    );
+    store.block_next();
+    let first_clock = context(GRACE_MS);
+    let second_clock = context(GRACE_MS * 10);
+    let config = config();
+    let (first, second) = tokio::join!(
+        gc_namespace(&store, &namespace_id, &config, &first_clock),
+        async {
+            store.wait_until_blocked().await;
+            let result = gc_namespace(store.inner(), &namespace_id, &config, &second_clock).await;
+            store.release();
+            result
+        }
+    );
+    let deadline = second_clock.now_ms + GRACE_MS;
+    assert_eq!(
+        first.expect("losing collector").reclaim_after_ms,
+        Some(deadline)
+    );
+    assert_eq!(
+        second.expect("winning collector").reclaim_after_ms,
+        Some(deadline)
+    );
+}
+
+#[tokio::test]
+async fn uncertain_retirement_reads_back_and_failed_retirement_saves_no_progress() {
+    for landed in [false, true] {
+        let directory = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = NamespaceId::parse("retirement-uncertain").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&inner, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        delete_namespace(
+            &inner,
+            &namespace_id,
+            DeleteNamespaceOptions::default(),
+            &setup,
+        )
+        .await
+        .expect("delete");
+        let (mut state, _) = mark_state(&inner, &namespace_id, &setup)
+            .await
+            .expect("mark deleted roots");
+        if let GcPhase::Sweeping { family, .. } = &mut state.phase {
+            *family = GcCandidateFamily::Checkpoints;
+        }
+        let run_key = super::run::run_key(&namespace_id);
+        let bytes = Bytes::from(
+            loonfs_api::wire::control::encode_control_state(ControlObjectKind::GcRun, &state)
+                .expect("encode run"),
+        );
+        inner
+            .put_overwrite(&run_key, bytes.clone())
+            .await
+            .expect("save sweep");
+        let store = FailStore::new(
+            inner,
+            KeyPredicate::exact(wal_head(&namespace_id)),
+            OperationClass::CompareAndSwap,
+            InjectedError::Transport("uncertain retirement".to_owned()),
+        );
+        let store = if landed {
+            store.apply_then_fail()
+        } else {
+            store
+        };
+        store.fail_next(1);
+        let store = RecordingStore::new(store, KeyPredicate::any());
+        let result = gc_namespace(&store, &namespace_id, &config(), &context(GRACE_MS)).await;
+        assert_eq!(result.is_ok(), landed);
+        let head = crate::namespace::control::load_head_object(&store, &namespace_id)
+            .await
+            .expect("head");
+        assert_eq!(
+            head.state.status.reclaim_after_ms(),
+            landed.then_some(GRACE_MS * 2)
+        );
+        if !landed {
+            assert_eq!(
+                store
+                    .get(&run_key, None)
+                    .await
+                    .expect("run")
+                    .expect("run exists"),
+                bytes
+            );
+            assert_eq!(store.counts().compare_and_swaps, 1);
+        }
+    }
 }

@@ -184,6 +184,29 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     + PROVIDER_ATTEMPT_TIMEOUT_MS
     + GC_SAFETY_MARGIN_MS;
 
+/// Lifetime of a direct download or upload capability.
+pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
+
+/// Covers outstanding reads and direct capabilities after retirement.
+pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 = max_u64(
+    GC_MIN_GRACE_WINDOW_MS,
+    DIRECT_TRANSFER_URL_TTL_MS
+        + PROVIDER_OPERATION_DEADLINE_MS
+        + PROVIDER_ATTEMPT_TIMEOUT_MS
+        + GC_SAFETY_MARGIN_MS,
+);
+
+const fn covers_namespace_retirement(grace_ms: u64) -> bool {
+    grace_ms >= GC_MIN_GRACE_WINDOW_MS
+        && grace_ms
+            >= DIRECT_TRANSFER_URL_TTL_MS
+                + PROVIDER_OPERATION_DEADLINE_MS
+                + PROVIDER_ATTEMPT_TIMEOUT_MS
+                + GC_SAFETY_MARGIN_MS
+}
+
+const _: () = assert!(covers_namespace_retirement(NAMESPACE_RETIREMENT_GRACE_MS));
+
 /// Default age of an unreachable object before garbage collection may remove it.
 pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
 
@@ -276,6 +299,14 @@ const _: () = assert!(
 mod tests {
     use super::*;
     use crate::gc::GcConfig;
+
+    #[test]
+    fn retirement_grace_covers_capabilities_and_rejects_a_shorter_window() {
+        assert!(covers_namespace_retirement(NAMESPACE_RETIREMENT_GRACE_MS));
+        assert!(!covers_namespace_retirement(
+            NAMESPACE_RETIREMENT_GRACE_MS - 1
+        ));
+    }
 
     #[test]
     fn the_content_grace_floor_rejects_a_window_one_receipt_short() {

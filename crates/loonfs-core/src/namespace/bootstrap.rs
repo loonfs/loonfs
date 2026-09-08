@@ -335,7 +335,9 @@ mod tests {
     fn ambiguous_install_never_revives_a_deleted_namespace_id() {
         let proposed = proposed_head();
         let mut deleted = proposed.clone();
-        deleted.status = NamespaceStatus::Deleted {};
+        deleted.status = NamespaceStatus::Deleted {
+            reclaim_after_ms: None,
+        };
 
         assert_eq!(
             classify_ambiguous_namespace_install(&proposed, &deleted),

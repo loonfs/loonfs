@@ -91,7 +91,7 @@ The required durable object families and standard key patterns are:
 
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
-| **WAL head** | Mutable | Defines the namespace's durable identity and current state: content store, fork provenance, visible sequence, writer epoch, writer metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
+| **WAL head** | Mutable | Defines the namespace's durable identity and current state: content store, fork provenance, visible sequence, writer epoch, writer metadata, replay hints, visible WAL tip, and deleted retirement deadline. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/wal_{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user, fork target, or snapshot). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
@@ -864,8 +864,8 @@ no default, and a head that omits it fails to decode. There is no
 initialization status and no intermediate status of any kind, because there is
 no initialization to observe: the head is published complete by one
 conditional write, so a namespace either has a head or does not exist.
-Deletion is the one transition the head must record, and it keeps that head
-forever as the tombstone that retires its `namespace_id`. Readers MUST refuse
+Deletion is terminal. The head stays forever as the tombstone that prevents
+reuse of its `namespace_id`. Readers MUST refuse
 to serve a namespace whose head status they do not recognize; decoding is
 fail-closed, never best-effort.
 
@@ -888,9 +888,17 @@ manifests, and non-protecting checkpoint records under the usual windows,
 leaving the head as the id-retiring tombstone, together with the root and
 floor objects if the namespace ever wrote them (section 6, rule 4). Objects
 protected by fork-owned checkpoint records survive, so clones of a deleted
-source stay readable. A deleted fork target that materialized its own metadata
-root also keeps its source checkpoint: that root may be the basis of a nested
-fork whose manifest still names source-owned segments and content.
+source stay readable.
+
+A deleted head has two substates. `{"kind":"deleted"}` has no established
+retirement and retains dependencies. `{"kind":"deleted","reclaim_after_ms":T}`
+records irrevocable retirement and the earliest owner-prefix collection time.
+GC may make only the transition from an absent deadline to a fixed deadline.
+Every later head write preserves that deadline verbatim and remains deleted;
+successor identity validation rejects clearing or moving it. Both substates
+refuse namespace operations in the same way. Retirement records that no
+retained view or dependent fork remains. Retirement by itself deletes no
+content.
 
 ### 2.6 Forks
 
@@ -903,10 +911,30 @@ verified fork-owned source checkpoint at that head, then installs the complete
 target head with one create-if-absent. The target writes no manifest, no root, and no floor: the
 head's `fork_basis` names the source manifest the target starts from, and the
 fork-owned checkpoint record is what keeps that manifest and its segments alive
-for as long as the target or a nested descendant may still need them. A target
-must materialize its own metadata root before it can be forked again; that
-direct-read, non-swept control object conservatively keeps the source
-checkpoint after target deletion.
+for as long as the target or a nested descendant may still need them.
+The immediate target head decides release, using the fixed GC run clock:
+
+| Target head | Source checkpoint action |
+| --- | --- |
+| Active, exact source, checkpoint id, and manifest | Retain (`referenced_by_live_target`). |
+| Active, absent fork basis or another source or checkpoint id | Reclaimable. |
+| Active, same source and checkpoint id, different manifest | Corruption. |
+| Deleted, absent fork basis or another source or checkpoint id | Reclaimable. |
+| Deleted, same source and checkpoint id, absent deadline | Retain (`target_not_retired`). |
+| Deleted, same source and checkpoint id, deadline after the run clock | Retain (`target_retirement_grace`). |
+| Deleted, same source and checkpoint id, deadline at or before the run clock | Reclaimable. |
+
+An absent target retains the record until its lease expires. An unreadable
+head retains the record; an undecodable head is corruption. An absent expired
+target gets no tombstone. The fork installation margin remains required.
+
+For `A -> B -> C`, a live C keeps its record under B, which prevents B from
+retiring after deletion. A therefore keeps its record for B. After C is deleted
+and its own checkpoint prefix has no retained record, C retires. After C's
+deadline, B releases C's record. A later B run deletes that record after its
+release grace and retires B. After B's deadline, A releases B's record. Each
+step reads local records and the immediate target's head only. Compaction in
+B or C does not change these rules.
 
 Fork provenance lives in the target head and stays there for the namespace's
 life. Reads and recovery use the target head, its own manifests once it has
@@ -2446,8 +2474,9 @@ the maintenance endpoint or an explicit maintenance-step opt-in.
 Before reserving a new collection, a collector verifies the namespace head.
 An absent head means there is nothing to collect. WAL-head format version 2
 also gates this GC protocol: a version-1 collector must refuse the head
-before it can delete anything. The head payload is unchanged, but the
-collection coordination required to interpret its references has changed.
+before it can delete anything. The optional retirement deadline is part of the version-2 head payload, and
+the collection coordination required to interpret its references is what the
+version gates.
 There is no mixed-protocol collection or compatibility fallback.
 
 GC uses resumable listing mark-and-sweep. Its inputs are `wal/head.json`,
@@ -2592,8 +2621,8 @@ publishing CAS) — under these rules:
    its basis, if it has a foreign one, is protected on the source side by
    the fork-owned checkpoint record. On a terminally
    deleted namespace the root set shrinks to fork-owned records protecting
-   a live target (and their bases): reads are impossible and the tombstone
-   is immutable, so user and snapshot pins, the final replay chain, and the
+   a target that is active or not past retirement grace (and their bases): reads
+   are impossible and deletion is terminal, so user and snapshot pins, the final replay chain, and the
    last manifest protect nothing and age out. The head survives as the
    id-retiring tombstone, together with the root and floor objects if the
    namespace ever wrote them. Completed GC progress also stays in its
@@ -2621,9 +2650,24 @@ publishing CAS) — under these rules:
    a later pass. Content objects are never enumerated by listing the content
    store, which is shared by every namespace whose head names it; they are
    reached only through the upload session that owns them (rule 11).
-10. **Fork checkpoints require an exact reference.** A fork-owned record remains a root while its active target's `fork_basis` names the record's source namespace, checkpoint id, and manifest. An absent target keeps the record until its lease expires. A deleted target with no metadata root makes the record releasable immediately. A deleted target with a metadata root retains the record conservatively, because nested checkpoint creation must publish that root before installing a descendant and the descendant's manifest may still name source-owned objects. An active target without a fork basis, or one that names another source or checkpoint, makes the record releasable immediately. This also allows GC to release records created by failed fork attempts against an existing target.
+10. **Fork checkpoints require an exact reference.** Apply the target-head
+    table in section 2.6. A deleted target naming this record retains it until
+    retirement is established and its deadline is at or before the fixed run
+    clock. GC never reads the target's metadata root to classify a fork record.
+    An unreadable target head retains; an undecodable head fails as corruption.
+    An active target naming the same source and checkpoint id but a different
+    manifest is corruption. An absent target retains until its lease expires;
+    GC writes no tombstone for an absent expired target.
 
-    If the target head or metadata root cannot be read, GC retains the record or fails the pass without deletion. Checkpoint basis verification rejects a deleted source, so a checkpoint attempt that publishes a late root after the target tombstone cannot install a new descendant. If the source namespace and checkpoint id match but the manifest differs, the namespace is corrupt and the pass fails.
+    Checkpoint creation writes its record and then verifies it against the
+    head. `verify_checkpoint_basis` refuses a deleted head. A record that
+    protects anything was therefore durable before deletion, and a complete
+    post-deletion listing encounters it. A record written after the sweep
+    passed its key cannot verify, so its creator releases it. If the creator
+    crashes first, the record is active with an absent target and an unexpired
+    lease. It blocks the next pass until the lease expires. Neither case
+    permits an early release of a verified dependency.
+
 11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
    owns both halves, because a session record is the only handle on the
    content object it created.
@@ -2777,6 +2821,43 @@ publishing CAS) — under these rules:
    the complete run index, degraded roots — applies here exactly as it
    applies to `metadata/segments/`.
 
+13. **Namespace retirement requires a complete checkpoint sweep.** A run may
+    retire only if its reserved roots captured a deleted head with no
+    `reclaim_after_ms`. A run that captured an active head never retires it.
+    `GcRoots` stores both `namespace_deleted` and `reclaim_after_ms`.
+    `GcPhase::Sweeping.checkpoints_retained` records whether any listed
+    checkpoint survived: an active record, a newly released record, a released
+    record within grace, a lost compare-and-swap, or a record that disappeared
+    between listing and load. Uncertainty retains. Only deletion of every
+    encountered checkpoint, or an empty prefix, permits retirement.
+
+    At the end of the checkpoints family, GC re-reads the head and
+    compare-and-swaps deleted with no deadline to deleted with this deadline:
+
+    ```
+    deadline = fresh_invocation_now_ms + max(run.grace_window_ms,
+                                             NAMESPACE_RETIREMENT_GRACE_MS)
+    NAMESPACE_RETIREMENT_GRACE_MS = max(GC_MIN_GRACE_WINDOW_MS,
+        DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_OPERATION_DEADLINE_MS
+        + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS)
+    DIRECT_TRANSFER_URL_TTL_MS = 15 * 60 * 1000
+    ```
+
+    The fresh clock belongs to the invocation performing the swap, never the
+    run's start. A resumed run cannot backdate retirement. This grace covers
+    a download capability issued just before deletion, an in-flight read
+    within the publication budgets, one provider operation, and the clock
+    allowance. Core asserts the inequality at compile time.
+
+    Every other head field is preserved verbatim, and successor identity is
+    checked. A lost compare-and-swap reloads the head. Another collector's
+    deadline wins and remains unchanged. An active head is corruption because
+    deletion is terminal. An uncertain transport outcome requires readback
+    before deciding success or returning an error. An error writes no further
+    state. GC progress is not authority; the head's status is checked at the
+    transition. Retirement releases fork records from descendants to
+    ancestors. It deletes no content by itself.
+
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.
 To keep that true, every readable checkpoint record roots its basis for the
@@ -2784,8 +2865,8 @@ duration of a pass, whatever its lifecycle, expiry, or owner — no exceptions.
 State, expiry, and owner fate gate only whether the record itself is a
 candidate. A fork-owned record that no target uses (rule 10) is rechecked and
 released with compare-and-swap on its current ETag. An active record is never
-deleted directly, and a released fork record is retained if its target still
-names it. A released record is deleted once its `released_at_ms` is a grace window old;
+deleted directly. A released fork record is retained while its target names
+it and the target-head table in rule 10 requires retention. A released record is deleted once its `released_at_ms` is a grace window old;
 because release is terminal, no second state is needed between deciding to
 delete and deleting, and a crash between the release CAS and the delete
 leaves a record the next pass reaps unconditionally.
@@ -2807,8 +2888,8 @@ The phases are:
   run, one validated data block at a time. Shared descriptors use the
   tightest protected manifest sequence bound.
 - `sealing`: merge the content index and object table into one complete table.
-- `sweeping`: that table, the small retention summary, candidate family, and
-  exclusive last-decided key. Data families precede checkpoint and upload
+- `sweeping`: that table, the small retention summary, `checkpoints_retained`,
+  candidate family, and exclusive last-decided key. Data families precede checkpoint and upload
   records.
 - `cleaning`: exclusive last-decided scratch key. Only recognized mark pages
   are removed, including abandoned pages from older runs.
@@ -2851,6 +2932,7 @@ An old worker can leave an unreferenced page after cleanup; a later run
 reaps it. The singleton run record itself stays in place, preventing deletion
 and recreation races. No marks, roots, or scan positions are trusted from
 client continuation tokens.
+
 
 ### 6.5 Control-object cleanup
 

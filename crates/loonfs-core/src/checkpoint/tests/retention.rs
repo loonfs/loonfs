@@ -972,7 +972,9 @@ async fn checkpoint_verification_rejects_a_deleted_namespace() {
         .await
         .expect("load head");
     let mut deleted_head = loaded_head.state;
-    deleted_head.status = loonfs_api::wire::control::NamespaceStatus::Deleted {};
+    deleted_head.status = loonfs_api::wire::control::NamespaceStatus::Deleted {
+        reclaim_after_ms: None,
+    };
     let encoded = loonfs_api::wire::control::encode_control_state(
         loonfs_api::wire::control::ControlObjectKind::WalHead,
         &deleted_head,

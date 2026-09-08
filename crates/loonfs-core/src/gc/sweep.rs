@@ -25,6 +25,7 @@ pub(super) struct Sweep<'a, 'store, S: ?Sized> {
     pub(super) references: References<'a, 'store, S>,
     pub(super) upload_sweep: UploadSweepContext<'a, S>,
     pub(super) leases: &'a mut CompactionLeases,
+    pub(super) checkpoints_retained: &'a mut bool,
     pub(super) report: &'a mut GcResponse,
 }
 
@@ -32,10 +33,13 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
     pub(super) async fn candidate(&mut self, family: CandidateFamily, key: &str) -> Result<()> {
         if !family.recognizes(key) {
             self.report.retain(RetainedReason::UnrecognizedKey);
+            *self.checkpoints_retained |= family == CandidateFamily::Checkpoints;
             return Ok(());
         }
         if family == CandidateFamily::Checkpoints && self.references.missing_basis(key).await? {
-            return self.process_missing_basis_checkpoint(key).await;
+            self.process_missing_basis_checkpoint(key).await?;
+            *self.checkpoints_retained = true;
+            return Ok(());
         }
         match family {
             CandidateFamily::WalSegments => {
@@ -54,7 +58,10 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                 self.leases.load_once(self.store, self.namespace_id).await?;
                 self.process_compaction_staging(key).await
             }
-            CandidateFamily::Checkpoints => self.process_checkpoint(key).await,
+            CandidateFamily::Checkpoints => {
+                *self.checkpoints_retained |= !self.process_checkpoint(key).await?;
+                Ok(())
+            }
             CandidateFamily::UploadSessions => self.process_upload_session(key).await,
         }
     }
@@ -173,19 +180,19 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         Ok(())
     }
 
-    async fn process_checkpoint(&mut self, key: &str) -> Result<()> {
+    async fn process_checkpoint(&mut self, key: &str) -> Result<bool> {
         if self.references.object(key).await? {
             self.report.retain(RetainedReason::Referenced);
-            return Ok(());
+            return Ok(false);
         }
         match maybe_release_fork_checkpoint(self.store, key, self.mutation).await? {
             ForkCheckpointSweep::Released => {
                 self.report.released_checkpoints.fork += 1;
-                return Ok(());
+                return Ok(false);
             }
             ForkCheckpointSweep::Retained => {
                 self.report.retain(RetainedReason::CheckpointNotReleasable);
-                return Ok(());
+                return Ok(false);
             }
             ForkCheckpointSweep::NotAnActiveFork => {}
         }
@@ -202,12 +209,13 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             CheckpointSweep::Delete => {
                 self.delete_key(key).await?;
                 self.report.deleted.checkpoint_records += 1;
+                return Ok(true);
             }
             CheckpointSweep::Released => self.report.released_checkpoints.expired += 1,
             CheckpointSweep::ReleasedSnapshot => self.report.released_checkpoints.snapshot += 1,
             CheckpointSweep::Retain => self.report.retain(RetainedReason::CheckpointNotReleasable),
         }
-        Ok(())
+        Ok(false)
     }
 
     async fn process_upload_session(&mut self, key: &str) -> Result<()> {
