@@ -104,6 +104,7 @@ The required durable object families and standard key patterns are:
 | **GC run** | Mutable CAS | Coordinates marking and sweeping across calls and hosts; one active run per namespace. | `namespaces/{namespace_id}/gc/run.json` |
 | **GC mark pages** | Immutable | Sorted, checksummed reference tables and intermediate merge output. | `namespaces/{namespace_id}/gc/runs/{gc_run_id}/tables/{table_id}/{page_index:020}.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
+| **Content store descriptors** | Immutable | Identify the content domain held by a backend. | `content-stores/{content_store_id}/store.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
 `.sst.zst` identifies the block encoding: sorted rows with each block compressed using zstd. Metadata and grep segments use this encoding. `.wal.zst` identifies the WAL encoding.
@@ -137,13 +138,9 @@ its starting basis, later target manifests may go on referencing source-owned
 metadata segments, and the source holds a fork-owned checkpoint record
 protecting that basis for the target's lifetime.
 
-The content-store keyspace holds blobs and nothing else. A content store has
-no descriptor object and no durable record of its own: its id is minted by
-random generation when a namespace is created and recorded in that
-namespace's head. Uniqueness rests on the generated id's randomness, so no
-object has to be claimed, read, or verified before bytes may be written under
-it, and a content store is shared exactly by the namespaces whose heads name
-it.
+The content-store keyspace holds an immutable domain descriptor beside its
+`objects/` collection (section 2.4.1). A content store is shared exactly by
+the namespaces whose heads name it.
 
 WAL segment names sort by history position (section 1.3); recovery still
 follows `head.visible_wal_tip` and the predecessor links inside verified WAL
@@ -183,12 +180,12 @@ The namespace tree's lifecycle can be read off its grammar:
 - **`wal/head.json` is the namespace.** The head exists, or the namespace does
   not. It is the existence marker, and after deletion it is kept forever as
   the tombstone that retires the namespace id.
-- **Creation and forking are one conditional write.** Create and fork both
+- **Creation and forking install the head with one conditional write.** Both
   build a complete active head in memory and install it with create-if-absent.
   Nothing under the new namespace's prefix is written before that write, so
-  there is no partial namespace to classify, complete, or reap, and no
-  ordering rule to get wrong. A create or fork that loses the conditional
-  write answers `namespace_exists`, or `namespace_deleted` against a
+  there is no partial namespace to classify, complete, or reap. Creation
+  first writes the content domain descriptor outside that prefix. A create
+  or fork that loses the conditional write answers `namespace_exists`, or `namespace_deleted` against a
   tombstone, unless the head it finds is its own earlier attempt, which
   succeeds idempotently (section 3.9.3).
 
@@ -346,10 +343,10 @@ Small mutable objects such as the namespace head must use compare-and-swap
 semantics. These objects must remain small enough that guarded rewrite is
 practical.
 
-Eight control-object kinds are registered: `wal_head`, `wal_floor`,
+Nine control-object kinds are registered: `wal_head`, `wal_floor`,
 `metadata_root`, `checkpoint_record`, `upload_session`, `compaction_lease`,
-`compaction_output_protection`, and `gc_run`. A control-object envelope carrying
-any other kind string is rejected, not skipped.
+`compaction_output_protection`, `gc_run`, and `content_store`. A control-object
+envelope carrying any other kind string is rejected, not skipped.
 
 The WAL floor and the metadata root are the only control objects that carry
 `updated_at_ms`. That field records when the object's last rewrite succeeded,
@@ -716,6 +713,20 @@ make content durable  ->  then make metadata visible
 This separation is part of the core model.
 
 #### 2.4.1 Immutable content storage
+
+Each content domain has a `content_store` version 1 control envelope at
+`content-stores/{content_store_id}/store.json`. Its strict payload is
+`ContentStoreState { content_store_id, created_at_ms }`, with `created_at_ms`
+an unsigned 64-bit Unix-millisecond creation timestamp. Namespace creation
+writes it with create-if-absent before installing the head that names the
+new domain. An occupied key under the freshly generated id is corruption.
+The descriptor is immutable and never collected. An abandoned create,
+including a head install that loses to another creator after the initial
+absence check, can leave an orphan descriptor that no head names. Error paths
+write nothing further. Forks share the source domain and write no descriptor.
+No reader consults it today. A deployment resolving a content domain to a
+physical backend may read it to confirm that backend holds the domain.
+The key is beside `objects/`, so content listings under `objects/` exclude it.
 
 The stable immutable content families are:
 
@@ -1740,22 +1751,31 @@ Deleted
 ```
 
 There is no state between absent and active. The head object is the
-namespace, so publishing it complete in one conditional write is the entire
-installation protocol: nothing under the new namespace's prefix is written
-before it, and everything written after it is ordinary namespace history.
+namespace. Publishing it complete in one conditional write installs the
+namespace: nothing under the new namespace's prefix is written before it,
+and everything written after it is ordinary namespace history.
 
 #### 3.9.1 Creating a namespace
 
 The request supplies only the new namespace id; the server supplies the
-mutation context. The protocol is one step: build the complete active genesis
-head — sequence 0, the genesis commit id, writer epoch 0, the next inode id
-after the root inode, a freshly minted content store id, and no fork basis —
-and write it with create-if-absent.
+mutation context. First read and validate the namespace head. An existing
+active head returns `namespace_exists`, or the existing namespace when
+`allow_existing` is set; a deleted head returns `namespace_deleted`. These
+paths write nothing. Read failures and corrupt heads are errors, never
+absence. Only a missing head permits creation to proceed.
 
-That write is the whole protocol. No manifest, root, or floor is prepared
-before it, and none is written after it: the genesis basis is built in
-(section 2.9.1), and the root and floor objects appear when the namespace's
-first flush and first retention advance need them.
+Build the complete active genesis head: sequence 0, the
+genesis commit id, writer epoch 0, the next inode id after the root inode,
+a freshly minted content store id, and no fork basis. Write the descriptor
+for that domain with create-if-absent (section 2.4.1), then install the head
+with create-if-absent. The initial read does not reserve the namespace id;
+the conditional head write still decides races and retains the recovery
+rules in section 3.9.3.
+
+No manifest, root, or floor is prepared before the head write, and none is
+written after it: the genesis basis is built in (section 2.9.1). The root
+and floor objects appear when the namespace's first flush and first
+retention advance need them.
 
 #### 3.9.2 Forking a namespace
 
@@ -1779,9 +1799,10 @@ namespace id; the server supplies the mutation context. The protocol is:
 5. Write the target head with create-if-absent.
 
 The target copies the source's `content_store_id` because a fork shares file
-bytes copy-on-write. It inherits the source's materialized name keys
-unchanged, which is sound because name-key folding is a fixed rule of the
-format (section 2.3.1) rather than a per-namespace choice.
+bytes copy-on-write. It writes no content store descriptor. It inherits the
+source's materialized name keys unchanged, which is sound because name-key
+folding is a fixed rule of the format (section 2.3.1) rather than a
+per-namespace choice.
 
 The renewal races with garbage collection on the same record. If GC releases the record first, the renewal fails. If the renewal succeeds first, its later expiry changes the record and causes a stale release to fail its compare-and-swap. Once the target exists, its `fork_basis` keeps the checkpoint reachable. An abandoned attempt leaves only a checkpoint that GC can release after its lease expires.
 
@@ -1941,6 +1962,7 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Compaction lease | `compaction_lease` | JSON, uncompressed | 3 |
 | Compaction output protection | `compaction_output_protection` | JSON, uncompressed | 1 |
 | GC run | `gc_run` | JSON, uncompressed | 1 |
+| Content store descriptor | `content_store` | JSON, uncompressed | 1 |
 | GC mark page | `gc_mark_page` | JSON, uncompressed | 1 |
 
 JSON families keep their payload inline as raw JSON so manifests and control

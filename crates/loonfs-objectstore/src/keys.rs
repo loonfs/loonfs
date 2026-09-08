@@ -155,6 +155,11 @@ pub fn upload_session(namespace_id: &NamespaceId, upload_id: &UploadId) -> Strin
     format!("namespaces/{namespace_id}/uploads/{upload_id}.json")
 }
 
+/// Builds the descriptor key beside a content domain's objects.
+pub fn content_store(content_store_id: &ContentStoreId) -> String {
+    format!("content-stores/{content_store_id}/store.json")
+}
+
 /// Builds the immutable content-object key for one content identity.
 pub fn content_blob(content_store_id: &ContentStoreId, content_id: &ContentId) -> String {
     let [first_shard, second_shard] = content_id.shard_prefixes();
@@ -189,7 +194,7 @@ pub fn gc_mark_page(
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, metadata_compaction_lease,
+        checkpoint_record, content_blob, content_store, metadata_compaction_lease,
         metadata_compaction_output_protection, metadata_compaction_prefix,
         metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
         metadata_segment_object_key, upload_session, wal_floor, wal_head, wal_segment,
@@ -298,6 +303,10 @@ mod tests {
         };
 
         let built = [
+            (
+                "Content store descriptors",
+                content_store(&content_store_id()),
+            ),
             ("WAL head", wal_head(&namespace_id())),
             (
                 "WAL segments",

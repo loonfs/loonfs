@@ -20,10 +20,10 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    CompactionLeaseStatus, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HeadState,
-    ManifestRef, MetadataCompactionLeaseState, MetadataRootState, NamespaceStatus, ProxiedStaging,
-    UploadSessionMode, UploadSessionRecordStatus, UploadSessionState, WalFloorState,
-    WalSegmentPointer, WriterBlock,
+    CompactionLeaseStatus, ContentStoreState, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
+    HeadState, ManifestRef, MetadataCompactionLeaseState, MetadataRootState, NamespaceStatus,
+    ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus, UploadSessionState,
+    WalFloorState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -622,6 +622,14 @@ fn head_status_rejects_unknown_fields_as_corruption() {
 #[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(
+        "control_content_store.v1.json",
+        ControlObjectKind::ContentStore,
+        ContentStoreState {
+            content_store_id: content_store_id(),
+            created_at_ms: 1_000,
+        },
+    );
+    check_control_golden(
         "control_wal_head.v2.json",
         ControlObjectKind::WalHead,
         sample_head_state(),
@@ -918,13 +926,18 @@ fn every_durable_status_is_a_kind_tagged_object() {
 }
 
 #[test]
-fn every_mutable_control_payload_rejects_unknown_fields_as_corruption() {
+fn every_control_payload_rejects_unknown_fields_as_corruption() {
     let add_unknown = |payload: &mut serde_json::Value| {
         payload["field_from_the_future"] = serde_json::Value::from(true);
     };
     assert_control_payload_edit_is_corrupt::<HeadState>(
         "control_wal_head.v2.json",
         ControlObjectKind::WalHead,
+        add_unknown,
+    );
+    assert_control_payload_edit_is_corrupt::<ContentStoreState>(
+        "control_content_store.v1.json",
+        ControlObjectKind::ContentStore,
         add_unknown,
     );
     assert_control_payload_edit_is_corrupt::<WalFloorState>(
@@ -1354,6 +1367,14 @@ fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
 #[test]
 fn control_object_decoders_reject_wrong_format_version_without_fallback() {
     let cases = [
+        (
+            ControlObjectKind::ContentStore,
+            serde_json::to_value(ContentStoreState {
+                content_store_id: content_store_id(),
+                created_at_ms: 1_000,
+            })
+            .expect("content store state"),
+        ),
         (
             ControlObjectKind::CheckpointRecord,
             serde_json::to_value(CheckpointRecordState {

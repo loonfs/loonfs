@@ -14,7 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::num::NonZeroU64;
 
-/// Selects one independently versioned mutable control-object family.
+/// Selects one independently versioned control-object family.
 ///
 /// See [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,11 +37,13 @@ pub enum ControlObjectKind {
     CompactionOutputProtection,
     /// Coordinates bounded, resumable marking and sweeping.
     GcRun,
+    /// Identifies the content domain held by a backend.
+    ContentStore,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::WalHead,
         Self::WalFloor,
         Self::MetadataRoot,
@@ -50,6 +52,7 @@ impl ControlObjectKind {
         Self::CompactionLease,
         Self::CompactionOutputProtection,
         Self::GcRun,
+        Self::ContentStore,
     ];
 
     /// Durable format version for this control object kind.
@@ -68,6 +71,7 @@ impl ControlObjectKind {
             Self::CompactionLease => 3,
             Self::CompactionOutputProtection => 1,
             Self::GcRun => 1,
+            Self::ContentStore => 1,
         }
     }
 
@@ -82,6 +86,7 @@ impl ControlObjectKind {
             Self::CompactionLease => "compaction_lease",
             Self::CompactionOutputProtection => "compaction_output_protection",
             Self::GcRun => "gc_run",
+            Self::ContentStore => "content_store",
         }
     }
 
@@ -89,6 +94,16 @@ impl ControlObjectKind {
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
     }
+}
+
+/// Identifies a content domain in its physical backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentStoreState {
+    /// Domain whose objects share this descriptor's prefix.
+    pub content_store_id: ContentStoreId,
+    /// Unix-millisecond stamp from the domain's creation context.
+    pub created_at_ms: u64,
 }
 
 /// Earliest sequence for which incremental WAL history is retained.
