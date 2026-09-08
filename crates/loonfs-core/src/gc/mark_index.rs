@@ -83,7 +83,7 @@ pub(super) async fn step<S: ObjectStore + ?Sized>(
             .positions
             .iter()
             .zip(&pending.inputs)
-            .all(|(position, table)| position.page_no == table.page_count);
+            .all(|(position, table)| position.page_index == table.page_count);
     if !page.is_empty() {
         let count = page.len() as u64;
         tables
@@ -129,9 +129,9 @@ pub(super) async fn write_sorted<S: ObjectStore + ?Sized>(
         page_count: entries.len().div_ceil(GC_MARK_PAGE_ENTRIES) as u64,
         entry_count: entries.len() as u64,
     };
-    for (page_no, page) in entries.chunks(GC_MARK_PAGE_ENTRIES).enumerate() {
+    for (page_index, page) in entries.chunks(GC_MARK_PAGE_ENTRIES).enumerate() {
         tables
-            .write_page(&table.table_id, page_no as u64, page.to_vec())
+            .write_page(&table.table_id, page_index as u64, page.to_vec())
             .await?;
     }
     Ok(table)

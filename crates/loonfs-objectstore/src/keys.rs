@@ -176,10 +176,10 @@ pub fn gc_mark_page(
     namespace_id: &loonfs_api::NamespaceId,
     run_id: &loonfs_api::GcRunId,
     table_id: &loonfs_api::GcMarkTableId,
-    page_no: u64,
+    page_index: u64,
 ) -> String {
     format!(
-        "{}{}/tables/{}/{page_no:020}.json",
+        "{}{}/tables/{}/{page_index:020}.json",
         gc_runs_prefix(namespace_id),
         run_id,
         table_id
@@ -289,7 +289,7 @@ mod tests {
                 .replace("{group}", "bindings")
                 .replace("{gc_run_id}", "gcr_00000000000000000000000000000001")
                 .replace("{table_id}", "gct_00000000000000000000000000000001")
-                .replace("{page_no:020}", "00000000000000000000")
+                .replace("{page_index:020}", "00000000000000000000")
                 .replace("{segment_id}", "seg_00000000000000000000000000000001")
                 .replace("{upload_id}", "upl_00000000000000000000000000000001")
                 .replace("{content_id[4..6]}", &CONTENT_ID[4..6])

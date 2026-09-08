@@ -104,17 +104,17 @@ pub(super) fn table(table: &GcMarkTable) -> Result<()> {
 }
 
 fn position(table: &GcMarkTable, position: GcMarkPosition) -> Result<()> {
-    if position.page_no > table.page_count
-        || position.entry_no as usize >= GC_MARK_PAGE_ENTRIES
-        || (position.page_no == table.page_count && position.entry_no != 0)
+    if position.page_index > table.page_count
+        || position.entry_index as usize >= GC_MARK_PAGE_ENTRIES
+        || (position.page_index == table.page_count && position.entry_index != 0)
     {
         return Err(invalid());
     }
     let consumed = position
-        .page_no
+        .page_index
         .checked_mul(GC_MARK_PAGE_ENTRIES as u64)
-        .and_then(|count| count.checked_add(u64::from(position.entry_no)));
-    if position.page_no < table.page_count
+        .and_then(|count| count.checked_add(u64::from(position.entry_index)));
+    if position.page_index < table.page_count
         && consumed.is_none_or(|count| count >= table.entry_count)
     {
         return Err(invalid());

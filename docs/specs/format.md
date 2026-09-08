@@ -23,6 +23,10 @@ the namespace commit history. `_no` is a monotonic counter scoped to a
 resource, such as a file, inode, or namespace. `_index` is a 0-based position
 inside a collection. `_number` is a 1-based position defined by a provider or
 tool.
+A named optional object member is omitted when absent; an empty positional slot,
+such as a merge level in `GcMarkIndex.levels`, remains `null`.
+`status` names a resource's lifecycle and `phase` names a computation's progress;
+both use `kind` as the discriminator when tagged.
 
 Unknown fields are tolerated where a reader must accept what a newer writer
 added, and rejected where accepting one would lose information the sender
@@ -98,7 +102,7 @@ The required durable object families and standard key patterns are:
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **GC run** | Mutable CAS | Coordinates marking and sweeping across calls and hosts; one active run per namespace. | `namespaces/{namespace_id}/gc/run.json` |
-| **GC mark pages** | Immutable | Sorted, checksummed reference tables and intermediate merge output. | `namespaces/{namespace_id}/gc/runs/{gc_run_id}/tables/{table_id}/{page_no:020}.json` |
+| **GC mark pages** | Immutable | Sorted, checksummed reference tables and intermediate merge output. | `namespaces/{namespace_id}/gc/runs/{gc_run_id}/tables/{table_id}/{page_index:020}.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
@@ -2670,7 +2674,10 @@ delete and deleting, and a crash between the release CAS and the delete
 leaves a record the next pass reaps unconditionally.
 The collector persists the following state in the `gc_run` JSON control
 family, version 1. The common fields are `namespace_id`, `gc_run_id`,
-`step_no`, `started_at_ms`, `grace_window_ms`, and a tagged `phase`:
+`step_no`, `started_at_ms`, `grace_window_ms`, and a tagged `phase`.
+`step_no` counts successful progress CAS writes. Resume positions use zero-based
+`page_index` and `entry_index`; `block_index` selects the next revision data block.
+The phases are:
 
 - `starting`: reservation exists; the control snapshot has not been captured.
 - `marking`: the fixed root summary, source cursor, retained WAL pointer and
@@ -2692,9 +2699,9 @@ family, version 1. The common fields are `namespace_id`, `gc_run_id`,
   by CAS and begin another run.
 
 The `gc_mark_page` JSON family, version 1, stores immutable sorted pages at
-`gc/runs/{gc_run_id}/tables/{table_id}/{page_no:020}.json`. Run IDs use `gcr_`
+`gc/runs/{gc_run_id}/tables/{table_id}/{page_index:020}.json`. Run IDs use `gcr_`
 and table IDs use `gct_`, each followed by 32 lowercase hex digits. The payload
-contains `namespace_id`, `gc_run_id`, `table_id`, `page_no`, and `entries`.
+contains `namespace_id`, `gc_run_id`, `table_id`, `page_index`, and `entries`.
 Pages contain 1–512 strictly increasing keys and at most 8 MiB of encoded
 bytes. The shared envelope checksums the exact payload bytes. A table
 reference contains its ID, page count, and entry count; every nonfinal page
