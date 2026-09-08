@@ -679,19 +679,20 @@ archive, or through a sync client.
 #### 2.3.1 Name-key folding
 
 Sibling-name comparison is a fixed rule of the v0 format, not a per-namespace
-choice. Every name key is derived from its display name by normalizing to NFC
-with Unicode 17.0.0 data, applying full Unicode default (non-Turkic) case folding
-with Unicode 9.0.0 data, then normalizing to NFC with Unicode 17.0.0 data again.
-These are the fixed data versions used by `unicode-normalization` 0.1.25 and
-`unicode-casefold` 0.2.0 in `Cargo.lock`. Their source tables declare those
-versions separately; the normalization and folding versions differ.
+choice. Every name key is derived from its display name by normalizing to NFC,
+applying full Unicode default (non-Turkic) case folding, then normalizing to NFC
+again. Both steps use Unicode 17.0.0 data: `icu_normalizer` 2.1.1 and
+`icu_casemap` 2.1.1 use compiled data from `icu_normalizer_data` 2.1.1 and
+`icu_casemap_data` 2.1.1. Both data crates identify ICU `release-78.1rc` as
+their source. ICU 78 uses Unicode 17.0.0.
 
 Both admission and lookup use this rule. The display-name and name-key corpus
 in `crates/loonfs-api/tests/golden/name_folding.v1.json` pins its mappings and
 directory collisions. A dependency update that changes a mapping is a
 format-semantic change under section 4.3, even if no field or encoding changes.
 There is one rule, no per-namespace selector or head field, and no rewriting of
-stored keys.
+stored keys. A namespace written before a rule change keeps its stored keys;
+this is acceptable before the format is released.
 
 ### 2.4 Files and revisions
 

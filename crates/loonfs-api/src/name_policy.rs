@@ -3,17 +3,15 @@
 //! The fixed data versions and evolution rule are in `docs/specs/format.md`,
 //! section 2.3.1. Admission and lookup share this implementation.
 
-use unicode_casefold::UnicodeCaseFold;
-use unicode_normalization::UnicodeNormalization;
+use icu_casemap::CaseMapper;
+use icu_normalizer::ComposingNormalizer;
 
 /// Derives the canonical lookup key for a display name.
 pub fn name_key_for_display_name(display_name: &str) -> String {
-    display_name
-        .nfc()
-        .collect::<String>()
-        .case_fold()
-        .nfc()
-        .collect()
+    let normalizer = ComposingNormalizer::new_nfc();
+    let normalized = normalizer.normalize(display_name);
+    let folded = CaseMapper::new().fold_string(&normalized);
+    normalizer.normalize(&folded).into_owned()
 }
 
 #[cfg(test)]

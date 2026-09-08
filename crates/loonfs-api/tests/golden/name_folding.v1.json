@@ -125,11 +125,35 @@
   },
   {
     "display_name": "Ა",
-    "name_key": "Ა"
+    "name_key": "ა"
   },
   {
     "display_name": "ა",
     "name_key": "ა"
+  },
+  {
+    "display_name": "Ꞹ",
+    "name_key": "ꞹ"
+  },
+  {
+    "display_name": "ꞹ",
+    "name_key": "ꞹ"
+  },
+  {
+    "display_name": "Ɤ",
+    "name_key": "ɤ"
+  },
+  {
+    "display_name": "ɤ",
+    "name_key": "ɤ"
+  },
+  {
+    "display_name": "Ꭰ",
+    "name_key": "Ꭰ"
+  },
+  {
+    "display_name": "ꭰ",
+    "name_key": "Ꭰ"
   },
   {
     "display_name": "readme-123.txt",

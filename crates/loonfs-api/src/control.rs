@@ -1036,6 +1036,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Checksum, ContentRefKind};
 
     #[test]
     fn completed_proxied_session_rejects_conflicting_staged_size() {

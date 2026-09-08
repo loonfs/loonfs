@@ -19,13 +19,13 @@ crc64fast-nvme.workspace = true
 # Content ids are 128 fully random bits, drawn straight from the system
 # generator so their shard prefixes stay uniform (see `ids::ContentId`).
 getrandom.workspace = true
+icu_casemap.workspace = true
+icu_normalizer.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-unicode-casefold.workspace = true
-unicode-normalization.workspace = true
 utoipa = { workspace = true, optional = true }
 xxhash-rust.workspace = true
 zstd.workspace = true
