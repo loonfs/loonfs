@@ -350,16 +350,16 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
         summary = "Fork namespace",
-        description = "Creates a new namespace as a fork from the source namespace's current durable view.",
+        description = "Creates a new namespace from the source current head or a live snapshot.",
         params(("namespace_id" = String, Path, description = "Source namespace id")),
         request_body = ForkNamespaceRequest,
         responses(
             (status = 200, description = "Namespace forked", body = loonfs_api::Namespace),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Source namespace not found", body = ApiError),
+            (status = 404, description = "Source namespace or snapshot not found", body = ApiError),
             (status = 409, description = "Fork conflict", body = ApiError),
-            (status = 410, description = "Source namespace deleted", body = ApiError),
+            (status = 410, description = "Source namespace deleted or snapshot gone", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -372,7 +372,13 @@ pub(super) async fn fork_namespace(
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
     let namespace = state
         .writer
-        .fork_namespace(&source_namespace_id, &request.new_namespace_id)
+        .fork_namespace_with(
+            &source_namespace_id,
+            &request.new_namespace_id,
+            loonfs::ForkNamespaceOptions {
+                snapshot_id: request.snapshot_id,
+            },
+        )
         .await
         .map_err(ApiResponseError::for_namespace(&source_namespace_id))?;
     Ok(Json(namespace))

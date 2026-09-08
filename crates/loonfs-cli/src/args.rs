@@ -787,6 +787,9 @@ pub(crate) struct NamespaceForkArgs {
     pub source: String,
     #[arg(value_hint = ValueHint::Other)]
     pub new_namespace_id: String,
+    /// Fork from a live snapshot instead of the current head.
+    #[arg(long = "snapshot", value_name = "id")]
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Args)]

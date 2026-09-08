@@ -699,7 +699,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/shared.txt", "gc-shared", &setup).await;
-    fork_namespace(&store, &source, &clone, &setup)
+    fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork");
     delete_namespace(&store, &source, DeleteNamespaceOptions::default(), &setup)
@@ -3529,7 +3529,7 @@ async fn fork_owned_checkpoints_reject_user_release() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, &setup)
+    fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork");
 
@@ -3732,7 +3732,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, &setup)
+    fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
@@ -3811,7 +3811,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, &setup)
+    fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork");
     let fork_record = read_fork_record(store.inner(), &source).await;
@@ -3885,7 +3885,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, &setup)
+    fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
@@ -3944,7 +3944,7 @@ async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, &setup)
+    fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
@@ -3981,7 +3981,7 @@ async fn gc_retains_a_released_fork_record_when_its_target_lives() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, &setup)
+    fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
@@ -4142,7 +4142,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
     .await
     .expect("leased fork record from the attempt that died");
 
-    fork_namespace(&store, &source, &clone, &setup)
+    fork_namespace(&store, &source, &clone, None, &setup)
         .await
         .expect("fork retry after abandonment");
     let retry = store

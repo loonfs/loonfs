@@ -28,19 +28,6 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     owner: CheckpointOwner,
     context: &MutationContext,
 ) -> Result<Checkpoint> {
-    // Checkpoint creation pins a manifest version as a first-class record
-    // under `checkpoints/`, write-then-verify (format spec, "Checkpoints"):
-    //
-    // 1. Choose a basis manifest that the metadata root references,
-    //    flushing the WAL tail first when it lags the head (`flush.rs`).
-    // 2. Write `checkpoints/{id}.json` with state = active, under a freshly
-    //    generated id — one logical pin, one record, never a reuse of some
-    //    earlier record's key.
-    // 3. Verify, after the write is durable, that the floor has not passed
-    //    the basis and the basis manifest still loads, under the verify
-    //    budget.
-    // 4. On verification failure, release the record — terminally — and
-    //    retry against a newer basis under a new id.
     validate_checkpoint_owner(&owner)?;
     let timer = &StdMonotonicTimer::default();
     let owner = &owner;
@@ -55,60 +42,83 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
                 }
             };
 
-            let checkpoint_id = CheckpointId::generate();
-            let record = CheckpointRecordState {
-                checkpoint_id: checkpoint_id.clone(),
-                namespace_id: namespace_id.clone(),
-                manifest: basis.manifest.clone(),
-                head_commit_id: basis.head_commit_id.clone(),
-                created_at_ms: context.now_ms,
-                owner: owner.clone(),
-                status: CheckpointStatus::Active {},
-            };
-            let verify_started_ms = timer.monotonic_now_ms();
-            write_checkpoint_record(store, &record).await?;
-
-            let verification = match verify_checkpoint_basis(store, &record).await {
-                Ok(verification) => verification,
-                Err(error) => {
-                    // Cleanup is best effort on an error and must not replace its
-                    // original classification.
-                    if let Err(cleanup_error) = release_checkpoint_record(
-                        store,
-                        namespace_id,
-                        &checkpoint_id,
-                        context.now_ms,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            namespace_id = %namespace_id,
-                            checkpoint_id = %checkpoint_id,
-                            original_error = %error,
-                            cleanup_error = %cleanup_error,
-                            "failed to release a checkpoint record after basis verification failed"
-                        );
-                    }
-                    return Err(error);
+            match create_checkpoint_at_basis(
+                store,
+                namespace_id,
+                owner.clone(),
+                basis.manifest.clone(),
+                basis.head_commit_id.clone(),
+                context,
+            )
+            .await
+            {
+                Ok(checkpoint) => Ok(CasAttempt::Settled(checkpoint)),
+                Err(error @ CoreError::CheckpointUnavailable(_)) => {
+                    Ok(CasAttempt::Contended(error))
                 }
-            };
-            let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
-                <= CHECKPOINT_VERIFY_BUDGET_MS;
-            if verification == CheckpointBasisVerification::Verified && within_budget {
-                return Ok(CasAttempt::Settled(super::checkpoint_summary(record)));
+                Err(error) => Err(error),
             }
-
-            // Overrunning the budget counts as verification failure: the record
-            // may have raced the grace window, so it must not stand as a root.
-            release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await?;
-            Ok(CasAttempt::Contended(CoreError::CheckpointUnavailable(
-                "checkpoint publication retry exhausted".to_owned(),
-            )))
         },
         |_, ()| async { Ok(crate::control_update::WriteEvidence::Unknown) },
     )
     .await?;
     created
+}
+
+pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    owner: CheckpointOwner,
+    manifest: loonfs_api::wire::control::ManifestRef,
+    head_commit_id: loonfs_api::CommitId,
+    context: &MutationContext,
+) -> Result<Checkpoint> {
+    validate_checkpoint_owner(&owner)?;
+    let timer = StdMonotonicTimer::default();
+    let checkpoint_id = CheckpointId::generate();
+    let record = CheckpointRecordState {
+        checkpoint_id: checkpoint_id.clone(),
+        namespace_id: namespace_id.clone(),
+        manifest,
+        head_commit_id,
+        created_at_ms: context.now_ms,
+        owner,
+        status: CheckpointStatus::Active {},
+    };
+    let verify_started_ms = timer.monotonic_now_ms();
+    write_checkpoint_record(store, &record).await?;
+
+    let verification = match verify_checkpoint_basis(store, &record).await {
+        Ok(verification) => verification,
+        Err(error) => {
+            // Cleanup is best effort on an error and must not replace its
+            // original classification.
+            if let Err(cleanup_error) =
+                release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await
+            {
+                tracing::warn!(
+                    namespace_id = %namespace_id,
+                    checkpoint_id = %checkpoint_id,
+                    original_error = %error,
+                    cleanup_error = %cleanup_error,
+                    "failed to release a checkpoint record after basis verification failed"
+                );
+            }
+            return Err(error);
+        }
+    };
+    let within_budget =
+        timer.monotonic_now_ms().saturating_sub(verify_started_ms) <= CHECKPOINT_VERIFY_BUDGET_MS;
+    if verification == CheckpointBasisVerification::Verified && within_budget {
+        return Ok(super::checkpoint_summary(record));
+    }
+
+    // Overrunning the budget counts as verification failure: the record
+    // may have raced the grace window, so it must not stand as a root.
+    release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await?;
+    Err(CoreError::CheckpointUnavailable(
+        "checkpoint publication retry exhausted".to_owned(),
+    ))
 }
 
 fn validate_checkpoint_owner(owner: &CheckpointOwner) -> Result<()> {

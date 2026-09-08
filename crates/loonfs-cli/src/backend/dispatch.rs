@@ -123,17 +123,18 @@ impl ResolvedTarget {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
+        options: loonfs::ForkNamespaceOptions,
     ) -> Result<Namespace, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .fork_namespace(source_namespace_id, new_namespace_id)
+                    .fork_namespace(source_namespace_id, new_namespace_id, options)
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .fork_namespace(source_namespace_id, new_namespace_id)
+                .fork_namespace(source_namespace_id, new_namespace_id, &options)
                 .await?),
         }
     }

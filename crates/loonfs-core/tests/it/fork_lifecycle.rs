@@ -41,8 +41,213 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::Namespace, CoreError> {
     namespace_engine(store, source_namespace_id, context)
-        .fork_namespace(new_namespace_id)
+        .fork_namespace(new_namespace_id, None)
         .await
+}
+
+async fn listed_names<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<String> {
+    let context = crate::common::read_context(store, namespace_id).await;
+    namespace_engine(store, namespace_id, &mutation_context())
+        .list_path_page(
+            "/docs",
+            loonfs_api::PageRequest {
+                limit: loonfs_test_support::ids::page_limit(10),
+                cursor: None,
+            },
+            Default::default(),
+            &context,
+        )
+        .await
+        .expect("list files")
+        .items
+        .into_iter()
+        .map(|entry| entry.display_name.expect("file name").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn snapshot_fork_keeps_its_tree_after_snapshot_release_and_source_gc() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let context = mutation_context();
+    let source = namespace_id("source");
+    let target = namespace_id("target");
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+    let engine = namespace_engine(&store, &source, &context);
+    let snapshot = engine
+        .create_snapshot("basis".to_owned(), u64::MAX / 2)
+        .await
+        .expect("snapshot");
+    let snapshot_record = loonfs_core::control::load_namespace_checkpoint_record_control(
+        &store,
+        &source,
+        &snapshot.checkpoint_id,
+    )
+    .await
+    .expect("load snapshot")
+    .expect("snapshot exists");
+    write_file_bytes(
+        &store,
+        &source,
+        "/docs/later.txt",
+        b"later",
+        &context,
+        Some("later"),
+    )
+    .await
+    .expect("advance source");
+    let fork = engine
+        .fork_namespace(&target, Some(&snapshot.checkpoint_id))
+        .await
+        .expect("fork snapshot");
+    assert_eq!(fork.head_seq, snapshot.checkpoint_seq);
+    let head = head_state(&store, &target).await;
+    assert_eq!(head.head_commit_id, snapshot_record.head_commit_id);
+    assert_eq!(
+        head.fork_basis.as_ref().expect("fork basis").manifest,
+        snapshot_record.manifest
+    );
+    assert_eq!(listed_names(&store, &target).await, ["shared.txt"]);
+    assert_eq!(
+        listed_names(&store, &source).await,
+        ["later.txt", "shared.txt"]
+    );
+    assert_eq!(
+        loonfs_core::control::load_namespace_checkpoint_record_control(
+            &store,
+            &source,
+            &snapshot.checkpoint_id,
+        )
+        .await
+        .expect("load snapshot")
+        .expect("snapshot exists"),
+        snapshot_record
+    );
+    engine
+        .release_snapshot(&snapshot.checkpoint_id)
+        .await
+        .expect("release snapshot");
+    engine
+        .create_checkpoint("current".to_owned(), None)
+        .await
+        .expect("flush current source");
+    let mut aged = context.clone();
+    aged.now_ms = u64::MAX / 2;
+    loonfs_core::gc_namespace(&store, &source, &loonfs_core::GcConfig::default(), &aged)
+        .await
+        .expect("collect source past grace window");
+    assert_eq!(listed_names(&store, &target).await, ["shared.txt"]);
+    assert_eq!(
+        read_file_bytes(&store, &target, "/docs/shared.txt")
+            .await
+            .expect("read fork")
+            .bytes,
+        b"base"
+    );
+}
+
+#[tokio::test]
+async fn invalid_snapshot_forks_write_nothing() {
+    let directory = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let context = mutation_context();
+    let source = namespace_id("source");
+    let other = namespace_id("other");
+    let target = namespace_id("target");
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+    seed_source_namespace_for_fork(&store, &other, &context).await;
+    let engine = namespace_engine(&store, &source, &context);
+    let expired = engine
+        .create_snapshot("expired".to_owned(), 1)
+        .await
+        .expect("expired snapshot");
+    let foreign = namespace_engine(&store, &other, &context)
+        .create_snapshot("foreign".to_owned(), u64::MAX / 2)
+        .await
+        .expect("foreign snapshot");
+    let checkpoint = engine
+        .create_checkpoint("user".to_owned(), None)
+        .await
+        .expect("user checkpoint");
+    for (snapshot_id, expected_code) in [
+        (expired.checkpoint_id, ErrorCode::SnapshotGone),
+        (foreign.checkpoint_id, ErrorCode::SnapshotNotFound),
+        (checkpoint.checkpoint_id, ErrorCode::SnapshotNotFound),
+    ] {
+        store.take();
+        let error = engine
+            .fork_namespace(&target, Some(&snapshot_id))
+            .await
+            .expect_err("invalid snapshot");
+        assert_eq!(error.code(), expected_code);
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().deletes, 0);
+        assert!(namespace_keys(&store, &target).await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn snapshot_release_during_fork_releases_the_attempt_without_installing_a_target() {
+    let directory = tempdir().expect("tempdir");
+    let source = namespace_id("source");
+    let target = namespace_id("target");
+    let store = loonfs_test_support::stores::BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(format!("namespaces/{source}/checkpoints/")),
+        OperationClass::PutCreateIfAbsent,
+    );
+    let context = mutation_context();
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+    let engine = namespace_engine(&store, &source, &context);
+    let snapshot = engine
+        .create_snapshot("basis".to_owned(), u64::MAX / 2)
+        .await
+        .expect("snapshot");
+    store.block_next();
+    let forking = engine.fork_namespace(&target, Some(&snapshot.checkpoint_id));
+    let releasing = async {
+        store.wait_until_blocked().await;
+        engine
+            .release_snapshot(&snapshot.checkpoint_id)
+            .await
+            .expect("release snapshot during fork write");
+        store.release();
+    };
+    let (result, ()) = tokio::join!(forking, releasing);
+    assert_eq!(
+        result.expect_err("snapshot gone").code(),
+        ErrorCode::SnapshotGone
+    );
+    assert!(namespace_keys(&store, &target).await.is_empty());
+    let records = store
+        .list_prefix(&format!("namespaces/{source}/checkpoints/"))
+        .await
+        .expect("list records");
+    let mut fork_records = 0;
+    for key in records {
+        let bytes = store
+            .get(&key, None)
+            .await
+            .expect("read record")
+            .expect("record exists");
+        let record = decode_control_object::<loonfs_api::wire::control::CheckpointRecordState>(
+            &bytes,
+            ControlObjectKind::CheckpointRecord,
+        )
+        .expect("decode record")
+        .into_payload();
+        if matches!(record.owner, CheckpointOwner::Fork { .. }) {
+            fork_records += 1;
+            assert!(matches!(record.status, CheckpointStatus::Released { .. }));
+        }
+    }
+    assert_eq!(fork_records, 1);
 }
 
 async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(

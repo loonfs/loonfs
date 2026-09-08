@@ -366,7 +366,11 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     let forked = harness
         .client
-        .fork_namespace(&namespace_id("demo"), &namespace_id("clone"))
+        .fork_namespace(
+            &namespace_id("demo"),
+            &namespace_id("clone"),
+            &loonfs_client::ForkNamespaceOptions::default(),
+        )
         .await
         .expect("fork namespace");
     assert_eq!(forked.namespace_id.as_str(), "clone");
@@ -450,5 +454,53 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(clone_changes.changes.len(), 1);
     assert_eq!(clone_changes.changes[0].committed_seq, ChangeSeq(2));
 
+    harness.server.abort();
+}
+
+// The client and HTTP server run concurrently on separate workers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_namespace_fork_uses_the_snapshot_sequence() {
+    let directory = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        directory.path().join("store"),
+        "snapshot-fork",
+        "snapshot-fork",
+    ))
+    .await;
+    let source = namespace_id("source");
+    let target = namespace_id("target");
+    harness
+        .client
+        .create_namespace(&source)
+        .await
+        .expect("namespace");
+    let path = NamespacePath::parse("source", "/file.txt").expect("path");
+    harness
+        .client
+        .put_file_bytes(&path, b"captured", &replace_file_options())
+        .await
+        .expect("first write");
+    let snapshot = harness
+        .client
+        .create_snapshot(&source, "basis", 60_000)
+        .await
+        .expect("snapshot");
+    harness
+        .client
+        .put_file_bytes(&path, b"current", &replace_file_options())
+        .await
+        .expect("advance source");
+    let fork = harness
+        .client
+        .fork_namespace(
+            &source,
+            &target,
+            &loonfs_client::ForkNamespaceOptions {
+                snapshot_id: Some(snapshot.snapshot_id),
+            },
+        )
+        .await
+        .expect("fork snapshot");
+    assert_eq!(fork.head_seq, snapshot.head_seq);
     harness.server.abort();
 }

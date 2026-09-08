@@ -13,9 +13,9 @@ use std::num::NonZeroU64;
 
 pub use loonfs_api::options::{
     CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
-    UpdateAttributesOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListInodeChildrenOptions,
+    ListPathEntriesOptions, MoveOptions, PutFileOptions, RestoreRevisionOptions, StatPathOptions,
+    UndeleteOptions, UpdateAttributesOptions,
 };
 
 /// Overrides for the metadata-upkeep action.

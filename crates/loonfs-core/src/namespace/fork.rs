@@ -2,9 +2,10 @@
 //! fork-owned source checkpoint, sharing content bytes and reading the
 //! source's metadata until the target flushes its own.
 
-use crate::checkpoint::record::renew_fork_checkpoint_for_install;
+use crate::checkpoint::record::{release_checkpoint_record, renew_fork_checkpoint_for_install};
 use crate::checkpoint::{
-    create_checkpoint, load_checkpoint_record, load_namespace_manifest_envelope,
+    classify_live_snapshot, create_checkpoint, create_checkpoint_at_basis, load_checkpoint_record,
+    load_namespace_manifest_envelope,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
@@ -15,30 +16,29 @@ use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{
     CheckpointOwner, ForkBasis, HeadState, NamespaceStatus, WriterBlock,
 };
-use loonfs_api::{Namespace, NamespaceId, WriterEpoch};
+use loonfs_api::{CheckpointId, Namespace, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
+    snapshot_id: Option<&CheckpointId>,
     context: &MutationContext,
 ) -> Result<Namespace> {
     // Include time already spent on the fork when renewing its lease.
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
-    // Each attempt creates a checkpoint that keeps the target's source
-    // metadata alive. GC removes abandoned checkpoints after their lease.
-    let checkpoint = create_checkpoint(
-        store,
-        source_namespace_id,
-        CheckpointOwner::Fork {
-            target_namespace_id: new_namespace_id.clone(),
-            expires_at_ms: context.now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS),
-        },
-        context,
-    )
-    .await?;
+    let owner = CheckpointOwner::Fork {
+        target_namespace_id: new_namespace_id.clone(),
+        expires_at_ms: context.now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS),
+    };
+    let checkpoint = if let Some(snapshot_id) = snapshot_id {
+        create_snapshot_fork_checkpoint(store, source_namespace_id, snapshot_id, owner, context)
+            .await?
+    } else {
+        create_checkpoint(store, source_namespace_id, owner, context).await?
+    };
     let source_record =
         load_checkpoint_record(store, source_namespace_id, &checkpoint.checkpoint_id)
             .await?
@@ -120,4 +120,60 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     }
 
     crate::namespace::status::load_namespace(store, new_namespace_id).await
+}
+
+async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
+    store: &S,
+    source_namespace_id: &NamespaceId,
+    snapshot_id: &CheckpointId,
+    owner: CheckpointOwner,
+    context: &MutationContext,
+) -> Result<loonfs_api::Checkpoint> {
+    let timer = StdMonotonicTimer::default();
+    let started_ms = timer.monotonic_now_ms();
+    let snapshot = classify_live_snapshot(
+        load_checkpoint_record(store, source_namespace_id, snapshot_id)
+            .await?
+            .filter(|record| matches!(record.state.owner, CheckpointOwner::Snapshot { .. })),
+        snapshot_id,
+        context.now_ms,
+    )?
+    .state;
+    let checkpoint = create_checkpoint_at_basis(
+        store,
+        source_namespace_id,
+        owner,
+        snapshot.manifest,
+        snapshot.head_commit_id,
+        context,
+    )
+    .await?;
+    let rechecked = load_checkpoint_record(store, source_namespace_id, snapshot_id)
+        .await
+        .and_then(|record| {
+            classify_live_snapshot(
+                record,
+                snapshot_id,
+                context
+                    .now_ms
+                    .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
+            )
+        });
+    if let Err(error) = rechecked {
+        release_checkpoint_record(
+            store,
+            source_namespace_id,
+            &checkpoint.checkpoint_id,
+            context.now_ms,
+        )
+        .await?;
+        return Err(match error {
+            CoreError::SnapshotNotFound { .. } => CoreError::SnapshotGone {
+                snapshot_id: snapshot_id.clone(),
+                reason: "released".to_owned(),
+            },
+            error => error,
+        });
+    }
+    Ok(checkpoint)
 }

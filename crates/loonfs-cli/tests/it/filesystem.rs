@@ -1045,6 +1045,38 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
 }
 
 #[test]
+fn embedded_namespace_fork_uses_the_selected_snapshot() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("file.txt");
+    fs::write(&payload, b"captured").expect("payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("path"), "/first.txt"]));
+    let snapshot = harness.run(&[
+        "--json", "snapshot", "create", "demo", "--name", "basis", "--ttl-ms", "60000",
+    ]);
+    assert_success(&snapshot);
+    let snapshot = json_data(&snapshot);
+    assert_success(&harness.run(&["put", payload.to_str().expect("path"), "/second.txt"]));
+    let fork = harness.run(&[
+        "--json",
+        "namespace",
+        "fork",
+        "demo",
+        "clone",
+        "--snapshot",
+        snapshot["snapshot_id"].as_str().expect("snapshot id"),
+    ]);
+    assert_success(&fork);
+    assert_eq!(json_data(&fork)["head_seq"], snapshot["head_seq"]);
+    assert_success(&harness.run(&["stat", "--namespace", "clone", "/first.txt"]));
+    let missing = harness.run(&["--json", "stat", "--namespace", "clone", "/second.txt"]);
+    assert_failure(&missing);
+    assert_eq!(json_error(&missing)["code"], "path_not_found");
+}
+
+#[test]
 fn embedded_namespace_commands_reject_invalid_namespace_ids() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
