@@ -8,11 +8,11 @@
 
 use crate::common::collect_path_entries;
 use loonfs::{
-    maintenance_hint_relay, CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode,
-    FsMaintenance, FsReader, FsWriter, GarbageCollectionJob, MaintenanceRegistry,
-    MaintenanceRunner, ManifestNo, MetadataCompactionJob, MetadataMaintenanceJob,
-    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError,
-    SharedObjectStore, StoreConfig,
+    maintenance_hint_relay, CommitId, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, GarbageCollectionJob,
+    MaintenanceRegistry, MaintenanceRunner, ManifestNo, MetadataCompactionJob,
+    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
 };
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
@@ -98,11 +98,12 @@ async fn writer_with_runner(
 async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    seed_segments: u64,
 ) {
     append_wal_segments(
         store,
         namespace_id,
-        loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS,
+        loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS - seed_segments,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("wal-tail-test-writer").expect("writer id"),
             now_ms: 1_000,
@@ -606,14 +607,31 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
+        let mut replay_options = CreateDirectoryOptions::new(loonfs_test_support::test_actor());
+        replay_options.commit.commit_id =
+            Some(CommitId::parse("before-write-stop").expect("commit id"));
+        let original = stalled
+            .create_directory(&namespace_id, "/before-write-stop", replay_options.clone())
+            .await
+            .expect("land the commit before the ceiling");
         let tail_store = LocalFsStore::new(temp_dir.path()).expect("open tail store");
-        fill_wal_tail_to_write_stop(&tail_store, &namespace_id).await;
+        fill_wal_tail_to_write_stop(&tail_store, &namespace_id, 1).await;
         stalled
             .shutdown()
             .await
             .expect("shut down the first writer");
 
-        let writer = writer(temp_dir.path()).await;
+        let blocking = Arc::new(BlockingStore::new(
+            tail_store,
+            KeyPredicate::family(DurableObjectFamily::MetadataManifest),
+            OperationClass::Put,
+        ));
+        let writer = FsWriter::builder_with_store(blocking.clone())
+            .writer_id("handle-test-writer")
+            .build()
+            .await
+            .expect("build writer");
+        blocking.block_next();
         let refused = writer
             .put_file_bytes(
                 &namespace_id,
@@ -624,6 +642,13 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .await
             .expect_err("the write-stopped tail refuses the first publish");
         assert_eq!(refused.code(), ErrorCode::MaintenanceRequired);
+        blocking.wait_until_blocked().await;
+        let replay = writer
+            .create_directory(&namespace_id, "/before-write-stop", replay_options)
+            .await
+            .expect("replay succeeds while the tail remains at the bound");
+        assert_eq!(replay, original);
+        blocking.release();
         writer
             .wait_for_fold(&namespace_id)
             .await

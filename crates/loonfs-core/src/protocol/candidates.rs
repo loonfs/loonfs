@@ -6,7 +6,8 @@ use super::batch::BatchOutcomeSlot;
 use super::publish_view::PublishMetadataView;
 use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan};
 use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, MetadataViewError, Result};
+use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::ContentAdmission;
@@ -114,6 +115,15 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         Ok(Some(admission)) => return admission,
         Ok(None) => {}
         Err(error) => return CandidateAdmission::independent(Err(error)),
+    }
+    if let Some(wal_tail_segments) = view.write_stop() {
+        return CandidateAdmission::independent(Err(MetadataViewError::MaintenanceRequired {
+            namespace_id: namespace_id.clone(),
+            reason: format!(
+                "WAL tail has {wal_tail_segments} segments; publishes resume once maintenance brings it back under {MAX_UNFLUSHED_WAL_SEGMENTS}"
+            ),
+        }
+        .into()));
     }
     if let Err(error) = candidate.validate_request_limits() {
         return CandidateAdmission::independent(Err(error));

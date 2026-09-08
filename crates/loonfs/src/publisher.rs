@@ -1347,8 +1347,7 @@ impl NamespacePublisher {
             candidates,
         )
         .await;
-        let write_stopped =
-            !publish.results.is_empty() && publish.results.iter().all(is_maintenance_required);
+        let write_stopped = publish.results.iter().any(is_maintenance_required);
         if write_stopped {
             self.read_core.instruments().publisher_write_stop_refusal();
         }

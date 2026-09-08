@@ -2313,9 +2313,10 @@ deployment's read costs bounded regardless of scheduling: the reference
 implementation's writer folds the WAL tail into a manifest after a publish
 observes the tail at or past the WAL-tail policy's checkpoint threshold
 (32 segments at defaults), without delaying that publish, and every publish
-surface rejects with `maintenance_required` once the tail reaches the same policy's
-write-rejection threshold (128 at defaults). Reads never gate on tail
-length. Bounded reads are the
+surface refuses new commits with `maintenance_required` once the tail reaches
+the same policy's write-rejection threshold (128 at defaults). A commit id the
+namespace already knows is still answered from its receipt. Reads never gate on
+tail length. Bounded reads are the
 automatic half only: the retention floor never advances on its own, so
 history retention — and the row reclamation that follows it — remains an
 explicit operator decision. An embedded engine where an operator
