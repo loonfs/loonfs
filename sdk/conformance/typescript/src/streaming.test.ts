@@ -27,6 +27,7 @@ const fixtures: Fixture[] = JSON.parse(
 function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8Array>): typeof fetch {
     const claim = {
         kind: "blob",
+        owner_namespace_id: "demo",
         content_id: "cnt_00000000000000000000000000000001",
         size_bytes: fixture.size_bytes,
         checksum: { algorithm: fixture.algorithm, value: fixture.checksum },

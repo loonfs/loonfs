@@ -44,7 +44,7 @@ func streamingCases(t *testing.T) []streamCase {
 func streamTestServer(t *testing.T, fixture streamCase, direct bool, content func(http.ResponseWriter, *http.Request)) *httptest.Server {
 	t.Helper()
 	var host *httptest.Server
-	claim := map[string]any{"kind": "blob", "content_id": "cnt_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
+	claim := map[string]any{"kind": "blob", "owner_namespace_id": "demo", "content_id": "cnt_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
 	host = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/object" {
 			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Private") != "" {
