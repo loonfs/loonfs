@@ -1558,8 +1558,12 @@ fn content_failure_reason(error: DurableContentValidationError) -> Result<String
 mod tests {
     use super::*;
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use loonfs_api::wire::control::decode_control_object;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
+    use loonfs_test_support::stores::{
+        FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    };
     use tempfile::tempdir;
 
     const BYTES: &[u8] = b"terminal states\n";
@@ -1599,8 +1603,8 @@ mod tests {
         )
     }
 
-    async fn complete(
-        store: &LocalFsStore,
+    async fn complete<S: ObjectStore + ?Sized>(
+        store: &S,
         namespace_id: &NamespaceId,
         content_store_id: &ContentStoreId,
         upload_id: &UploadId,
@@ -1615,6 +1619,155 @@ mod tests {
             context,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn completion_retry_after_a_lost_acknowledgement_preserves_the_terminal_record() {
+        let temp_dir = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+        let (namespace_id, content_store_id, upload_id, content_ref, _) =
+            staged_session(&inner, &context(1_000)).await;
+        let key = upload_session(&namespace_id, &upload_id);
+        let failing = FailStore::new(
+            inner,
+            KeyPredicate::exact(&key),
+            OperationClass::CompareAndSwap,
+            InjectedError::Transport("lost completion acknowledgement".to_owned()),
+        )
+        .apply_then_fail();
+        failing.fail_next(1);
+        let store = RecordingStore::new(failing, KeyPredicate::any());
+
+        let error = complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &context(2_000),
+        )
+        .await
+        .expect_err("completion acknowledgement is lost");
+        assert!(matches!(error, CoreError::Store { .. }));
+        assert_eq!(store.counts().compare_and_swaps, 1);
+        let stored = store
+            .get_with_metadata(&key)
+            .await
+            .expect("read session")
+            .expect("session");
+        let state = load_upload_session_state(&store, &namespace_id, &upload_id)
+            .await
+            .expect("valid terminal record");
+        assert_eq!(
+            state.mode,
+            UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Idle,
+            }
+        );
+        assert_eq!(
+            state.status,
+            UploadSessionRecordStatus::Completed {
+                completed_at_ms: 2_000,
+                content_ref: content_ref.clone(),
+            }
+        );
+
+        store.reset();
+        let replay = complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &context(3_000),
+        )
+        .await
+        .expect("replay completion");
+        assert_eq!(replay.response.content_ref(), Some(&content_ref));
+        assert!(matches!(
+            replay.response.status,
+            UploadSessionStatus::Completed {
+                completed_at_ms: 2_000,
+                ..
+            }
+        ));
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().deletes, 0);
+        assert_eq!(
+            store
+                .get_with_metadata(&key)
+                .await
+                .expect("read replayed session")
+                .expect("session"),
+            stored
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_completion_skips_the_session_read_and_reloads_after_contention() {
+        for contended in [false, true] {
+            let temp_dir = tempdir().expect("tempdir");
+            let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+            let (namespace_id, content_store_id, upload_id, content_ref, _) =
+                staged_session(&inner, &context(1_000)).await;
+            let key = upload_session(&namespace_id, &upload_id);
+            let stored = inner
+                .get_with_metadata(&key)
+                .await
+                .expect("read session")
+                .expect("session");
+            let state = decode_control_object::<UploadSessionState>(
+                &stored.bytes,
+                ControlObjectKind::UploadSession,
+            )
+            .expect("staged session")
+            .into_payload();
+            let initial = LoadedControl {
+                object_key: key.clone(),
+                state,
+                etag: stored.metadata.etag.expect("session etag"),
+            };
+            if contended {
+                abort_upload(
+                    &inner,
+                    &namespace_id,
+                    &content_store_id,
+                    &upload_id,
+                    &context(2_000),
+                )
+                .await
+                .expect("competing abort");
+            }
+            let store = RecordingStore::new(inner, KeyPredicate::exact(&key));
+            let completed = freeze_completed_session_from_initial(
+                &store,
+                &namespace_id,
+                &content_store_id,
+                &upload_id,
+                &content_ref,
+                3_000,
+                Some(initial),
+            )
+            .await;
+
+            assert_eq!(store.counts().compare_and_swaps, 1);
+            assert_eq!(store.count(OperationClass::Read), usize::from(contended));
+            if contended {
+                assert!(matches!(completed, Err(CoreError::UploadNotFound { .. })));
+            } else {
+                assert_eq!(
+                    completed.expect("complete").response.content_ref(),
+                    Some(&content_ref)
+                );
+            }
+            let state = load_upload_session_state(&store, &namespace_id, &upload_id)
+                .await
+                .expect("valid terminal session");
+            assert_eq!(
+                state.mode,
+                UploadSessionMode::ServiceProxied {
+                    staging: ProxiedStaging::Idle
+                }
+            );
+        }
     }
 
     #[test]
