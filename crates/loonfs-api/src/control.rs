@@ -1057,6 +1057,7 @@ mod tests {
     fn completed_proxied_session_rejects_conflicting_staged_size() {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,
@@ -1092,6 +1093,7 @@ mod tests {
     fn terminal_upload_modes_reject_only_retained_staged_references() {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,

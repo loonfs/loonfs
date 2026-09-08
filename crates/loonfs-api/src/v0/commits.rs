@@ -307,11 +307,12 @@ mod tests {
     #[test]
     fn filesystem_change_events_use_snake_case_kind_tags() {
         let sample_content_ref = crate::ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
             crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("valid content id"),
             b"hello",
         );
-        let sample_content_ref_json = r#"{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#;
+        let sample_content_ref_json = r#"{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#;
 
         let generation = binding_generation();
         let directory_created = FilesystemChange::DirectoryCreated {

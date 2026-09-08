@@ -105,7 +105,7 @@ The required durable object families and standard key patterns are:
 | **GC mark pages** | Immutable | Sorted, checksummed reference tables and intermediate merge output. | `namespaces/{namespace_id}/gc/runs/{gc_run_id}/tables/{table_id}/{page_index:020}.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content store descriptors** | Immutable | Identify the content domain held by a backend. | `content-stores/{content_store_id}/store.json` |
-| **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
+| **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{owner_namespace_id}/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
 `.sst.zst` identifies the block encoding: sorted rows with each block compressed using zstd. Metadata and grep segments use this encoding. `.wal.zst` identifies the WAL encoding.
 
@@ -262,7 +262,7 @@ The metadata log has six rules.
 
 ### 1.6 Immutable content rules
 
-The content model has six rules.
+The content model has seven rules.
 
 1. **Identity and integrity are separate.** A content object's identity is a
    random `content_id`. Its checksum verifies the bytes stored under that id.
@@ -278,6 +278,14 @@ The content model has six rules.
    `content_ref.checksum` over the complete file. If it cannot compute that
    algorithm, the read fails. A HEAD request may check existence and size
    before downloading the object.
+7. A namespace owns the new content it creates. Forks preserve the ownership
+   of inherited content. Sharing an ancestor does not make siblings retain one
+   another's private content. A reference names the namespace that originally
+   wrote the bytes in `owner_namespace_id`. Forking, restoring, replaying, and
+   compacting never substitute the current namespace.
+
+Recording the owner reclaims nothing by itself. Section 6.4 states what
+garbage collection may delete.
 
 ##### Checksum format
 
@@ -333,7 +341,9 @@ compare-and-swap, but they are not content digests unless a provider-specific
 behavior is separately exposed and verified through this contract.
 
 A reader or writer resolves content through the namespace head:
-`namespace_id -> head.content_store_id -> content-stores/{content_store_id}/...`.
+`namespace_id -> head.content_store_id`, then
+`content_ref -> owner_namespace_id + content_id -> one exact key`.
+Reading inherited content does not load its owner's head or walk ancestry.
 File revisions and change-feed payloads store only `content_ref`; they do not
 store content-store ids or object-store paths.
 
@@ -588,6 +598,7 @@ The revision row for the current file contents:
   "delta_index": 0,
   "content_ref": {
     "kind": "blob_v1",
+    "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -728,10 +739,13 @@ No reader consults it today. A deployment resolving a content domain to a
 physical backend may read it to confirm that backend holds the domain.
 The key is beside `objects/`, so content listings under `objects/` exclude it.
 
-The stable immutable content families are:
+New uploads for a namespace are owned by that namespace inside the content
+domain its head names.
+
+The immutable content key is:
 
 ```text
-content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}
+content-stores/{content_store_id}/objects/{owner_namespace_id}/{content_id[4..6]}/{content_id[6..8]}/{content_id}
 ```
 
 The core rules are:
@@ -749,17 +763,19 @@ The core rules are:
 - `content_ref.size_bytes` records the complete byte length;
 - `content_ref.checksum` is mandatory and covers the complete object;
 - all content-object access resolves `namespace_id` through the namespace
-  head to its `content_store_id`;
+  head to its `content_store_id`, then uses the reference's owner and content id;
 - future content strategies must use a new `content_ref.kind` and name their
   durability and validation rules before revisions may reference them.
 
 `ContentRef` rejects unknown fields in every context, including immutable
-durable records. Unknown `kind` values fail to decode. A new content kind
-requires a version change on every durable family that carries references:
+durable records. Unknown `kind` values and references without
+`owner_namespace_id` fail to decode. A new content kind requires a version
+change on every durable family that carries references:
 
 ```json
 {
   "kind": "blob_v1",
+  "owner_namespace_id": "demo",
   "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
   "size_bytes": 19482,
   "checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" }
@@ -879,7 +895,9 @@ fork whose manifest still names source-owned segments and content.
 ### 2.6 Forks
 
 Forking a namespace creates a new namespace with independent metadata history
-and the same `content_store_id` as the source namespace. The fork point is the
+and the same `content_store_id` as the source namespace. New uploads go under
+the target's owner prefix. Inherited references keep their original owners.
+There is no content domain rotation at a fork point. The fork point is the
 source namespace's current head. Every attempt creates its own leased,
 verified fork-owned source checkpoint at that head, then installs the complete
 target head with one create-if-absent. The target writes no manifest, no root, and no floor: the
@@ -1170,13 +1188,14 @@ Content must be durable before any metadata change can reference it.
    the final object key exists up front.
 2. Read the namespace head for its `content_store_id`.
 3. Upload the complete byte sequence to
-   `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}`
+   `content-stores/{content_store_id}/objects/{owner_namespace_id}/{content_id[4..6]}/{content_id[6..8]}/{content_id}`
    with create-if-absent semantics.
 4. Build a content reference:
 
    ```json
    {
      "kind": "blob_v1",
+     "owner_namespace_id": "demo",
      "content_id": "con_<32hex>",
      "size_bytes": 123,
      "checksum": { "algorithm": "sha256", "value": "<64hex>" }
@@ -1377,7 +1396,7 @@ Given a visible file inode at seq N:
 2. Read the namespace head for its `content_store_id`.
 3. Verify that `content_ref.kind` is supported by the reader.
 4. For `blob_v1`, fetch the object at
-   `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id[6..8]}/{content_id}`.
+   `content-stores/{content_store_id}/objects/{owner_namespace_id}/{content_id[4..6]}/{content_id[6..8]}/{content_id}`.
 5. Verify `content_ref.size_bytes`, then compute the algorithm in
    `content_ref.checksum` over the complete file and compare the result. The
    read fails if the algorithm is unsupported or the values do not match.
@@ -1517,6 +1536,7 @@ A content reference enters the preimage as exactly:
 { "kind": "blob_v1", "content_id": "con_<32hex>", "size_bytes": 123 }
 ```
 
+The owner is excluded because the random `content_id` is unique across owners.
 The checksum is excluded because `content_id` identifies the object. The
 checksum verifies that object but does not change its identity. Different
 checksum evidence for the same object must not produce a different commit
@@ -2611,8 +2631,8 @@ publishing CAS) — under these rules:
    *Before `completed`, the upload half owns everything, and its reasoning
    is session-local.* An `open` session whose `expires_at_ms` has passed by a
    grace window is compare-and-swapped to `aborted` under the etag loaded
-   with it, and only then is the object at its content id deleted, together
-   with any provider-side transfer the session had started. A lost
+   with it, and only then is the object at its namespace owner and content id
+   deleted, together with any provider-side transfer the session had started. A lost
    compare-and-swap retains the session for a later pass. An `aborted`
    record repeats that cleanup — covering a crash between the swap and the
    delete — and is deleted a grace window after its own `aborted_at_ms`. No

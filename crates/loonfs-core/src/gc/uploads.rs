@@ -128,7 +128,8 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                     if !delete_unpublished_content_object(
                         sweep.store,
                         &sweep.content_store_id,
-                        &content_ref.content_id,
+                        &state.namespace_id,
+                        &state.content_id,
                     )
                     .await
                     {

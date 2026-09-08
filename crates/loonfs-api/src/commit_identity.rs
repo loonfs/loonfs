@@ -643,6 +643,7 @@ mod tests {
     #[test]
     fn put_file_guards_change_the_fingerprint_deterministically() {
         let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"guarded put bytes",
         );
@@ -721,15 +722,21 @@ mod tests {
         let bytes = b"pinned put bytes";
 
         for content_ref in [
-            ContentRef::blob_v1(content_id.clone(), bytes),
+            ContentRef::blob_v1(
+                crate::NamespaceId::parse("demo").expect("namespace id"),
+                content_id.clone(),
+                bytes,
+            ),
             ContentRef {
                 kind: ContentRefKind::BlobV1,
+                owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
                 content_id: content_id.clone(),
                 size_bytes: bytes.len() as u64,
                 checksum: Checksum::crc32c(bytes),
             },
             ContentRef {
                 kind: ContentRefKind::BlobV1,
+                owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
                 content_id: content_id.clone(),
                 size_bytes: bytes.len() as u64,
                 checksum: Checksum::crc64nvme(bytes),
@@ -771,8 +778,16 @@ mod tests {
     fn a_different_content_object_changes_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let bytes = b"identical bytes, two uploads";
-        let first = ContentRef::blob_v1(ContentId::generate(), bytes);
-        let second = ContentRef::blob_v1(ContentId::generate(), bytes);
+        let first = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
+            bytes,
+        );
+        let second = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
+            bytes,
+        );
 
         assert_ne!(
             semantic_commit_fingerprint(
@@ -848,7 +863,11 @@ mod tests {
     fn put_fingerprint_changes_with_every_request_field() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let path = AbsolutePath::parse("/a.txt").expect("path");
-        let content_ref = ContentRef::blob_v1(ContentId::generate(), b"hello");
+        let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
+            b"hello",
+        );
         let mut options = PutFileOptions::new(test_actor());
         options.behavior = DestinationBehavior::Replace;
         let fingerprint =

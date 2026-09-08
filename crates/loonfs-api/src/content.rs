@@ -1,7 +1,7 @@
 //! Immutable content references and their checksums.
 
 use crate::hex::{hex_encode_bytes, is_lower_hex_byte};
-use crate::ids::ContentId;
+use crate::ids::{ContentId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha2Sha256};
 use std::fmt;
@@ -317,15 +317,16 @@ pub enum ContentRefValidationError {
 /// A reference to one immutable content object.
 ///
 /// The object must be durable before the reference is published.
-// This type also appears in request bodies, so it rejects unknown fields in
-// every context. Add new content kinds instead of new fields. This is not
-// rustdoc because it describes storage behavior, not the public API.
+// Request bodies and durable records share this type, so it rejects unknown
+// fields in every context. After release, new content kinds, not new fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContentRef {
     /// Content strategy used by the referenced object.
     pub kind: ContentRefKind,
+    /// Namespace that originally wrote the bytes.
+    pub owner_namespace_id: NamespaceId,
     /// Immutable identity of the referenced object.
     pub content_id: ContentId,
     /// Complete byte length of the referenced content.
@@ -339,9 +340,10 @@ impl ContentRef {
     ///
     /// Every caller of this constructor moves the bytes through the LoonFS
     /// write path, so the checksum is trusted by construction.
-    pub fn blob_v1(content_id: ContentId, bytes: &[u8]) -> Self {
+    pub fn blob_v1(owner_namespace_id: NamespaceId, content_id: ContentId, bytes: &[u8]) -> Self {
         Self {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id,
             content_id,
             size_bytes: bytes.len() as u64,
             checksum: Checksum::sha256(bytes),
@@ -353,9 +355,15 @@ impl ContentRef {
     ///
     /// Accepting the digest object, rather than an arbitrary checksum string,
     /// ensures that the checksum came from the LoonFS write path.
-    pub fn blob_v1_streamed(content_id: ContentId, size_bytes: u64, digest: Sha256) -> Self {
+    pub fn blob_v1_streamed(
+        owner_namespace_id: NamespaceId,
+        content_id: ContentId,
+        size_bytes: u64,
+        digest: Sha256,
+    ) -> Self {
         Self {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id,
             content_id,
             size_bytes,
             checksum: digest.finish(),
@@ -430,6 +438,7 @@ mod tests {
 
         let json = r#"{
             "kind": "blob_v1",
+            "owner_namespace_id": "demo",
             "content_id": "con_0123456789abcdef0123456789abcdef",
             "size_bytes": 5,
             "checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
@@ -438,8 +447,12 @@ mod tests {
     }
 
     #[test]
-    fn a_content_ref_uses_only_the_checksum_shape() {
-        let content_ref = ContentRef::blob_v1(content_id(), b"hello");
+    fn a_content_ref_requires_an_owner_and_one_checksum() {
+        let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            content_id(),
+            b"hello",
+        );
 
         assert_eq!(content_ref.kind, ContentRefKind::BlobV1);
         assert_eq!(content_ref.size_bytes, 5);
@@ -448,7 +461,14 @@ mod tests {
 
         let document = serde_json::to_value(&content_ref).expect("encode content ref");
         let object = document.as_object().expect("content ref object");
-        assert_eq!(object.len(), 4);
+        assert_eq!(object.len(), 5);
+        assert_eq!(object["owner_namespace_id"], "demo");
+        let mut missing_owner = document.clone();
+        missing_owner
+            .as_object_mut()
+            .expect("reference")
+            .remove("owner_namespace_id");
+        assert!(serde_json::from_value::<ContentRef>(missing_owner).is_err());
         assert!(object.contains_key("checksum"));
         assert!(!object.contains_key("storage_checksum"));
         assert!(!object.contains_key("whole_file_sha256"));
@@ -456,7 +476,11 @@ mod tests {
 
     #[test]
     fn validation_rejects_a_malformed_checksum() {
-        let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
+        let mut content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            content_id(),
+            b"hello",
+        );
         content_ref.checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
             value: content_ref.checksum.value.clone(),

@@ -95,7 +95,11 @@ fn grant(content_ref: ContentRef, url: &str) -> BeginDownloadResponse {
 async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named() {
     let payload = b"the bytes the grant described".to_vec();
     let served = b"something else entirely, and a different length".to_vec();
-    let content_ref = ContentRef::blob_v1(ContentId::generate(), &payload);
+    let content_ref = ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+    );
     let client = client();
 
     let _guard = test_transport::script([Outcome::Success(served)]);
@@ -118,6 +122,7 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
 fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
     ContentRef {
         kind: loonfs_api::ContentRefKind::BlobV1,
+        owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
         content_id: ContentId::generate(),
         size_bytes: bytes.len() as u64,
         checksum: loonfs_api::Checksum::crc32c(bytes),
@@ -208,7 +213,11 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
 #[tokio::test]
 async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     let payload = b"exactly the bytes the grant described".to_vec();
-    let content_ref = ContentRef::blob_v1(ContentId::generate(), &payload);
+    let content_ref = ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+    );
     let client = client();
 
     let _guard = test_transport::script([Outcome::Success(payload.clone())]);
@@ -229,7 +238,11 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
 async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
     let payload = b"the first half and then the second half".to_vec();
     let held = 10;
-    let content_ref = ContentRef::blob_v1(ContentId::generate(), &payload);
+    let content_ref = ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+    );
     let client = client();
 
     let guard = test_transport::script([Outcome::Success(payload[held..].to_vec())]);
@@ -263,7 +276,11 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
 #[tokio::test]
 async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     let payload = b"a whole object".to_vec();
-    let content_ref = ContentRef::blob_v1(ContentId::generate(), &payload);
+    let content_ref = ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+    );
     let client = client();
 
     let guard = test_transport::script([Outcome::Success(payload.clone())]);
@@ -297,7 +314,11 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
 #[tokio::test]
 async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() {
     let payload = b"unused".to_vec();
-    let content_ref = ContentRef::blob_v1(ContentId::generate(), &payload);
+    let content_ref = ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+    );
     let mut grant = grant(content_ref, "http://example.invalid/object");
     let ObjectTransferAccess::PresignedUrl { method, .. } = &mut grant.access;
     *method = "PUT".to_owned();

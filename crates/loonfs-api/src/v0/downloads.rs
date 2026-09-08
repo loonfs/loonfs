@@ -92,6 +92,7 @@ mod tests {
 
     fn content_ref() -> ContentRef {
         ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
         )
@@ -100,6 +101,7 @@ mod tests {
     fn content_ref_json() -> serde_json::Value {
         serde_json::json!({
             "kind": "blob_v1",
+            "owner_namespace_id": "demo",
             "content_id": "con_0123456789abcdef0123456789abcdef",
             "size_bytes": 5,
             "checksum": {

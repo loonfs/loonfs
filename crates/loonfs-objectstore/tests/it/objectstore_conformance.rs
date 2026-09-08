@@ -418,6 +418,7 @@ fn stored_checksum_test_key() -> String {
     content_blob(
         &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
             .expect("valid content store id"),
+        &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
         &ContentId::parse("con_9a41c07d55e2410fb3c6d8e1f2a3b4c5").expect("valid content id"),
     )
 }
@@ -466,6 +467,7 @@ fn streamed_write_key() -> String {
     content_blob(
         &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
             .expect("valid content store id"),
+        &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
         &ContentId::parse("con_5723ea9d1c4b48f0a1d2e3f4a5b6c7d8").expect("valid content id"),
     )
 }

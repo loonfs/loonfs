@@ -102,7 +102,11 @@ fn assert_row_categories_equal(overlay: &MetadataState, replayed: &MetadataState
 }
 
 fn content_ref(seed: u8) -> ContentRef {
-    ContentRef::blob_v1(ContentId::generate(), &[seed; 12])
+    ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &[seed; 12],
+    )
 }
 
 fn attributes(entries: impl IntoIterator<Item = (&'static str, &'static str)>) -> Attributes {

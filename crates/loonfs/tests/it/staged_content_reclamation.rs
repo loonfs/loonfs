@@ -81,7 +81,11 @@ async fn content_key(
             .expect("load namespace catalog")
             .content_store_id()
             .clone();
-    loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id)
+    loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    )
 }
 
 async fn exists(store: &SharedObjectStore, key: &str) -> bool {

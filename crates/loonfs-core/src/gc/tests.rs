@@ -769,8 +769,11 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
     let session_key = loonfs_objectstore::keys::upload_session(&namespace_id, &upload_id);
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
 
     // Inside the lease nothing happens, however old the object looks: the
     // session carries its own expiry, so no provider timestamp decides this.
@@ -1002,8 +1005,11 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadAborted);
     let gc_config = config();
     let gc = gc_namespace(&store, &namespace_id, &gc_config, &aged);
@@ -1050,8 +1056,11 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCompleted);
     let completion = crate::protocol::complete_upload(
         &store,
@@ -1177,8 +1186,11 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
         .expect("bootstrap");
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
 
     let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS - 1);
     let report = gc_namespace(&store, &namespace_id, &config(), &inside)
@@ -1205,8 +1217,11 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
     write_test_file(&store, &namespace_id, "/docs/other.txt", "gc-other", &setup).await;
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
 
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let report = gc_namespace(&store, &namespace_id, &config(), &past)
@@ -1240,8 +1255,11 @@ async fn completed_content_delete_failure_keeps_the_session_for_retry() {
         .expect("bootstrap");
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
 
     store.fail_next(1);
@@ -1305,8 +1323,11 @@ async fn content_gc_never_reclaims_published_content() {
                 .await
                 .expect("advance floor");
         }
-        let content_key =
-            loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+        let content_key = loonfs_objectstore::keys::content_blob(
+            &content_store_id,
+            &content_ref.owner_namespace_id,
+            &content_ref.content_id,
+        );
 
         let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
         let report = gc_namespace(&store, &namespace_id, &config(), &past)
@@ -1422,8 +1443,11 @@ async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_cont
     namespace_with_a_scan_worth_bounding(store.inner(), &namespace_id, &setup).await;
     let (upload_id, content_ref, content_store_id, _) =
         complete_upload_for_gc(store.inner(), &namespace_id, b"unpublished\n", &setup).await;
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
     let segment_keys = store
         .inner()
         .list_prefix(&metadata_segment_prefix(&namespace_id))
@@ -1543,8 +1567,11 @@ async fn a_complete_pass_fetches_each_retained_segment_once() {
         &setup,
     )
     .await;
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let retained = live_set(&inner, &namespace_id, &past).await.wal_segments;
     assert!(!retained.is_empty(), "the fixture must retain a chain");
@@ -1645,8 +1672,11 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
         &setup,
     )
     .await;
-    let content_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let content_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     for max_steps in [1, 2, 5, 17, 64] {
         let trial_root = temp_dir.path().join(format!("trial-{max_steps}"));

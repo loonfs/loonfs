@@ -1192,7 +1192,8 @@ the same content-claim grammar used by direct multipart:
 
 The checksum algorithm must match the session's `checksum_algorithm`; a
 difference answers `invalid_request`. The server builds the final content
-reference from the session's content identity and the completion claim. It
+reference from the session's namespace id and content id, plus the completion
+claim. The session's namespace is the owner. It
 then compares the claimed size and checksum with the object in storage. A
 mismatch makes the session unusable, and the server deletes the unpublished
 object. Completion verifies the stored content against the client's claim; it
@@ -1309,6 +1310,12 @@ upload along with the object it was writing. Aborting an upload that already
 assembled its object is safe on every supported provider: it succeeds and
 leaves the object alone.
 
+A content reference contains `kind`, `owner_namespace_id`, `content_id`,
+`size_bytes`, and `checksum`. The owner is the namespace that originally wrote
+the bytes. Clients echo the server's reference unchanged; the owner is required
+in requests and visible in responses. Ownership does not change on a fork or
+restore. Recording the owner reclaims nothing by itself.
+
 A server may return a short-lived `content_token` for completed content.
 Clients treat the token as opaque and can copy it directly into a commit
 request. Reading a completed session returns a fresh token while its minting
@@ -1318,7 +1325,7 @@ window remains open. The separate `content_ref` remains available afterward.
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+  "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
 }
 ```
 
@@ -1336,7 +1343,7 @@ tokens naming other refs are ignored.
   "actor": { "kind": "service", "id": "document-importer" },
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1344,7 +1351,7 @@ tokens naming other refs are ignored.
     {
       "kind": "put_file",
       "path": "/docs/report.pdf",
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "behavior": "no_replace"
     }
   ]
@@ -1519,6 +1526,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "size_bytes": 19482,
   "content_ref": {
     "kind": "blob_v1",
+    "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1627,6 +1635,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "size_bytes": 19482,
       "content_ref": {
         "kind": "blob_v1",
+        "owner_namespace_id": "demo",
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
         "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1720,6 +1729,7 @@ retained. A directory returns `path_conflict`, an unknown inode returns
       "committed_by": { "kind": "service", "id": "render-worker" },
       "content_ref": {
         "kind": "blob_v1",
+        "owner_namespace_id": "demo",
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
         "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1782,7 +1792,7 @@ create a directory and write into it:
   "message": "import the January report",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1791,7 +1801,7 @@ create a directory and write into it:
     {
       "kind": "put_file",
       "path": "/reports/2026/january.pdf",
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "behavior": "no_replace"
     },
     {
@@ -1897,7 +1907,7 @@ Representative response:
       "parent_inode_id": "ino_12",
       "display_name": "january.pdf",
       "revision_no": 1,
-      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
     }
   ]
 }
@@ -2094,7 +2104,7 @@ final (format spec, section 3.10). What that means at the API:
 
   ```json
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_multipart", "status": "open", "expires_at_ms": 1730000000000 }
-  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
+  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "service_proxied", "status": "aborted", "aborted_at_ms": 1730000002000 }
   ```
 
@@ -2208,6 +2218,7 @@ Representative content-upload response:
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "content_ref": {
     "kind": "blob_v1",
+    "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2232,6 +2243,7 @@ Representative complete-upload response:
   "completed_at_ms": 1730000001000,
   "content_ref": {
     "kind": "blob_v1",
+    "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2239,6 +2251,7 @@ Representative complete-upload response:
   "content_token": {
     "content_ref": {
       "kind": "blob_v1",
+      "owner_namespace_id": "demo",
       "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
       "size_bytes": 20591,
       "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2276,6 +2289,7 @@ checks the arriving bytes against:
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
+    "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -2300,6 +2314,7 @@ Its body is `{}` and its response does not include a path:
   "revision_no": 3,
   "content_ref": {
     "kind": "blob_v1",
+    "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -2375,6 +2390,7 @@ more than three events. The events stay in request order.
           "revision_no": 8,
           "content_ref": {
             "kind": "blob_v1",
+            "owner_namespace_id": "demo",
             "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
             "size_bytes": 20591,
             "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2419,6 +2435,7 @@ includes its first revision and content reference:
   "revision_no": 1,
   "content_ref": {
     "kind": "blob_v1",
+    "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }

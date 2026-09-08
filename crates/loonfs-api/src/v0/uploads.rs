@@ -642,7 +642,11 @@ mod tests {
             mode: UploadMode::DirectPut,
             status: UploadSessionStatus::Completed {
                 completed_at_ms: 3_000,
-                content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
+                content_ref: ContentRef::blob_v1(
+                    crate::NamespaceId::parse("demo").expect("namespace id"),
+                    ContentId::generate(),
+                    b"hello",
+                ),
                 content_token: None,
             },
         })
@@ -662,6 +666,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
         let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
         );
@@ -695,6 +700,7 @@ mod tests {
             serde_json::json!({
                 "content_ref": {
                     "kind": "blob_v1",
+                    "owner_namespace_id": "demo",
                     "content_id": "con_0123456789abcdef0123456789abcdef",
                     "size_bytes": 5,
                     "checksum": {
@@ -728,6 +734,7 @@ mod tests {
         let token = serde_json::json!({
             "content_ref": {
                 "kind": "blob_v1",
+                "owner_namespace_id": "demo",
                 "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 5,
                 "checksum": {

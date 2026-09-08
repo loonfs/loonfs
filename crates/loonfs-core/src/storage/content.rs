@@ -10,11 +10,9 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::content_admission::PreparedContent;
 use bytes::Bytes;
 use futures::StreamExt;
-#[cfg(any(test, feature = "test-support"))]
-use loonfs_api::NamespaceId;
 use loonfs_api::{
     Checksum, ContentId, ContentRef, ContentRefValidationError, ContentStoreId, ErrorCode,
-    PathEntry, Sha256, StreamingChecksum,
+    NamespaceId, PathEntry, Sha256, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{
@@ -229,9 +227,10 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
 pub(crate) async fn create_content_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
+    owner_namespace_id: &NamespaceId,
     content_id: &ContentId,
 ) -> crate::error::Result<String> {
-    let object_key = content_key_for_id(content_store_id, content_id);
+    let object_key = content_key_for_id(content_store_id, owner_namespace_id, content_id);
     store
         .create_multipart_upload(&object_key)
         .await
@@ -249,7 +248,11 @@ pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
     provider_upload_id: &str,
     parts: &[MultipartPart],
 ) -> crate::error::Result<MultipartCompletion> {
-    let object_key = content_key_for_id(content_store_id, &expected.content_id);
+    let object_key = content_key_for_id(
+        content_store_id,
+        &expected.owner_namespace_id,
+        &expected.content_id,
+    );
     store
         .complete_multipart_upload(&object_key, provider_upload_id, parts, &expected.checksum)
         .await
@@ -270,9 +273,10 @@ pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
 pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
+    owner_namespace_id: &NamespaceId,
     content_id: &ContentId,
 ) -> bool {
-    let object_key = content_blob(content_store_id, content_id);
+    let object_key = content_blob(content_store_id, owner_namespace_id, content_id);
     match store.delete(&object_key).await {
         Ok(()) => true,
         Err(error) => {
@@ -298,10 +302,11 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
 pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
+    owner_namespace_id: &NamespaceId,
     content_id: &ContentId,
     provider_upload_id: &str,
 ) -> bool {
-    let object_key = content_blob(content_store_id, content_id);
+    let object_key = content_blob(content_store_id, owner_namespace_id, content_id);
     match store
         .abort_multipart_upload(&object_key, provider_upload_id)
         .await
@@ -590,9 +595,10 @@ pub(crate) async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
 
 pub(crate) fn content_key_for_id(
     content_store_id: &ContentStoreId,
+    owner_namespace_id: &NamespaceId,
     content_id: &ContentId,
 ) -> String {
-    content_blob(content_store_id, content_id)
+    content_blob(content_store_id, owner_namespace_id, content_id)
 }
 
 pub(crate) fn content_object_key_for_ref(
@@ -602,7 +608,11 @@ pub(crate) fn content_object_key_for_ref(
     content_ref
         .validate()
         .map_err(DurableContentValidationError::InvalidContentRef)?;
-    Ok(content_blob(content_store_id, &content_ref.content_id))
+    Ok(content_blob(
+        content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    ))
 }
 
 /// Checks fetched bytes against everything the reference claims about them.
@@ -686,11 +696,12 @@ async fn validate_content_size<S: ObjectStore + ?Sized>(
 #[cfg(any(test, feature = "test-support"))]
 pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
+    owner_namespace_id: &NamespaceId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    store_bytes_as_content_with_store_id(store, content_store_id, bytes).await
+    let content_store_id = load_namespace_content_store_id(store, owner_namespace_id).await?;
+    store_bytes_as_content_with_store_id(store, content_store_id, owner_namespace_id.clone(), bytes)
+        .await
 }
 
 /// Test fixture for planting durable content without an upload session.
@@ -702,9 +713,17 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
 pub(crate) async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
+    owner_namespace_id: NamespaceId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    stage_bytes_under_content_id(store, content_store_id, ContentId::generate(), bytes).await
+    stage_bytes_under_content_id(
+        store,
+        content_store_id,
+        owner_namespace_id,
+        ContentId::generate(),
+        bytes,
+    )
+    .await
 }
 
 /// Result of staging streamed content.
@@ -730,11 +749,12 @@ pub(crate) enum StreamedPayloadKind {
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
+    owner_namespace_id: NamespaceId,
     content_id: ContentId,
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
 ) -> Result<StagedStream, CoreError> {
-    let object_key = content_blob(&content_store_id, &content_id);
+    let object_key = content_blob(&content_store_id, &owner_namespace_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::default()));
     let hashed = {
         let observed = Arc::clone(&observed);
@@ -772,13 +792,19 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     };
 
     Ok(StagedStream {
-        content_ref: ContentRef::blob_v1_streamed(content_id, observed.size_bytes, observed.digest),
+        content_ref: ContentRef::blob_v1_streamed(
+            owner_namespace_id,
+            content_id,
+            observed.size_bytes,
+            observed.digest,
+        ),
         already_present,
     })
 }
 
 /// Reads and hashes a stream without storing it.
 pub(crate) async fn identify_streamed_payload(
+    owner_namespace_id: NamespaceId,
     content_id: ContentId,
     mut body: ByteStream,
 ) -> Result<ContentRef, CoreError> {
@@ -789,6 +815,7 @@ pub(crate) async fn identify_streamed_payload(
         observed.size_bytes += chunk.len() as u64;
     }
     Ok(ContentRef::blob_v1_streamed(
+        owner_namespace_id,
         content_id,
         observed.size_bytes,
         observed.digest,
@@ -807,11 +834,16 @@ struct StreamedPayload {
 pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
+    owner_namespace_id: NamespaceId,
     content_id: ContentId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    let content_ref = ContentRef::blob_v1(content_id, bytes);
-    let object_key = content_blob(&content_store_id, &content_ref.content_id);
+    let content_ref = ContentRef::blob_v1(owner_namespace_id, content_id, bytes);
+    let object_key = content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
     // Create-only plus the byte check stay on this write even though a
     // random id cannot collide: if this key is ever occupied by different
     // bytes, that is corruption, and it must fail loudly rather than be
@@ -936,7 +968,11 @@ mod tests {
         let expected = content_ref(b"expected");
         // Same id, different bytes: identity alone can no longer prove
         // content, so the checksum has to.
-        let planted = ContentRef::blob_v1(expected.content_id.clone(), b"mismatch");
+        let planted = ContentRef::blob_v1(
+            expected.owner_namespace_id.clone(),
+            expected.content_id.clone(),
+            b"mismatch",
+        );
         put_content_object(&store, &content_store_id, &planted, b"mismatch").await;
 
         let err = validate_durable_content_reference(&store, &content_store_id, &expected)
@@ -954,6 +990,7 @@ mod tests {
         let bytes = b"transferred straight to the provider";
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(bytes),
@@ -986,6 +1023,7 @@ mod tests {
         let bytes = b"provider-assembled bytes";
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc64nvme(bytes),
@@ -1086,12 +1124,22 @@ mod tests {
         let (_temp_dir, store, content_store_id) = test_store();
         let bytes = b"identical payload";
 
-        let first = store_bytes_as_content_with_store_id(&store, content_store_id.clone(), bytes)
-            .await
-            .expect("first stage");
-        let second = store_bytes_as_content_with_store_id(&store, content_store_id, bytes)
-            .await
-            .expect("second stage");
+        let first = store_bytes_as_content_with_store_id(
+            &store,
+            content_store_id.clone(),
+            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            bytes,
+        )
+        .await
+        .expect("first stage");
+        let second = store_bytes_as_content_with_store_id(
+            &store,
+            content_store_id,
+            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            bytes,
+        )
+        .await
+        .expect("second stage");
 
         assert_ne!(
             first.content_ref().content_id,
@@ -1138,7 +1186,11 @@ mod tests {
             kind: loonfs_api::PathEntryKind::File {
                 revision_no: loonfs_api::RevisionNo(1),
                 size_bytes: 0,
-                content_ref: ContentRef::blob_v1(loonfs_api::ContentId::generate(), b""),
+                content_ref: ContentRef::blob_v1(
+                    loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                    loonfs_api::ContentId::generate(),
+                    b"",
+                ),
                 revision_committed_by: loonfs_api::ActorRef::loonfs_system(),
                 revision_committed_at_ms: 1,
             },
@@ -1420,6 +1472,7 @@ mod tests {
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize + 5);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(&bytes),
@@ -1480,6 +1533,7 @@ mod tests {
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: checksum(&bytes),
@@ -1541,7 +1595,11 @@ mod tests {
         // Same id and same length, different bytes: only the digest can tell.
         let mut planted = bytes.clone();
         planted[0] ^= 0xff;
-        let planted_ref = ContentRef::blob_v1(expected.content_id.clone(), &planted);
+        let planted_ref = ContentRef::blob_v1(
+            expected.owner_namespace_id.clone(),
+            expected.content_id.clone(),
+            &planted,
+        );
         put_content_object(&store, &content_store_id, &planted_ref, &planted).await;
 
         let mut stream = open_stream(&store, &content_store_id, &expected)
@@ -1610,7 +1668,11 @@ mod tests {
         content_ref: &ContentRef,
         bytes: &[u8],
     ) {
-        let key = content_blob(content_store_id, &content_ref.content_id);
+        let key = content_blob(
+            content_store_id,
+            &content_ref.owner_namespace_id,
+            &content_ref.content_id,
+        );
         store
             .put_if_absent(&key, Bytes::copy_from_slice(bytes))
             .await

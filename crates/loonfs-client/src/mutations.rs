@@ -405,7 +405,11 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_content_ref(bytes: &[u8]) -> ContentRef {
-        ContentRef::blob_v1(ContentId::generate(), bytes)
+        ContentRef::blob_v1(
+            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
+            bytes,
+        )
     }
 
     #[test]

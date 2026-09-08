@@ -133,6 +133,7 @@ fn content_id(value: &str) -> ContentId {
 
 fn sample_content_ref() -> ContentRef {
     ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
         content_id("con_0123456789abcdef0123456789abcdef"),
         b"golden bytes",
     )
@@ -145,6 +146,7 @@ fn sample_content_ref() -> ContentRef {
 fn sample_crc_content_ref() -> ContentRef {
     ContentRef {
         kind: ContentRefKind::BlobV1,
+        owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
         content_id: content_id("con_fedcba9876543210fedcba9876543210"),
         size_bytes: 11_534_336,
         checksum: Checksum {
@@ -161,6 +163,7 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
         sample_crc_content_ref(),
         ContentRef {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             content_id: content_id("con_00112233445566778899aabbccddeeff"),
             size_bytes: 4_096,
             checksum: Checksum {

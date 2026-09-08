@@ -17,6 +17,7 @@
       "behavior": "no_replace",
       "content_ref": {
         "kind": "blob_v1",
+        "owner_namespace_id": "demo",
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -46,6 +47,7 @@
       "display_name": "report.txt",
       "content_ref": {
         "kind": "blob_v1",
+        "owner_namespace_id": "demo",
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -64,6 +66,7 @@
       "inode_id": "ino_42",
       "content_ref": {
         "kind": "blob_v1",
+        "owner_namespace_id": "demo",
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -191,6 +194,7 @@
       "behavior": "replace",
       "content_ref": {
         "kind": "blob_v1",
+        "owner_namespace_id": "demo",
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {

@@ -349,7 +349,11 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         content_tokens: vec![
             content_token(&first),
             ContentToken {
-                content_ref: ContentRef::blob_v1(ContentId::generate(), b"irrelevant"),
+                content_ref: ContentRef::blob_v1(
+                    loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                    ContentId::generate(),
+                    b"irrelevant",
+                ),
                 token: "irrelevant.garbage".to_owned(),
             },
         ],
