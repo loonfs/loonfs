@@ -23,9 +23,6 @@ use loonfs_api::{
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use std::time::Duration;
 
-/// Lifetime of a presigned download URL.
-const DIRECT_GET_URL_TTL: Duration = Duration::from_secs(15 * 60);
-
 /// Issues a short-lived download URL for a file.
 ///
 /// This endpoint reads metadata but does not proxy the file bytes, so service-proxied
@@ -159,7 +156,7 @@ async fn presigned_access(
         .presign_get(
             PresignedGetRequest {
                 object_key,
-                expires_in: DIRECT_GET_URL_TTL,
+                expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
             },
             presign_time(),
         )

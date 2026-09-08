@@ -7,7 +7,7 @@ use crate::checkpoint::record::{
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::{load_head_object, load_metadata_root_object_if_present};
+use crate::namespace::control::load_head_object;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -166,24 +166,6 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
             }
         },
     };
-    if head.status.is_deleted() {
-        // A nested fork must materialize its immediate source's metadata root
-        // before it can publish the descendant checkpoint. That root may name
-        // metadata and content owned by earlier ancestors, and it is a direct,
-        // non-swept control object rather than listing evidence. Retain this
-        // source record conservatively whenever the deleted target ever
-        // materialized one.
-        if load_metadata_root_object_if_present(store, target_namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?
-            .is_some()
-        {
-            return Ok(ForkCheckpointReachability::Retained {
-                reason: "target_may_have_live_descendant",
-            });
-        }
-        return Ok(ForkCheckpointReachability::Reclaimable);
-    }
     let Some(basis) = head.fork_basis else {
         return Ok(ForkCheckpointReachability::Reclaimable);
     };
@@ -191,6 +173,17 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
         || basis.source_checkpoint_id != record.checkpoint_id
     {
         return Ok(ForkCheckpointReachability::Reclaimable);
+    }
+    if head.status.is_deleted() {
+        return Ok(match head.status.reclaim_after_ms() {
+            None => ForkCheckpointReachability::Retained {
+                reason: "target_not_retired",
+            },
+            Some(deadline) if deadline > context.now_ms => ForkCheckpointReachability::Retained {
+                reason: "target_retirement_grace",
+            },
+            Some(_) => ForkCheckpointReachability::Reclaimable,
+        });
     }
     if basis.manifest != record.manifest {
         return Err(CoreError::NamespaceCorrupt(format!(

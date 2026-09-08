@@ -179,7 +179,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     let mut budget = PassBudget::new(config.max_steps);
     while !matches!(loaded.state.phase, GcPhase::Complete {}) && budget.try_charge() {
         let mut next = loaded.state.clone();
-        pass.step(&mut next, &mut report).await?;
+        pass.step(&mut next, &mut report, context.now_ms).await?;
         next.step_no = next
             .step_no
             .checked_add(1)
@@ -188,7 +188,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         if confirmed.state.gc_run_id != run_id {
             // Another caller completed our run and reserved the next. Our
             // token cannot become permission to work on that newer run.
-            return Ok(report);
+            return retirement_report(store, namespace_id, fixed_context.now_ms, report).await;
         }
         loaded = confirmed;
     }
@@ -212,6 +212,29 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
                 step_no: loaded.state.step_no,
             })
             .map_err(|error| CoreError::Internal(format!("cannot encode GC cursor: {error}")))?,
+        );
+    }
+    retirement_report(store, namespace_id, fixed_context.now_ms, report).await
+}
+
+async fn retirement_report<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    run_now_ms: u64,
+    mut report: GcResponse,
+) -> Result<GcResponse> {
+    let head = crate::namespace::control::load_head_object(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    report.reclaim_after_ms = head.state.status.reclaim_after_ms();
+    if let Some(deadline) = report
+        .reclaim_after_ms
+        .filter(|deadline| *deadline > run_now_ms)
+    {
+        report.next_reclamation_at_ms = Some(
+            report
+                .next_reclamation_at_ms
+                .map_or(deadline, |current| current.min(deadline)),
         );
     }
     Ok(report)
@@ -247,6 +270,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
         &mut self,
         state: &mut GcRunState,
         report: &mut GcResponse,
+        fresh_now_ms: u64,
     ) -> Result<()> {
         let store = self.store;
         let namespace_id = self.namespace_id;
@@ -283,6 +307,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                         roots: GcRoots {
                             content_store_id: head.content_store_id.clone(),
                             namespace_deleted: deleted,
+                            reclaim_after_ms: head.status.reclaim_after_ms(),
                             degraded: false,
                             anchor: GcReferenceAnchor::NotNeeded {},
                         },
@@ -326,6 +351,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                 }
                 if roots.degraded || roots.namespace_deleted {
                     state.phase = GcPhase::Sweeping {
+                        checkpoints_retained: false,
                         roots: roots.clone(),
                         table: objects.clone(),
                         family: GcCandidateFamily::WalSegments,
@@ -382,6 +408,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                     mark_index::step(tables, index).await?;
                 } else if !mark_index::seal(index)? {
                     state.phase = GcPhase::Sweeping {
+                        checkpoints_retained: false,
                         roots: roots.clone(),
                         table: index
                             .levels
@@ -396,6 +423,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                 }
             }
             GcPhase::Sweeping {
+                checkpoints_retained,
                 roots,
                 table,
                 family,
@@ -426,18 +454,34 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                             upload_sweep,
                             leases,
                             report,
+                            checkpoints_retained,
                         }
                         .candidate(*family, &key)
                         .await?;
                         *last_key = Some(key);
                     }
-                    None => match GcCandidateFamily::ALL.get(family.index() + 1) {
-                        Some(next) => {
-                            *family = *next;
-                            *last_key = None;
+                    None => {
+                        if *family == GcCandidateFamily::Checkpoints
+                            && roots.namespace_deleted
+                            && roots.reclaim_after_ms.is_none()
+                            && !*checkpoints_retained
+                        {
+                            crate::namespace::delete::retire_namespace(
+                                store,
+                                namespace_id,
+                                state.grace_window_ms,
+                                fresh_now_ms,
+                            )
+                            .await?;
                         }
-                        None => state.phase = GcPhase::Cleaning { last_key: None },
-                    },
+                        match GcCandidateFamily::ALL.get(family.index() + 1) {
+                            Some(next) => {
+                                *family = *next;
+                                *last_key = None;
+                            }
+                            None => state.phase = GcPhase::Cleaning { last_key: None },
+                        }
+                    }
                 }
             }
             GcPhase::Cleaning { last_key } => {

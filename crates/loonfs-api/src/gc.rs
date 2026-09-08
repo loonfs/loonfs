@@ -210,6 +210,8 @@ pub enum GcPhase {
     },
     /// Decide candidates against one complete, immutable mark table.
     Sweeping {
+        /// Whether any listed checkpoint survived this sweep.
+        checkpoints_retained: bool,
         /// Fixed retention summary.
         roots: GcRoots,
         /// Complete, immutable deletion evidence.
@@ -236,8 +238,10 @@ pub enum GcPhase {
 pub struct GcRoots {
     /// Content store used by this namespace's upload sessions.
     pub content_store_id: crate::ContentStoreId,
-    /// Deleted namespaces keep published content permanently at launch.
+    /// Whether the reserved head was terminally deleted.
     pub namespace_deleted: bool,
+    /// Collection deadline captured from the reserved head.
+    pub reclaim_after_ms: Option<u64>,
     /// Incomplete root reads forbid metadata and content reclamation.
     pub degraded: bool,
     /// Historical reference boundary selected using the fixed run clock.

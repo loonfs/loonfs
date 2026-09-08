@@ -403,7 +403,9 @@ fn sample_head_state() -> HeadState {
 
 fn sample_deleted_head_state() -> HeadState {
     HeadState {
-        status: NamespaceStatus::Deleted {},
+        status: NamespaceStatus::Deleted {
+            reclaim_after_ms: None,
+        },
         ..sample_head_state()
     }
 }
@@ -641,6 +643,16 @@ fn control_objects_match_golden_bytes() {
         "control_namespace_head.deleted.v2.json",
         ControlObjectKind::WalHead,
         sample_deleted_head_state(),
+    );
+    check_control_golden(
+        "control_namespace_head.retired.v2.json",
+        ControlObjectKind::WalHead,
+        HeadState {
+            status: NamespaceStatus::Deleted {
+                reclaim_after_ms: Some(2_000_000),
+            },
+            ..sample_head_state()
+        },
     );
     check_control_golden(
         "control_namespace_head.fork.v2.json",
@@ -898,6 +910,7 @@ fn every_durable_status_is_a_kind_tagged_object() {
     let fixtures = [
         "control_wal_head.v2.json",
         "control_namespace_head.deleted.v2.json",
+        "control_namespace_head.retired.v2.json",
         "control_checkpoint_record.v1.json",
         "control_checkpoint_record_released.v1.json",
         "control_upload_session.v1.json",
@@ -2801,6 +2814,7 @@ fn gc_progress_and_mark_pages_match_golden_bytes() {
     let roots = GcRoots {
         content_store_id: content_store_id(),
         namespace_deleted: false,
+        reclaim_after_ms: None,
         degraded: false,
         anchor: GcReferenceAnchor::Manifest {
             head_seq: ChangeSeq(4),
@@ -2844,6 +2858,7 @@ fn gc_progress_and_mark_pages_match_golden_bytes() {
         (
             "sweeping",
             GcPhase::Sweeping {
+                checkpoints_retained: false,
                 roots,
                 table: table.clone(),
                 family: GcCandidateFamily::WalSegments,

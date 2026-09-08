@@ -7,6 +7,7 @@ mod batch_publish;
 mod change_feed;
 mod commit_validation;
 mod common;
+mod content_retirement_model;
 mod differential;
 mod fork_lifecycle;
 mod inode_mutations;

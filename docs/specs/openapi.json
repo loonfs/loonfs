@@ -3660,7 +3660,13 @@
             "type": "string"
           },
           "next_reclamation_at_ms": {
-            "description": "The earliest known reclamation time for an upload session inspected by this\npass, in Unix milliseconds.",
+            "description": "The earliest known future reclamation time observed by this pass.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reclaim_after_ms": {
+            "description": "The deleted head's irrevocable owner-prefix collection deadline.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"

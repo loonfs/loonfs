@@ -35,8 +35,6 @@ use loonfs_objectstore::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DIRECT_PUT_URL_TTL: Duration = Duration::from_secs(15 * 60);
-
 /// Lifetime of one part-upload capability. Longer than a whole-object PUT's
 /// because a client works through a large file part by part and may not
 /// reach a late wave for a while, and short enough that an issued part URL
@@ -194,7 +192,7 @@ async fn begin_direct_put_upload(
         .presign_put(
             PresignedPutRequest {
                 object_key: &prepared.object_key,
-                expires_in: DIRECT_PUT_URL_TTL,
+                expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
             },
             presign_time(),
         )

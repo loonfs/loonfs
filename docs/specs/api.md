@@ -1001,12 +1001,21 @@ When a GC pass sees a future reclamation deadline, its response includes
 `next_reclamation_at_ms`, the soonest time still ahead of the pass at which
 something it retained becomes reclaimable: an open upload session's lease
 plus the grace window, an aborted session's grace, or a completed session's
-derived content-reclamation grace. A scheduler reads it to decide when to
+derived content-reclamation grace, or the retired namespace's
+`reclaim_after_ms`. A scheduler reads it to decide when to
 run the namespace again rather than tracking upload deadlines itself. It
 describes only what this pass examined — a pass that stopped on `next_cursor`
 saw part of the keyspace, and candidates that age out on their object
 timestamps carry no time here — so its absence is not a claim that nothing
 is owed.
+
+`reclaim_after_ms` is present only when the deleted head records retirement.
+It is omitted for an active namespace or a deleted namespace still waiting on
+pins. A future deadline means the namespace is waiting on grace. Retirement
+is irrevocable and the deadline never changes. A run that started before the
+deadline reports it through `next_reclamation_at_ms` so a scheduler revisits,
+even if the invocation resumed after that deadline. Retirement itself deletes
+no content.
 
 GC responses carry `next_cursor` only when more candidate enumeration remains.
 The token is opaque, tolerant of additive fields when decoded, and valid only
@@ -1475,15 +1484,16 @@ Checkpoint listing and user-checkpoint release are explicit exceptions. They
 remain available because permanent user pins must stay discoverable and
 releasable after deletion. Releasing a fork-owned checkpoint remains rejected.
 
-Deletion itself reclaims nothing, but a deleted namespace's derived state —
-WAL segments, metadata segments and manifests, and checkpoint records that
-protect nothing live — becomes garbage once the tombstone is in place. A
-maintenance run with `kind` set to `gc` runs against the tombstone and ages
-that state out under the normal grace rules; the head survives as the
-tombstone so the id stays retired. Content blobs live in a shared content
-store outside the namespace prefix, and the same pass reclaims each one
-still held by an upload-session record; a blob whose session record was
-already swept has nothing left pointing at it and is not reclaimed.
+Deletion is immediate logical deletion followed by asynchronous, conditional
+reclamation. Deletion itself reclaims nothing. Dependent forks, retained
+checkpoints, grace windows, and maintenance not running can all delay
+reclamation. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
+metadata, and checkpoint records. Once a complete post-deletion checkpoint
+sweep retains no record, it records retirement on the deleted head as a fixed
+`reclaim_after_ms`. The head survives permanently. Retirement itself deletes
+no content. Existing upload-session cleanup continues to reclaim the content
+it owns under its existing rules; previously published content whose upload
+record is gone is not reclaimed by retirement alone.
 
 The optional `expected_head_seq` query parameter deletes only if the head is
 still at that sequence, failing with `stale_head` otherwise — the same
