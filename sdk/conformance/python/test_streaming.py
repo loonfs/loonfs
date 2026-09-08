@@ -32,6 +32,7 @@ class Chunks(httpx.SyncByteStream):
 def stream_client(fixture, direct, body):
     claim = {
         "kind": "blob",
+        "owner_namespace_id": "demo",
         "content_id": "cnt_00000000000000000000000000000001",
         "size_bytes": fixture["size_bytes"],
         "checksum": {"algorithm": fixture["algorithm"], "value": fixture["checksum"]},
