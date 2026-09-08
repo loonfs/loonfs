@@ -339,10 +339,10 @@ Small mutable objects such as the namespace head must use compare-and-swap
 semantics. These objects must remain small enough that guarded rewrite is
 practical.
 
-Six control-object kinds are registered: `wal_head`, `wal_floor`,
-`metadata_root`, `checkpoint_record`, `upload_session`, and
-`compaction_lease`, `compaction_output_protection`, and `gc_run`. A control-object envelope carrying any other kind string
-is rejected, not skipped.
+Eight control-object kinds are registered: `wal_head`, `wal_floor`,
+`metadata_root`, `checkpoint_record`, `upload_session`, `compaction_lease`,
+`compaction_output_protection`, and `gc_run`. A control-object envelope carrying
+any other kind string is rejected, not skipped.
 
 The WAL floor and the metadata root are the only control objects that carry
 `updated_at_ms`. That field records when the object's last rewrite succeeded,
@@ -730,7 +730,8 @@ The core rules are:
   durability and validation rules before revisions may reference them.
 
 `ContentRef` rejects unknown fields in every context, including immutable
-durable records. Extend it with new `kind` values instead of adding fields:
+durable records. Unknown `kind` values fail to decode. A new content kind
+requires a version change on every durable family that carries references:
 
 ```json
 {
@@ -789,9 +790,9 @@ A `set` also carries the binding the delete removed, as one
 `display_name` together. Tombstone rows are immortal, so this is where a
 deleted name survives after unbind rows age out, and it is the binding
 undelete restores in place. Every deletion records the binding it removed.
-Only a `set` includes this field. A reader ignores it on a `revoke`, just like
-any other unknown field (encoding conventions above). A partial binding is
-not valid.
+Only the tagged `set` variant includes this field. The tagged `revoke`
+variant has no binding field, and a reader rejects a `revoke` carrying
+`deleted_direntry`. A partial binding is not valid.
 
 The `active_deletions` family tracks deletions that can still be restored. A
 `set` tombstone creates a `listed` row keyed by `(deletion_seq,
@@ -1028,12 +1029,12 @@ released { released_at_ms }
 Missing
 ```
 
-`released` is terminal. Nothing returns a record to `active`: there is no
-refresh, no renewal, and no revival, and a released record protects nothing
-and serves no read. A new pin is a new record under a new id — ids are
-generated, never derived and never supplied by a caller, so a pin can never
-land on a released record's key and a released id is never reused. Distinct
-pins over one basis are distinct records with independent lifecycles.
+`released` is terminal. A released record never returns to `active`, protects
+nothing, and serves no read. The only renewal is the expiry extension of an
+active fork-owned record during fork installation (section 3.9.2). A new pin
+is a new record under a new id. Ids are generated, never derived and never
+supplied by a caller, and a record id is never reused. Distinct pins over one
+basis are distinct records with independent lifecycles.
 
 No checkpoint status transition consults a provider object timestamp. Every
 instant the status depends on lives in the record: `created_at_ms` for the
@@ -1841,7 +1842,7 @@ Three rules apply:
 
 ## 4. Durable encodings and versioning
 
-A stable format needs explicit versioning in three places.
+Storage formats and protocol bindings are versioned separately.
 
 | Layer | What is versioned |
 | --- | --- |
@@ -1907,7 +1908,9 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Grep manifest | `grep_manifest` | JSON, uncompressed | 1 |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the grep manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 4 |
-| Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
+| WAL head | `wal_head` | JSON, uncompressed | 2 |
+| WAL floor | `wal_floor` | JSON, uncompressed | 1 |
+| Metadata root | `metadata_root` | JSON, uncompressed | 1 |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
 | Compaction lease | `compaction_lease` | JSON, uncompressed | 3 |
@@ -1990,7 +1993,7 @@ A row key contains hyphen-separated components. The first component is the singu
 
 The row's `kind` and its family serve different purposes. A row kind may appear in multiple families, so their names do not need to match. For example, a `direntry_bind` row appears in both `direntry_binds` and `direntry_child_binds`.
 
-The ten families and their exact grammar:
+The nine families and their exact grammar:
 
 | Family | Row key | Filter key |
 | --- | --- | --- |
@@ -2016,7 +2019,7 @@ The family groups and their exact members:
 | `commit_receipts` | `commit_receipts` |
 | `attributes` | `attributes` |
 
-`direntry_binds` and `direntry_child_binds` store the same `direntry_bind` rows under different keys. The two revision families do the same for `file_revision` rows. A row key therefore depends on both the row and its family.
+`direntry_binds` and `direntry_child_binds` store the same `direntry_bind` rows under different keys. The single `revisions` family stores `file_revision` rows. A row key therefore depends on both the row and its family.
 
 The `inodes` and `active_deletions` families store the full row key in the filter. Inode lookups already know the full key, while active deletions are read only by range scans.
 
@@ -2153,14 +2156,16 @@ and grep maintenance does not collect core-owned objects.
   including nested objects, and no payload carries a `format_version` of its
   own. A kind name that ends in a version, such as the `blob_v1` content-ref
   kind, names one closed shape and is not a second version mechanism.
-- **Additive within a released version.** Readers ignore unknown payload and
-  envelope fields, at every level of nesting, except inside the closed shapes
-  named in the encoding conventions above. After the first stable release,
-  adding such fields is the only change permitted within an existing format
-  version.
-- **Other post-release changes require a new version.** After the first stable
-  release, renaming, removing, retyping, or re-tagging any field — or changing
-  the payload encoding — requires a new `format_version` for the owning family.
+  A version governs safe interpretation and operation, including collection
+  protocols, not only field layout.
+- **Every accepted field is understood.** A supported durable family version
+  understands every authoritative field it accepts. Readers reject unknown
+  envelope and payload fields at every level of nesting. New durable meaning
+  requires a supported version change for the owning family.
+- **Post-release changes require a new version.** After the first stable
+  release, adding, renaming, removing, retyping, or re-tagging any field, changing
+  the payload encoding, or changing an operation that the version governs
+  requires a new `format_version` for the owning family.
   Readers reject versions they do not support with a typed unsupported-version
   error; there is no silent fallback.
 - **A durable digest names its algorithm, and where the algorithm is chosen
@@ -2177,13 +2182,10 @@ and grep maintenance does not collect core-owned objects.
   additionally carry their canonicalization scheme (`v2:sha256:<hex>`, section
   3.3.1) because their preimage rules can evolve independently of the
   algorithm.
-- **Unknown content-ref kinds round-trip in immutable records.** A reader that
-  does not understand a `content_ref.kind` must preserve the original string
-  when it relays or rewrites an immutable record, so a later format version
-  can add a kind. A reader of a mutable control object rejects an unknown kind
-  instead, because a guarded rewrite must not carry a kind it cannot validate.
-  No reader may create new references with kinds it does not understand
-  (section 3.1.3).
+- **New content kinds require family version changes.** A new `content_ref.kind`
+  arrives with a version change on every durable family that carries references.
+  Readers reject unknown kinds during decoding, as they reject unknown checksum
+  algorithms. No reader preserves or creates a reference it cannot interpret.
 - **Every encoding is pinned by golden-byte fixtures**
   (`crates/loonfs-api/tests/golden_formats.rs`). An encoder change that alters
   durable bytes fails those tests. The grep families are pinned under the same
@@ -2237,9 +2239,13 @@ is useful only after both the checkpoint record and its referenced manifest
 are verified. Readers must prefer the current verified manifest plus the
 visible WAL segment chain over unverified or partial manifest artifacts.
 
-The namespace manifest may reference one or more immutable metadata runs. Runs
-are not a second source of truth; they are rebuildable metadata rows used to
-keep normal metadata view loading from replaying an unbounded WAL tail.
+The namespace manifest may reference one or more immutable metadata runs.
+Runs are produced from committed state. Once the WAL below the retention
+floor is reclaimed, these runs are required recovery material, not a cache.
+Recovery uses the verified materialized basis plus the required visible WAL,
+bounded by the head's visibility boundary. Verification must precede floor
+advancement (section 3.8). Missing or corrupt required recovery material is a
+hard error; readers do not substitute another basis or replay reclaimed history.
 
 File revisions are stored once in the `revisions` family, newest first within
 an inode, using the same descending revision, sequence, and delta ordering as

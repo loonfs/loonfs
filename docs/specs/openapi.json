@@ -987,8 +987,8 @@
             "description": "Immutable identity of the referenced object."
           },
           "kind": {
-            "description": "Content strategy used by the referenced object.",
-            "type": "string"
+            "$ref": "#/components/schemas/ContentRefKind",
+            "description": "Content strategy used by the referenced object."
           },
           "size_bytes": {
             "description": "Complete byte length of the referenced content.",
@@ -1004,6 +1004,13 @@
           "checksum"
         ],
         "type": "object"
+      },
+      "ContentRefKind": {
+        "description": "A supported content reference kind serialized as a string.",
+        "enum": [
+          "blob_v1"
+        ],
+        "type": "string"
       },
       "ContentToken": {
         "additionalProperties": false,

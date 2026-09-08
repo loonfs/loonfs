@@ -1028,21 +1028,17 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn validate_content_ref_rejects_unsupported_kind() {
-        let (_temp_dir, store, content_store_id) = test_store();
-        let content_ref = ContentRef {
-            kind: ContentRefKind::Unsupported("kind_from_the_future".to_owned()),
-            ..content_ref(b"bytes")
-        };
+    #[test]
+    fn content_ref_with_an_unknown_kind_fails_to_decode() {
+        let mut document = serde_json::to_value(content_ref(b"bytes")).expect("encode content ref");
+        document["kind"] = serde_json::json!("kind_from_the_future");
 
-        let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
-            .await
-            .expect_err("unsupported content ref kind");
-        assert!(matches!(
-            err,
-            DurableContentValidationError::InvalidContentRef(_)
-        ));
+        let error = serde_json::from_value::<ContentRef>(document)
+            .expect_err("unknown content kind must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "unknown variant `kind_from_the_future`, expected `blob_v1`"
+        );
     }
 
     #[tokio::test]

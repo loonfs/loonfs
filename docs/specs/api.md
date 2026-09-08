@@ -723,8 +723,9 @@ itself and so must tolerate fields it does not know (section 7.2).
 `ContentRef`, `Checksum`, and `ActorRef` are closed shapes on both sides: a
 response never adds a field to one of them, and new content strategies or
 checksum algorithms arrive as new `kind` and `algorithm` values, which is why
-those three schemas are `additionalProperties: false` in responses too. The
-encoding conventions in `format.md` state the same rules and extend them to
+those three schemas are `additionalProperties: false` in responses too.
+Unknown content kinds fail to decode, just like unknown checksum algorithms.
+The encoding conventions in `format.md` state the same rules and extend them to
 durable shapes.
 
 Query strings reject unknown parameters. For example, `DELETE /v0/namespaces/{ns}?expected_head_sq=418` returns 400 `invalid_request` rather than deleting the namespace without the intended guard. Routes that declare no query parameters reject all query parameters. `GET /health`, `GET /readiness`, and `GET /metrics` are exceptions because probes and scrapers may append their own parameters.
