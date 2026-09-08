@@ -3008,8 +3008,6 @@ fn commit_assertion_wire_shapes_match_golden() {
 
 #[test]
 fn name_folding_matches_the_fixed_unicode_corpus() {
-    assert_eq!(unicode_normalization::UNICODE_VERSION, (17, 0, 0));
-    assert_eq!(unicode_casefold::UNICODE_VERSION, (9, 0, 0));
     let display_names = [
         "Cafe\u{301}.TXT",
         "CAFÉ.txt",
@@ -3044,6 +3042,12 @@ fn name_folding_matches_the_fixed_unicode_corpus() {
         "𐐀",
         "Ა",
         "ა",
+        "Ꞹ",
+        "ꞹ",
+        "Ɤ",
+        "ɤ",
+        "Ꭰ",
+        "ꭰ",
         "readme-123.txt",
         "123_+-",
     ];
