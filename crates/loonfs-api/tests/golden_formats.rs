@@ -757,7 +757,7 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             created_at_ms: 1_000,
             mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged(sample_content_ref()),
+                staging: ProxiedStaging::Idle,
             },
             status: UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,

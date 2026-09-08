@@ -623,7 +623,7 @@ impl HeadState {
 /// Staging progress for a service-proxied upload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxiedStaging {
-    /// No request owns the staging slot and no content has been staged.
+    /// No request owns the staging slot and no staged reference is retained.
     Idle,
     /// One request owns the staging slot.
     Claimed,
@@ -807,16 +807,15 @@ pub struct UploadSessionState {
 }
 
 impl UploadSessionState {
-    /// Proves the relationships this record's shape cannot express but every
-    /// reader of one depends on.
-    ///
-    /// Every reference the record holds is about the same content object,
-    /// whose identity the session allocated before any byte moved. A record
-    /// whose references disagree with its own `content_id` describes two
-    /// objects and cannot be acted on — a completion would verify one key
-    /// and publish another.
-    ///
     fn validate(&self) -> Result<(), String> {
+        if !matches!(self.status, UploadSessionRecordStatus::Open { .. })
+            && self.mode.content_ref().is_some()
+        {
+            return Err(format!(
+                "upload session `{}` is {} but still holds a staged content reference",
+                self.upload_id, self.status
+            ));
+        }
         for content_ref in self
             .mode
             .content_ref()
@@ -1069,6 +1068,103 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_proxied_session_rejects_conflicting_staged_size() {
+        let content_ref = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                .expect("content id"),
+            size_bytes: 5,
+            checksum: Checksum::sha256(b"hello"),
+        };
+        let mut staged = content_ref.clone();
+        staged.size_bytes += 1;
+        let session = UploadSessionState {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef").expect("upload id"),
+            content_id: content_ref.content_id.clone(),
+            created_at_ms: 1_000,
+            mode: UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Staged(staged),
+            },
+            status: UploadSessionRecordStatus::Completed {
+                completed_at_ms: 2_000,
+                content_ref,
+            },
+        };
+
+        let error = session.validate().expect_err("conflicting staged size");
+        assert_eq!(
+            error,
+            format!(
+                "upload session `{}` is completed but still holds a staged content reference",
+                session.upload_id
+            )
+        );
+    }
+
+    #[test]
+    fn terminal_upload_modes_reject_only_retained_staged_references() {
+        let content_ref = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                .expect("content id"),
+            size_bytes: 5,
+            checksum: Checksum::sha256(b"hello"),
+        };
+        let modes = [
+            UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Idle,
+            },
+            UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Claimed,
+            },
+            UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Staged(content_ref.clone()),
+            },
+            UploadSessionMode::DirectPut {
+                checksum_algorithm: ChecksumAlgorithm::Sha256,
+            },
+            UploadSessionMode::DirectMultipart {
+                provider_upload_id: "provider-upload".to_owned(),
+                part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
+                checksum_algorithm: ChecksumAlgorithm::Sha256,
+            },
+        ];
+        for mode in modes {
+            for status in [
+                UploadSessionRecordStatus::Completed {
+                    completed_at_ms: 2_000,
+                    content_ref: content_ref.clone(),
+                },
+                UploadSessionRecordStatus::Aborted {
+                    aborted_at_ms: 2_000,
+                },
+            ] {
+                let session = UploadSessionState {
+                    namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                    upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
+                        .expect("upload id"),
+                    content_id: content_ref.content_id.clone(),
+                    created_at_ms: 1_000,
+                    mode: mode.clone(),
+                    status,
+                };
+                let encoded = serde_json::to_value(&session).expect("encode session");
+                let decoded = serde_json::from_value::<UploadSessionState>(encoded);
+                if mode.content_ref().is_some() {
+                    let error = decoded
+                        .expect_err("terminal staging is corrupt")
+                        .to_string();
+                    assert!(error.contains(session.upload_id.as_str()));
+                    assert!(error.contains("still holds a staged content reference"));
+                } else {
+                    assert_eq!(decoded.expect("valid terminal session"), session);
+                }
+            }
+        }
+    }
 
     #[test]
     fn control_object_kind_strings_round_trip_and_match_serde() {

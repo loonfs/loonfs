@@ -757,6 +757,18 @@ This applies to:
 - file replace; and
 - file restore, when the restore introduces a newly referenced content object.
 
+An upload session's staged content reference applies only while the session is
+open. Completion clears service-proxied staging to `idle` in the same
+conditional write that sets `status` to `completed`. The completed status is
+the record's only content description. Staging carries no content information
+after completion. Abort also clears service-proxied staging to `idle`.
+
+A completed or aborted record that retains a staged content reference is
+corrupt, even if that reference agrees with the completed reference. The mode
+continues to identify how the content was produced. Direct modes retain their
+provider state for cleanup and retries. Upload sessions remain at format
+version 1.
+
 ### 2.5 Tombstones and deletion
 
 Deletion is logical first. When an item is deleted, LoonFS records tombstone

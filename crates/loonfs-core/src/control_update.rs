@@ -9,7 +9,8 @@ use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::control::{load_head_object, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, HeadState, UploadSessionState,
+    encode_control_state, ControlObjectKind, HeadState, ProxiedStaging, UploadSessionMode,
+    UploadSessionRecordStatus, UploadSessionState,
 };
 use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::{upload_session, wal_head};
@@ -283,7 +284,12 @@ where
 {
     match update(loaded.state).await? {
         UploadSessionUpdate::Noop(outcome) => Ok(CasAttempt::Settled(outcome)),
-        UploadSessionUpdate::Replace { next, outcome } => {
+        UploadSessionUpdate::Replace { mut next, outcome } => {
+            if !matches!(next.status, UploadSessionRecordStatus::Open { .. }) {
+                if let UploadSessionMode::ServiceProxied { staging } = &mut next.mode {
+                    *staging = ProxiedStaging::Idle;
+                }
+            }
             let encoded = encode_control_state(ControlObjectKind::UploadSession, next.as_ref())
                 .map_err(|error| CoreError::Codec {
                     object_key: loaded.object_key.clone(),
