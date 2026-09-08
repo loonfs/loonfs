@@ -348,7 +348,10 @@ Maintenance
     next_cursor for the same namespace, and --grace-window-ms protects
     objects younger than the window. A run that takes more than one pass
     reports each pass on standard error as it lands, and the summary says
-    what the pass kept and mostly why; --json carries every retention reason
+    what the pass kept and mostly why; --json carries every retention reason.
+    Repeated GC runs reclaim a deleted namespace's own content once it retires,
+    with deleted.content_objects counting completed-session reclamation and
+    deleted.retired_content_objects counting owner-prefix deletion attempts.
 
   loonfs maintenance store probe
     Test the object-store operations LoonFS requires. The command creates

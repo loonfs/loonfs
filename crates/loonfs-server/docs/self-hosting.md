@@ -420,6 +420,15 @@ do neither. A mode that does not serve the group answers every route under
 scheduled work to another process. Long metadata compactions can log progress
 for an extended period. No action is required unless failures repeat.
 
+Deleted namespaces are not enumerated for maintenance. Assign them explicitly
+with `loonfs maintenance loop --namespaces <id>` and keep running GC until a
+pass reports no `deleted.retired_content_objects` and no future
+`next_reclamation_at_ms`. Late writes through already-issued upload
+capabilities and dependent forks can extend reclamation. An empty pass does
+not rule out later writes, so keep these namespaces assigned to the loop.
+See the API spec's [namespace deletion section](../../../docs/specs/api.md#63-delete-v0namespacesns)
+for the blockers.
+
 `compaction_required` asks the registered `metadata_compaction` job to run.
 The self-hosted server schedules that follow-up automatically.
 

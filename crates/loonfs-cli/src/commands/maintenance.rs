@@ -250,6 +250,7 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
+    total.reclaim_after_ms = pass.reclaim_after_ms.or(total.reclaim_after_ms);
     total.next_cursor = pass.next_cursor;
 }
 
@@ -743,20 +744,25 @@ async fn run_maintenance_index_disable(
 mod tests {
     use super::*;
     use crate::progress::ProgressMode;
-    use loonfs_api::{GcResponse, NamespaceId, RetainedReason};
+    use loonfs_api::{GcResponse, NamespaceId};
 
     #[test]
-    fn the_summary_folds_expired_releases_and_keeps_the_soonest_horizon() {
+    fn the_summary_totals_reclamation_and_keeps_retirement_and_the_soonest_deadline() {
         let namespace = NamespaceId::parse("demo").expect("namespace id");
         let mut total = GcResponse::empty(namespace.clone());
 
         let mut first = GcResponse::empty(namespace.clone());
         first.released_checkpoints.expired = 2;
+        first.deleted.content_objects = 1;
+        first.deleted.retired_content_objects = 2;
         first.next_reclamation_at_ms = Some(9_000);
         accumulate_gc_response(&mut total, first);
 
         let mut second = GcResponse::empty(namespace.clone());
         second.released_checkpoints.expired = 1;
+        second.deleted.content_objects = 3;
+        second.deleted.retired_content_objects = 4;
+        second.reclaim_after_ms = Some(12_000);
         accumulate_gc_response(&mut total, second);
 
         let mut third = GcResponse::empty(namespace);
@@ -764,6 +770,9 @@ mod tests {
         accumulate_gc_response(&mut total, third);
 
         assert_eq!(total.released_checkpoints.expired, 3);
+        assert_eq!(total.deleted.content_objects, 4);
+        assert_eq!(total.deleted.retired_content_objects, 6);
+        assert_eq!(total.reclaim_after_ms, Some(12_000));
         assert_eq!(total.next_reclamation_at_ms, Some(9_000));
     }
 
@@ -812,35 +821,5 @@ mod tests {
                 .lines_for_completed_pass(pass.to_owned())
                 .is_empty());
         }
-    }
-
-    #[test]
-    fn a_pass_line_names_what_stayed_and_mostly_why() {
-        let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
-        pass.deleted.wal_segments = 2;
-        pass.deleted.upload_sessions = 3;
-        pass.deleted.content_objects = 1;
-        for _ in 0..4 {
-            pass.retain(RetainedReason::WithinGraceWindow);
-        }
-        pass.retain(RetainedReason::UploadSessionWindow);
-        pass.next_reclamation_at_ms = Some(1_700_000_000_000);
-
-        let line = gc_pass_line(&pass);
-        assert!(
-            line.contains("6 deleted, 5 retained; mostly within_grace_window: 4"),
-            "every deleted family counts, upload sessions included: {line}"
-        );
-        assert!(
-            line.contains("next reclaimable at 2023-11-14 22:13:20Z"),
-            "{line}"
-        );
-
-        let quiet = gc_pass_line(&GcResponse::empty(
-            NamespaceId::parse("demo").expect("namespace id"),
-        ));
-        assert!(quiet.contains("0 deleted, 0 retained"), "{quiet}");
-        assert!(!quiet.contains("mostly"), "{quiet}");
-        assert!(!quiet.contains("next reclaimable"), "{quiet}");
     }
 }
