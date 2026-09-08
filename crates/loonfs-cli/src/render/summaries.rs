@@ -220,7 +220,7 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     }
 }
 
-fn gc_deleted_counts(deleted: &loonfs_api::DeletedObjectCounts) -> [(&'static str, u64); 6] {
+fn gc_deleted_counts(deleted: &loonfs_api::DeletedObjectCounts) -> [(&'static str, u64); 7] {
     [
         ("wal segments", deleted.wal_segments),
         ("metadata segments", deleted.metadata_segments),
@@ -228,6 +228,7 @@ fn gc_deleted_counts(deleted: &loonfs_api::DeletedObjectCounts) -> [(&'static st
         ("checkpoint records", deleted.checkpoint_records),
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
+        ("retired content objects", deleted.retired_content_objects),
     ]
 }
 
@@ -278,6 +279,20 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
     }
     if let Some(cursor) = &report.next_cursor {
         summary.push_str(&format!("; next_cursor: {cursor}"));
+    }
+    if let Some(deadline) = report.reclaim_after_ms {
+        // A future retirement deadline always contributes to the run's earliest deadline.
+        if report
+            .next_reclamation_at_ms
+            .is_some_and(|next| next <= deadline)
+        {
+            summary.push_str(&format!(
+                "\nnamespace is retired; its content becomes collectable at {}",
+                format_utc_ms(deadline)
+            ));
+        } else {
+            summary.push_str("\nnamespace is retired; its owner prefix is collectable");
+        }
     }
     summary
 }

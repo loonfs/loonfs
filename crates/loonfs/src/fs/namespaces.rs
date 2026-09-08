@@ -88,9 +88,10 @@ impl FsWriter {
     /// Deletes a namespace: a fenced, terminal head transition (format
     /// spec, "Tombstones and deletion"). Commits acknowledged before the
     /// swap stay committed; reads, writes, forks, and re-creation of the id
-    /// fail with `namespace_deleted` afterward. Deletion does not reclaim
-    /// published content. Garbage collection can release derived metadata and
-    /// upload-owned content, but there is no published-content purge guarantee.
+    /// fail with `namespace_deleted` afterward. Repeated garbage collection
+    /// reclaims the namespace's own content after retirement and its grace
+    /// period. See the API spec, "Deleting, retaining, and reclaiming", for
+    /// blockers and limits.
     ///
     /// Sequenced as a barrier through the publication service: mutations
     /// admitted before the delete publish first, and mutations admitted

@@ -705,4 +705,73 @@ mod tests {
         );
         assert!(rendered.contains("request id: req_doctor"), "{rendered}");
     }
+    #[test]
+    fn gc_summaries_report_counts_retention_and_namespace_retirement() {
+        use super::summaries::{gc_pass_line, gc_summary};
+        use loonfs_api::{GcResponse, RetainedReason};
+
+        let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
+        pass.deleted.wal_segments = 2;
+        pass.deleted.upload_sessions = 3;
+        pass.deleted.content_objects = 1;
+        pass.deleted.retired_content_objects = 7;
+        pass.released_checkpoints.fork = 2;
+        for _ in 0..4 {
+            pass.retain(RetainedReason::WithinGraceWindow);
+        }
+        pass.retain(RetainedReason::UploadSessionWindow);
+        pass.next_reclamation_at_ms = Some(1_700_000_000_000);
+
+        let line = gc_pass_line(&pass);
+        assert!(
+            line.contains("13 deleted, 5 retained; mostly within_grace_window: 4"),
+            "every deleted family counts: {line}"
+        );
+        assert!(
+            line.contains("next reclaimable at 2023-11-14 22:13:20Z"),
+            "{line}"
+        );
+
+        let quiet = gc_pass_line(&GcResponse::empty(
+            NamespaceId::parse("demo").expect("namespace id"),
+        ));
+        assert!(quiet.contains("0 deleted, 0 retained"), "{quiet}");
+        assert!(!quiet.contains("mostly"), "{quiet}");
+        assert!(!quiet.contains("next reclaimable"), "{quiet}");
+
+        let summary = gc_summary(&pass);
+        assert!(
+            summary.contains("1 content objects, 7 retired content objects"),
+            "{summary}"
+        );
+        assert!(summary.contains("released 2 fork checkpoints"), "{summary}");
+        assert!(!summary.contains("namespace is retired"), "{summary}");
+
+        pass.reclaim_after_ms = Some(1_700_000_000_000);
+        for next in [1_699_999_999_000, 1_700_000_000_000] {
+            pass.next_reclamation_at_ms = Some(next);
+            assert_eq!(
+                gc_summary(&pass).lines().last(),
+                Some(
+                    "namespace is retired; its content becomes collectable at 2023-11-14 22:13:20Z"
+                )
+            );
+        }
+        for next in [None, Some(1_700_000_001_000)] {
+            pass.next_reclamation_at_ms = next;
+            assert_eq!(
+                gc_summary(&pass).lines().last(),
+                Some("namespace is retired; its owner prefix is collectable")
+            );
+        }
+        let empty = gc_summary(&GcResponse::empty(
+            NamespaceId::parse("demo").expect("namespace id"),
+        ));
+        assert!(
+            empty.contains("0 content objects, 0 retired content objects"),
+            "{empty}"
+        );
+        assert!(!empty.contains("namespace is retired"), "{empty}");
+        assert!(!empty.contains("released"), "{empty}");
+    }
 }
