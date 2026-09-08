@@ -17,7 +17,10 @@ use loonfs_api::{
     PathEntry, Sha256, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::{ByteRange, ByteStream, ObjectStore, ObjectStoreError, PutMode};
+use loonfs_objectstore::{
+    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectStore, ObjectStoreError,
+    PutMode,
+};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -221,6 +224,36 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
         });
     }
     Ok(())
+}
+
+pub(crate) async fn create_content_multipart_upload<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    content_id: &ContentId,
+) -> crate::error::Result<String> {
+    let object_key = content_key_for_id(content_store_id, content_id);
+    store
+        .create_multipart_upload(&object_key)
+        .await
+        .map_err(|err| CoreError::store(&object_key, &err))
+}
+
+/// A failed completion is reported as the store failure it was. The
+/// provider may have refused the parts or the response may have been lost,
+/// and the two arrive alike, so this does not guess; the session stays open
+/// and a repeated completion reconciles from whatever the provider holds.
+pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    expected: &ContentRef,
+    provider_upload_id: &str,
+    parts: &[MultipartPart],
+) -> crate::error::Result<MultipartCompletion> {
+    let object_key = content_key_for_id(content_store_id, &expected.content_id);
+    store
+        .complete_multipart_upload(&object_key, provider_upload_id, parts, &expected.checksum)
+        .await
+        .map_err(|err| CoreError::store(&object_key, &err))
 }
 
 /// Removes the content object an upload session owned but never published.
@@ -553,6 +586,13 @@ pub(crate) async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
     let bytes = load_required_object(store, &object_key).await?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
     Ok(bytes)
+}
+
+pub(crate) fn content_key_for_id(
+    content_store_id: &ContentStoreId,
+    content_id: &ContentId,
+) -> String {
+    content_blob(content_store_id, content_id)
 }
 
 pub(crate) fn content_object_key_for_ref(
