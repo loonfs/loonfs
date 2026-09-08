@@ -65,7 +65,7 @@ impl MaintenanceJob for MetadataCompactionJob {
             MetadataCompactionOutcome::Published { .. }
             | MetadataCompactionOutcome::BoundedMergePublished => (
                 MaintenanceConclusion::Progressed,
-                Some(MaintenanceJobId::METADATA),
+                Some((MaintenanceJobId::METADATA, namespace_id.clone())),
             ),
             MetadataCompactionOutcome::NotNeeded => (MaintenanceConclusion::Idle, None),
             MetadataCompactionOutcome::Superseded

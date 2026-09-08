@@ -158,7 +158,7 @@ hoc.
 | `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable`, `disable`, and `gc` routes. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers all four routes `not_supported` with this key. |
 | `filesystem.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `filesystem.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a maintenance run with `kind` set to `gc` (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
+| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Metadata and the namespace's own content become conditionally reclaimable through maintenance runs with `kind` set to `gc` (section 6.3). A deployment may still advertise `false` and answer `not_supported`. |
 | `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
 | `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
@@ -1017,17 +1017,25 @@ deadline reports it through `next_reclamation_at_ms` so a scheduler revisits,
 even if the invocation resumed after that deadline. Retirement itself deletes
 no content.
 
-GC responses carry `next_cursor` only when more candidate enumeration remains.
-The token is opaque, tolerant of additive fields when decoded, and valid only
-against the namespace that issued it. It encodes the last examined key and
-object family, not a live set or retention proof: every resumed invocation
-reloads the current roots, WAL floor, and checkpoint protections before any
-deletion. If the namespace advances or keys disappear between calls, a stale
-cursor may re-examine work or defer a newly inserted key that sorts before its
-position until the next full pass; it can never make a newly live object
-deletable.
+GC responses carry `next_cursor` while the reserved run has work remaining.
+The opaque token names the namespace and run. Server-owned progress supplies
+the phase and last-decided key; the token carries no deletion evidence.
+Resumed calls keep the run's captured roots, fixed clock, and sealed reference
+index. Mutable candidate lifecycles are checked when swept. A stale cursor
+may repeat work, and an inserted key before the saved position waits for the
+next full run. Each new run captures roots and starts enumeration again.
 
-A GC response groups related counts. `deleted` contains counts for `wal_segments`, `metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`, and `content_objects`. `released_checkpoints` contains `fork`, `expired`, and `missing_basis` counts. Every count field is present, including zero values.
+A GC response groups related counts. `deleted` contains `wal_segments`,
+`metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`,
+`content_objects`, and `retired_content_objects`. `released_checkpoints`
+contains `fork`, `expired`, and `missing_basis` counts. Every count field is
+present, including zero values.
+
+`content_objects` counts reclamation through completed upload sessions.
+`retired_content_objects` counts successful deletion attempts under a retired
+namespace's owner prefix, including a delete that finds the key already absent.
+A retry can repeat a count; these are attempt counts, not a count of distinct
+objects.
 
 Every GC response also carries `retained`, which is `retained_candidates`
 split by the decision that spared each candidate. The reasons are a closed
@@ -1060,44 +1068,52 @@ candidate under `no_reference_manifest`.
 
 #### Deleting, retaining, and reclaiming
 
-The launch contract provides no purge operation or guarantee for previously
-published file content. Such content may remain indefinitely, including after
-namespace deletion. Deletion ends access; it does not promise physical erasure.
+Namespace deletion ends access immediately. Ordinary namespace GC then
+conditionally reclaims the namespace's own content. This is asynchronous
+reclamation, with no fixed completion time or guarantee of physical erasure.
 
-Two horizons decide when a namespace actually gets smaller, and they are
-independent.
+Dependent forks and retained checkpoints delay retirement. A complete
+post-deletion checkpoint sweep must retain no record before GC records
+`reclaim_after_ms` on the deleted head. A later run that starts at or after
+that deadline lists and deletes recognized content objects under that
+namespace's owner prefix. It keeps the head, content-store descriptor, and
+every other owner's prefix.
 
-The first is the **metadata retention floor**. It limits how far back clients
-can replay the WAL. Advancing the floor makes older WAL segments eligible for
-garbage collection. It advances only through an explicit request:
-`POST .../runs` with body `{"kind":"retention"}`, or
+Retention is coarse: a deleted ancestor keeps its entire owner prefix while
+a live descendant still depends on it. GC does not select individual published
+content objects within that prefix. Deleting a file or tree in an active
+namespace also does not reclaim its published content, because LoonFS retains
+every file revision.
+
+The metadata retention floor is separate. It limits WAL replay history and
+makes older WAL segments eligible for GC. Advance it explicitly with
+`POST .../runs` and body `{"kind":"retention"}`, or
 `loonfs maintenance retention advance`. It does not remove file revisions.
+Completed upload sessions in active namespaces use the derived content
+reclamation grace, slightly longer than seven days, before GC can reclaim
+staged content that no retained revision references.
 
-The second is the **content reclamation grace**, which is slightly longer than
-seven days and is derived rather than configured. Upload sessions stage
-content before a commit references it. LoonFS keeps unreferenced staged
-content until no valid upload receipt can still publish it. During this
-period, garbage collection reports the object under `upload_session_window`.
+Run GC repeatedly, including after a pass finds an empty owner prefix. An
+already-issued upload capability can write an object after deletion, and a
+late write before a saved cursor is found by the next run. Continued late
+writes, grace windows, dependent forks, retained checkpoints, and maintenance
+not running can all delay complete reclamation. A deleted head fences commits
+and new upload capabilities; it does not revoke capabilities already issued.
 
-Deleting a file does not reclaim its content because LoonFS retains every file
-revision. Garbage collection removes staged content that no commit published,
-such as data from an abandoned upload. Deleting a large tree therefore does
-not make the object-store bucket smaller.
+The runtime schedules future work from `next_reclamation_at_ms`. LoonFS does
+not enumerate namespaces for maintenance. Assign inactive and deleted
+namespaces explicitly with `loonfs maintenance loop --namespaces <id>`. The
+command runs until stopped, or performs one bounded pass with `--drain`.
+Retirement also prompts the runner to schedule GC for a fork's source. A
+missed prompt delays reclamation and never permits deletion.
 
-The runtime schedules another garbage-collection pass at
-`next_reclamation_at_ms`, when the oldest retained object becomes eligible.
-Active namespaces do not need a separate cron job for this cleanup.
+Keep the provider's lifecycle rule for incomplete multipart uploads. Provider
+upload state can exist outside object listings, so owner-prefix deletion does
+not replace session abort and provider cleanup. Deleting a key does not erase
+physical versions retained by bucket versioning or retention locks.
 
-LoonFS does not enumerate namespaces for maintenance. Use
-`loonfs maintenance loop --namespaces <id>` to maintain inactive
-namespaces explicitly. The command runs until stopped, or performs one
-bounded pass with `--drain`. An inactive namespace receives no maintenance
-unless a process is assigned to it.
-
-When a pass keeps more than it deletes, `retained` above says why. The one
-answer that is an operator decision rather than a wait is
-`checkpoint_not_releasable`: a pin holds its basis for as long as it exists,
-so `GET /v0/maintenance/namespaces/{ns}/checkpoints` is where to look next.
+Use `retained` to understand what a pass kept. Inspect checkpoint blockers
+through `GET /v0/maintenance/namespaces/{ns}/checkpoints`.
 
 #### Service-proxied upload
 
@@ -1487,13 +1503,20 @@ releasable after deletion. Releasing a fork-owned checkpoint remains rejected.
 Deletion is immediate logical deletion followed by asynchronous, conditional
 reclamation. Deletion itself reclaims nothing. Dependent forks, retained
 checkpoints, grace windows, and maintenance not running can all delay
-reclamation. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
+reclamation. Continued writes through already-issued capabilities can also
+leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
 metadata, and checkpoint records. Once a complete post-deletion checkpoint
 sweep retains no record, it records retirement on the deleted head as a fixed
 `reclaim_after_ms`. The head survives permanently. Retirement itself deletes
-no content. Existing upload-session cleanup continues to reclaim the content
-it owns under its existing rules; previously published content whose upload
-record is gone is not reclaimed by retirement alone.
+no content. A later GC run starting at or after the deadline sweeps the
+namespace's owner prefix, including previously published content whose upload
+record is gone. A deleted ancestor retains its entire owner prefix while a
+live descendant depends on it. The shared content-store descriptor and other
+owners' objects remain.
+
+Run GC repeatedly to catch late writes and keep the provider's incomplete
+multipart-upload lifecycle rule. Deleting an object key does not erase
+physical versions under bucket versioning or retention locks.
 
 The optional `expected_head_seq` query parameter deletes only if the head is
 still at that sequence, failing with `stale_head` otherwise — the same

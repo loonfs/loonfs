@@ -4,10 +4,12 @@
 //! unpublished object deleted using only the session record.
 //!
 //! After completion, content may already be referenced by metadata. The
-//! collector waits for `CONTENT_RECLAMATION_GRACE_MS`, then scans namespace
-//! metadata before deleting the object. The grace period covers the receipt
-//! lifetime and any publication that receipt can authorize, so no new
-//! reference can appear after the scan becomes eligible.
+//! collector waits for `CONTENT_RECLAMATION_GRACE_MS`, then consults the run's
+//! reference index before deleting the object. The grace period covers the
+//! receipt lifetime and any publication that receipt can authorize, so no new
+//! reference can appear after the index becomes eligible. On a retired
+//! namespace past its deadline every object under the owner prefix is dead,
+//! so a completed session is reclaimed without either wait.
 
 use crate::context::MutationContext;
 use crate::control_update::{
@@ -42,6 +44,7 @@ pub(super) struct UploadSweepContext<'a, S: ?Sized> {
     store: &'a S,
     namespace_id: &'a NamespaceId,
     content_store_id: ContentStoreId,
+    retired_content: bool,
     grace_window_ms: u64,
     context: &'a MutationContext,
 }
@@ -51,6 +54,7 @@ impl<'a, S: ?Sized> UploadSweepContext<'a, S> {
         store: &'a S,
         namespace_id: &'a NamespaceId,
         content_store_id: ContentStoreId,
+        retired_content: bool,
         grace_window_ms: u64,
         context: &'a MutationContext,
     ) -> Self {
@@ -58,6 +62,7 @@ impl<'a, S: ?Sized> UploadSweepContext<'a, S> {
             store,
             namespace_id,
             content_store_id,
+            retired_content,
             grace_window_ms,
             context,
         }
@@ -112,12 +117,20 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             completed_at_ms,
             content_ref,
         } => {
-            if sweep.context.now_ms.saturating_sub(completed_at_ms) < CONTENT_RECLAMATION_GRACE_MS {
+            if !sweep.retired_content
+                && sweep.context.now_ms.saturating_sub(completed_at_ms)
+                    < CONTENT_RECLAMATION_GRACE_MS
+            {
                 return Ok(retain_until(
                     completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_MS),
                 ));
             }
-            match references.content(&content_ref.content_id).await? {
+            let reference = if sweep.retired_content {
+                ContentReference::Absent
+            } else {
+                references.content(&content_ref.content_id).await?
+            };
+            match reference {
                 ContentReference::Unknown => Ok(retain_undated()),
                 // Metadata now owns the published content. Delete only the completed
                 // upload-session record.

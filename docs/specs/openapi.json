@@ -1130,7 +1130,7 @@
             "type": "integer"
           },
           "content_objects": {
-            "description": "Unreferenced content objects deleted after their completed sessions passed the\nreclamation grace period.",
+            "description": "Content reclaimed through completed upload sessions.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1143,6 +1143,12 @@
           },
           "metadata_segments": {
             "description": "Unreferenced metadata segments deleted.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retired_content_objects": {
+            "description": "Successful deletion attempts under a retired namespace owner prefix.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1166,7 +1172,8 @@
           "manifests",
           "checkpoint_records",
           "upload_sessions",
-          "content_objects"
+          "content_objects",
+          "retired_content_objects"
         ],
         "type": "object"
       },
