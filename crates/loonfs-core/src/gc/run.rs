@@ -430,13 +430,39 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                 last_key,
             } => {
                 report.retention_degraded |= roots.degraded;
-                let prefix = family.prefix(namespace_id);
+                let retired_content = roots.namespace_deleted
+                    && roots
+                        .reclaim_after_ms
+                        .is_some_and(|deadline| context.now_ms >= deadline);
+                if *family == GcCandidateFamily::OwnedContent && last_key.is_none() {
+                    if !retired_content {
+                        state.phase = GcPhase::Cleaning { last_key: None };
+                        return Ok(());
+                    }
+                    let head = crate::namespace::control::load_head_object(store, namespace_id)
+                        .await
+                        .map_err(CoreError::ControlObjectLoad)?;
+                    if !head.state.status.is_deleted()
+                        || head.state.content_store_id != roots.content_store_id
+                        || head
+                            .state
+                            .status
+                            .reclaim_after_ms()
+                            .is_none_or(|deadline| context.now_ms < deadline)
+                    {
+                        return Err(CoreError::NamespaceCorrupt(
+                            "retired namespace head does not match content sweep roots".to_owned(),
+                        ));
+                    }
+                }
+                let prefix = family.prefix(namespace_id, roots);
                 match scan.next(store, &prefix, last_key.as_deref()).await? {
                     Some(key) => {
                         let upload_sweep = UploadSweepContext::new(
                             store,
                             namespace_id,
                             roots.content_store_id.clone(),
+                            retired_content,
                             state.grace_window_ms,
                             context,
                         );

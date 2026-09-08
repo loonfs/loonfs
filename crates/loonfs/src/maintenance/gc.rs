@@ -85,7 +85,22 @@ impl MaintenanceJob for GarbageCollectionJob {
                 "maintenance GC returned a non-GC response".to_owned(),
             )));
         };
-        Ok(gc_run_result(gc, continuation))
+        let follow_up = if gc.reclaim_after_ms.is_some() {
+            loonfs_core::control::load_namespace_head_control(
+                self.maintenance.core.store(),
+                namespace_id,
+            )
+            .await
+            .map_err(loonfs_core::Error::ControlObjectLoad)?
+            .state
+            .fork_basis
+            .map(|basis| (MaintenanceJobId::GC, basis.manifest.owner_namespace_id))
+        } else {
+            None
+        };
+        let mut report = gc_run_result(gc, continuation);
+        report.follow_up = follow_up;
+        Ok(report)
     }
 
     async fn probe(&self, _namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
@@ -120,6 +135,7 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
         || gc.deleted.manifests > 0
         || gc.deleted.checkpoint_records > 0
         || gc.deleted.upload_sessions > 0
+        || gc.deleted.retired_content_objects > 0
         || gc.released_checkpoints.fork > 0
         || gc.released_checkpoints.expired > 0
         || gc.released_checkpoints.missing_basis > 0

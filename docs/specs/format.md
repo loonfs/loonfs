@@ -880,9 +880,9 @@ namespace, status, and re-creation of the same id — fails with
 `namespace_deleted`.
 
 Namespace deletion does not imply content-store deletion. In v0, deleting a
-content store is unsupported operator-only work, and the only content garbage
-collection is the narrow one described in section 6.4: an object a completed
-upload session owns and no metadata references. Metadata is reclaimed by garbage collection: on a
+content store is unsupported operator-only work. Section 6.4 permits content
+reclamation through upload sessions and through the owner prefix of a retired
+namespace whose deadline has passed. Metadata is reclaimed by garbage collection: on a
 terminally deleted namespace a GC pass reaps the WAL chain, metadata segments,
 manifests, and non-protecting checkpoint records under the usual windows,
 leaving the head as the id-retiring tombstone, together with the root and
@@ -2464,10 +2464,12 @@ moves only when an operator requests an explicit retention advance.
 
 ### 6.4 Garbage collection
 
-Delete is tombstone-first. Garbage collection reclaims unreachable metadata
-and content still owned by upload-session records under the rules below.
-There is no general sweep or purge guarantee for previously published content;
-content may remain indefinitely after file or namespace deletion. GC and floor advancement are the only
+Delete is tombstone-first. Garbage collection reclaims unreachable metadata,
+content still owned by upload-session records, and the owner prefix of a
+retired namespace, under the rules below. Published content in a live
+namespace is never swept, and a deleted ancestor's content stays while a
+descendant depends on it, so content can remain long after file or namespace
+deletion. GC and floor advancement are the only
 consumers of listing, and nothing sweeps by default: a pass runs only through
 the maintenance endpoint or an explicit maintenance-step opt-in.
 
@@ -2647,9 +2649,9 @@ publishing CAS) — under these rules:
    create-if-absent, content-derived, or write-verification protocols. Once
    one is unreferenced and grace-aged, unconditional deletion is safe: a
    zombie retry can at most recreate identical, still-unreferenced bytes for
-   a later pass. Content objects are never enumerated by listing the content
-   store, which is shared by every namespace whose head names it; they are
-   reached only through the upload session that owns them (rule 11).
+   a later pass. The only listed content prefix is the owner prefix of a retired namespace
+   whose deadline has passed (rule 14). Every other owner prefix is reached
+   only through upload sessions (rule 11).
 10. **Fork checkpoints require an exact reference.** Apply the target-head
     table in section 2.6. A deleted target naming this record retains it until
     retirement is established and its deadline is at or before the fixed run
@@ -2669,8 +2671,8 @@ publishing CAS) — under these rules:
     permits an early release of a verified dependency.
 
 11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
-   owns both halves, because a session record is the only handle on the
-   content object it created.
+   handles both halves. Retired namespaces also sweep their owner prefix
+   under rule 14.
 
    *Before `completed`, the upload half owns everything, and its reasoning
    is session-local.* An `open` session whose `expires_at_ms` has passed by a
@@ -2684,7 +2686,16 @@ publishing CAS) — under these rules:
    published belongs to exactly one session, and a session that never
    completed never had a receipt, so nothing anywhere can reference it.
 
-   *At `completed`, ownership passes to the content half.* Completed content
+   A completed session in a namespace whose captured deleted head carries
+   `reclaim_after_ms` at or before the fixed run clock deletes its content
+   through the session cleanup helper, then deletes its record. It needs no
+   content reference index or additional completion grace. A duplicate delete
+   by the owner sweep is harmless. A deleted but unretired namespace retains
+   completed sessions because its content references are unknown. Open and
+   aborted sessions keep their lease, abort, and provider cleanup paths even
+   after retirement. Provider upload state can exist outside object listings.
+
+   *At `completed`, ownership passes to the content half.* In an active namespace, completed content
    may or may not have been published, and consumption is inferred from
    metadata references rather than recorded on the session. A completed
    session's content object is reclaimed only when all of the following
@@ -2858,6 +2869,36 @@ publishing CAS) — under these rules:
     transition. Retirement releases fork records from descendants to
     ancestors. It deletes no content by itself.
 
+14. **Retired namespaces sweep their own content.** After upload sessions,
+    the `owned_content` family lists exactly
+    `content-stores/{content_store_id}/objects/{namespace_id}/`. Eligibility
+    is decided at family start, with `last_key: null`: captured roots must
+    be deleted and carry `reclaim_after_ms` at or before `started_at_ms`.
+    A run started before the deadline skips the family and reports the
+    deadline in `next_reclamation_at_ms`. Every other ineligible state skips
+    the family. Active namespaces never list their published content.
+
+    Before listing, GC re-reads the head once. It must still be deleted,
+    name the captured content store, and carry a deadline at or before the
+    fixed run clock. A mismatch fails with `namespace_corrupt`; a failed read
+    fails with the store error. Neither permits deletion or a progress write.
+    Retirement cannot regress, so this check covers the whole family,
+    including resumed calls after a successful candidate.
+
+    Each candidate must parse as a content blob, name this exact owner, and
+    start with the exact owner prefix. Anything else is retained as
+    `unrecognized_key`. Recognized objects are deleted unconditionally under
+    rule 9. Not-found is harmless. A delete error ends the pass without
+    advancing the cursor past the failed key. Listing and deletion use the
+    existing bounded scan and step budget.
+
+    Each new run begins with no last key and lists again. An empty completed
+    pass is never authority to stop listing. This removes late writes,
+    including objects inserted before a previous cursor. Heads, content-store
+    descriptors, and other owners' objects are never candidates for this
+    family. The deleted head rejects new upload capabilities and commits;
+    already-issued capabilities may still write until they expire.
+
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.
 To keep that true, every readable checkpoint record roots its basis for the
@@ -2889,8 +2930,9 @@ The phases are:
   tightest protected manifest sequence bound.
 - `sealing`: merge the content index and object table into one complete table.
 - `sweeping`: that table, the small retention summary, `checkpoints_retained`,
-  candidate family, and exclusive last-decided key. Data families precede checkpoint and upload
-  records.
+  candidate family, and exclusive last-decided key. The order is WAL segments,
+  metadata segments, compaction staging, manifests, checkpoints, upload sessions,
+  and owned content.
 - `cleaning`: exclusive last-decided scratch key. Only recognized mark pages
   are removed, including abandoned pages from older runs.
 - `complete`: the next caller without this run's token may replace the record

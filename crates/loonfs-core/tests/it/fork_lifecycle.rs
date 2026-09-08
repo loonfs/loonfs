@@ -1796,3 +1796,152 @@ async fn a_creator_losing_after_the_head_read_leaves_only_an_orphan_descriptor()
         vec![wal_head(&namespace_id)]
     );
 }
+
+#[tokio::test]
+async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_content() {
+    let directory = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let setup = mutation_context();
+    let source = namespace_id("template");
+    let sibling = namespace_id("sibling");
+    seed_source_namespace_for_fork(&store, &source, &setup).await;
+    fork_namespace(&store, &source, &sibling, &setup)
+        .await
+        .expect("fork sibling");
+    write_file_bytes(
+        &store,
+        &sibling,
+        "/docs/sibling.txt",
+        b"sibling",
+        &setup,
+        Some("sibling-write"),
+    )
+    .await
+    .expect("write sibling");
+    let content_store_id = head_state(&store, &source).await.content_store_id;
+    let source_prefix = content_owner_prefix(&content_store_id, &source);
+    let sibling_prefix = content_owner_prefix(&content_store_id, &sibling);
+    let source_keys = store
+        .list_prefix(&source_prefix)
+        .await
+        .expect("source content");
+    let sibling_keys = store
+        .list_prefix(&sibling_prefix)
+        .await
+        .expect("sibling content");
+    assert!(!source_keys.is_empty());
+    assert!(!sibling_keys.is_empty());
+    let config = loonfs_core::GcConfig::default();
+    let mut aged = setup.clone();
+    aged.now_ms = u64::MAX / 4;
+    for number in 0..4 {
+        let leaf = namespace_id(&format!("leaf-{number}"));
+        fork_namespace(&store, &source, &leaf, &setup)
+            .await
+            .expect("fork leaf");
+        write_file_bytes(
+            &store,
+            &leaf,
+            "/docs/own.txt",
+            b"leaf",
+            &setup,
+            Some("leaf-write"),
+        )
+        .await
+        .expect("write leaf");
+        let prefix = content_owner_prefix(&content_store_id, &leaf);
+        assert!(!store
+            .list_prefix(&prefix)
+            .await
+            .expect("leaf content")
+            .is_empty());
+        namespace_engine(&store, &leaf, &setup)
+            .delete_namespace(Default::default())
+            .await
+            .expect("delete leaf");
+        let mut reclaimed = 0;
+        for call in 0..8 {
+            let report = loonfs_core::gc_namespace(&store, &leaf, &config, &aged)
+                .await
+                .expect("collect leaf");
+            reclaimed += report.deleted.retired_content_objects;
+            if store
+                .list_prefix(&prefix)
+                .await
+                .expect("leaf content")
+                .is_empty()
+            {
+                break;
+            }
+            aged.now_ms = report
+                .reclaim_after_ms
+                .unwrap_or(aged.now_ms + config.grace_window_ms);
+            assert!(call < 7, "leaf reclamation must converge");
+        }
+        assert!(reclaimed > 0);
+        assert_eq!(
+            store
+                .list_prefix(&source_prefix)
+                .await
+                .expect("source content"),
+            source_keys
+        );
+        assert_eq!(
+            store
+                .list_prefix(&sibling_prefix)
+                .await
+                .expect("sibling content"),
+            sibling_keys
+        );
+        assert_eq!(
+            read_file_bytes(&store, &source, "/docs/shared.txt")
+                .await
+                .expect("source read")
+                .bytes,
+            b"base"
+        );
+        assert_eq!(
+            read_file_bytes(&store, &sibling, "/docs/shared.txt")
+                .await
+                .expect("inherited read")
+                .bytes,
+            b"base"
+        );
+        assert_eq!(
+            read_file_bytes(&store, &sibling, "/docs/sibling.txt")
+                .await
+                .expect("sibling read")
+                .bytes,
+            b"sibling"
+        );
+    }
+    namespace_engine(&store, &source, &aged)
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete source");
+    for _ in 0..3 {
+        aged.now_ms += config.grace_window_ms;
+        let report = loonfs_core::gc_namespace(&store, &source, &config, &aged)
+            .await
+            .expect("collect deleted source");
+        assert_eq!(report.reclaim_after_ms, None);
+        assert_eq!(report.deleted.retired_content_objects, 0);
+        assert_eq!(
+            store
+                .list_prefix(&source_prefix)
+                .await
+                .expect("source content"),
+            source_keys
+        );
+    }
+    assert_eq!(
+        read_file_bytes(&store, &sibling, "/docs/shared.txt")
+            .await
+            .expect("read deleted ancestor")
+            .bytes,
+        b"base"
+    );
+}

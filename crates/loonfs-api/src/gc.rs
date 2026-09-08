@@ -336,7 +336,7 @@ pub struct GcManifestRange {
     pub last_key: String,
 }
 
-/// Durable sweep order; data precedes the records that protect it.
+/// Durable sweep order; retired content follows upload cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GcCandidateFamily {
@@ -352,17 +352,20 @@ pub enum GcCandidateFamily {
     Checkpoints,
     /// Mutable upload records and unpublished content.
     UploadSessions,
+    /// Content owned by a retired namespace after its deadline.
+    OwnedContent,
 }
 
 impl GcCandidateFamily {
-    /// Data families precede the mutable records that protect them.
-    pub const ALL: [Self; 6] = [
+    /// Metadata precedes its protecting records; retired content comes last.
+    pub const ALL: [Self; 7] = [
         Self::WalSegments,
         Self::MetadataSegments,
         Self::CompactionStaging,
         Self::Manifests,
         Self::Checkpoints,
         Self::UploadSessions,
+        Self::OwnedContent,
     ];
 
     /// This family's position in [`Self::ALL`], which is the sweep order.
@@ -374,6 +377,7 @@ impl GcCandidateFamily {
             Self::Manifests => 3,
             Self::Checkpoints => 4,
             Self::UploadSessions => 5,
+            Self::OwnedContent => 6,
         }
     }
 }

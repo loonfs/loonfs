@@ -241,6 +241,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     requested: &[UploadPartChecksumClaim],
 ) -> Result<MultipartPartTargets> {
+    ensure_upload_namespace_available(store, namespace_id).await?;
     if requested.is_empty() {
         return Err(CoreError::InvalidUploadContent(
             "a part-signing request names at least one part".to_owned(),
@@ -640,6 +641,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     payload: ProxiedPayload<'_>,
 ) -> Result<UploadContentResponse> {
+    ensure_upload_namespace_available(store, namespace_id).await?;
     let (content_store_id, loaded) =
         read_open_proxied_session(store, namespace_id, upload_id).await?;
 
@@ -803,6 +805,7 @@ where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
 {
+    ensure_upload_namespace_available(store, namespace_id).await?;
     let now_ms = context.now_ms;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     // An aborted session answers the same absence its physical deletion
@@ -1222,6 +1225,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     now_ms: u64,
 ) -> Result<(UploadSession, Option<CompletedUploadReceipt>)> {
+    ensure_upload_namespace_available(store, namespace_id).await?;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     let mode = upload_mode(&loaded.mode);
     let (status, receipt) = match loaded.status {
@@ -2357,5 +2361,113 @@ mod tests {
         assert_eq!(replay.response.content_ref(), Some(&content_ref));
         assert!(replay.response.content_token().is_none());
         assert!(replay.receipt.is_none());
+    }
+    async fn delete_upload_namespace<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
+        crate::commit_engine::delete_namespace(
+            store,
+            namespace_id,
+            Default::default(),
+            &context(3_000),
+        )
+        .await
+        .expect("delete namespace");
+    }
+
+    #[tokio::test]
+    async fn deleted_namespace_refuses_multipart_part_targets() {
+        let directory = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(directory.path()).expect("store");
+        let (namespace_id, _, _, _, _) = staged_session(&inner, &context(1_000)).await;
+        let upload_id = create_upload_session(
+            &inner,
+            &namespace_id,
+            NewUploadSession::direct_multipart(
+                ContentId::generate(),
+                "provider-upload",
+                NonZeroU64::new(5 * 1024 * 1024).expect("part size"),
+                DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
+            ),
+            &context(1_000),
+        )
+        .await
+        .expect("multipart session");
+        delete_upload_namespace(&inner, &namespace_id).await;
+        let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
+        let error = direct_multipart_part_targets(
+            &store,
+            &namespace_id,
+            &upload_id,
+            &[UploadPartChecksumClaim {
+                part_number: 1,
+                checksum: Checksum::crc64nvme(BYTES),
+            }],
+        )
+        .await
+        .expect_err("deleted namespace");
+        assert!(matches!(error, CoreError::NamespaceDeleted { .. }));
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().deletes, 0);
+    }
+
+    #[tokio::test]
+    async fn deleted_namespace_refuses_proxied_content() {
+        let directory = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(directory.path()).expect("store");
+        let (namespace_id, _, upload_id, _, _) = staged_session(&inner, &context(1_000)).await;
+        delete_upload_namespace(&inner, &namespace_id).await;
+        let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
+        let error = upload_content(&store, &namespace_id, &upload_id, BYTES)
+            .await
+            .expect_err("deleted namespace");
+        assert!(matches!(error, CoreError::NamespaceDeleted { .. }));
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().deletes, 0);
+    }
+
+    #[tokio::test]
+    async fn deleted_namespace_refuses_upload_completion() {
+        let directory = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(directory.path()).expect("store");
+        let (namespace_id, content_store_id, upload_id, _, _) =
+            staged_session(&inner, &context(1_000)).await;
+        delete_upload_namespace(&inner, &namespace_id).await;
+        let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
+        let error = complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &context(4_000),
+        )
+        .await
+        .expect_err("deleted namespace");
+        assert!(matches!(error, CoreError::NamespaceDeleted { .. }));
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().deletes, 0);
+    }
+
+    #[tokio::test]
+    async fn deleted_namespace_refuses_upload_status_receipts() {
+        let directory = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(directory.path()).expect("store");
+        let (namespace_id, content_store_id, upload_id, _, _) =
+            staged_session(&inner, &context(1_000)).await;
+        complete(
+            &inner,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &context(2_000),
+        )
+        .await
+        .expect("complete");
+        delete_upload_namespace(&inner, &namespace_id).await;
+        let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
+        let error = get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 4_000)
+            .await
+            .expect_err("deleted namespace");
+        assert!(matches!(error, CoreError::NamespaceDeleted { .. }));
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().deletes, 0);
     }
 }

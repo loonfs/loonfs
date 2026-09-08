@@ -968,9 +968,10 @@ pub struct DeletedObjectCounts {
     pub checkpoint_records: u64,
     /// Upload-session control objects deleted after the reap window.
     pub upload_sessions: u64,
-    /// Unreferenced content objects deleted after their completed sessions passed the
-    /// reclamation grace period.
+    /// Content reclaimed through completed upload sessions.
     pub content_objects: u64,
+    /// Successful deletion attempts under a retired namespace owner prefix.
+    pub retired_content_objects: u64,
 }
 
 impl DeletedObjectCounts {
@@ -983,6 +984,7 @@ impl DeletedObjectCounts {
             checkpoint_records,
             upload_sessions,
             content_objects,
+            retired_content_objects,
         } = other;
         self.wal_segments += wal_segments;
         self.metadata_segments += metadata_segments;
@@ -990,6 +992,7 @@ impl DeletedObjectCounts {
         self.checkpoint_records += checkpoint_records;
         self.upload_sessions += upload_sessions;
         self.content_objects += content_objects;
+        self.retired_content_objects += retired_content_objects;
     }
 }
 

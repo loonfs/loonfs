@@ -70,8 +70,8 @@ pub struct MaintenanceRunReport {
     pub continuation: Option<String>,
     /// Earliest Unix millisecond for another run.
     pub not_before_ms: Option<u64>,
-    /// A job this run wants scheduled for the same namespace.
-    pub follow_up: Option<MaintenanceJobId>,
+    /// A job and namespace this run wants scheduled.
+    pub follow_up: Option<(MaintenanceJobId, NamespaceId)>,
 }
 
 impl MaintenanceRunReport {
