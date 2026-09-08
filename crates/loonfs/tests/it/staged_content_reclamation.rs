@@ -422,8 +422,8 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
     assert_eq!(counts.overwrite_puts, 0, "a session is never clobbered");
     assert_eq!(
         sessions.count(OperationClass::Read),
-        1,
-        "the swap reads the etag it swaps on, and nothing else reads a session"
+        0,
+        "the completion swap reuses the confirmed creation etag without rereading the session"
     );
     assert_eq!(
         counts.deletes, 0,

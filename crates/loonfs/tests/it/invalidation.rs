@@ -497,8 +497,8 @@ async fn read_after_write_is_served_from_seeded_caches() {
         .expect("steady-state put");
     // The publish must read the live head and root for freshness. Because no
     // root has been published yet, it also reads the floor to distinguish a
-    // young namespace from a lost recovery root. The upload session that owns
-    // the staged content has to be read to be completed on its own etag.
+    // young namespace from a lost recovery root. The owned upload session reuses
+    // its confirmed creation state and etag, so completion needs no session GET.
     let write_gets = recording.take_get_keys();
     let uploads_prefix = loonfs_objectstore::keys::upload_session_prefix(&namespace_id);
     let classify = |suffix: &str| {
@@ -515,12 +515,12 @@ async fn read_after_write_is_served_from_seeded_caches() {
             .iter()
             .filter(|key| key.starts_with(&uploads_prefix))
             .count(),
-        1,
-        "one staging session is opened and completed per put, got {write_gets:?}"
+        0,
+        "owned session completion reuses its creation etag, got {write_gets:?}"
     );
     assert_eq!(
         write_gets.len(),
-        4,
+        3,
         "a steady-state write reads nothing beyond those controls, got {write_gets:?}"
     );
 
