@@ -2859,7 +2859,7 @@ fn gc_progress_and_mark_pages_match_golden_bytes() {
             "sweeping",
             GcPhase::Sweeping {
                 checkpoints_retained: false,
-                roots,
+                roots: roots.clone(),
                 table: table.clone(),
                 family: GcCandidateFamily::WalSegments,
                 last_key: None,
@@ -2867,6 +2867,13 @@ fn gc_progress_and_mark_pages_match_golden_bytes() {
         ),
         ("cleaning", GcPhase::Cleaning { last_key: None }),
         ("complete", GcPhase::Complete {}),
+        ("owned_content", GcPhase::Sweeping {
+            checkpoints_retained: false,
+            roots: GcRoots { namespace_deleted: true, reclaim_after_ms: Some(900_000), ..roots },
+            table: table.clone(),
+            family: GcCandidateFamily::OwnedContent,
+            last_key: Some("content-stores/cs_0123456789abcdef0123456789abcdef/objects/demo/01/23/con_0123456789abcdef0123456789abcdef".to_owned()),
+        }),
     ];
     for (step_no, (name, phase)) in phases.into_iter().enumerate() {
         check_control_golden(

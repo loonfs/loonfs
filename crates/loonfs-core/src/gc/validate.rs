@@ -57,12 +57,16 @@ pub(super) fn run(state: &GcRunState) -> Result<()> {
         GcPhase::Sealing { index: pending, .. } => index(pending)?,
         GcPhase::Sweeping {
             table: marks,
+            roots,
             family,
             last_key,
             ..
         } => {
             table(marks)?;
-            position_key(last_key.as_deref(), &family.prefix(&state.namespace_id))?;
+            position_key(
+                last_key.as_deref(),
+                &family.prefix(&state.namespace_id, roots),
+            )?;
         }
         GcPhase::Cleaning { last_key } => {
             position_key(last_key.as_deref(), &gc_runs_prefix(&state.namespace_id))?

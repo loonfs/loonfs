@@ -844,7 +844,7 @@ impl MaintenanceJob for BlockingJob {
             conclusion: MaintenanceConclusion::Blocked,
             continuation: None,
             not_before_ms: None,
-            follow_up: self.follow_up,
+            follow_up: self.follow_up.map(|job| (job, _namespace_id.clone())),
         })
     }
 
@@ -962,4 +962,56 @@ async fn reconciliation_recovers_a_hint_dropped_before_attachment() {
     assert_eq!(subscriber.stepped().len(), 2);
 
     runner.shutdown().await.expect("runner shutdown");
+}
+
+#[tokio::test]
+async fn retired_fork_collection_schedules_the_source_namespace() {
+    use loonfs_objectstore::keys::gc_run;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::ObjectStore;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("gc-follow-up")
+        .build()
+        .await
+        .expect("writer");
+    let source = namespace_id("source");
+    let target = namespace_id("target");
+    writer
+        .create_namespace(&source, Default::default())
+        .await
+        .expect("source");
+    writer.fork_namespace(&source, &target).await.expect("fork");
+    writer
+        .delete_namespace(&target, Default::default())
+        .await
+        .expect("delete target");
+    let maintenance = crate::FsMaintenance::builder_with_store(store.clone())
+        .actor_id("gc-follow-up")
+        .build()
+        .await
+        .expect("maintenance");
+    let registry = MaintenanceRegistry::new();
+    registry
+        .register(Arc::new(GarbageCollectionJob::new(maintenance)))
+        .expect("register GC");
+    let runner = MaintenanceRunner::builder(registry)
+        .build()
+        .expect("runner");
+    assert!(store
+        .head(&gc_run(&source))
+        .await
+        .expect("source progress")
+        .is_none());
+    runner.handle().nudge(MaintenanceJobId::GC, &target);
+    runner.drain().await.expect("collect target and source");
+    assert!(store
+        .head(&gc_run(&source))
+        .await
+        .expect("source progress")
+        .is_some());
+    runner.shutdown().await.expect("shutdown runner");
+    writer.shutdown().await.expect("shutdown writer");
 }

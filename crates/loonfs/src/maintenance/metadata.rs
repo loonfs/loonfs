@@ -53,7 +53,8 @@ impl MaintenanceJob for MetadataMaintenanceJob {
                 let mut report = MaintenanceRunReport::concluded(metadata_conclusion(&metadata));
                 if metadata.reorganize == ReorganizeStepOutcome::CompactionRequired {
                     report.conclusion = MaintenanceConclusion::Blocked;
-                    report.follow_up = Some(MaintenanceJobId::METADATA_COMPACTION);
+                    report.follow_up =
+                        Some((MaintenanceJobId::METADATA_COMPACTION, namespace_id.clone()));
                 }
                 Ok(report)
             }

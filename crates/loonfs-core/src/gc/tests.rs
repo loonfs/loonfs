@@ -5520,3 +5520,316 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_saves_no_progress
         }
     }
 }
+
+async fn retired_content_namespace<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> (ContentStoreId, MutationContext) {
+    let setup = context(1_000);
+    bootstrap_namespace(store, namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let content_store_id =
+        crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
+            .await
+            .expect("content store");
+    delete_namespace(store, namespace_id, Default::default(), &setup)
+        .await
+        .expect("delete");
+    let report = gc_namespace(store, namespace_id, &config(), &setup)
+        .await
+        .expect("retire");
+    (
+        content_store_id,
+        context(report.reclaim_after_ms.expect("deadline")),
+    )
+}
+
+async fn owned_content_keys<S: ObjectStore>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    namespace_id: &NamespaceId,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    for number in [2, 3, 4] {
+        let content_id =
+            loonfs_api::ContentId::parse(format!("con_{number:032x}")).expect("content id");
+        let key =
+            loonfs_objectstore::keys::content_blob(content_store_id, namespace_id, &content_id);
+        store
+            .put_if_absent(&key, Bytes::from_static(b"content"))
+            .await
+            .expect("content");
+        keys.push(key);
+    }
+    keys
+}
+
+#[tokio::test]
+async fn retired_owner_sweep_is_bounded_resumable_and_lists_again() {
+    let directory = tempdir().expect("tempdir");
+    let mut store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("a").expect("namespace");
+    let (content_store_id, now) = retired_content_namespace(&store, &namespace_id).await;
+    let keys = owned_content_keys(&store, &content_store_id, &namespace_id).await;
+    let sibling = NamespaceId::parse("ab").expect("sibling");
+    let sibling_keys = owned_content_keys(&store, &content_store_id, &sibling).await;
+    let prefix = loonfs_objectstore::keys::content_owner_prefix(&content_store_id, &namespace_id);
+    let unknown = format!("{prefix}unknown");
+    store
+        .put_if_absent(&unknown, Bytes::new())
+        .await
+        .expect("unknown key");
+    let early = gc_namespace(
+        &store,
+        &namespace_id,
+        &GcConfig {
+            max_steps: Some(1),
+            ..config()
+        },
+        &context(now.now_ms - 1),
+    )
+    .await
+    .expect("early run");
+    let early = gc_namespace(
+        &store,
+        &namespace_id,
+        &GcConfig {
+            cursor: early.next_cursor,
+            ..config()
+        },
+        &now,
+    )
+    .await
+    .expect("resume past deadline");
+    assert_eq!(early.next_reclamation_at_ms, Some(now.now_ms));
+    assert_eq!(early.deleted.retired_content_objects, 0);
+    let mut bounded = GcConfig {
+        max_steps: Some(1),
+        ..config()
+    };
+    let mut deleted = 0;
+    let mut retained = 0;
+    for call in 0..100 {
+        store.take();
+        let report = gc_namespace(&store, &namespace_id, &bounded, &now)
+            .await
+            .expect("bounded run");
+        assert!(store.counts().deletes <= 1);
+        assert!(store.counts().lists <= 1);
+        deleted += report.deleted.retired_content_objects;
+        retained += report.retained.unrecognized_key;
+        bounded.cursor = report.next_cursor;
+        if bounded.cursor.is_none() {
+            break;
+        }
+        store = RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("reopen store"),
+            KeyPredicate::any(),
+        );
+        assert!(call < 99, "bounded run must complete");
+    }
+    assert_eq!(deleted, keys.len() as u64);
+    assert_eq!(retained, 1);
+    assert_eq!(
+        store.list_prefix(&prefix).await.expect("owner prefix"),
+        std::slice::from_ref(&unknown)
+    );
+    for key in sibling_keys.iter().chain(
+        [
+            loonfs_objectstore::keys::wal_head(&namespace_id),
+            loonfs_objectstore::keys::content_store(&content_store_id),
+        ]
+        .iter(),
+    ) {
+        assert!(store.head(key).await.expect("head").is_some());
+    }
+    let late_id = loonfs_api::ContentId::parse(format!("con_{:032x}", 1)).expect("late id");
+    let late_key =
+        loonfs_objectstore::keys::content_blob(&content_store_id, &namespace_id, &late_id);
+    assert!(late_key < keys[0]);
+    store
+        .put_if_absent(&late_key, Bytes::from_static(b"late"))
+        .await
+        .expect("late object");
+    let report = gc_namespace(&store, &namespace_id, &config(), &now)
+        .await
+        .expect("next run");
+    assert_eq!(report.deleted.retired_content_objects, 1);
+    assert_eq!(
+        store.list_prefix(&prefix).await.expect("owner prefix"),
+        [unknown]
+    );
+}
+
+#[tokio::test]
+async fn retired_owner_delete_failure_retries_the_failed_key() {
+    let directory = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("retry").expect("namespace");
+    let (content_store_id, now) = retired_content_namespace(&inner, &namespace_id).await;
+    let keys = owned_content_keys(&inner, &content_store_id, &namespace_id).await;
+    let store = FailStore::new(
+        inner,
+        KeyPredicate::exact(keys[1].clone()),
+        OperationClass::Delete,
+        InjectedError::Transport("delete failed".to_owned()),
+    );
+    store.fail_next(1);
+    assert!(gc_namespace(&store, &namespace_id, &config(), &now)
+        .await
+        .is_err());
+    let state = super::run::load_run(&store, &namespace_id)
+        .await
+        .expect("load")
+        .expect("run")
+        .state;
+    assert!(
+        matches!(state.phase, GcPhase::Sweeping { family: GcCandidateFamily::OwnedContent, last_key: Some(ref key), .. } if key == &keys[0])
+    );
+    assert!(store.head(&keys[1]).await.expect("head").is_some());
+    let report = gc_namespace(&store, &namespace_id, &config(), &now)
+        .await
+        .expect("retry");
+    assert_eq!(report.deleted.retired_content_objects, 2);
+    for key in keys {
+        assert!(store.head(&key).await.expect("head").is_none());
+    }
+}
+
+#[tokio::test]
+async fn retired_owner_head_recheck_fails_without_writes() {
+    use loonfs_api::wire::control::{encode_control_state, NamespaceStatus};
+    for invalid in 0..5 {
+        let directory = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = NamespaceId::parse("head-check").expect("namespace");
+        let (content_store_id, now) = retired_content_namespace(&inner, &namespace_id).await;
+        owned_content_keys(&inner, &content_store_id, &namespace_id).await;
+        let bounded = GcConfig {
+            max_steps: Some(1),
+            ..config()
+        };
+        for call in 0..100 {
+            gc_namespace(&inner, &namespace_id, &bounded, &now)
+                .await
+                .expect("advance");
+            let state = super::run::load_run(&inner, &namespace_id)
+                .await
+                .expect("load")
+                .expect("run")
+                .state;
+            if matches!(
+                state.phase,
+                GcPhase::Sweeping {
+                    family: GcCandidateFamily::OwnedContent,
+                    last_key: None,
+                    ..
+                }
+            ) {
+                break;
+            }
+            assert!(call < 99, "must reach owner family");
+        }
+        let mut head = crate::namespace::control::load_head_object(&inner, &namespace_id)
+            .await
+            .expect("head")
+            .state;
+        match invalid {
+            0 => head.content_store_id = ContentStoreId::generate(),
+            1 => head.status = NamespaceStatus::Active {},
+            2 => {
+                head.status = NamespaceStatus::Deleted {
+                    reclaim_after_ms: None,
+                }
+            }
+            3 => {
+                head.status = NamespaceStatus::Deleted {
+                    reclaim_after_ms: Some(now.now_ms + 1),
+                }
+            }
+            _ => {}
+        }
+        inner
+            .put_overwrite(
+                &wal_head(&namespace_id),
+                Bytes::from(
+                    encode_control_state(ControlObjectKind::WalHead, &head).expect("encode"),
+                ),
+            )
+            .await
+            .expect("replace head");
+        let failure = FailStore::new(
+            inner,
+            KeyPredicate::exact(wal_head(&namespace_id)),
+            OperationClass::Read,
+            InjectedError::Transport("head read failed".to_owned()),
+        );
+        if invalid == 4 {
+            failure.fail_next(1);
+        }
+        let store = RecordingStore::new(failure, KeyPredicate::any());
+        let error = gc_namespace(&store, &namespace_id, &config(), &now)
+            .await
+            .expect_err("reject invalid head");
+        if invalid < 4 {
+            assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+        }
+        assert_eq!(store.counts().deletes, 0);
+        assert_eq!(store.counts().puts, 0);
+    }
+}
+
+#[tokio::test]
+async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
+    for first_run_ms in [1_000, CONTENT_RECLAMATION_GRACE_MS + 1_000] {
+        let directory = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = NamespaceId::parse("completed-retired").expect("namespace");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        let (upload_id, content, content_store_id, _) =
+            complete_upload_for_gc(&store, &namespace_id, b"content", &setup).await;
+        delete_namespace(&store, &namespace_id, Default::default(), &setup)
+            .await
+            .expect("delete");
+        let report = gc_namespace(&store, &namespace_id, &config(), &context(first_run_ms))
+            .await
+            .expect("unretired run");
+        assert_eq!(report.deleted.upload_sessions, 0);
+        assert_eq!(
+            report.retained.upload_session_undecided + report.retained.upload_session_window,
+            1
+        );
+        let key = loonfs_objectstore::keys::content_blob(
+            &content_store_id,
+            &namespace_id,
+            &content.content_id,
+        );
+        assert!(store.head(&key).await.expect("object").is_some());
+        let report = gc_namespace(
+            &store,
+            &namespace_id,
+            &config(),
+            &context(report.reclaim_after_ms.expect("retired")),
+        )
+        .await
+        .expect("retired run");
+        assert_eq!(report.deleted.upload_sessions, 1);
+        assert_eq!(report.deleted.content_objects, 1);
+        assert!(store.head(&key).await.expect("object").is_none());
+        assert!(store
+            .head(&loonfs_objectstore::keys::upload_session(
+                &namespace_id,
+                &upload_id
+            ))
+            .await
+            .expect("session")
+            .is_none());
+    }
+}

@@ -778,9 +778,9 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
                 elapsed_ms,
                 "maintenance pass settled"
             );
-            if let Some(follow_up) = result.follow_up {
+            if let Some((follow_up, ref namespace_id)) = result.follow_up {
                 inner.instruments.follow_up(follow_up);
-                nudge_if_inactive(inner, follow_up, &key.namespace_id);
+                nudge_if_inactive(inner, follow_up, namespace_id);
             }
             StepOutcome::Concluded(result)
         }

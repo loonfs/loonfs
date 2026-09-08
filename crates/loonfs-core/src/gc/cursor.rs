@@ -1,12 +1,13 @@
 //! Opaque, namespace-bound cursors for bounded GC enumeration.
 
 use crate::error::{CoreError, Result};
+use loonfs_api::wire::gc::GcRoots;
 use loonfs_api::{
     decode_namespace_cursor, encode_cursor, NamespaceCursor, NamespaceCursorError, NamespaceId,
     PageCursor,
 };
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_compaction_prefix, metadata_manifest_prefix,
+    checkpoint_prefix, content_owner_prefix, metadata_compaction_prefix, metadata_manifest_prefix,
     metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::layout::manifest_object_id_of;
@@ -24,7 +25,7 @@ pub(super) use loonfs_api::wire::gc::GcCandidateFamily as CandidateFamily;
 
 pub(super) trait CandidateFamilyExt {
     fn recognizes(self, key: &str) -> bool;
-    fn prefix(self, namespace_id: &NamespaceId) -> String;
+    fn prefix(self, namespace_id: &NamespaceId, roots: &GcRoots) -> String;
 }
 
 impl CandidateFamilyExt for CandidateFamily {
@@ -44,10 +45,11 @@ impl CandidateFamilyExt for CandidateFamily {
             Self::Manifests => matches!(manifest_object_id_of(key), Some(Ok(_))),
             Self::Checkpoints => family == DurableObjectFamily::CheckpointRecord,
             Self::UploadSessions => family == DurableObjectFamily::UploadSession,
+            Self::OwnedContent => family == DurableObjectFamily::ContentBlob,
         }
     }
 
-    fn prefix(self, namespace_id: &NamespaceId) -> String {
+    fn prefix(self, namespace_id: &NamespaceId, roots: &GcRoots) -> String {
         match self {
             Self::WalSegments => wal_segment_prefix(namespace_id),
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
@@ -55,6 +57,7 @@ impl CandidateFamilyExt for CandidateFamily {
             Self::Manifests => metadata_manifest_prefix(namespace_id),
             Self::Checkpoints => checkpoint_prefix(namespace_id),
             Self::UploadSessions => upload_session_prefix(namespace_id),
+            Self::OwnedContent => content_owner_prefix(&roots.content_store_id, namespace_id),
         }
     }
 }
@@ -158,7 +161,19 @@ mod tests {
         const CURSOR_KIND: &'static str = "test_gc";
 
         fn prefix(&self, namespace_id: &NamespaceId) -> String {
-            self.family.prefix(namespace_id)
+            self.family.prefix(
+                namespace_id,
+                &GcRoots {
+                    content_store_id: loonfs_api::ContentStoreId::parse(
+                        "cs_0123456789abcdef0123456789abcdef",
+                    )
+                    .expect("content store id"),
+                    namespace_deleted: false,
+                    reclaim_after_ms: None,
+                    degraded: false,
+                    anchor: loonfs_api::wire::gc::GcReferenceAnchor::NotNeeded {},
+                },
+            )
         }
     }
 

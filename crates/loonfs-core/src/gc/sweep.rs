@@ -63,6 +63,20 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                 Ok(())
             }
             CandidateFamily::UploadSessions => self.process_upload_session(key).await,
+            CandidateFamily::OwnedContent => {
+                let prefix = family.prefix(self.namespace_id, self.references.roots);
+                if !key.starts_with(&prefix)
+                    || loonfs_objectstore::layout::parse_object_key(key).is_none_or(|parsed| {
+                        parsed.owner_namespace_id() != Some(self.namespace_id.as_str())
+                    })
+                {
+                    self.report.retain(RetainedReason::UnrecognizedKey);
+                    return Ok(());
+                }
+                self.delete_key(key).await?;
+                self.report.deleted.retired_content_objects += 1;
+                Ok(())
+            }
         }
     }
     async fn process_aged_family(
@@ -278,10 +292,10 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
     }
 
     async fn delete_key(&self, key: &str) -> Result<()> {
-        self.store
-            .delete(key)
-            .await
-            .map_err(|error| CoreError::store(key, &error))
+        match self.store.delete(key).await {
+            Ok(()) | Err(loonfs_objectstore::ObjectStoreError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(CoreError::store(key, &error)),
+        }
     }
 
     /// Records the earliest future reclamation deadline.
