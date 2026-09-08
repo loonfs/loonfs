@@ -1,8 +1,8 @@
 //! Per-operation options shared by the embedded runtime and HTTP client.
 
 use crate::{
-    ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, CheckpointId, CommitId,
-    DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
+    ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, CheckpointId, CommitAssertion,
+    CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
 };
 use std::collections::BTreeMap;
 
@@ -35,6 +35,9 @@ pub struct CommitOptions {
     pub commit_id: Option<CommitId>,
     /// The optional commit message that forms part of the commit identity.
     pub message: Option<String>,
+    /// Ordered admission conditions evaluated before any operations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<CommitAssertion>,
 }
 
 impl CommitOptions {
@@ -44,6 +47,7 @@ impl CommitOptions {
             actor,
             commit_id: None,
             message: None,
+            assertions: Vec::new(),
         }
     }
 }

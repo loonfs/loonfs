@@ -1420,6 +1420,12 @@ preimage deliberately excludes `commit_id`, writer epoch, and
 `committed_at_ms`: a retry of the same logical commit must fingerprint
 identically no matter who retries it or when.
 
+When non-empty, `assertions` follows `message` in the preimage, in request order.
+Each assertion uses `kind` followed by its fields; `namespace_head` has
+`expected_head_seq` encoded as a JSON integer. An empty list is omitted, so
+assertion-free requests retain their existing fingerprints. Assertions add no
+WAL field or delta and are not evaluated during replay.
+
 Every operation starts with `kind`, using the current API operation name.
 The remaining fields appear in this order:
 

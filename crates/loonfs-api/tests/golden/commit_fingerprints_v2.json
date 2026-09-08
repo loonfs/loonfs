@@ -257,5 +257,45 @@
     },
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"update_attributes\",\"path\":\"/café/report.txt\",\"set\":{\"a\":\"résumé 🍵\",\"z\":\"line\\n\\\"two\\\"\"},\"remove\":[],\"expected_inode_id\":null,\"expected_attributes_revision_no\":null}],\"message\":null}",
     "fingerprint": "v2:sha256:e010868fc8c948685283d5250fb0cdbd84556be7c63841a6c68a384eb452a4d7"
+  },
+  {
+    "name": "namespace_head_assertions",
+    "operation": {
+      "kind": "create_directory",
+      "path": "/docs",
+      "parents": false
+    },
+    "assertions": [
+      {
+        "kind": "namespace_head",
+        "expected_head_seq": 1
+      },
+      {
+        "kind": "namespace_head",
+        "expected_head_seq": 2
+      }
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"assertions\":[{\"kind\":\"namespace_head\",\"expected_head_seq\":1},{\"kind\":\"namespace_head\",\"expected_head_seq\":2}]}",
+    "fingerprint": "v2:sha256:332498254b49707d06e49f5ca418591c9da2812cfbafff1af55a6ac09151a390"
+  },
+  {
+    "name": "namespace_head_assertions_reversed",
+    "operation": {
+      "kind": "create_directory",
+      "path": "/docs",
+      "parents": false
+    },
+    "assertions": [
+      {
+        "kind": "namespace_head",
+        "expected_head_seq": 2
+      },
+      {
+        "kind": "namespace_head",
+        "expected_head_seq": 1
+      }
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"assertions\":[{\"kind\":\"namespace_head\",\"expected_head_seq\":2},{\"kind\":\"namespace_head\",\"expected_head_seq\":1}]}",
+    "fingerprint": "v2:sha256:a0314dfb842dbb4e08ec83c1feb8c69f23df63e592b9bac831ad92b001f6b3b6"
   }
 ]

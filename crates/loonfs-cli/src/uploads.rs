@@ -306,6 +306,7 @@ fn request_matches_options(request: &CommitRequest, options: &PutFileOptions) ->
     options.commit.commit_id.as_ref() == Some(&request.commit_id)
         && options.commit.actor == request.actor
         && options.commit.message == request.message
+        && options.commit.assertions == request.assertions
         && matches!(request.operations.as_slice(), [FilesystemOperation::PutFile {
             behavior, expected_inode_id, expected_revision_no, ..
         }] if *behavior == options.behavior

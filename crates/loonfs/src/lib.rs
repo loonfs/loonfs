@@ -55,11 +55,11 @@ pub use loonfs_api::v0::{
 pub use loonfs_api::{
     ActorId, ActorKind, ActorRef, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo,
     AttributeValue, Attributes, AttributesProjection, CapabilityDocument, ChangeSeq, Checkpoint,
-    CheckpointId, CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
-    ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse, DeletedObjectCounts,
-    DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileBytes, FileRevision,
-    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcResponse, InodeId, InodeKind,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    CheckpointId, CheckpointOwnerSummary, ChecksumAlgorithm, CommitAssertion, CommitId, ContentId,
+    ContentRef, ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    DeletedObjectCounts, DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileBytes,
+    FileRevision, FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcResponse, InodeId,
+    InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome,
     MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceResponse, NameKey,
     Namespace, NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry,
@@ -110,8 +110,8 @@ pub mod wire {
 /// Most embedded applications do not need this module.
 pub mod publish {
     pub use loonfs_core::limits::{
-        MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_MESSAGE_BYTES,
-        MAX_COMMIT_OPERATIONS,
+        MAX_COMMIT_ASSERTIONS, MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS,
+        MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS,
     };
     pub use loonfs_core::path::parse_mutation_path;
     pub use loonfs_core::publish::{

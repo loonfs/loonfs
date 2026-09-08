@@ -1271,6 +1271,7 @@ async fn empty_request_is_rejected_before_commit_id_reuse() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: CommitId::parse("empty-reuse").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -1344,6 +1345,7 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
         .await
         .expect("bootstrap");
     let candidate = CommitCandidate::new(CommitRequest {
+        assertions: Vec::new(),
         commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
         actor: loonfs_test_support::test_actor(),
         message: None,
@@ -1921,4 +1923,141 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     .expect("idempotent retry should return existing receipt");
 
     assert_eq!(retry.committed_seq, first.committed_seq);
+}
+
+fn guarded_directory(commit_id: &str, path: &str, expected_head_seq: ChangeSeq) -> CommitRequest {
+    commit_request(
+        commit_id,
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(path).expect("path"),
+            parents: false,
+        },
+    )
+    .assertions(vec![loonfs_api::CommitAssertion::NamespaceHead {
+        expected_head_seq,
+    }])
+}
+
+#[tokio::test]
+async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
+    for second_expected in [ChangeSeq(0), ChangeSeq(1)] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = namespace_id("demo");
+        let context = mutation_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        let first = guarded_directory("first", "/first", ChangeSeq(0));
+        let second = guarded_directory("second", "/second", second_expected);
+        let next_seq = if second_expected == ChangeSeq(0) {
+            2
+        } else {
+            3
+        };
+        let results = publish_namespace_commits_batch(
+            &store,
+            &namespace_id,
+            vec![
+                CommitCandidate::new(first.clone()),
+                CommitCandidate::new(second),
+                CommitCandidate::new(guarded_directory("next", "/next", ChangeSeq(next_seq - 1))),
+            ],
+            &context,
+        )
+        .await;
+        let landed = results[0].as_ref().expect("first commit");
+        assert_eq!(landed.committed_seq, ChangeSeq(1));
+        if second_expected == ChangeSeq(0) {
+            let error = results[1].as_ref().expect_err("second assertion is stale");
+            assert_eq!(error.code(), ErrorCode::StaleHead);
+            let details = error.details().expect("assertion details");
+            assert_eq!(details.expected_head_seq, Some(ChangeSeq(0)));
+            assert_eq!(details.actual_head_seq, Some(ChangeSeq(1)));
+            assert_eq!(details.assertion_index, Some(0));
+            assert_eq!(details.operation_index, None);
+        } else {
+            assert_eq!(
+                results[1].as_ref().expect("second commit").committed_seq,
+                ChangeSeq(2)
+            );
+        }
+        assert_eq!(
+            results[2].as_ref().expect("next commit").committed_seq,
+            ChangeSeq(next_seq)
+        );
+        let head = load_namespace_head_control(&store, &namespace_id)
+            .await
+            .expect("head");
+        assert_eq!(head.state.next_inode_id, InodeId(next_seq + 2));
+        let replay = submit_commit(&store, &namespace_id, first.clone(), &context)
+            .await
+            .expect("receipt resolves despite stale assertion");
+        assert_eq!(&replay, landed);
+        let changed = first.assertions(vec![loonfs_api::CommitAssertion::NamespaceHead {
+            expected_head_seq: ChangeSeq(next_seq),
+        }]);
+        let conflict = submit_commit(&store, &namespace_id, changed, &context)
+            .await
+            .expect_err("changed assertion changes identity");
+        assert_eq!(conflict.code(), ErrorCode::CommitIdReuseConflict);
+    }
+}
+
+#[tokio::test]
+async fn assertion_limit_rejects_before_planning_and_writes_nothing() {
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    engine
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::new(guarded_directory(
+                "seed",
+                "/seed",
+                ChangeSeq(0),
+            ))],
+            &context,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .results
+        .remove(0)
+        .expect("seed commit");
+    store.take();
+    let request = guarded_directory("over-limit", "/missing/child", ChangeSeq(0)).assertions(vec![
+            loonfs_api::CommitAssertion::NamespaceHead {
+                expected_head_seq: ChangeSeq(0),
+            };
+            loonfs_core::limits::MAX_COMMIT_ASSERTIONS + 1
+        ]);
+    let error = engine
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::new(request)],
+            &context,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .results
+        .remove(0)
+        .expect_err("assertion limit");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert!(error
+        .to_string()
+        .contains("1025 assertions; maximum is 1024"));
+    let counts = store.counts();
+    assert_eq!(counts.puts, 0);
+    assert_eq!(counts.compare_and_swaps, 0);
+    assert_eq!(counts.deletes, 0);
 }

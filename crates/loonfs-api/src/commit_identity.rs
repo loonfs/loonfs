@@ -347,12 +347,14 @@ pub fn semantic_commit_fingerprint(
     actor: &ActorRef,
     message: Option<&str>,
     operations: &[FilesystemOperation],
+    assertions: &[crate::CommitAssertion],
 ) -> Result<CommitFingerprint, SemanticFingerprintError> {
     Ok(fingerprint_bytes(&canonical_commit_bytes(
         namespace_id,
         actor,
         message,
         operations,
+        assertions,
     )?))
 }
 
@@ -361,6 +363,7 @@ fn canonical_commit_bytes(
     actor: &ActorRef,
     message: Option<&str>,
     operations: &[FilesystemOperation],
+    assertions: &[crate::CommitAssertion],
 ) -> Result<Vec<u8>, SemanticFingerprintError> {
     #[derive(Serialize)]
     struct CanonicalCommit<'a> {
@@ -369,6 +372,8 @@ fn canonical_commit_bytes(
         actor: ActorFingerprintInput<'a>,
         operations: Vec<OperationFingerprintInput<'a>>,
         message: Option<&'a str>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        assertions: Vec<&'a crate::CommitAssertion>,
     }
 
     Ok(serde_json::to_vec(&CanonicalCommit {
@@ -380,6 +385,7 @@ fn canonical_commit_bytes(
         },
         operations: operations.iter().map(operation_fingerprint_input).collect(),
         message,
+        assertions: assertions.iter().collect(),
     })?)
 }
 
@@ -397,6 +403,8 @@ mod tests {
         struct Vector {
             name: String,
             operation: FilesystemOperation,
+            #[serde(default)]
+            assertions: Vec<crate::CommitAssertion>,
             canonical_json: String,
             fingerprint: String,
         }
@@ -406,17 +414,28 @@ mod tests {
         for vector in vectors {
             let namespace = NamespaceId::parse("demo").expect("namespace");
             let operations = [vector.operation];
-            let bytes = canonical_commit_bytes(&namespace, &test_actor(), None, &operations)
-                .expect("canonical bytes");
+            let bytes = canonical_commit_bytes(
+                &namespace,
+                &test_actor(),
+                None,
+                &operations,
+                &vector.assertions,
+            )
+            .expect("canonical bytes");
             assert_eq!(
                 bytes,
                 vector.canonical_json.as_bytes(),
                 "{} canonical bytes",
                 vector.name
             );
-            let fingerprint =
-                semantic_commit_fingerprint(&namespace, &test_actor(), None, &operations)
-                    .expect("fingerprint");
+            let fingerprint = semantic_commit_fingerprint(
+                &namespace,
+                &test_actor(),
+                None,
+                &operations,
+                &vector.assertions,
+            )
+            .expect("fingerprint");
             assert_eq!(
                 fingerprint.as_str(),
                 vector.fingerprint,
@@ -444,6 +463,7 @@ mod tests {
             &test_actor(),
             None,
             &[operation],
+            &[],
         )
         .expect("fingerprint")
         .as_str()
@@ -483,9 +503,9 @@ mod tests {
         .expect("reversed operation");
 
         assert_eq!(
-            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[forward])
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[forward], &[])
                 .expect("forward"),
-            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[reversed])
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[reversed], &[])
                 .expect("reversed")
         );
     }
@@ -498,6 +518,7 @@ mod tests {
             &test_actor(),
             None,
             &[update_attributes([], ["a", "b"], None, None)],
+            &[],
         )
         .expect("baseline");
 
@@ -507,7 +528,8 @@ mod tests {
                     &namespace_id,
                     &test_actor(),
                     None,
-                    &[update_attributes([], spelling, None, None)]
+                    &[update_attributes([], spelling, None, None)],
+                    &[]
                 )
                 .expect("variant"),
                 baseline
@@ -528,6 +550,7 @@ mod tests {
                 None,
                 None,
             )],
+            &[],
         )
         .expect("baseline");
 
@@ -556,7 +579,7 @@ mod tests {
         ] {
             assert_ne!(
                 baseline,
-                semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[variant])
+                semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[variant], &[])
                     .expect("variant fingerprint"),
                 "a changed {label} must change the fingerprint"
             );
@@ -587,6 +610,7 @@ mod tests {
                 &test_actor(),
                 None,
                 &[operation(generation)],
+                &[],
             )
             .expect("fingerprint")
         };
@@ -608,6 +632,7 @@ mod tests {
                 actor,
                 None,
                 std::slice::from_ref(&operation),
+                &[],
             )
             .expect("fingerprint")
         };
@@ -716,6 +741,7 @@ mod tests {
                     &test_actor(),
                     None,
                     &[put("/docs/report.txt", content_ref)],
+                    &[],
                 )
                 .expect("retry fingerprint")
                 .as_str(),
@@ -753,14 +779,16 @@ mod tests {
                 &namespace_id,
                 &test_actor(),
                 None,
-                &[put("/docs/report.txt", first)]
+                &[put("/docs/report.txt", first)],
+                &[]
             )
             .expect("fingerprint"),
             semantic_commit_fingerprint(
                 &namespace_id,
                 &test_actor(),
                 None,
-                &[put("/docs/report.txt", second)]
+                &[put("/docs/report.txt", second)],
+                &[]
             )
             .expect("fingerprint")
         );
@@ -772,14 +800,20 @@ mod tests {
         // commit id with a different message must conflict, so the message
         // joins the preimage.
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let without =
-            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[create_dir("/docs")])
-                .expect("fingerprint");
+        let without = semantic_commit_fingerprint(
+            &namespace_id,
+            &test_actor(),
+            None,
+            &[create_dir("/docs")],
+            &[],
+        )
+        .expect("fingerprint");
         let with = semantic_commit_fingerprint(
             &namespace_id,
             &test_actor(),
             Some("import batch"),
             &[create_dir("/docs")],
+            &[],
         )
         .expect("fingerprint");
 
@@ -795,14 +829,16 @@ mod tests {
                 &namespace_id,
                 &test_actor(),
                 None,
-                &[create_dir("/a"), create_dir("/b")]
+                &[create_dir("/a"), create_dir("/b")],
+                &[]
             )
             .expect("forward fingerprint"),
             semantic_commit_fingerprint(
                 &namespace_id,
                 &test_actor(),
                 None,
-                &[create_dir("/b"), create_dir("/a")]
+                &[create_dir("/b"), create_dir("/a")],
+                &[]
             )
             .expect("reversed fingerprint")
         );
@@ -828,6 +864,7 @@ mod tests {
                         expected_inode_id: options.expected_inode_id,
                         expected_revision_no: options.expected_revision_no,
                     }],
+                    &[],
                 )
                 .expect("retry fingerprint")
             };

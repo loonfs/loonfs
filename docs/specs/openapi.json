@@ -613,6 +613,40 @@
         ],
         "type": "string"
       },
+      "CommitAssertion": {
+        "description": "Admission conditions checked against the candidate's pre-state before its operations.\nThe pre-state head sequence is the last admitted commit's sequence in the batch,\nor the batch's base head sequence when no earlier candidate was admitted.",
+        "discriminator": {
+          "mapping": {
+            "namespace_head": "#/components/schemas/CommitAssertionNamespaceHead"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CommitAssertionNamespaceHead"
+          }
+        ]
+      },
+      "CommitAssertionNamespaceHead": {
+        "description": "Requires the pre-state head sequence to equal `expected_head_seq`.",
+        "properties": {
+          "expected_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence observed when the caller read its inputs."
+          },
+          "kind": {
+            "enum": [
+              "namespace_head"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_head_seq",
+          "kind"
+        ],
+        "type": "object"
+      },
       "CommitId": {
         "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] returns\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
         "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
@@ -626,6 +660,13 @@
           "actor": {
             "$ref": "#/components/schemas/ActorRef",
             "description": "Actor responsible for the commit, as supplied by the application."
+          },
+          "assertions": {
+            "description": "Ordered admission conditions evaluated before any operations.",
+            "items": {
+              "$ref": "#/components/schemas/CommitAssertion"
+            },
+            "type": "array"
           },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
@@ -1104,6 +1145,11 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Change-feed cursor the request asked to resume after."
           },
+          "assertion_index": {
+            "description": "Zero-based position of the failed request assertion.",
+            "minimum": 0,
+            "type": "integer"
+          },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Idempotency key of the commit the error concerns."
@@ -1126,7 +1172,7 @@
           },
           "expected_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The head sequence required by a namespace delete."
+            "description": "The head sequence required by the request."
           },
           "expected_inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -5651,7 +5697,7 @@
     },
     "/v0/namespaces/{namespace_id}/commits": {
       "post": {
-        "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
+        "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. Request assertions check the pre-state after receipt resolution and before operations; a failed assertion names its position in `details.assertion_index`. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
         "operationId": "create_commit",
         "parameters": [
           {

@@ -230,6 +230,7 @@ pub enum CoreError {
     StaleHeadPrecondition {
         expected: ChangeSeq,
         actual: ChangeSeq,
+        assertion_index: Option<u32>,
     },
     /// Identifies the operation that caused a multi-operation request to fail.
     /// The request remains atomic, and the error code is taken from the underlying
@@ -600,7 +601,12 @@ impl CoreError {
                 retention_floor_seq: Some(*retention_floor_seq),
                 ..ErrorDetails::default()
             }),
-            CoreError::StaleHeadPrecondition { expected, actual } => Some(ErrorDetails {
+            CoreError::StaleHeadPrecondition {
+                expected,
+                actual,
+                assertion_index,
+            } => Some(ErrorDetails {
+                assertion_index: *assertion_index,
                 expected_head_seq: Some(*expected),
                 actual_head_seq: Some(*actual),
                 ..ErrorDetails::default()
@@ -940,6 +946,7 @@ mod tests {
         // A refused `expected_head_seq` carries both sequences, so a caller
         // that still means to delete knows what to retry against.
         let precondition = CoreError::StaleHeadPrecondition {
+            assertion_index: None,
             expected: ChangeSeq(41),
             actual: ChangeSeq(45),
         };

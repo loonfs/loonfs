@@ -16,6 +16,9 @@ use loonfs_objectstore::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE};
 /// materialization.
 pub const MAX_COMMIT_OPERATIONS: usize = 4096;
 
+/// Bounds the admission work for one commit.
+pub const MAX_COMMIT_ASSERTIONS: usize = 1024;
+
 /// Maximum content-token or prepared-proof entries carried by one explicit
 /// commit, bounding preparation work for a new primary. An oversized
 /// candidate may occupy a publisher queue slot until candidate preparation

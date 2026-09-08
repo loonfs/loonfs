@@ -129,6 +129,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "move_by_inode",
     "move_path",
     "name_key",
+    "namespace_head",
     "namespace_id",
     "new_namespace_id",
     "next_after_seq",
@@ -350,6 +351,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         .collect();
 
     let populated = ErrorDetails {
+        assertion_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
         committed_seq: Some(ChangeSeq::from(1)),
         committed_fingerprint: Some("fingerprint".to_owned()),
@@ -1606,6 +1608,7 @@ async fn runtime_created_state_is_readable_through_http() {
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit: loonfs_api::options::CommitOptions {
+                assertions: Vec::new(),
                 actor: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
                 message: None,
@@ -1706,6 +1709,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
+                        assertions: Vec::new(),
                         actor: loonfs_test_support::test_actor(),
                         commit_id: None,
                         message: None,
@@ -1821,6 +1825,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
+                        assertions: Vec::new(),
                         actor: loonfs_test_support::test_actor(),
                         commit_id: None,
                         message: None,
@@ -2021,6 +2026,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
@@ -3679,6 +3685,7 @@ async fn write_file_bytes(
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
+                assertions: Vec::new(),
                 actor: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                 message: None,
@@ -3703,6 +3710,7 @@ async fn delete_path_recursive(
         DeleteOptions {
             behavior: DeleteDirectoryBehavior::Recursive,
             commit: loonfs_api::options::CommitOptions {
+                assertions: Vec::new(),
                 actor: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                 message: None,
@@ -4570,4 +4578,57 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
         );
         assert!(watched.peaks().peak_live_bytes <= loonfs::CONTENT_READ_CHUNK_BYTES);
     }
+}
+
+#[tokio::test]
+async fn stale_commit_assertion_returns_409_with_its_index() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, state) = app(
+        test_config(temp_dir.path(), "assertion-writer"),
+        AppOptions::default(),
+    )
+    .await
+    .expect("app");
+    state
+        .writer
+        .create_namespace(
+            &NamespaceId::parse("demo").expect("namespace"),
+            CreateNamespaceOptions::default(),
+        )
+        .await
+        .expect("namespace");
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v0/namespaces/demo/commits")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "commit_id": "stale-assertion",
+                        "actor": {"kind": "user", "id": "test-actor"},
+                        "assertions": [{"kind": "namespace_head", "expected_head_seq": 1}],
+                        "operations": [{"kind": "create_directory", "path": "/docs"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
+    assert_eq!(error.code, ErrorCode::StaleHead.as_str());
+    let details = error.details.expect("details");
+    assert_eq!(details.assertion_index, Some(0));
+    assert_eq!(details.expected_head_seq, Some(ChangeSeq(1)));
+    assert_eq!(details.actual_head_seq, Some(ChangeSeq(0)));
+    assert_eq!(details.operation_index, None);
+    state.writer.shutdown().await.expect("shutdown");
 }

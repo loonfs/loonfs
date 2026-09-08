@@ -179,6 +179,7 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         let commit_id = commit_id_or_generated(&options.commit);
         let request = CommitRequest {
+            assertions: options.commit.assertions.clone(),
             commit_id: commit_id.clone(),
             actor: options.commit.actor.clone(),
             message: options.commit.message.clone(),
@@ -217,7 +218,8 @@ impl Client {
                     path: spec.absolute_path().clone(),
                     parents: options.parents,
                 },
-            ),
+            )
+            .assertions(options.commit.assertions.clone()),
         )
         .await
     }
@@ -239,7 +241,8 @@ impl Client {
                     behavior: options.behavior,
                     expected_inode_id: options.expected_inode_id,
                 },
-            ),
+            )
+            .assertions(options.commit.assertions.clone()),
         )
         .await
     }
@@ -264,7 +267,8 @@ impl Client {
                     expected_inode_id: options.expected_inode_id,
                     expected_attributes_revision_no: options.expected_attributes_revision_no,
                 },
-            ),
+            )
+            .assertions(options.commit.assertions.clone()),
         )
         .await
     }
@@ -298,7 +302,8 @@ impl Client {
                         expected_revision_no: options.expected_destination_revision_no,
                     },
                 },
-            ),
+            )
+            .assertions(options.commit.assertions.clone()),
         )
         .await
     }
@@ -332,7 +337,8 @@ impl Client {
                         expected_revision_no: options.expected_destination_revision_no,
                     },
                 },
-            ),
+            )
+            .assertions(options.commit.assertions.clone()),
         )
         .await
     }
@@ -359,7 +365,8 @@ impl Client {
                     deletion_seq,
                     path: path.cloned(),
                 },
-            ),
+            )
+            .assertions(options.commit.assertions.clone()),
         )
         .await
     }
@@ -381,7 +388,8 @@ impl Client {
                     path: spec.absolute_path().clone(),
                     source_revision_no,
                 },
-            ),
+            )
+            .assertions(options.commit.assertions.clone()),
         )
         .await
     }

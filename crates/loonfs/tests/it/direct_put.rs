@@ -333,6 +333,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
+                assertions: Vec::new(),
                 actor: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
@@ -366,6 +367,7 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit: loonfs_api::options::CommitOptions {
+                assertions: Vec::new(),
                 actor: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
                 message: None,
@@ -400,6 +402,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 b"alpha",
                 PutFileOptions {
                     commit: loonfs_api::options::CommitOptions {
+                        assertions: Vec::new(),
                         actor: loonfs_test_support::test_actor(),
                         commit_id: Some(commit_id.clone()),
                         message: None,
@@ -665,6 +668,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
+                assertions: Vec::new(),
                 actor: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,

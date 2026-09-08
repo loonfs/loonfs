@@ -56,6 +56,10 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub operation_index: Option<u32>,
+    /// Zero-based position of the failed request assertion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub assertion_index: Option<u32>,
     /// Epoch the failing writer session held when it was displaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -132,7 +136,7 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_deletion_seq: Option<ChangeSeq>,
-    /// The head sequence required by a namespace delete.
+    /// The head sequence required by the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_head_seq: Option<ChangeSeq>,
@@ -563,6 +567,21 @@ impl FilesystemOperation {
     }
 }
 
+/// Admission conditions checked against the candidate's pre-state before its operations.
+/// The pre-state head sequence is the last admitted commit's sequence in the batch,
+/// or the batch's base head sequence when no earlier candidate was admitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommitAssertion {
+    /// Requires the pre-state head sequence to equal `expected_head_seq`.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitAssertionNamespaceHead"))]
+    NamespaceHead {
+        /// Sequence observed when the caller read its inputs.
+        expected_head_seq: ChangeSeq,
+    },
+}
+
 /// A request to commit one or more filesystem operations atomically in order.
 ///
 /// Unknown fields are rejected.
@@ -580,11 +599,20 @@ pub struct CommitRequest {
     /// The proofs for new external content references in this request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_tokens: Vec<ContentToken>,
+    /// Ordered admission conditions evaluated before any operations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<CommitAssertion>,
     /// The non-empty ordered operations to commit atomically.
     pub operations: Vec<FilesystemOperation>,
 }
 
 impl CommitRequest {
+    /// Sets the admission conditions in caller order.
+    pub fn assertions(mut self, assertions: Vec<CommitAssertion>) -> Self {
+        self.assertions = assertions;
+        self
+    }
+
     /// A request carrying exactly one operation.
     pub fn single(
         commit_id: CommitId,
@@ -597,6 +625,7 @@ impl CommitRequest {
             actor,
             message,
             content_tokens: Vec::new(),
+            assertions: Vec::new(),
             operations: vec![operation],
         }
     }

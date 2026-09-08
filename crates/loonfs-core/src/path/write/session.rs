@@ -6,12 +6,13 @@ use super::planner::prepare_commit_against_publish_view;
 use crate::commit::{
     CandidateAllocation, CommitFingerprint, CommitPlan, InodeAllocator, ValidatedCommitPlan,
 };
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 #[cfg(test)]
 use loonfs_api::AbsolutePath;
+use loonfs_api::CommitAssertion;
 #[cfg(test)]
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
@@ -62,6 +63,20 @@ impl PublishPlanningSession {
         committed_at_ms: u64,
         allocation: &mut CandidateAllocation,
     ) -> Result<ValidatedCommitPlan> {
+        for (assertion_index, assertion) in request.assertions.iter().enumerate() {
+            match assertion {
+                CommitAssertion::NamespaceHead { expected_head_seq }
+                    if *expected_head_seq != self.head.seq =>
+                {
+                    return Err(CoreError::StaleHeadPrecondition {
+                        expected: *expected_head_seq,
+                        actual: self.head.seq,
+                        assertion_index: u32::try_from(assertion_index).ok(),
+                    });
+                }
+                CommitAssertion::NamespaceHead { .. } => {}
+            }
+        }
         prepare_commit_against_publish_view(
             request,
             semantic_identity,
@@ -173,6 +188,7 @@ mod tests {
 
     fn candidate_that_allocates_then_fails(commit_id: &str) -> CommitCandidate {
         CommitCandidate::new(CommitRequest {
+            assertions: Vec::new(),
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -206,6 +222,50 @@ mod tests {
 
     fn test_fingerprint() -> CommitFingerprint {
         serde_json::from_str(r#""v2:sha256:test""#).expect("fingerprint")
+    }
+
+    #[tokio::test]
+    async fn assertions_change_only_the_fingerprint_in_the_wal_payload() {
+        use super::super::planner::commit_fingerprint;
+        use crate::commit::{materialize_commit, wal_payload_from_materialized_commit};
+
+        let (_temp_dir, store, namespace_id, _) = setup_namespace().await;
+        let view = load_current_metadata_view(&store, &namespace_id)
+            .await
+            .expect("view");
+        let request = create_directory_candidate("wal", "/docs").request().clone();
+        let mut payloads = Vec::new();
+        for assertions in [
+            Vec::new(),
+            vec![CommitAssertion::NamespaceHead {
+                expected_head_seq: view.head().seq,
+            }],
+        ] {
+            let request = request.clone().assertions(assertions);
+            let mut session = PublishPlanningSession::new(view.head());
+            let mut allocation = session.begin_candidate();
+            let plan = session
+                .prepare_commit(
+                    &request,
+                    commit_fingerprint(&namespace_id, &request).expect("fingerprint"),
+                    view.projected_metadata_view(),
+                    1,
+                    &mut allocation,
+                )
+                .await
+                .expect("plan");
+            let next_inode_id = session.commit_candidate(allocation).expect("allocation");
+            payloads.push(wal_payload_from_materialized_commit(&materialize_commit(
+                plan.finish(next_inode_id),
+                1,
+            )));
+        }
+        assert_ne!(
+            payloads[0].semantic_commit_fingerprint,
+            payloads[1].semantic_commit_fingerprint
+        );
+        payloads[1].semantic_commit_fingerprint = payloads[0].semantic_commit_fingerprint.clone();
+        assert_eq!(payloads[0], payloads[1]);
     }
 
     #[tokio::test]

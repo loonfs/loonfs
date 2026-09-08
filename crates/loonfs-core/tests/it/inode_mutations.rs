@@ -98,6 +98,7 @@ async fn creates_entries_under_a_parent_inode() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: test_commit_id(Some("create-by-inode")),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -372,6 +373,7 @@ async fn earlier_move_makes_a_later_guard_stale_and_rolls_back_the_commit() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: test_commit_id(Some("move-then-delete-with-old-generation")),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -435,6 +437,7 @@ async fn content_write_preserves_the_guard_for_a_later_move() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: test_commit_id(Some("write-then-move-with-same-generation")),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -547,6 +550,7 @@ async fn inode_operation_observes_an_earlier_delete_in_the_same_commit() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: test_commit_id(Some("delete-then-write")),
             actor: loonfs_test_support::test_actor(),
             message: None,

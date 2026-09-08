@@ -239,6 +239,7 @@ async fn assert_raw_error(response: reqwest::Response, expected: &ErrorOutcome) 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommitReplayRequest {
+    assertions: Vec<loonfs_api::CommitAssertion>,
     namespace_id: String,
     commit_id: String,
     actor: ActorRef,
@@ -268,7 +269,8 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
             path: loonfs_api::AbsolutePath::parse(&request.path).expect("fixture path"),
             parents: false,
         },
-    );
+    )
+    .assertions(request.assertions);
     let first = harness
         .client
         .create_commit(&namespace, &commit)
@@ -951,6 +953,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-inode-file"),
                 actor: request.actor.clone(),
                 message: None,
@@ -1026,6 +1029,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-revision"),
                 actor: request.actor.clone(),
                 message: None,
