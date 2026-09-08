@@ -2988,3 +2988,58 @@ fn commit_assertion_wire_shapes_match_golden() {
         serde_json::from_slice(&bytes).expect("decode wire shapes");
     assert_eq!(decoded, guarded);
 }
+
+#[test]
+fn name_folding_matches_the_fixed_unicode_corpus() {
+    assert_eq!(unicode_normalization::UNICODE_VERSION, (17, 0, 0));
+    assert_eq!(unicode_casefold::UNICODE_VERSION, (9, 0, 0));
+    let display_names = [
+        "Cafe\u{301}.TXT",
+        "CAFÉ.txt",
+        "Straße",
+        "STRASSE",
+        "ẞ",
+        "ﬀ",
+        "ﬃ",
+        "FFI",
+        "Σ",
+        "σ",
+        "ς",
+        "ΟΣ",
+        "ΐ",
+        "Ϊ\u{301}",
+        "I",
+        "i",
+        "İ",
+        "i\u{307}",
+        "ı",
+        "Kelvin",
+        "Ångström",
+        "A\u{30a}ngstro\u{308}m",
+        "МОСКВА",
+        "Αθήνα",
+        "東京",
+        "العربية",
+        "שלום",
+        "नमस्ते",
+        "\u{1100}\u{1161}",
+        "가",
+        "𐐀",
+        "Ა",
+        "ა",
+        "readme-123.txt",
+        "123_+-",
+    ];
+    let corpus: Vec<_> = display_names
+        .into_iter()
+        .map(|display_name| {
+            serde_json::json!({
+                "display_name": display_name,
+                "name_key": loonfs_api::name_key_for_display_name(display_name),
+            })
+        })
+        .collect();
+    let mut bytes = serde_json::to_vec_pretty(&corpus).expect("encode folding corpus");
+    bytes.push(b'\n');
+    assert_matches_golden("name_folding.v1.json", &bytes);
+}

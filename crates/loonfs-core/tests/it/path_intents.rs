@@ -1734,31 +1734,73 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
 }
 
 #[tokio::test]
-async fn resolve_path_uses_nfc_casefold_folding() {
+async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
+    #[derive(serde::Deserialize)]
+    struct NameMapping {
+        display_name: loonfs_api::DisplayName,
+        name_key: NameKey,
+    }
+
+    let corpus: Vec<NameMapping> = serde_json::from_str(include_str!(
+        "../../../loonfs-api/tests/golden/name_folding.v1.json"
+    ))
+    .expect("folding corpus");
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let store = loonfs_test_support::stores::RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        loonfs_test_support::stores::KeyPredicate::any(),
+    );
     let context = mutation_context();
-    let stored_path = "/Cafe\u{0301}.txt";
-    let lookup_path = "/CAF\u{00c9}.TXT";
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    let namespace_id = namespace_id("demo");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id("demo"),
-        stored_path,
-        b"hello",
-        &context,
-        Some("seed-unicode-name"),
-    )
-    .await
-    .expect("seed unicode name");
-
-    let resolved = resolve_path(&store, &namespace_id("demo"), lookup_path)
-        .await
-        .expect("resolve path");
-    assert_eq!(resolved.path.as_str(), stored_path);
-    assert_eq!(named_entry(&resolved), "Cafe\u{0301}.txt");
+    let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone());
+    let mut entries = std::collections::BTreeMap::<NameKey, PathEntry>::new();
+    for mapping in corpus {
+        let stored_path = format!("/{}", mapping.display_name);
+        let lookup_path = format!("/{}", mapping.name_key);
+        for path in [&stored_path, &lookup_path] {
+            let candidate = CommitCandidate::new(CommitRequest::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse(path).expect("corpus path"),
+                    parents: false,
+                },
+            ));
+            store.take();
+            let result = engine
+                .publish_batch(&store, vec![candidate], &context, &Default::default())
+                .await
+                .results
+                .into_iter()
+                .next()
+                .expect("one admission result");
+            if entries.contains_key(&mapping.name_key) {
+                let error = result.expect_err("folded sibling collision");
+                assert_eq!(error.code(), ErrorCode::PathConflict);
+                assert_eq!(store.counts().puts, 0);
+                assert_eq!(store.counts().compare_and_swaps, 0);
+                assert_eq!(store.counts().deletes, 0);
+            } else {
+                result.expect("admit corpus display name");
+            }
+            let resolved = resolve_path(&store, &namespace_id, path)
+                .await
+                .expect("resolve corpus spelling");
+            if let Some(entry) = entries.get(&mapping.name_key) {
+                assert_eq!(&resolved, entry);
+            } else {
+                assert_eq!(named_entry(&resolved), mapping.display_name.as_str());
+                assert!(entries
+                    .values()
+                    .all(|other| other.inode_id != resolved.inode_id));
+                entries.insert(mapping.name_key.clone(), resolved);
+            }
+        }
+    }
 }
 
 #[tokio::test]

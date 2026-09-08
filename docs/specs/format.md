@@ -205,8 +205,11 @@ The required invariants of this layout are:
 > retention winning every ambiguous race.
 
 > **Throughput is group commit; deadlines are local monotonic budgets a
-> writer applies to itself.** No validator ever compares clocks, and
-> accelerators (`recent_segments`, WAL indexes) prefetch but never decide
+> writer applies to itself.** Commit ordering and writer fencing do not depend
+> on clock agreement. Time-based reclamation and expiry require bounded clock
+> error, covered by the maintenance safety margins where specified in section
+> 6.4. Direct expiry checks have no added margin.
+> Accelerators (`recent_segments`, WAL indexes) prefetch but never decide
 > what the history is.
 
 ### 1.4 Head update authority
@@ -672,14 +675,19 @@ archive, or through a sync client.
 #### 2.3.1 Name-key folding
 
 Sibling-name comparison is a fixed rule of the v0 format, not a per-namespace
-choice. Every name key is derived from its display name by: normalize to NFC,
-apply Unicode default case folding, then normalize to NFC again. Both the read
-and the write path derive keys the same way, so a namespace cannot disagree
-with itself about which two names collide.
+choice. Every name key is derived from its display name by normalizing to NFC
+with Unicode 17.0.0 data, applying full Unicode default (non-Turkic) case folding
+with Unicode 9.0.0 data, then normalizing to NFC with Unicode 17.0.0 data again.
+These are the fixed data versions used by `unicode-normalization` 0.1.25 and
+`unicode-casefold` 0.2.0 in `Cargo.lock`. Their source tables declare those
+versions separately; the normalization and folding versions differ.
 
-Because the rule is fixed, nothing durable records it and there is nothing to
-default. If a second supported folding rule ever ships, the head gains a field
-that selects between them; until then there is nothing to select.
+Both admission and lookup use this rule. The display-name and name-key corpus
+in `crates/loonfs-api/tests/golden/name_folding.v1.json` pins its mappings and
+directory collisions. A dependency update that changes a mapping is a
+format-semantic change under section 4.3, even if no field or encoding changes.
+There is one rule, no per-namespace selector or head field, and no rewriting of
+stored keys.
 
 ### 2.4 Files and revisions
 
@@ -2415,7 +2423,7 @@ publishing CAS) — under these rules:
    retries. Multipart transfers of large immutable payloads carry no
    whole-operation deadline; the floor's provider terms remain the
    small-object bounds because everything the inequality times — the budget
-   self-checks, which are wall clock regardless of per-operation deadlines,
+   self-checks, which use local monotonic elapsed time,
    and the final compare-and-swap — concerns small control objects. A
    window below the floor is rejected as `invalid_request` at every
    surface. Under the floor's inequality, any acknowledged root
@@ -2424,12 +2432,56 @@ publishing CAS) — under these rules:
    reachable or not. An object without a provider timestamp reads as
    young.
 
-   Checkpoint records are the one family whose age is not a provider
-   timestamp. The record carries every instant its lifecycle needs, and
-   `T` is applied to those instead: a record is deleted `T` after its own
-   `released_at_ms`, and a record whose basis is verifiably absent is
-   released only `T` after its own `created_at_ms`, which is what keeps a
-   create still inside its verify budget from being raced.
+   **Clock assumptions.** Object age compares the collector host's recorded
+   `now_ms` with the provider's `last_modified_ms`:
+   `now_ms.saturating_sub(last_modified_ms) >= T`. The minimum `T` is
+   `GC_MIN_GRACE_WINDOW_MS = 1,230,000 ms`: 900,000 ms for the longest
+   publication, 120,000 ms for the provider deadline, 30,000 ms for an attempt,
+   and `GC_SAFETY_MARGIN_MS = 180,000 ms`. Thus the combined allowance for
+   clock error that overstates age (collector ahead of provider), timestamp
+   precision, and scheduling delay around the budget checks is at most
+   180,000 ms. If scheduling and precision consume `S` ms, permissible
+   relative clock error is at most `180,000 - S` ms. This is a relative
+   host-to-provider bound, not an allowance of three minutes for each clock.
+   A provider clock ahead of the collector delays collection. Missing age
+   evidence retains the object; a timestamp in the future also retains it.
+
+   Record ages compare clocks on different hosts. Checkpoint deletion uses
+   `now_ms.saturating_sub(released_at_ms) >= T`; release of a checkpoint with
+   a verifiably absent basis uses the same comparison with `created_at_ms`.
+   Upload cleanup uses stored expiry, completion, and abort instants (rule
+   11). The grace part of each inequality covers the same combined 180,000 ms
+   allowance, now between the collector and the host that stamped the record
+   or admits the final publication. `CONTENT_RECLAMATION_GRACE_MS` adds the
+   receipt admission window to `GC_MIN_GRACE_WINDOW_MS`; it assumes this
+   relative error bound also holds between receipt issuers, admitting hosts,
+   and collectors. Host clock drift over a run and any wall-clock steps must
+   fit within these bounds.
+
+   Direct record expiry is different: hosts compare their current instant
+   with a stored `expires_at_ms` without adding `GC_SAFETY_MARGIN_MS`.
+   `UPLOAD_SESSION_LEASE_MS`, caller-selected checkpoint leases, and snapshot
+   expiries specify lifetimes, not skew allowances. No constant guarantees
+   that these remain usable until the creating host reaches the deadline:
+   a host ahead by `E` ms can reject or release them up to `E` ms early by
+   the creating host's clock. Even a positive error below 180,000 ms can do so.
+   Grace-delayed reclamation protects publication; it does not promise
+   simultaneous expiry decisions or the full requested lifetime on every host.
+
+   Fork and compaction publication have explicit remaining-time checks.
+   `FORK_CHECKPOINT_LEASE_MS = 2 * GC_MIN_GRACE_WINDOW_MS` supplies the fork
+   lease. Installation requires strictly more remaining lease time than
+   `FORK_INSTALL_MARGIN_MS = 330,000 ms`: one 150,000 ms provider operation
+   plus the 180,000 ms allowance. The full lease alone would not cover skew
+   when a delayed installer has nearly spent it. A compaction refresh stamps
+   its deadline before its provider write, so its checked inequality is
+   `METADATA_COMPACTION_LEASE_EXPIRY_MS >= 150,000 + GC_MIN_GRACE_WINDOW_MS`.
+   The current 1,500,000 ms lease exceeds this 1,380,000 ms floor. It covers
+   the refresh write, publication, final provider operation, and the same
+   180,000 ms allowance. `METADATA_COMPACTION_STAGING_GRACE_MS` adds that
+   lease lifetime to the minimum object-age grace. These inequalities assume
+   the stated provider and monotonic publication bounds hold; they do not
+   cover an unbounded pause between a budget check and its write.
 
    An object's provider timestamp says when it appeared, not when it stopped
    being referenced, and those differ for every object a publication once
@@ -2468,7 +2520,10 @@ publishing CAS) — under these rules:
    the fixed cutoff and publication budgets; streaming compaction uses the
    independent protection in rule 12. An arbitrarily paused older collector
    retains these same protections and cannot advance a newer run's CAS state.
-   Mutable candidate lifecycles are still inspected when swept.
+   Mutable candidate lifecycles are still inspected when swept. The recorded
+   `now` makes paused and resumed passes consistent; it does not remove
+   host-to-provider or host-to-host skew. The starting host's clock error
+   remains part of every comparison that uses that run's instant.
 4. Roots: `metadata/root.json`; the reference manifest R (rule 1); active
    checkpoint records whose owner still
    stands — a user or snapshot pin until its expiry passes, a fork pin until
@@ -2643,9 +2698,10 @@ publishing CAS) — under these rules:
 
    `METADATA_COMPACTION_LEASE_EXPIRY_MS` is
    `METADATA_COMPACTION_LEASE_MISSED_REFRESHES` times the refresh interval,
-   and it must itself be at least `T`: a job's last refresh before
-   its output becomes referenced is at the top of a finalization attempt, and
-   that attempt's compare-and-swap lands within one publication bound of it.
+   and it must itself cover one provider operation plus
+   `GC_MIN_GRACE_WINDOW_MS`. The refresh write precedes the finalization
+   budget; both that write and the final root compare-and-swap consume a
+   provider bound. Rule 1 derives the clock-error allowance for this check.
    That inequality is also what completes the fence — a job that refreshed
    at the top of an attempt cannot have its prefix claimed before that
    attempt's root compare-and-swap.
@@ -2822,5 +2878,8 @@ rows described above copy this timestamp into fields such as `created_at_ms`,
 without also loading the commit receipt.
 
 These timestamps are informational. Sequence numbers determine ordering and
-validity. Commit fingerprints do not include timestamps, and the format does
-not require clocks to be synchronized.
+validity. Commit fingerprints do not include timestamps. Commit ordering and
+writer fencing use sequences, epochs, and compare-and-swap and do not depend
+on clock agreement. Time-based reclamation and expiry require bounded clock
+error. Section 6.4 states what the maintenance safety margins cover and where
+direct expiry comparisons have no added margin.

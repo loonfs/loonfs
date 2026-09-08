@@ -5085,3 +5085,119 @@ async fn a_missing_completed_mark_page_stops_before_deleting_candidates() {
         .expect_err("missing evidence is never an absent reference");
     assert_eq!(namespace_keys(&store, &ns).await, before);
 }
+
+#[tokio::test]
+async fn provider_age_reserves_the_clock_margin_before_deletion() {
+    use super::reap::{delete_if_aged, GraceAge};
+    use crate::limits::GC_SAFETY_MARGIN_MS;
+
+    let dir = tempdir().expect("tempdir");
+    let provider_stamp = 1_000_000;
+    let store = RecordingStore::new(
+        MetadataMapStore::new(
+            LocalFsStore::new(dir.path()).expect("store"),
+            KeyPredicate::any(),
+            move |mut metadata| {
+                metadata.last_modified_ms = Some(provider_stamp);
+                metadata
+            },
+        ),
+        KeyPredicate::any(),
+    );
+    let key = "orphan";
+    store
+        .put_if_absent(key, Bytes::from_static(b"orphan"))
+        .await
+        .expect("write orphan");
+    let publication_bound = GC_MIN_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
+    let collector = context(provider_stamp + publication_bound - 1 + GC_SAFETY_MARGIN_MS);
+    assert_eq!(
+        delete_if_aged(&store, key, GC_MIN_GRACE_WINDOW_MS, collector.now_ms)
+            .await
+            .expect("age before cutoff"),
+        GraceAge::Young,
+    );
+    assert_eq!(store.counts().deletes, 0);
+    assert_eq!(
+        delete_if_aged(&store, key, GC_MIN_GRACE_WINDOW_MS, collector.now_ms + 1)
+            .await
+            .expect("age at cutoff"),
+        GraceAge::Aged,
+    );
+    assert_eq!(store.counts().deletes, 1);
+}
+
+#[tokio::test]
+async fn host_clock_error_advances_record_expiry_but_release_keeps_its_grace() {
+    use crate::limits::GC_SAFETY_MARGIN_MS;
+
+    let dir = tempdir().expect("tempdir");
+    let store = MetadataMapStore::without_last_modified(
+        LocalFsStore::new(dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let creator = context(1_000_000);
+    bootstrap_namespace(&store, &namespace_id, &creator, false)
+        .await
+        .expect("bootstrap");
+    let expires_at_ms = creator.now_ms + 2 * GC_SAFETY_MARGIN_MS;
+    let checkpoint = crate::checkpoint::create_checkpoint(
+        &store,
+        &namespace_id,
+        CheckpointOwner::User {
+            name: "clock-boundary".to_owned(),
+            expires_at_ms: Some(expires_at_ms),
+        },
+        &creator,
+    )
+    .await
+    .expect("checkpoint");
+    let key = loonfs_objectstore::keys::checkpoint_record(&namespace_id, &checkpoint.checkpoint_id);
+    let store = RecordingStore::new(store, KeyPredicate::exact(key.clone()));
+    let config = GcConfig {
+        grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
+        ..config()
+    };
+    let clock_error = GC_SAFETY_MARGIN_MS / 2;
+    let creator_at_expiry_check = expires_at_ms - clock_error;
+    let collector = context(creator_at_expiry_check + clock_error);
+    gc_namespace(
+        &store,
+        &namespace_id,
+        &config,
+        &context(collector.now_ms - 1),
+    )
+    .await
+    .expect("before expiry");
+    assert_eq!(store.counts().compare_and_swaps, 0);
+    gc_namespace(&store, &namespace_id, &config, &collector)
+        .await
+        .expect("at expiry on the faster host");
+    assert_eq!(store.counts().compare_and_swaps, 1);
+    assert_eq!(
+        checkpoint_lifecycle(&store, &namespace_id, &checkpoint.checkpoint_id).await,
+        CheckpointStatus::Released {
+            released_at_ms: collector.now_ms
+        }
+    );
+    gc_namespace(
+        &store,
+        &namespace_id,
+        &config,
+        &context(collector.now_ms + GC_MIN_GRACE_WINDOW_MS - 1),
+    )
+    .await
+    .expect("before release grace cutoff");
+    assert_eq!(store.counts().deletes, 0);
+    gc_namespace(
+        &store,
+        &namespace_id,
+        &config,
+        &context(collector.now_ms + GC_MIN_GRACE_WINDOW_MS),
+    )
+    .await
+    .expect("at release grace cutoff");
+    assert_eq!(store.counts().deletes, 1);
+    assert!(store.head(&key).await.expect("head checkpoint").is_none());
+}

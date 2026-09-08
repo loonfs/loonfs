@@ -6,8 +6,8 @@
 //! itself against a budget here and refuses to publish its root once the
 //! budget is spent, provider operations consume one deadline across retries,
 //! and the minimum grace window is derived — not tuned — from those bounds
-//! plus a margin for provider-timestamp skew. Callers may configure a larger
-//! grace window, never a smaller one.
+//! plus a margin for clock error and scheduling delay. Callers may configure
+//! a larger grace window, never a smaller one.
 
 use loonfs_objectstore::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE};
 
@@ -86,7 +86,7 @@ const _: () = assert!(
 /// every object it times (WAL segments inside the publish budget,
 /// checkpoint records, the root compare-and-swap) is a small control
 /// object on the single-request path, and publications self-enforce their
-/// budgets by wall clock regardless of per-operation deadlines.
+/// budgets by local monotonic elapsed time regardless of provider deadlines.
 pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = PROVIDER_OPERATION_DEADLINE.as_millis() as u64;
 
 /// One control-plane provider HTTP attempt's request timeout, in
@@ -114,8 +114,9 @@ pub const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
 /// garbage-collection candidates.
 pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 
-/// Margin absorbing provider-timestamp skew against the GC caller's clock,
-/// plus scheduling slop around the budget checks.
+/// Combined allowance for age overstatement from host-to-provider or
+/// host-to-host clock error and scheduling delay around publication checks.
+/// Direct expiry comparisons do not add this margin to stored deadlines.
 pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 
 /// Default work budget for one garbage-collection invocation.
@@ -132,8 +133,8 @@ pub const METADATA_COMPACTION_LEASE_MISSED_REFRESHES: u64 = 5;
 
 /// Lifetime written into a compaction lease whenever the job refreshes it.
 ///
-/// This must outlast one publication so garbage collection cannot claim a
-/// job's prefix while its final compare-and-swap is in progress.
+/// This covers the refresh write, final publication, and clock-error margin
+/// so collection cannot claim the output during the root compare-and-swap.
 pub const METADATA_COMPACTION_LEASE_EXPIRY_MS: u64 =
     METADATA_COMPACTION_LEASE_MISSED_REFRESHES * METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS;
 
@@ -153,9 +154,10 @@ const _: () = assert!(
     "a refresh that spends its whole provider budget must still land before the next is due"
 );
 
-/// Returns whether a lease can cover one metadata publication.
+/// Includes the refresh write before the publication budget starts.
 const fn outlasts_one_publication(expiry_ms: u64) -> bool {
-    expiry_ms >= GC_MIN_GRACE_WINDOW_MS
+    expiry_ms
+        >= PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_MIN_GRACE_WINDOW_MS
 }
 
 // The lease must remain valid through a final publication attempt.
@@ -174,7 +176,7 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 
 /// Minimum age of an unreachable object before garbage collection or repair
 /// may remove it. The value covers the longest publication budget, provider
-/// operation time, and clock skew.
+/// operation time, and the combined clock-error and scheduling allowance.
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     max_u64(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS),
     METADATA_PUBLICATION_BUDGET_MS,
@@ -207,14 +209,22 @@ pub const MAX_SIGNED_PARTS_PER_REQUEST: usize = 1_000;
 
 /// Lease for the source checkpoint created by a fork attempt.
 ///
-/// Two GC grace windows cover checkpoint creation and target installation.
+/// Renewal and the installation margin protect an absent target against
+/// collection by a host whose clock is ahead within the safety allowance.
 pub const FORK_CHECKPOINT_LEASE_MS: u64 = 2 * GC_MIN_GRACE_WINDOW_MS;
 
-/// Time reserved for the target-head write after renewing a fork checkpoint.
+/// Remaining lease time required before target installation, including
+/// the provider write and the clock-error and scheduling allowance.
 pub const FORK_INSTALL_MARGIN_MS: u64 =
-    PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS;
+    PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS;
 
-/// Lease duration for an upload session.
+const fn covers_fork_installation(margin_ms: u64) -> bool {
+    margin_ms >= PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS
+}
+
+const _: () = assert!(covers_fork_installation(FORK_INSTALL_MARGIN_MS));
+
+/// Lifetime resolved on the creating host; expiry checks add no clock-error margin.
 pub const UPLOAD_SESSION_LEASE_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Time during which a content receipt may be used in a commit.
@@ -230,7 +240,7 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
 
 /// Minimum age of unreferenced content from a completed upload before
 /// collection. The value covers the receipt window, receipt lifetime, and a
-/// final publication.
+/// final publication with the clock-error and scheduling allowance.
 pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;
 
@@ -327,7 +337,17 @@ mod tests {
         assert!(outlasts_one_publication(
             METADATA_COMPACTION_LEASE_EXPIRY_MS
         ));
-        assert!(!outlasts_one_publication(GC_MIN_GRACE_WINDOW_MS - 1));
+        let minimum =
+            GC_MIN_GRACE_WINDOW_MS + PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS;
+        assert!(outlasts_one_publication(minimum));
+        assert!(!outlasts_one_publication(minimum - 1));
+    }
+
+    #[test]
+    fn the_fork_installation_margin_reserves_clock_error_after_the_provider_write() {
+        assert_eq!(FORK_INSTALL_MARGIN_MS, 330_000);
+        assert!(covers_fork_installation(FORK_INSTALL_MARGIN_MS));
+        assert!(!covers_fork_installation(FORK_INSTALL_MARGIN_MS - 1));
     }
 
     #[test]
