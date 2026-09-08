@@ -1444,29 +1444,23 @@ async fn bootstrap_writes_a_descriptor_before_the_head_and_fork_writes_none() {
         fork_head.state.content_store_id,
         descriptor.content_store_id
     );
-    store.reset();
-    let error = bootstrap_namespace(&store, &source, &context, false)
-        .await
-        .expect_err("source exists");
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    let puts: Vec<_> = store
-        .take()
-        .into_iter()
-        .filter_map(|operation| match operation {
-            RecordedOperation::Put { key, mode, .. } => Some((key, mode)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(puts.len(), 2);
-    assert_ne!(puts[0].0, descriptor_key);
-    assert!(puts[0].0.starts_with("content-stores/") && puts[0].0.ends_with("/store.json"));
-    assert_eq!(puts[0].1, PutMode::CreateIfAbsent);
-    assert_eq!(puts[1], (wal_head(&source), PutMode::CreateIfAbsent));
-    assert!(store
-        .head(&puts[0].0)
-        .await
-        .expect("orphan descriptor")
-        .is_some());
+    for allow_existing in [false, true] {
+        store.reset();
+        let result = bootstrap_namespace(&store, &source, &context, allow_existing).await;
+        if allow_existing {
+            assert_eq!(result.expect("adopt source").namespace_id, source);
+        } else {
+            assert_eq!(
+                result.expect_err("source exists").code(),
+                ErrorCode::NamespaceExists
+            );
+        }
+        let counts = store.counts();
+        assert_eq!(
+            (counts.puts, counts.compare_and_swaps, counts.deletes),
+            (0, 0, 0)
+        );
+    }
 }
 
 #[tokio::test]
@@ -1488,9 +1482,143 @@ async fn an_occupied_descriptor_key_fails_before_the_head_write() {
         if message.contains("already exists under a freshly minted identity"))
     );
     let operations = store.take();
-    assert_eq!(operations.len(), 1);
+    assert_eq!(operations.len(), 2);
     assert!(
-        matches!(&operations[0], RecordedOperation::Put { mode: PutMode::CreateIfAbsent, key, .. }
+        matches!(&operations[0], RecordedOperation::GetWithMetadata { key, .. }
+        if key == &wal_head(&namespace_id("demo")))
+    );
+    assert!(
+        matches!(&operations[1], RecordedOperation::Put { mode: PutMode::CreateIfAbsent, key, .. }
         if key.starts_with("content-stores/") && key.ends_with("/store.json"))
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_of_a_deleted_namespace_writes_nothing() {
+    let directory = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    namespace_engine(&store, &namespace_id, &context)
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect("delete");
+    for allow_existing in [false, true] {
+        store.reset();
+        let error = bootstrap_namespace(&store, &namespace_id, &context, allow_existing)
+            .await
+            .expect_err("retired id");
+        assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
+        let counts = store.counts();
+        assert_eq!(
+            (counts.puts, counts.compare_and_swaps, counts.deletes),
+            (0, 0, 0)
+        );
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_head_read_failures_never_create_a_descriptor() {
+    for injected in [
+        InjectedError::Transport("head read failed".to_owned()),
+        InjectedError::PermissionDenied("head read denied".to_owned()),
+    ] {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = namespace_id("demo");
+        let failing = FailStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::exact(wal_head(&namespace_id)),
+            OperationClass::Read,
+            injected,
+        );
+        failing.fail_all();
+        let store = RecordingStore::new(failing, KeyPredicate::any());
+        for allow_existing in [false, true] {
+            let error =
+                bootstrap_namespace(&store, &namespace_id, &mutation_context(), allow_existing)
+                    .await
+                    .expect_err("head read failed");
+            assert!(matches!(
+                error,
+                loonfs_core::BootstrapNamespaceError::Head(_)
+            ));
+        }
+        let counts = store.counts();
+        assert_eq!(
+            (counts.puts, counts.compare_and_swaps, counts.deletes),
+            (0, 0, 0)
+        );
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_of_a_corrupt_head_writes_nothing() {
+    let directory = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = namespace_id("demo");
+    store
+        .put_if_absent(
+            &wal_head(&namespace_id),
+            Bytes::from_static(b"invalid head"),
+        )
+        .await
+        .expect("corrupt head");
+    store.reset();
+    for allow_existing in [false, true] {
+        let error = bootstrap_namespace(&store, &namespace_id, &mutation_context(), allow_existing)
+            .await
+            .expect_err("corrupt head");
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+    }
+    let counts = store.counts();
+    assert_eq!(
+        (counts.puts, counts.compare_and_swaps, counts.deletes),
+        (0, 0, 0)
+    );
+}
+
+#[tokio::test]
+async fn a_creator_losing_after_the_head_read_leaves_only_an_orphan_descriptor() {
+    let directory = tempdir().expect("tempdir");
+    let store = loonfs_test_support::stores::BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix("content-stores/"),
+        OperationClass::PutCreateIfAbsent,
+    );
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    store.block_next();
+    let delayed = bootstrap_namespace(&store, &namespace_id, &context, false);
+    let winner = async {
+        store.wait_until_blocked().await;
+        let result = bootstrap_namespace(&store, &namespace_id, &context, false).await;
+        store.release();
+        result.expect("concurrent creator wins")
+    };
+    let (delayed, winner) = tokio::join!(delayed, winner);
+    assert_eq!(
+        delayed.expect_err("lost conditional write").code(),
+        ErrorCode::NamespaceExists
+    );
+    assert_eq!(winner.namespace_id, namespace_id);
+    let head = head_state(&store, &namespace_id).await;
+    let descriptors = store
+        .list_prefix("content-stores/")
+        .await
+        .expect("descriptors");
+    assert_eq!(descriptors.len(), 2);
+    assert!(descriptors.contains(&content_store(&head.content_store_id)));
+    assert_eq!(
+        namespace_keys(&store, &namespace_id).await,
+        vec![wal_head(&namespace_id)]
     );
 }

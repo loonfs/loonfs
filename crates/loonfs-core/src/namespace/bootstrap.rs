@@ -83,6 +83,29 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     allow_existing: bool,
 ) -> Result<Namespace, BootstrapNamespaceError> {
+    // Avoid creating an unreferenced descriptor for an already-taken id.
+    // Absence here is only a hint: the conditional head write still decides
+    // which concurrent creator wins.
+    match load_head_object(store, namespace_id).await {
+        Ok(existing) => {
+            if existing.state.status.is_deleted() {
+                return Err(BootstrapNamespaceError::NamespaceDeleted {
+                    namespace_id: namespace_id.clone(),
+                });
+            }
+            if !allow_existing {
+                return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
+                    namespace_id: namespace_id.clone(),
+                });
+            }
+            return crate::namespace::status::load_namespace(store, namespace_id)
+                .await
+                .map_err(BootstrapNamespaceError::Core);
+        }
+        Err(ControlObjectLoadError::MissingObject { .. }) => {}
+        Err(error) => return Err(BootstrapNamespaceError::Head(error)),
+    }
+
     let mut head = HeadState::initial(
         namespace_id.clone(),
         ContentStoreId::generate(),

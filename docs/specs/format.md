@@ -721,8 +721,8 @@ an unsigned 64-bit Unix-millisecond creation timestamp. Namespace creation
 writes it with create-if-absent before installing the head that names the
 new domain. An occupied key under the freshly generated id is corruption.
 The descriptor is immutable and never collected. An abandoned create,
-including a head install refused because the namespace exists or was
-deleted, can leave an orphan descriptor that no head names. Error paths
+including a head install that loses to another creator after the initial
+absence check, can leave an orphan descriptor that no head names. Error paths
 write nothing further. Forks share the source domain and write no descriptor.
 No reader consults it today. A deployment resolving a content domain to a
 physical backend may read it to confirm that backend holds the domain.
@@ -1758,11 +1758,19 @@ and everything written after it is ordinary namespace history.
 #### 3.9.1 Creating a namespace
 
 The request supplies only the new namespace id; the server supplies the
-mutation context. Build the complete active genesis head: sequence 0, the
+mutation context. First read and validate the namespace head. An existing
+active head returns `namespace_exists`, or the existing namespace when
+`allow_existing` is set; a deleted head returns `namespace_deleted`. These
+paths write nothing. Read failures and corrupt heads are errors, never
+absence. Only a missing head permits creation to proceed.
+
+Build the complete active genesis head: sequence 0, the
 genesis commit id, writer epoch 0, the next inode id after the root inode,
 a freshly minted content store id, and no fork basis. Write the descriptor
 for that domain with create-if-absent (section 2.4.1), then install the head
-with create-if-absent.
+with create-if-absent. The initial read does not reserve the namespace id;
+the conditional head write still decides races and retains the recovery
+rules in section 3.9.3.
 
 No manifest, root, or floor is prepared before the head write, and none is
 written after it: the genesis basis is built in (section 2.9.1). The root
