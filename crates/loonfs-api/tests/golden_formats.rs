@@ -2940,3 +2940,51 @@ fn gc_mark_pages_reject_wrong_order_oversize_and_unknown_entries() {
     .expect("encode");
     assert!(decode_gc_mark_page(encoded.as_bytes()).is_err());
 }
+
+#[test]
+fn commit_assertion_wire_shapes_match_golden() {
+    use loonfs_api::{
+        AbsolutePath, CommitAssertion, CommitRequest, ErrorDetails, FilesystemOperation,
+    };
+
+    let request = CommitRequest::single(
+        CommitId::parse("guarded").expect("commit id"),
+        actor(),
+        None,
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/docs").expect("path"),
+            parents: false,
+        },
+    );
+    let guarded = request.clone().assertions(vec![
+        CommitAssertion::NamespaceHead {
+            expected_head_seq: ChangeSeq(42),
+        },
+        CommitAssertion::FileRevision {
+            inode_id: InodeId(42),
+            expected_revision_no: RevisionNo(3),
+        },
+        CommitAssertion::Binding {
+            path: AbsolutePath::parse("/docs/input").expect("path"),
+            expected_inode_id: Some(InodeId(42)),
+            expected_binding_generation: Some(
+                loonfs_api::BindingGeneration::parse("aaaa").expect("generation"),
+            ),
+        },
+        CommitAssertion::Attributes {
+            inode_id: InodeId(42),
+            expected_attributes_revision_no: loonfs_api::AttributeRevisionNo(2),
+        },
+    ]);
+    let details = ErrorDetails {
+        assertion_index: Some(0),
+        expected_head_seq: Some(ChangeSeq(42)),
+        actual_head_seq: Some(ChangeSeq(43)),
+        ..ErrorDetails::default()
+    };
+    let bytes = serde_json::to_vec_pretty(&(request, &guarded, details)).expect("wire shapes");
+    assert_matches_golden("commit_assertions.v0.json", &bytes);
+    let (_, decoded, _): (CommitRequest, CommitRequest, ErrorDetails) =
+        serde_json::from_slice(&bytes).expect("decode wire shapes");
+    assert_eq!(decoded, guarded);
+}

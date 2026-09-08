@@ -118,7 +118,10 @@ pub enum CoreError {
     },
     /// The requested binding generation is no longer current.
     #[error("inode `{inode_id}` is no longer bound at the generation the request named")]
-    BindingGenerationMismatch { inode_id: InodeId },
+    BindingGenerationMismatch {
+        inode_id: InodeId,
+        assertion_index: Option<u32>,
+    },
     #[error("commit id conflict for `{commit_id}`")]
     CommitIdReuseConflict {
         commit_id: String,
@@ -230,6 +233,7 @@ pub enum CoreError {
     StaleHeadPrecondition {
         expected: ChangeSeq,
         actual: ChangeSeq,
+        assertion_index: Option<u32>,
     },
     /// Identifies the operation that caused a multi-operation request to fail.
     /// The request remains atomic, and the error code is taken from the underlying
@@ -600,9 +604,22 @@ impl CoreError {
                 retention_floor_seq: Some(*retention_floor_seq),
                 ..ErrorDetails::default()
             }),
-            CoreError::StaleHeadPrecondition { expected, actual } => Some(ErrorDetails {
+            CoreError::StaleHeadPrecondition {
+                expected,
+                actual,
+                assertion_index,
+            } => Some(ErrorDetails {
+                assertion_index: *assertion_index,
                 expected_head_seq: Some(*expected),
                 actual_head_seq: Some(*actual),
+                ..ErrorDetails::default()
+            }),
+            CoreError::BindingGenerationMismatch {
+                inode_id,
+                assertion_index: Some(assertion_index),
+            } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                assertion_index: Some(*assertion_index),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitValidation(error) => error.details(),
@@ -908,6 +925,7 @@ mod tests {
             inode_id: InodeId(7),
             expected: RevisionNo(2),
             actual: Some(RevisionNo(5)),
+            assertion_index: None,
         });
         let details = stale.details().expect("stale-revision details");
         assert_eq!(details.inode_id, Some(InodeId(7)));
@@ -925,6 +943,7 @@ mod tests {
                 inode_id: InodeId(7),
                 expected: RevisionNo(2),
                 actual: None,
+                assertion_index: None,
             });
         let message = unversioned.to_string();
         assert!(message.contains("revision 2"), "{message}");
@@ -940,6 +959,7 @@ mod tests {
         // A refused `expected_head_seq` carries both sequences, so a caller
         // that still means to delete knows what to retry against.
         let precondition = CoreError::StaleHeadPrecondition {
+            assertion_index: None,
             expected: ChangeSeq(41),
             actual: ChangeSeq(45),
         };

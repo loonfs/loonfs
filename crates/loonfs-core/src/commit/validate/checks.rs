@@ -541,7 +541,8 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
             CommitValidationError::UpdateAttributesBaseRevisionMismatch {
                 inode_id,
                 expected,
-                actual,
+                actual: Some(actual),
+                assertion_index: None,
             }
             .into(),
         );
@@ -641,10 +642,13 @@ async fn validate_source_binding<S: ObjectStore + ?Sized>(
     };
     if BindingIdentity::from(&existing) != expected_identity {
         return Err(CommitValidationError::BindingPreconditionMismatch {
-            parent_inode_id: expected.parent_inode_id,
-            name_key: expected.name_key.clone(),
-            expected_child_inode_id: expected.child_inode_id,
-            actual_child_inode_id: existing.child_inode_id,
+            target: format!(
+                "name `{}` under parent inode `{}`",
+                expected.name_key, expected.parent_inode_id
+            ),
+            expected_inode_id: Some(expected.child_inode_id),
+            actual_inode_id: Some(existing.child_inode_id),
+            assertion_index: None,
         }
         .into());
     }
@@ -668,6 +672,7 @@ async fn validate_file_base_revision_is<S: ObjectStore + ?Sized>(
             inode_id,
             expected: expected_revision_no,
             actual,
+            assertion_index: None,
         }
         .into());
     }

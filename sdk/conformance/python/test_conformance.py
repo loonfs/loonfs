@@ -29,6 +29,7 @@ from loonfs.server import (
     BeginUploadResponse_DirectPut,
     BeginUploadResponse_ServiceProxied,
     Checksum,
+    CommitAssertion,
     CommitResponse,
     CompletedUploadPart,
     ConflictError,
@@ -112,6 +113,7 @@ class ErrorContractExpected:
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class CommitReplayRequest:
+    assertions: list[CommitAssertion]
     namespace_id: str
     commit_id: str
     actor: ActorRef
@@ -513,12 +515,15 @@ def _apply(
     *,
     message: str | None = None,
     content_tokens: list[str] | None = None,
+    assertions: list[CommitAssertion] | None = None,
 ) -> Any:
     extra = {}
     if message is not None:
         extra["message"] = message
     if content_tokens is not None:
         extra["content_tokens"] = content_tokens
+    if assertions is not None:
+        extra["assertions"] = assertions
     return client.commits.create(
         namespace_id,
         actor=actor,
@@ -712,6 +717,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
         request.actor,
         FilesystemOperation_CreateDirectory(path=request.path, parents=False),
         message=request.message,
+        assertions=request.assertions,
     )
     replayed = _apply(
         harness.client,
@@ -720,6 +726,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
         request.actor,
         FilesystemOperation_CreateDirectory(path=request.path, parents=False),
         message=request.message,
+        assertions=request.assertions,
     )
 
     assert first.committed_seq == expected.committed_seq
@@ -727,6 +734,31 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
     assert replayed.committed_seq == first.committed_seq
     assert replayed.commit_id == first.commit_id
     assert replayed.namespace_id == first.namespace_id
+
+    with pytest.raises(ConflictError) as stale:
+        _apply(
+            harness.client,
+            request.namespace_id,
+            request.commit_id + "-stale",
+            request.actor,
+            FilesystemOperation_CreateDirectory(path=request.path, parents=False),
+            message=request.message,
+            assertions=request.assertions,
+        )
+    assert stale.value.body.code == "stale_head"
+    assert stale.value.body.details.assertion_index == 0
+    assert stale.value.body.details.actual_head_seq == first.committed_seq
+
+    with pytest.raises(ConflictError) as reused:
+        _apply(
+            harness.client,
+            request.namespace_id,
+            request.commit_id,
+            request.actor,
+            FilesystemOperation_CreateDirectory(path=request.path, parents=False),
+            message=request.message,
+        )
+    assert reused.value.body.code == "commit_id_reuse_conflict"
 
 
 def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None:

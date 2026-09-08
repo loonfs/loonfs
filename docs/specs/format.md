@@ -1420,6 +1420,23 @@ preimage deliberately excludes `commit_id`, writer epoch, and
 `committed_at_ms`: a retry of the same logical commit must fingerprint
 identically no matter who retries it or when.
 
+When non-empty, `assertions` follows `message` in the preimage, in request order.
+Each assertion uses its request serde encoding, with `kind` followed by these fields in order:
+
+| Kind | Fields after `kind`, in order |
+| --- | --- |
+| `namespace_head` | `expected_head_seq` |
+| `file_revision` | `inode_id`, `expected_revision_no` |
+| `binding` | `path`, `expected_inode_id`, `expected_binding_generation` |
+| `attributes` | `inode_id`, `expected_attributes_revision_no` |
+
+Assertion inode IDs use public `ino_` strings. Sequence and revision numbers
+are JSON integers. Paths use their validated absolute form. Binding generations
+are opaque strings. Absent optional assertion fields are omitted.
+An empty assertion list is omitted, so
+assertion-free requests retain their existing fingerprints. Assertions add no
+WAL field or delta and are not evaluated during replay.
+
 Every operation starts with `kind`, using the current API operation name.
 The remaining fields appear in this order:
 

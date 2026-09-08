@@ -240,12 +240,13 @@ The codes that populate it:
 | --- | --- |
 | `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `writer_capacity_exceeded` | `max_writer_sessions` |
-| `path_conflict` | `expected_inode_id`, `actual_inode_id` when an inode guard found a different inode at the path |
-| `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision) |
-| `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` |
+| `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `assertion_index` for a failed request assertion |
+| `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `assertion_index` for a failed request assertion |
+| `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `assertion_index` for a failed request assertion |
+| `binding_generation_mismatch` | `inode_id` and `assertion_index` for a failed request assertion |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
-| `stale_head` | `expected_head_seq`, `actual_head_seq`, when the failure was a caller-supplied `expected_head_seq` precondition rather than a raced head advance. A caller that still means to delete retries against the sequence it found |
+| `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `assertion_index` identifies a failed request assertion. |
 | `not_deleted` | `inode_id`, plus `expected_deletion_seq` and `actual_deletion_seq` when a live deletion exists at a different generation |
 | any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
 | any commit carrying more than one operation | `operation_index` — the position of the operation that stopped the request (section 5.1) |
@@ -451,11 +452,14 @@ A commit is one request: a `commit_id` — a client-generated stable
 idempotency key that must be reused verbatim for safe retries — a required
 application-asserted `actor` with a `kind` (`user`, `service`, or `system`)
 and opaque `id`, an optional `message` (a human-readable annotation that is part of the commit's
-identity), and an ordered, non-empty list of path operations. A request with
+identity), an optional ordered `assertions` array, and an ordered, non-empty list of path operations. A request with
 one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same commit and fingerprint alike.
 A `message` is at most 4096 bytes; a longer one is rejected with
 `invalid_request` before planning, on every transport.
+The semantic fingerprint includes assertions in request order. Changing an
+assertion or its position changes identity. An empty assertion list is omitted
+from the fingerprint input, preserving assertion-free retry identity.
 
 The operations of one request commit together, in order, as one logical
 commit. Operation `k` is planned against authoritative namespace state plus
@@ -510,6 +514,39 @@ Callers may bound a response with `limit`; a truncated page returns
 the requested cursor is older than the retention floor, the caller must
 re-bootstrap instead of expecting older incremental history to remain
 available.
+
+### Request-level assertions
+
+`assertions` is optional and defaults to an empty list, with at most 1024 entries.
+More entries return `invalid_request` before planning.
+The pre-state includes earlier admitted candidates in the batch and none of this candidate's operations.
+Its head sequence is the last admitted commit's sequence, or the batch's base head sequence for the first admission.
+
+`namespace_head` requires `expected_head_seq` to equal the pre-state head sequence.
+Any intervening namespace commit invalidates it, including unrelated writes.
+Failure returns `stale_head` with `expected_head_seq` and `actual_head_seq`.
+
+`file_revision` requires a visible `inode_id` whose current content revision equals `expected_revision_no`.
+Any new revision of that inode, including restore, invalidates it, as does deletion.
+Failure returns `stale_revision`; `actual_revision_no` is absent when the inode is not visible or has no current revision.
+
+`binding` requires an absolute `path` to contain `expected_inode_id`, or to be unbound when that field is absent.
+The root is a valid target. A bind, unbind, or rebind at the path can invalidate the expectation.
+Without a generation, returning to the same inode satisfies it again.
+Optional `expected_binding_generation` requires `expected_inode_id` and detects any move of the inode, including moving away and back.
+An inode mismatch returns `path_conflict` with `expected_inode_id` and `actual_inode_id`, each absent for an unbound expectation or actual path.
+A generation mismatch returns `binding_generation_mismatch`; the root has no binding generation.
+
+`attributes` requires a visible `inode_id` whose attribute revision equals `expected_attributes_revision_no`.
+Any attribute update invalidates it, as does deletion. Content-only rewrites do not.
+Failure returns `stale_attributes`; `actual_attributes_revision_no` is absent when the inode is not visible.
+
+Receipt resolution comes first: an identical landed request returns its receipt even when its assertion is now stale.
+Reusing that commit ID with different assertions returns `commit_id_reuse_conflict`.
+Assertions run in order before operations; the first failure returns its kind's error with zero-based `assertion_index`.
+A failed assertion reserves no sequence or inode and leaves the planning view unchanged.
+A retry after a lost head compare-and-swap evaluates assertions again against the new basis.
+Assertions are admission conditions, stored only through the fingerprint in WAL records and receipts, and never evaluated during replay.
 
 ### Actor attribution
 
@@ -1695,7 +1732,7 @@ retained. A directory returns `path_conflict`, an unknown inode returns
 ### 6.8 `POST /commits`
 
 This is the binding for the commit model in section 5.1: one `commit_id`, one
-required `actor`, an optional `message`, and `operations` — an ordered,
+required `actor`, an optional `message`, optional `assertions`, and `operations` — an ordered,
 non-empty array of path operations. An empty array is `invalid_request`.
 
 The root path `/` is readable but never a mutation target. An operation that
@@ -1712,6 +1749,10 @@ Representative request:
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "actor": { "kind": "user", "id": "usr_8f3c" },
+  "assertions": [
+    { "kind": "namespace_head", "expected_head_seq": 42 },
+    { "kind": "file_revision", "inode_id": "ino_7", "expected_revision_no": 3 }
+  ],
   "operations": [
     {
       "kind": "move_path",

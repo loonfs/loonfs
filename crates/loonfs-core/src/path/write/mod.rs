@@ -2,6 +2,7 @@
 //! compiles it into one commit's operations, and the publish planning
 //! session.
 
+mod assertions;
 mod intent;
 mod plan_attributes;
 mod plan_by_inode;
@@ -30,10 +31,14 @@ pub(super) fn ensure_expected_inode(
         if resolved.inode_id != expected {
             return Err(
                 crate::commit::CommitValidationError::BindingPreconditionMismatch {
-                    parent_inode_id: resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID),
-                    name_key: NameKey::for_display_name(name),
-                    expected_child_inode_id: expected,
-                    actual_child_inode_id: resolved.inode_id,
+                    target: format!(
+                        "name `{}` under parent inode `{}`",
+                        NameKey::for_display_name(name),
+                        resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID)
+                    ),
+                    expected_inode_id: Some(expected),
+                    actual_inode_id: Some(resolved.inode_id),
+                    assertion_index: None,
                 }
                 .into(),
             );

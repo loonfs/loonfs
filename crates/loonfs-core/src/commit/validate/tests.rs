@@ -297,7 +297,8 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() 
             CommitValidationError::UpdateAttributesBaseRevisionMismatch {
                 inode_id: InodeId(2),
                 expected: AttributeRevisionNo(1),
-                actual: AttributeRevisionNo(2),
+                actual: Some(AttributeRevisionNo(2)),
+                assertion_index: None,
             }
         ),
         "{error:?}"
@@ -337,7 +338,7 @@ async fn a_first_attribute_write_states_revision_zero() {
             error,
             CommitValidationError::UpdateAttributesBaseRevisionMismatch {
                 expected: AttributeRevisionNo(1),
-                actual: AttributeRevisionNo(0),
+                actual: Some(AttributeRevisionNo(0)),
                 ..
             }
         ),
@@ -399,6 +400,7 @@ async fn stale_revision_precondition_is_rejected() {
             inode_id: InodeId(3),
             expected: RevisionNo(1),
             actual: Some(RevisionNo(2)),
+            assertion_index: None,
         }
     ));
 }
@@ -662,6 +664,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             inode_id: InodeId(3),
             expected: RevisionNo(1),
             actual: Some(RevisionNo(2)),
+            assertion_index: None,
         }
     ));
     assert_eq!(

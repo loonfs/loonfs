@@ -21,6 +21,7 @@ fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> C
         commit.message.clone(),
         operation,
     )
+    .assertions(commit.assertions.clone())
 }
 
 impl FsWriter {

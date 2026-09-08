@@ -232,6 +232,7 @@ async fn create_remote_directory(
             &spec,
             &CreateDirectoryOptions {
                 commit: CommitOptions {
+                    assertions: Vec::new(),
                     actor: context.actor().clone(),
                     commit_id: None,
                     message,
@@ -318,6 +319,7 @@ pub(crate) async fn run_put_tree(
                 &PutFileOptions {
                     behavior,
                     commit: CommitOptions {
+                        assertions: Vec::new(),
                         actor: context.actor().clone(),
                         commit_id: None,
                         message,
@@ -504,6 +506,7 @@ pub(crate) async fn run_copy_tree(
                     &loonfs_client::CopyOptions {
                         behavior,
                         commit: CommitOptions {
+                            assertions: Vec::new(),
                             actor: context.actor().clone(),
                             commit_id: None,
                             message: message.clone(),

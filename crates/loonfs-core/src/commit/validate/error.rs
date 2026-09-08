@@ -82,6 +82,7 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         expected: RevisionNo,
         actual: Option<RevisionNo>,
+        assertion_index: Option<u32>,
     },
     #[error(
         "binding precondition failed: name `{name_key}` is not bound under parent inode `{parent_inode_id}`"
@@ -91,13 +92,13 @@ pub enum CommitValidationError {
         name_key: NameKey,
     },
     #[error(
-        "binding precondition failed: name `{name_key}` under parent inode `{parent_inode_id}` expected child inode `{expected_child_inode_id}` but found `{actual_child_inode_id}`"
+        "binding precondition failed: {target} {}", binding_mismatch(.expected_inode_id, .actual_inode_id)
     )]
     BindingPreconditionMismatch {
-        parent_inode_id: InodeId,
-        name_key: NameKey,
-        expected_child_inode_id: InodeId,
-        actual_child_inode_id: InodeId,
+        target: String,
+        expected_inode_id: Option<InodeId>,
+        actual_inode_id: Option<InodeId>,
+        assertion_index: Option<u32>,
     },
     #[error("directory inode `{inode_id}` is not empty")]
     DirectoryNotEmpty { inode_id: InodeId },
@@ -145,12 +146,13 @@ pub enum CommitValidationError {
         base_revision_no: RevisionNo,
     },
     #[error(
-        "attribute base revision mismatch for inode `{inode_id}`: expected revision {expected}, found revision {actual}"
+        "attribute base revision mismatch for inode `{inode_id}`: {}", revision_mismatch(.expected, .actual)
     )]
     UpdateAttributesBaseRevisionMismatch {
         inode_id: InodeId,
         expected: AttributeRevisionNo,
-        actual: AttributeRevisionNo,
+        actual: Option<AttributeRevisionNo>,
+        assertion_index: Option<u32>,
     },
     #[error(
         "cannot update attributes for inode `{inode_id}` because revision `{base_attributes_revision_no}` is already at the maximum 9007199254740991"
@@ -193,19 +195,23 @@ impl CommitValidationError {
     pub fn details(&self) -> Option<ErrorDetails> {
         match self {
             Self::BindingPreconditionMismatch {
-                expected_child_inode_id,
-                actual_child_inode_id,
+                expected_inode_id,
+                actual_inode_id,
+                assertion_index,
                 ..
             } => Some(ErrorDetails {
-                expected_inode_id: Some(*expected_child_inode_id),
-                actual_inode_id: Some(*actual_child_inode_id),
+                expected_inode_id: *expected_inode_id,
+                actual_inode_id: *actual_inode_id,
+                assertion_index: *assertion_index,
                 ..ErrorDetails::default()
             }),
             Self::BaseRevisionMismatch {
                 inode_id,
                 expected,
                 actual,
+                assertion_index,
             } => Some(ErrorDetails {
+                assertion_index: *assertion_index,
                 inode_id: Some(*inode_id),
                 expected_revision_no: Some(*expected),
                 actual_revision_no: *actual,
@@ -241,10 +247,12 @@ impl CommitValidationError {
                 inode_id,
                 expected,
                 actual,
+                assertion_index,
             } => Some(ErrorDetails {
+                assertion_index: *assertion_index,
                 inode_id: Some(*inode_id),
                 expected_attributes_revision_no: Some(*expected),
-                actual_attributes_revision_no: Some(*actual),
+                actual_attributes_revision_no: *actual,
                 ..ErrorDetails::default()
             }),
             Self::InodeMissing {
@@ -259,9 +267,18 @@ impl CommitValidationError {
     }
 }
 
-fn revision_mismatch(expected: &RevisionNo, actual: &Option<RevisionNo>) -> String {
+fn revision_mismatch<T: fmt::Display>(expected: &T, actual: &Option<T>) -> String {
     match actual {
         Some(actual) => format!("expected revision {expected}, found revision {actual}"),
         None => format!("expected revision {expected}, found no revision"),
     }
+}
+
+fn binding_mismatch(expected: &Option<InodeId>, actual: &Option<InodeId>) -> String {
+    let expected = expected.map_or_else(
+        || "no inode".to_owned(),
+        |inode_id| format!("child inode `{inode_id}`"),
+    );
+    let actual = actual.map_or_else(|| "no inode".to_owned(), |inode_id| format!("`{inode_id}`"));
+    format!("expected {expected} but found {actual}")
 }

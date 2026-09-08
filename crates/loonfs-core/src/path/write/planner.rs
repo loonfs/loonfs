@@ -38,6 +38,7 @@ pub(crate) fn commit_fingerprint(
         &request.actor,
         request.message.as_deref(),
         &request.operations,
+        &request.assertions,
     )
     .map_err(|err| CoreError::Internal(format!("failed to fingerprint mutation: {err}")))
 }
@@ -364,6 +365,7 @@ mod tests {
             create_dir("/docs"),
         );
         let batch = CommitRequest {
+            assertions: Vec::new(),
             commit_id,
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -550,6 +552,7 @@ mod tests {
             &store,
             &namespace_id,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: CommitId::parse("batch-create-then-put").expect("valid commit id"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -613,6 +616,7 @@ mod tests {
             &store,
             &namespace_id,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: CommitId::parse("batch-delete-then-create").expect("valid commit id"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -650,6 +654,7 @@ mod tests {
             &store,
             &namespace_id,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: CommitId::parse("batch-with-a-bad-op").expect("valid commit id"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,

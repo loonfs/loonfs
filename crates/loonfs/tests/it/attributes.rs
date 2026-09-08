@@ -55,6 +55,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
         &explicit.actor,
         explicit.message.as_deref(),
         &explicit.operations,
+        &[],
     )
     .expect("explicit fingerprint");
 
@@ -94,7 +95,8 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
             &namespace_id,
             &different.actor,
             different.message.as_deref(),
-            &different.operations
+            &different.operations,
+            &[]
         )
         .expect("different fingerprint"),
         explicit_fingerprint

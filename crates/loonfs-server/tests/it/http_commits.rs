@@ -111,6 +111,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .create_commit(
             &remote_ns,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("batch-one"),
                 actor: loonfs_test_support::test_actor(),
                 message: Some("import the reports".to_owned()),
@@ -174,6 +175,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .commit_prepared(
             &embedded_ns,
             CoreCommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("batch-one"),
                 actor: loonfs_test_support::test_actor(),
                 message: Some("import the reports".to_owned()),
@@ -231,6 +233,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
         .expect("create namespace");
     let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
     let request = || CommitRequest {
+        assertions: Vec::new(),
         commit_id: commit_id("returns-its-change"),
         actor: loonfs_test_support::test_actor(),
         message: Some("the first report".to_owned()),
@@ -339,6 +342,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
     // Resubmitting the same `content_ref` is what makes the retry
     // semantically identical, so the server replays rather than conflicts.
     let request = || CommitRequest {
+        assertions: Vec::new(),
         commit_id: commit_id("outlives-its-history"),
         actor: loonfs_test_support::test_actor(),
         message: Some("retired later".to_owned()),
@@ -434,6 +438,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("batch-stops-at-two"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -531,6 +536,7 @@ async fn an_empty_operation_list_is_rejected() {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("empty-batch"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -582,6 +588,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("root-alone"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -622,6 +629,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("root-in-batch"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -685,6 +693,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .create_commit(
             &namespace_id("missing"),
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("root-unknown-namespace"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -726,6 +735,7 @@ async fn a_batch_replays_under_its_commit_id() {
         .expect("create namespace");
 
     let batch = |ops: Vec<FilesystemOperation>| CommitRequest {
+        assertions: Vec::new(),
         commit_id: commit_id("replayed-batch"),
         actor: loonfs_test_support::test_actor(),
         message: Some("two directories".to_owned()),
@@ -829,6 +839,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             .create_commit(
                 &namespace,
                 CoreCommitRequest {
+                    assertions: Vec::new(),
                     commit_id: commit_id("crosses-transports"),
                     actor: loonfs_test_support::test_actor(),
                     message: Some("shaped once".to_owned()),
@@ -876,6 +887,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
                 actor: loonfs_test_support::test_actor(),
                 message: Some("shaped once".to_owned()),
@@ -904,6 +916,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
                 actor: loonfs_test_support::test_actor(),
                 message: Some("shaped once".to_owned()),
@@ -947,6 +960,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("guarded-create"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,

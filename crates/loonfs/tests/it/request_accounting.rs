@@ -275,6 +275,7 @@ async fn warm_phase_request_accounting() {
             PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
@@ -297,6 +298,7 @@ async fn warm_phase_request_accounting() {
             PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,

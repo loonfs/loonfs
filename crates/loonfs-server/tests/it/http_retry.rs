@@ -43,6 +43,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             b"first payload\n",
             &PutFileOptions {
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id.clone()),
                     message: Some("first commit".to_owned()),
@@ -60,6 +61,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             b"second payload\n",
             &PutFileOptions {
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id.clone()),
                     message: Some("second commit".to_owned()),
@@ -121,6 +123,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .clone()
         .expect("completion returns a content token");
     let commit_request = |content_ref, token| CommitRequest {
+        assertions: Vec::new(),
         commit_id: commit_id.clone(),
         actor: loonfs_test_support::test_actor(),
         message: None,
@@ -163,6 +166,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id.clone()),
                     message: None,
@@ -201,6 +205,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: different_actor,
                     commit_id: Some(commit_id.clone()),
                     message: None,
@@ -227,6 +232,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id),
                     message: None,
@@ -267,6 +273,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     let options = |message: &str| PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
+            assertions: Vec::new(),
             actor: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),
@@ -365,6 +372,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     let options = PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
+            assertions: Vec::new(),
             actor: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: Some("import batch".to_owned()),
@@ -442,6 +450,7 @@ async fn http_put_conflict_stands_when_only_a_guard_changed() {
     let replacing = PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
+            assertions: Vec::new(),
             actor: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: None,
@@ -532,6 +541,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
         .create_commit(
             &namespace,
             &CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id.clone(),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -562,6 +572,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id),
                     message: None,
@@ -644,6 +655,7 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     let pinned = NamespacePath::parse("demo", "/pinned").expect("pinned target");
     let mkdir_options = |message: &str| CreateDirectoryOptions {
         commit: loonfs_api::options::CommitOptions {
+            assertions: Vec::new(),
             actor: loonfs_test_support::test_actor(),
             commit_id: Some(CommitId::parse("req-message-mkdir").expect("valid commit id")),
             message: Some(message.to_owned()),
@@ -694,6 +706,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     let options = || PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
+            assertions: Vec::new(),
             actor: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: None,
@@ -797,6 +810,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
@@ -815,6 +829,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
@@ -848,6 +863,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
@@ -866,6 +882,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
@@ -898,6 +915,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &moved,
             &DeleteOptions {
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
                     message: None,
@@ -913,6 +931,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &moved,
             &DeleteOptions {
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
                     message: None,
@@ -974,6 +993,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    assertions: Vec::new(),
                     actor: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,

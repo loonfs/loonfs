@@ -9,7 +9,8 @@
       "id": "conformance-commit"
     },
     "message": "create replay directory",
-    "path": "/replayed"
+    "path": "/replayed",
+    "assertions": [{ "kind": "namespace_head", "expected_head_seq": 0 }]
   },
   "expected": {
     "committed_seq": 1

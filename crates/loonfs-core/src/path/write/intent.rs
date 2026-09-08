@@ -1,6 +1,6 @@
 //! [`CommitRequest`]: the one filesystem commit language, before planning.
 
-use loonfs_api::{ActorRef, CommitId};
+use loonfs_api::{ActorRef, CommitAssertion, CommitId};
 
 /// The operation language a commit is written in, owned by `loonfs-api` and
 /// used here unchanged.
@@ -39,9 +39,17 @@ pub struct CommitRequest {
     pub message: Option<String>,
     /// Ordered operations. Must be non-empty.
     pub operations: Vec<FilesystemOperation>,
+    /// Ordered admission conditions evaluated before any operations.
+    pub assertions: Vec<CommitAssertion>,
 }
 
 impl CommitRequest {
+    /// Sets the admission conditions in caller order.
+    pub fn assertions(mut self, assertions: Vec<CommitAssertion>) -> Self {
+        self.assertions = assertions;
+        self
+    }
+
     /// A request carrying exactly one operation.
     pub fn single(
         commit_id: CommitId,
@@ -54,6 +62,7 @@ impl CommitRequest {
             actor,
             message,
             operations: vec![operation],
+            assertions: Vec::new(),
         }
     }
 }

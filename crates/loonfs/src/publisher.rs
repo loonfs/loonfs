@@ -899,7 +899,7 @@ enum SubmissionAdmission {
     /// conflict; if it fails, this submission gets another turn at admission.
     Contended {
         primary_identity: CommitFingerprint,
-        candidate: CommitCandidate,
+        candidate: Box<CommitCandidate>,
         semantic_identity: CommitFingerprint,
     },
 }
@@ -1066,7 +1066,7 @@ impl NamespacePublisher {
                 self.trace_enqueue(queued_candidates(&state), "contended");
                 return Ok(SubmissionAdmission::Contended {
                     primary_identity,
-                    candidate,
+                    candidate: Box::new(candidate),
                     semantic_identity,
                 });
             }
@@ -1790,7 +1790,7 @@ where
                     .into())
                 }
                 Err(_) => {
-                    candidate = returned_candidate;
+                    candidate = *returned_candidate;
                     semantic_identity = returned_identity;
                 }
             },

@@ -114,7 +114,8 @@ impl CommitCandidate {
     pub fn estimated_retained_bytes(&self) -> Result<usize> {
         let mut bytes = RequestByteCounter(
             std::mem::size_of_val(self)
-                .saturating_add(std::mem::size_of_val(self.request.operations.as_slice())),
+                .saturating_add(std::mem::size_of_val(self.request.operations.as_slice()))
+                .saturating_add(std::mem::size_of_val(self.request.assertions.as_slice())),
         );
         serde_json::to_writer(
             &mut bytes,
@@ -123,6 +124,7 @@ impl CommitCandidate {
                 &self.request.actor,
                 &self.request.message,
                 &self.request.operations,
+                &self.request.assertions,
             ),
         )
         .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
@@ -164,6 +166,13 @@ impl CommitCandidate {
                 "mutation has {} operations; maximum is {}",
                 self.request.operations.len(),
                 crate::limits::MAX_COMMIT_OPERATIONS
+            )));
+        }
+        if self.request.assertions.len() > crate::limits::MAX_COMMIT_ASSERTIONS {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "mutation has {} assertions; maximum is {}",
+                self.request.assertions.len(),
+                crate::limits::MAX_COMMIT_ASSERTIONS
             )));
         }
         if let Some(message) = &self.request.message {
@@ -727,6 +736,7 @@ mod tests {
     fn semantic_identity_ignores_current_request_limits() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let oversized_ops = CommitCandidate::new(CommitRequest {
+            assertions: Vec::new(),
             commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -757,6 +767,7 @@ mod tests {
             .expect("prepared proof limits must not affect identity");
 
         let oversized_message = CommitCandidate::new(CommitRequest {
+            assertions: Vec::new(),
             commit_id: CommitId::parse("too-long-message").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
@@ -773,6 +784,7 @@ mod tests {
     #[test]
     fn a_batch_past_the_operation_ceiling_is_rejected() {
         let oversized = CommitCandidate::new(CommitRequest {
+            assertions: Vec::new(),
             commit_id: CommitId::parse("oversized-batch").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -791,6 +803,7 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
         let at_ceiling = CommitCandidate::new(CommitRequest {
+            assertions: Vec::new(),
             commit_id: CommitId::parse("largest-batch").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -815,6 +828,7 @@ mod tests {
         }];
 
         let oversized = CommitCandidate::new(CommitRequest {
+            assertions: Vec::new(),
             commit_id: CommitId::parse("oversized-message").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
@@ -826,6 +840,7 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
         let at_ceiling = CommitCandidate::new(CommitRequest {
+            assertions: Vec::new(),
             commit_id: CommitId::parse("largest-message").expect("valid commit id"),
             actor: loonfs_test_support::test_actor(),
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES)),

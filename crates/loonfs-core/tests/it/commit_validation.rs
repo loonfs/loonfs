@@ -490,6 +490,7 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
                 create_dir("/first"),
             ),
             CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id("discard-allocation"),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -739,6 +740,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("reports-batch"),
             actor: loonfs_test_support::test_actor(),
             message: Some("import reports".to_owned()),
@@ -795,6 +797,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -827,6 +830,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -850,6 +854,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         .expect("bootstrap namespace");
 
     let batch = |commit: &str| CommitRequest {
+        assertions: Vec::new(),
         commit_id: commit_id(commit),
         actor: loonfs_test_support::test_actor(),
         message: None,
@@ -868,6 +873,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("replayed-batch"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -894,6 +900,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("one-operation"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -920,6 +927,7 @@ async fn operation_order_decides_the_outcome() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("create-then-delete"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -937,6 +945,7 @@ async fn operation_order_decides_the_outcome() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("seed-y"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -950,6 +959,7 @@ async fn operation_order_decides_the_outcome() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("delete-then-create"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -1008,6 +1018,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("guarded-chain"),
             actor: loonfs_test_support::test_actor(),
             message: None,
@@ -1027,6 +1038,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
         &store,
         &namespace_id,
         CommitRequest {
+            assertions: Vec::new(),
             commit_id: commit_id("stale-guarded-chain"),
             actor: loonfs_test_support::test_actor(),
             message: None,

@@ -30,6 +30,7 @@ fn options(commit_id: &CommitId) -> PutFileOptions {
     PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
+            assertions: Vec::new(),
             actor: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: None,
@@ -367,6 +368,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
         .commit_prepared(
             &namespace_id,
             CommitRequest {
+                assertions: Vec::new(),
                 commit_id: commit_id.clone(),
                 actor: loonfs_test_support::test_actor(),
                 message: None,
@@ -540,6 +542,7 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
     let commit_id = CommitId::parse("pinned-mkdir").expect("valid commit id");
     let options = |message: &str| CreateDirectoryOptions {
         commit: loonfs_api::options::CommitOptions {
+            assertions: Vec::new(),
             actor: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),

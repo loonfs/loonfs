@@ -249,11 +249,12 @@ func runErrorContract(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type commitReplayRequest struct {
-	NamespaceID string          `json:"namespace_id"`
-	CommitID    string          `json:"commit_id"`
-	Actor       loonfs.ActorRef `json:"actor"`
-	Message     string          `json:"message"`
-	Path        string          `json:"path"`
+	Assertions  []*loonfs.CommitAssertion `json:"assertions"`
+	NamespaceID string                    `json:"namespace_id"`
+	CommitID    string                    `json:"commit_id"`
+	Actor       loonfs.ActorRef           `json:"actor"`
+	Message     string                    `json:"message"`
+	Path        string                    `json:"path"`
 }
 
 type commitReplayExpected struct {
@@ -271,6 +272,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		request.Path,
 		&request.Message,
 	)
+	commit.Assertions = request.Assertions
 	first, err := h.client.Commits.Create(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("first commit: %v", err)
@@ -293,6 +295,26 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		replayed.CommittedSeq != first.CommittedSeq ||
 		replayed.NamespaceID != first.NamespaceID {
 		t.Errorf("replayed commit = %#v, want %#v", replayed, first)
+	}
+	stale := *commit
+	stale.CommitID = request.CommitID + "-stale"
+	_, err = h.client.Commits.Create(context.Background(), &stale)
+	var assertionConflict *loonfs.ConflictError
+	if !errors.As(err, &assertionConflict) || assertionConflict.Body == nil || assertionConflict.Body.Code != "stale_head" {
+		t.Fatalf("stale assertion: got %v, want stale_head", err)
+	}
+	details := assertionConflict.Body.Details
+	if details == nil || details.AssertionIndex == nil || *details.AssertionIndex != 0 {
+		t.Fatalf("stale assertion details = %#v, want assertion_index 0", details)
+	}
+	if details.ActualHeadSeq == nil || *details.ActualHeadSeq != first.CommittedSeq {
+		t.Fatalf("stale assertion details = %#v, want actual_head_seq %d", details, first.CommittedSeq)
+	}
+	changedAssertions := *commit
+	changedAssertions.Assertions = nil
+	_, err = h.client.Commits.Create(context.Background(), &changedAssertions)
+	if !errors.As(err, &assertionConflict) || assertionConflict.Body == nil || assertionConflict.Body.Code != "commit_id_reuse_conflict" {
+		t.Fatalf("changed assertions: got %v, want commit_id_reuse_conflict", err)
 	}
 	prepared, err := h.client.Files.PrepareFileStream(context.Background(), loonfs.NamespaceID(request.NamespaceID), strings.NewReader("original bytes"), nil)
 	if err != nil {

@@ -65,6 +65,7 @@ interface ErrorContractExpected {
 }
 
 interface CommitReplayRequest {
+    assertions: LoonFS.CommitAssertion[];
     namespace_id: string;
     commit_id: string;
     actor: ActorValue;
@@ -337,6 +338,7 @@ function strictObject(value: unknown, fields: readonly string[], label: string):
 const ERROR_CONTRACT_REQUEST_FIELDS = ["namespace_id"] as const;
 const ERROR_CONTRACT_EXPECTED_FIELDS = ["unauthenticated"] as const;
 const COMMIT_REPLAY_REQUEST_FIELDS = [
+    "assertions",
     "namespace_id",
     "commit_id",
     "actor",
@@ -1185,6 +1187,7 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         request.path,
         request.message,
     );
+    commit.assertions = request.assertions;
     const first = await activeHarness.client.commits.create(commit);
     const replayed = await activeHarness.client.commits.create(commit);
 
@@ -1192,6 +1195,20 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
     assert.equal(first.commit_id, request.commit_id);
     assert.equal(replayed.committed_seq, first.committed_seq);
     assert.deepEqual(replayed, first);
+    await assert.rejects(
+        activeHarness.client.commits.create({...commit, commit_id: request.commit_id + "-stale"}),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.ConflictError);
+            assert.equal(error.body.code, "stale_head");
+            assert.equal(error.body.details?.assertion_index, 0);
+            assert.equal(error.body.details?.actual_head_seq, first.committed_seq);
+            return true;
+        },
+    );
+    await assert.rejects(
+        activeHarness.client.commits.create({...commit, assertions: []}),
+        (error: unknown) => error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict",
+    );
     const prepared: PreparedFileContent = await activeHarness.client.files.prepareFileStream({
         namespace_id: request.namespace_id, content: new Blob(["original bytes"]),
     });
