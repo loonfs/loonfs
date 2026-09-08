@@ -1,9 +1,4 @@
-//! Namespace creation: one conditional write of a complete head.
-//!
-//! The head is the namespace. Nothing is written before it and nothing
-//! after it, so a create either lands entirely or leaves the namespace
-//! absent — there is no partial state to classify, complete, or repair
-//! (format spec, "Creating a namespace").
+//! Namespace creation: a content-domain descriptor followed by a conditional head write.
 
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
@@ -12,11 +7,13 @@ use crate::error::{CoreError, StoreFailureClass};
 use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::control::load_head_object;
 use bytes::Bytes;
-use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HeadState, WriterBlock};
+use loonfs_api::wire::control::{
+    encode_control_state, ContentStoreState, ControlObjectKind, HeadState, WriterBlock,
+};
 use loonfs_api::{
     ChangeSeq, ContentStoreId, ErrorCode, InodeKind, Namespace, NamespaceId, ROOT_INODE_ID,
 };
-use loonfs_objectstore::keys::wal_head;
+use loonfs_objectstore::keys::{content_store, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
@@ -86,9 +83,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     allow_existing: bool,
 ) -> Result<Namespace, BootstrapNamespaceError> {
-    // A fresh content-store id per namespace. Nothing claims it durably:
-    // uniqueness rests on the generated id's randomness, exactly as it does
-    // for every other generated id in the format.
     let mut head = HeadState::initial(
         namespace_id.clone(),
         ContentStoreId::generate(),
@@ -98,6 +92,28 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         writer_id: context.writer_id.clone(),
         acquired_at_ms: context.now_ms,
     });
+
+    let object_key = content_store(&head.content_store_id);
+    let descriptor = ContentStoreState {
+        content_store_id: head.content_store_id.clone(),
+        created_at_ms: context.now_ms,
+    };
+    let bytes =
+        encode_control_state(ControlObjectKind::ContentStore, &descriptor).map_err(|error| {
+            CoreError::Codec {
+                object_key: object_key.clone(),
+                message: error.to_string(),
+            }
+        })?;
+    store
+        .put_if_absent(&object_key, Bytes::from(bytes))
+        .await
+        .map_err(|error| match error {
+            ObjectStoreError::PreconditionFailed { .. } => CoreError::Internal(format!(
+                "content store descriptor `{object_key}` already exists under a freshly minted identity"
+            )),
+            error => CoreError::store(&object_key, &error),
+        })?;
 
     match install_namespace_head(store, namespace_id, &head).await? {
         NamespaceHeadInstall::Landed => {}

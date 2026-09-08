@@ -756,7 +756,9 @@ fn classify_key(key: &str) -> KeyClass {
         | DurableObjectFamily::CompactionOutputProtection
         | DurableObjectFamily::GcRun
         | DurableObjectFamily::GcMarkPage => KeyClass::GcControl,
-        DurableObjectFamily::UploadSession => KeyClass::Metadata,
+        DurableObjectFamily::UploadSession | DurableObjectFamily::ContentStore => {
+            KeyClass::Metadata
+        }
     }
 }
 

@@ -279,7 +279,7 @@ async fn instrumented_store_forwards_start_after_listing() {
 }
 
 #[tokio::test]
-async fn classifies_wal_manifest_segment_and_checkpoint_key_families() {
+async fn classifies_durable_key_families() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
@@ -329,11 +329,20 @@ async fn classifies_wal_manifest_segment_and_checkpoint_key_families() {
         .await
         .expect("put checkpoint record");
 
+    store
+        .put_if_absent(
+            &loonfs_objectstore::keys::content_store(&loonfs_api::ContentStoreId::generate()),
+            bytes(b"descriptor"),
+        )
+        .await
+        .expect("put content store descriptor");
+
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, KeyClass::WalSegment);
     assert_eq!(samples[1].key_class, KeyClass::NamespaceManifest);
     assert_eq!(samples[2].key_class, KeyClass::MetadataSegment);
     assert_eq!(samples[3].key_class, KeyClass::GcControl);
+    assert_eq!(samples[4].key_class, KeyClass::Metadata);
 }
 
 #[tokio::test]

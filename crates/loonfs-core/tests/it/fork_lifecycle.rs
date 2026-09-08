@@ -1,8 +1,7 @@
 //! Namespace creation, fork installation, and terminal lifecycle guards.
 //!
-//! Create and fork are one conditional write of a complete head, so these
-//! tests are mostly about what that single write does under contention and
-//! what a namespace looks like before it has published anything of its own.
+//! Tests cover descriptor creation, conditional head installation, and
+//! namespace state before the first metadata publication.
 
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
@@ -12,7 +11,8 @@ use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{
     wire::control::{
-        decode_control_object, CheckpointOwner, CheckpointStatus, ControlObjectKind, HeadState,
+        decode_control_object, CheckpointOwner, CheckpointStatus, ContentStoreState,
+        ControlObjectKind, HeadState,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
@@ -23,12 +23,14 @@ use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_head_control;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
-use loonfs_objectstore::keys::{metadata_manifest_object, metadata_root, wal_floor, wal_head};
+use loonfs_objectstore::keys::{
+    content_store, metadata_manifest_object, metadata_root, wal_floor, wal_head,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -298,7 +300,7 @@ fn metadata_segment_counting_store(root: impl AsRef<Path>) -> RecordingStore<Loc
 }
 
 #[tokio::test]
-async fn a_created_namespace_is_one_object_until_its_first_flush() {
+async fn a_created_namespace_has_a_descriptor_and_only_a_head_until_its_first_flush() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -313,15 +315,17 @@ async fn a_created_namespace_is_one_object_until_its_first_flush() {
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
         vec![wal_head(&namespace_id)],
-        "creation writes the head and nothing else"
+        "creation writes only the head under the namespace prefix"
     );
-    assert!(
+    let head = load_namespace_head_control(&store, &namespace_id)
+        .await
+        .expect("load head");
+    assert_eq!(
         store
             .list_prefix("content-stores/")
             .await
-            .expect("list content stores")
-            .is_empty(),
-        "the content store is an id in the head, not an object"
+            .expect("list content stores"),
+        vec![content_store(&head.state.content_store_id)],
     );
 
     // Reads work against the built-in genesis state.
@@ -1375,4 +1379,118 @@ impl ObjectStore for ReleasePinBeforeRenewalStore {
     {
         self.inner.list_prefix_from_stream(prefix, start_after)
     }
+}
+
+#[tokio::test]
+async fn bootstrap_writes_a_descriptor_before_the_head_and_fork_writes_none() {
+    let directory = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let context = mutation_context();
+    let source = namespace_id("source");
+    bootstrap_namespace(&store, &source, &context, false)
+        .await
+        .expect("bootstrap");
+    let head = load_namespace_head_control(&store, &source)
+        .await
+        .expect("head");
+    let descriptor_key = content_store(&head.state.content_store_id);
+    let puts: Vec<_> = store
+        .take()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::Put { key, mode, .. } => Some((key, mode)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        puts,
+        vec![
+            (descriptor_key.clone(), PutMode::CreateIfAbsent),
+            (wal_head(&source), PutMode::CreateIfAbsent),
+        ]
+    );
+    let bytes = store
+        .get(&descriptor_key, None)
+        .await
+        .expect("get descriptor")
+        .expect("descriptor");
+    let descriptor =
+        decode_control_object::<ContentStoreState>(&bytes, ControlObjectKind::ContentStore)
+            .expect("decode descriptor")
+            .into_payload();
+    assert_eq!(
+        descriptor,
+        ContentStoreState {
+            content_store_id: head.state.content_store_id.clone(),
+            created_at_ms: head.state.created_at_ms,
+        }
+    );
+    store.reset();
+    let target = namespace_id("target");
+    fork_namespace(&store, &source, &target, &context)
+        .await
+        .expect("fork");
+    assert!(store
+        .take()
+        .iter()
+        .all(|operation| !operation.key().starts_with("content-stores/")));
+    let fork_head = load_namespace_head_control(&store, &target)
+        .await
+        .expect("fork head");
+    assert_eq!(
+        fork_head.state.content_store_id,
+        descriptor.content_store_id
+    );
+    store.reset();
+    let error = bootstrap_namespace(&store, &source, &context, false)
+        .await
+        .expect_err("source exists");
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+    let puts: Vec<_> = store
+        .take()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::Put { key, mode, .. } => Some((key, mode)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(puts.len(), 2);
+    assert_ne!(puts[0].0, descriptor_key);
+    assert!(puts[0].0.starts_with("content-stores/") && puts[0].0.ends_with("/store.json"));
+    assert_eq!(puts[0].1, PutMode::CreateIfAbsent);
+    assert_eq!(puts[1], (wal_head(&source), PutMode::CreateIfAbsent));
+    assert!(store
+        .head(&puts[0].0)
+        .await
+        .expect("orphan descriptor")
+        .is_some());
+}
+
+#[tokio::test]
+async fn an_occupied_descriptor_key_fails_before_the_head_write() {
+    let directory = tempdir().expect("tempdir");
+    let failing = FailStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix("content-stores/"),
+        OperationClass::Put,
+        InjectedError::PreconditionFailed,
+    );
+    failing.fail_all();
+    let store = RecordingStore::new(failing, KeyPredicate::any());
+    let error = bootstrap_namespace(&store, &namespace_id("demo"), &mutation_context(), false)
+        .await
+        .expect_err("descriptor collision");
+    assert!(
+        matches!(error, loonfs_core::BootstrapNamespaceError::Core(CoreError::Internal(message))
+        if message.contains("already exists under a freshly minted identity"))
+    );
+    let operations = store.take();
+    assert_eq!(operations.len(), 1);
+    assert!(
+        matches!(&operations[0], RecordedOperation::Put { mode: PutMode::CreateIfAbsent, key, .. }
+        if key.starts_with("content-stores/") && key.ends_with("/store.json"))
+    );
 }

@@ -35,6 +35,8 @@ pub enum DurableObjectFamily {
     UploadSession,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
+    /// Identifies the content domain stored under a content-store prefix.
+    ContentStore,
 }
 
 /// Reports the durable family and identifiers recoverable from a recognized key.
@@ -69,6 +71,11 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
+        ["content-stores", content_store_id, "store.json"] => Some(parsed(
+            DurableObjectFamily::ContentStore,
+            None,
+            Some(content_store_id),
+        )),
         ["content-stores", _, "objects", _, _, content_id] => Some(parsed(
             DurableObjectFamily::ContentBlob,
             None,
@@ -232,9 +239,10 @@ fn parsed<'a>(
 mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        checkpoint_record, content_blob, metadata_compaction_lease, metadata_compaction_segment,
-        metadata_manifest_object, metadata_root, metadata_segment, metadata_segment_prefix,
-        upload_session, wal_floor, wal_head, wal_segment, wal_segment_prefix,
+        checkpoint_record, content_blob, content_store, metadata_compaction_lease,
+        metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
+        metadata_segment_prefix, upload_session, wal_floor, wal_head, wal_segment,
+        wal_segment_prefix,
     };
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
@@ -261,6 +269,11 @@ mod tests {
         let content_id =
             ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("content id");
         let cases = [
+            (
+                content_store(&content_store_id),
+                DurableObjectFamily::ContentStore,
+                Some(content_store_id.as_str()),
+            ),
             (wal_head(&namespace_id), DurableObjectFamily::WalHead, None),
             (
                 wal_floor(&namespace_id),
@@ -319,7 +332,11 @@ mod tests {
             assert_eq!(parsed.family(), family);
             assert_eq!(
                 parsed.owner_namespace_id(),
-                (family != DurableObjectFamily::ContentBlob).then_some("ns-1")
+                (!matches!(
+                    family,
+                    DurableObjectFamily::ContentBlob | DurableObjectFamily::ContentStore
+                ))
+                .then_some("ns-1")
             );
             assert_eq!(parsed.identifier(), identifier);
         }
@@ -332,6 +349,9 @@ mod tests {
             .expect("compaction id");
         let segment_id =
             MetadataSegmentId::parse("seg_00000000000000000000000000000001").expect("segment id");
+        let content_store_id = ContentStoreId::generate();
+        assert!(!content_store(&content_store_id)
+            .starts_with(&format!("content-stores/{content_store_id}/objects/")));
         let staged = metadata_compaction_segment(&namespace_id, &job, &segment_id);
 
         assert!(!staged.starts_with(&metadata_segment_prefix(&namespace_id)));

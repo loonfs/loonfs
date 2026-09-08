@@ -66,7 +66,8 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
                 | DurableObjectFamily::GcMarkPage
                 | DurableObjectFamily::MetadataCompactionLease
                 | DurableObjectFamily::UploadSession
-                | DurableObjectFamily::ContentBlob => {}
+                | DurableObjectFamily::ContentBlob
+                | DurableObjectFamily::ContentStore => {}
             }
             continue;
         }
