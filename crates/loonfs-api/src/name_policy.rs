@@ -1,13 +1,7 @@
 //! How a display name folds into the name key directory lookups compare on.
 //!
-//! v0 has exactly one rule and it is part of the format, not a per-namespace
-//! choice: normalize to NFC, apply Unicode default case folding, then
-//! normalize to NFC again. Both the write and read paths derive keys through
-//! this one function, so a namespace cannot disagree with itself about what
-//! two names mean.
-//!
-//! If a second supported rule ever ships, the head gains a policy field that
-//! selects between them; until then there is nothing to select.
+//! The fixed data versions and evolution rule are in `docs/specs/format.md`,
+//! section 2.3.1. Admission and lookup share this implementation.
 
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
