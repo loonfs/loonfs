@@ -4527,6 +4527,107 @@ fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
 }
 
 #[tokio::test]
+async fn interrupted_revision_scan_resumes_at_the_saved_page_entry_and_block() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_segment_prefix(&namespace_id)),
+        OperationClass::Read,
+        InjectedError::Transport("revision read interrupted".to_owned()),
+    );
+    add_bounded_gc_fixture(store.inner(), &namespace_id, &context(1_000)).await;
+    let now = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let mut bounded = config();
+    bounded.max_steps = Some(1);
+    let mut passes = 0;
+    let mut first_revision_position = None;
+    let saved = loop {
+        let pass = gc_namespace(&store, &namespace_id, &bounded, &now)
+            .await
+            .expect("bounded pass");
+        bounded.cursor = pass.next_cursor;
+        assert!(bounded.cursor.is_some(), "run must reach revision scanning");
+        passes += 1;
+        assert!(passes < 1_000, "marking must converge");
+        let loaded = super::run::load_run(&store, &namespace_id)
+            .await
+            .expect("load progress")
+            .expect("run");
+        if let GcPhase::Revisions {
+            position,
+            block_index: 1,
+            content,
+            ..
+        } = &loaded.state.phase
+        {
+            if first_revision_position.is_some_and(|first| first != *position)
+                && content.merge.is_none()
+            {
+                break loaded.state;
+            }
+            first_revision_position.get_or_insert(*position);
+        }
+    };
+    let GcPhase::Revisions {
+        position,
+        block_index,
+        ..
+    } = &saved.phase
+    else {
+        panic!("expected revision scan");
+    };
+    assert_eq!(*block_index, 1);
+    let run_key = super::run::run_key(&namespace_id);
+    let bytes = store
+        .get(&run_key, None)
+        .await
+        .expect("saved bytes")
+        .expect("run");
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("run document");
+    assert_eq!(
+        payload["payload"]["phase"]["position"],
+        serde_json::json!({
+            "page_index": position.page_index,
+            "entry_index": position.entry_index,
+        })
+    );
+    assert_eq!(payload["payload"]["phase"]["block_index"], *block_index);
+
+    store.fail_all();
+    gc_namespace(&store, &namespace_id, &bounded, &now)
+        .await
+        .expect_err("revision read must fail");
+    assert!(store.attempts() > 0);
+    assert_eq!(
+        store.get(&run_key, None).await.expect("saved bytes"),
+        Some(bytes)
+    );
+    store.clear();
+
+    gc_namespace(&store, &namespace_id, &bounded, &context(now.now_ms + 1))
+        .await
+        .expect("resume revision scan");
+    let resumed = super::run::load_run(&store, &namespace_id)
+        .await
+        .expect("load resumed progress")
+        .expect("run")
+        .state;
+    let GcPhase::Revisions {
+        position: actual_position,
+        block_index: actual_block_index,
+        ..
+    } = resumed.phase
+    else {
+        panic!("expected revision scan");
+    };
+    assert_eq!(actual_position.page_index, position.page_index);
+    assert_eq!(actual_position.entry_index, position.entry_index + 1);
+    assert_eq!(actual_block_index, 0);
+    assert_eq!(resumed.step_no, saved.step_no + 1);
+}
+
+#[tokio::test]
 async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     let temp_dir = tempdir().expect("tempdir");
     let unbounded_root = temp_dir.path().join("unbounded");

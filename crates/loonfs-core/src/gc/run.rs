@@ -309,7 +309,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                         roots: work.roots.clone(),
                         objects,
                         position: GcMarkPosition::default(),
-                        block_no: 0,
+                        block_index: 0,
                         content: GcMarkIndex::default(),
                     };
                 }
@@ -318,7 +318,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                 roots,
                 objects,
                 position,
-                block_no,
+                block_index,
                 content,
             } => {
                 if content.merge.is_some() {
@@ -346,7 +346,10 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                     match entry.value {
                         GcMarkValue::RevisionSegment { segment, max_seq } => {
                             match crate::checkpoint::revision_content_block(
-                                store, &segment, max_seq, *block_no,
+                                store,
+                                &segment,
+                                max_seq,
+                                *block_index,
                             )
                             .await?
                             {
@@ -357,7 +360,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                                     )
                                     .await?;
                                     mark_index::insert(content, table, 0)?;
-                                    *block_no = block_no.checked_add(1).ok_or_else(|| {
+                                    *block_index = block_index.checked_add(1).ok_or_else(|| {
                                         CoreError::NamespaceCorrupt(
                                             "GC revision block position overflow".to_owned(),
                                         )
@@ -365,7 +368,7 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                                 }
                                 None => {
                                     MarkTables::<S>::advance(objects, position);
-                                    *block_no = 0;
+                                    *block_index = 0;
                                 }
                             }
                             break;

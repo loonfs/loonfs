@@ -2806,7 +2806,7 @@ fn gc_progress_and_mark_pages_match_golden_bytes() {
                 roots: roots.clone(),
                 objects: table.clone(),
                 position: GcMarkPosition::default(),
-                block_no: 0,
+                block_index: 0,
                 content: GcMarkIndex::default(),
             },
         ),
@@ -2847,7 +2847,7 @@ fn gc_progress_and_mark_pages_match_golden_bytes() {
         namespace_id: namespace_id(),
         gc_run_id: run_id,
         table_id: table.table_id,
-        page_no: 0,
+        page_index: 0,
         entries: vec![GcMarkEntry {
             key: "content/con_0123456789abcdef0123456789abcdef".to_owned(),
             value: GcMarkValue::Content {},
@@ -2860,6 +2860,23 @@ fn gc_progress_and_mark_pages_match_golden_bytes() {
         decode_gc_mark_page(&bytes).expect("decode").into_payload(),
         page
     );
+}
+
+#[test]
+fn gc_optional_members_and_empty_merge_slots_round_trip_exactly() {
+    use loonfs_api::wire::gc::{GcMarkIndex, GcPhase};
+
+    for bytes in [r#"{"levels":[]}"#, r#"{"levels":[null]}"#] {
+        let index: GcMarkIndex = serde_json::from_str(bytes).expect("decode index");
+        assert_eq!(serde_json::to_string(&index).expect("encode index"), bytes);
+    }
+    for bytes in [
+        r#"{"kind":"cleaning"}"#,
+        r#"{"kind":"cleaning","last_key":"namespaces/demo/gc/runs/gcr_0123456789abcdef0123456789abcdef/tables/gct_0123456789abcdef0123456789abcdef/00000000000000000000.json"}"#,
+    ] {
+        let phase: GcPhase = serde_json::from_str(bytes).expect("decode phase");
+        assert_eq!(serde_json::to_string(&phase).expect("encode phase"), bytes);
+    }
 }
 
 #[test]

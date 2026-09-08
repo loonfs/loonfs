@@ -63,7 +63,7 @@ pub struct GcMarkPage {
     /// Sorted table containing the page.
     pub table_id: GcMarkTableId,
     /// Zero-based position in the table.
-    pub page_no: u64,
+    pub page_index: u64,
     /// Strictly increasing keys. Pages are nonempty and bounded by the codec.
     pub entries: Vec<GcMarkEntry>,
 }
@@ -73,9 +73,9 @@ pub struct GcMarkPage {
 #[serde(deny_unknown_fields)]
 pub struct GcMarkPosition {
     /// Page containing the next entry, or the table's page count at EOF.
-    pub page_no: u64,
+    pub page_index: u64,
     /// Zero-based entry within that page.
-    pub entry_no: u32,
+    pub entry_index: u32,
 }
 
 /// Maximum entries in one independently decoded mark page.
@@ -141,6 +141,7 @@ pub struct GcMarkIndex {
     /// At most one table per binary merge level, low levels first.
     pub levels: Vec<Option<GcMarkTable>>,
     /// A bounded merge that must finish before another source is marked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<GcMarkMerge>,
 }
 
@@ -196,7 +197,7 @@ pub enum GcPhase {
         /// Next entry in the sealed object table.
         position: GcMarkPosition,
         /// Next data block in the current revision segment.
-        block_no: u64,
+        block_index: u64,
         /// Content marks and their pending merge.
         content: GcMarkIndex,
     },
@@ -216,11 +217,13 @@ pub enum GcPhase {
         /// Next candidate family to enumerate.
         family: GcCandidateFamily,
         /// Last key inspected, exclusive on resume.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         last_key: Option<String>,
     },
     /// Reap scratch pages, including abandoned output from older runs.
     Cleaning {
         /// Last scratch key decided.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         last_key: Option<String>,
     },
     /// A subsequent call without this run's token may start a new collection.
@@ -269,6 +272,7 @@ pub struct GcMarkWork {
     /// WAL floor frozen with the namespace controls.
     pub floor_seq: ChangeSeq,
     /// Next older WAL pointer. Cleared only upon reaching the exact floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_tip: Option<crate::control::WalSegmentPointer>,
 }
 
@@ -279,22 +283,27 @@ pub enum GcMarkSource {
     /// The namespace's owned root, when present.
     Root {
         /// Owned basis frozen from the namespace controls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         manifest: Option<crate::control::ManifestRef>,
     },
     /// Readable checkpoint records protect their immutable bases until swept.
     Checkpoints {
         /// Last checkpoint record inspected.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         last_key: Option<String>,
     },
     /// Find the newest generation whose surviving candidates are all aged.
     AnchorDiscovery {
         /// Last key inspected, exclusive on resume.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         last_key: Option<String>,
         /// Whether any recognizable manifest candidate was listed.
         candidate_seen: bool,
         /// Aged candidates in the current generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         current: Option<GcManifestRange>,
         /// Previous complete aged generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         aged: Option<GcManifestRange>,
     },
     /// Protect every candidate in the selected generation.
@@ -302,6 +311,7 @@ pub enum GcMarkSource {
         /// Selected inclusive manifest range.
         range: GcManifestRange,
         /// Last key inspected, exclusive on resume.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         last_key: Option<String>,
     },
     /// Follow and validate one retained WAL segment per step.

@@ -38,26 +38,31 @@ impl<'a, S: ObjectStore + ?Sized> MarkTables<'a, S> {
         }
     }
 
-    fn key(&self, table_id: &GcMarkTableId, page_no: u64) -> String {
-        loonfs_objectstore::keys::gc_mark_page(self.namespace_id, self.gc_run_id, table_id, page_no)
+    fn key(&self, table_id: &GcMarkTableId, page_index: u64) -> String {
+        loonfs_objectstore::keys::gc_mark_page(
+            self.namespace_id,
+            self.gc_run_id,
+            table_id,
+            page_index,
+        )
     }
 
-    async fn page(&mut self, table: &GcMarkTable, page_no: u64) -> Result<Arc<GcMarkPage>> {
+    async fn page(&mut self, table: &GcMarkTable, page_index: u64) -> Result<Arc<GcMarkPage>> {
         validate_extent(table)?;
-        if page_no >= table.page_count {
+        if page_index >= table.page_count {
             return Err(corrupt("invalid GC mark table extent"));
         }
         if let Some(index) = self
             .pages
             .iter()
-            .position(|(_, page)| page.table_id == table.table_id && page.page_no == page_no)
+            .position(|(_, page)| page.table_id == table.table_id && page.page_index == page_index)
         {
             let (size, page) = self.pages.remove(index).expect("cached page");
             validate_page_length(table, &page)?;
             self.pages.push_back((size, Arc::clone(&page)));
             return Ok(page);
         }
-        let key = self.key(&table.table_id, page_no);
+        let key = self.key(&table.table_id, page_index);
         let body = self
             .store
             .get_with_metadata(&key)
@@ -70,7 +75,7 @@ impl<'a, S: ObjectStore + ?Sized> MarkTables<'a, S> {
         if page.namespace_id != *self.namespace_id
             || page.gc_run_id != *self.gc_run_id
             || page.table_id != table.table_id
-            || page.page_no != page_no
+            || page.page_index != page_index
         {
             return Err(corrupt(&format!(
                 "GC mark page identity disagrees with {key}"
@@ -102,15 +107,15 @@ impl<'a, S: ObjectStore + ?Sized> MarkTables<'a, S> {
     pub(super) async fn write_page(
         &self,
         table_id: &GcMarkTableId,
-        page_no: u64,
+        page_index: u64,
         entries: Vec<GcMarkEntry>,
     ) -> Result<()> {
-        let key = self.key(table_id, page_no);
+        let key = self.key(table_id, page_index);
         let encoded = encode_gc_mark_page(GcMarkPage {
             namespace_id: self.namespace_id.clone(),
             gc_run_id: self.gc_run_id.clone(),
             table_id: table_id.clone(),
-            page_no,
+            page_index,
             entries,
         })
         .map_err(|error| corrupt(&error.to_string()))?;
@@ -169,24 +174,24 @@ impl<'a, S: ObjectStore + ?Sized> MarkTables<'a, S> {
         position: GcMarkPosition,
     ) -> Result<Option<GcMarkEntry>> {
         validate_extent(table)?;
-        if position.page_no == table.page_count && position.entry_no == 0 {
+        if position.page_index == table.page_count && position.entry_index == 0 {
             return Ok(None);
         }
-        let page = self.page(table, position.page_no).await?;
+        let page = self.page(table, position.page_index).await?;
         page.entries
-            .get(position.entry_no as usize)
+            .get(position.entry_index as usize)
             .cloned()
             .map(Some)
             .ok_or_else(|| corrupt("GC mark cursor exceeds page"))
     }
 
     pub(super) fn advance(table: &GcMarkTable, position: &mut GcMarkPosition) {
-        position.entry_no += 1;
+        position.entry_index += 1;
         let consumed =
-            position.page_no * GC_MARK_PAGE_ENTRIES as u64 + u64::from(position.entry_no);
-        if position.entry_no as usize == GC_MARK_PAGE_ENTRIES || consumed == table.entry_count {
-            position.page_no += 1;
-            position.entry_no = 0;
+            position.page_index * GC_MARK_PAGE_ENTRIES as u64 + u64::from(position.entry_index);
+        if position.entry_index as usize == GC_MARK_PAGE_ENTRIES || consumed == table.entry_count {
+            position.page_index += 1;
+            position.entry_index = 0;
         }
     }
 
@@ -247,7 +252,7 @@ pub(super) fn merge_equal(mut left: GcMarkEntry, right: GcMarkEntry) -> Result<G
 }
 
 fn validate_page_length(table: &GcMarkTable, page: &GcMarkPage) -> Result<()> {
-    let expected = (table.entry_count - page.page_no * GC_MARK_PAGE_ENTRIES as u64)
+    let expected = (table.entry_count - page.page_index * GC_MARK_PAGE_ENTRIES as u64)
         .min(GC_MARK_PAGE_ENTRIES as u64);
     if page.entries.len() as u64 != expected {
         return Err(corrupt("GC mark page length disagrees with table extent"));
@@ -330,9 +335,9 @@ mod tests {
         entries: &[GcMarkEntry],
     ) -> GcMarkTable {
         let table_id = GcMarkTableId::parse(id).expect("table id");
-        for (page_no, page) in entries.chunks(GC_MARK_PAGE_ENTRIES).enumerate() {
+        for (page_index, page) in entries.chunks(GC_MARK_PAGE_ENTRIES).enumerate() {
             tables
-                .write_page(&table_id, page_no as u64, page.to_vec())
+                .write_page(&table_id, page_index as u64, page.to_vec())
                 .await
                 .expect("write input page");
         }
