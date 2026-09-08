@@ -580,6 +580,42 @@ pub enum CommitAssertion {
         /// Sequence observed when the caller read its inputs.
         expected_head_seq: ChangeSeq,
     },
+    /// Requires a visible inode with the content revision the caller read.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitAssertionFileRevision"))]
+    FileRevision {
+        /// Inode whose state the caller read.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// Content revision observed by the caller.
+        expected_revision_no: RevisionNo,
+    },
+    /// Requires the path to retain the binding or absence the caller read.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitAssertionBinding"))]
+    Binding {
+        /// Absolute path to check, including the root.
+        path: AbsolutePath,
+        /// When absent, requires the path to be unbound.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_inode_id: Option<InodeId>,
+        /// Requires an inode expectation and detects moves away and back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_binding_generation: Option<BindingGeneration>,
+    },
+    /// Requires a visible inode with the attribute revision the caller read.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitAssertionAttributes"))]
+    Attributes {
+        /// Inode whose state the caller read.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// Attribute revision observed by the caller.
+        expected_attributes_revision_no: AttributeRevisionNo,
+    },
 }
 
 /// A request to commit one or more filesystem operations atomically in order.

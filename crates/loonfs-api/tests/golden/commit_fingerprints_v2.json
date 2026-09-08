@@ -297,5 +297,57 @@
     ],
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"assertions\":[{\"kind\":\"namespace_head\",\"expected_head_seq\":2},{\"kind\":\"namespace_head\",\"expected_head_seq\":1}]}",
     "fingerprint": "v2:sha256:a0314dfb842dbb4e08ec83c1feb8c69f23df63e592b9bac831ad92b001f6b3b6"
+  },
+  {
+    "name": "file_revision_assertion",
+    "operation": {
+      "kind": "create_directory",
+      "path": "/docs",
+      "parents": false
+    },
+    "assertions": [
+      {
+        "kind": "file_revision",
+        "inode_id": "ino_42",
+        "expected_revision_no": 3
+      }
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"assertions\":[{\"kind\":\"file_revision\",\"inode_id\":\"ino_42\",\"expected_revision_no\":3}]}",
+    "fingerprint": "v2:sha256:18ff992ea8f2ecbf02ea6bc9c2f7d4883aae30265d5f945bda40be02c06a7710"
+  },
+  {
+    "name": "binding_assertion",
+    "operation": {
+      "kind": "create_directory",
+      "path": "/docs",
+      "parents": false
+    },
+    "assertions": [
+      {
+        "kind": "binding",
+        "path": "/docs/input",
+        "expected_inode_id": "ino_42",
+        "expected_binding_generation": "aaaa"
+      }
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"assertions\":[{\"kind\":\"binding\",\"path\":\"/docs/input\",\"expected_inode_id\":\"ino_42\",\"expected_binding_generation\":\"aaaa\"}]}",
+    "fingerprint": "v2:sha256:ffa8b9a6b81f6cc4684b5a50124f685d8287d54b71a7e5da45a12864b8268298"
+  },
+  {
+    "name": "attributes_assertion",
+    "operation": {
+      "kind": "create_directory",
+      "path": "/docs",
+      "parents": false
+    },
+    "assertions": [
+      {
+        "kind": "attributes",
+        "inode_id": "ino_42",
+        "expected_attributes_revision_no": 2
+      }
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v2\",\"namespace_id\":\"demo\",\"actor\":{\"kind\":\"user\",\"id\":\"test-actor\"},\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"assertions\":[{\"kind\":\"attributes\",\"inode_id\":\"ino_42\",\"expected_attributes_revision_no\":2}]}",
+    "fingerprint": "v2:sha256:50f819c1ef301b02075703f13f544ae827526fe76c99566820e3f1e391bf95de"
   }
 ]

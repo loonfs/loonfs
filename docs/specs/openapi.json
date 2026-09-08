@@ -617,6 +617,9 @@
         "description": "Admission conditions checked against the candidate's pre-state before its operations.\nThe pre-state head sequence is the last admitted commit's sequence in the batch,\nor the batch's base head sequence when no earlier candidate was admitted.",
         "discriminator": {
           "mapping": {
+            "attributes": "#/components/schemas/CommitAssertionAttributes",
+            "binding": "#/components/schemas/CommitAssertionBinding",
+            "file_revision": "#/components/schemas/CommitAssertionFileRevision",
             "namespace_head": "#/components/schemas/CommitAssertionNamespaceHead"
           },
           "propertyName": "kind"
@@ -624,8 +627,95 @@
         "oneOf": [
           {
             "$ref": "#/components/schemas/CommitAssertionNamespaceHead"
+          },
+          {
+            "$ref": "#/components/schemas/CommitAssertionFileRevision"
+          },
+          {
+            "$ref": "#/components/schemas/CommitAssertionBinding"
+          },
+          {
+            "$ref": "#/components/schemas/CommitAssertionAttributes"
           }
         ]
+      },
+      "CommitAssertionAttributes": {
+        "description": "Requires a visible inode with the attribute revision the caller read.",
+        "properties": {
+          "expected_attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "description": "Attribute revision observed by the caller."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Inode whose state the caller read."
+          },
+          "kind": {
+            "enum": [
+              "attributes"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "expected_attributes_revision_no",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "CommitAssertionBinding": {
+        "description": "Requires the path to retain the binding or absence the caller read.",
+        "properties": {
+          "expected_binding_generation": {
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Requires an inode expectation and detects moves away and back."
+          },
+          "expected_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "When absent, requires the path to be unbound."
+          },
+          "kind": {
+            "enum": [
+              "binding"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path to check, including the root."
+          }
+        },
+        "required": [
+          "path",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "CommitAssertionFileRevision": {
+        "description": "Requires a visible inode with the content revision the caller read.",
+        "properties": {
+          "expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Content revision observed by the caller."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Inode whose state the caller read."
+          },
+          "kind": {
+            "enum": [
+              "file_revision"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "expected_revision_no",
+          "kind"
+        ],
+        "type": "object"
       },
       "CommitAssertionNamespaceHead": {
         "description": "Requires the pre-state head sequence to equal `expected_head_seq`.",
@@ -1147,6 +1237,7 @@
           },
           "assertion_index": {
             "description": "Zero-based position of the failed request assertion.",
+            "format": "int32",
             "minimum": 0,
             "type": "integer"
           },

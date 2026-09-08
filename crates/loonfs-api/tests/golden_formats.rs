@@ -2956,11 +2956,26 @@ fn commit_assertion_wire_shapes_match_golden() {
             parents: false,
         },
     );
-    let guarded = request
-        .clone()
-        .assertions(vec![CommitAssertion::NamespaceHead {
+    let guarded = request.clone().assertions(vec![
+        CommitAssertion::NamespaceHead {
             expected_head_seq: ChangeSeq(42),
-        }]);
+        },
+        CommitAssertion::FileRevision {
+            inode_id: InodeId(42),
+            expected_revision_no: RevisionNo(3),
+        },
+        CommitAssertion::Binding {
+            path: AbsolutePath::parse("/docs/input").expect("path"),
+            expected_inode_id: Some(InodeId(42)),
+            expected_binding_generation: Some(
+                loonfs_api::BindingGeneration::parse("aaaa").expect("generation"),
+            ),
+        },
+        CommitAssertion::Attributes {
+            inode_id: InodeId(42),
+            expected_attributes_revision_no: loonfs_api::AttributeRevisionNo(2),
+        },
+    ]);
     let details = ErrorDetails {
         assertion_index: Some(0),
         expected_head_seq: Some(ChangeSeq(42)),

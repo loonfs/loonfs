@@ -22,6 +22,22 @@
       {
         "kind": "namespace_head",
         "expected_head_seq": 42
+      },
+      {
+        "kind": "file_revision",
+        "inode_id": "ino_42",
+        "expected_revision_no": 3
+      },
+      {
+        "kind": "binding",
+        "path": "/docs/input",
+        "expected_inode_id": "ino_42",
+        "expected_binding_generation": "aaaa"
+      },
+      {
+        "kind": "attributes",
+        "inode_id": "ino_42",
+        "expected_attributes_revision_no": 2
       }
     ],
     "operations": [

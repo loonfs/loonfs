@@ -1563,8 +1563,8 @@ async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
     .expect_err("the old identity must reject the recreated file");
     match error {
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
-            expected_child_inode_id,
-            actual_child_inode_id,
+            expected_inode_id: Some(expected_child_inode_id),
+            actual_inode_id: Some(actual_child_inode_id),
             ..
         }) => {
             assert_eq!(expected_child_inode_id, old.inode_id);
@@ -2301,8 +2301,8 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
     assert!(matches!(
         error,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
-            expected_child_inode_id,
-            actual_child_inode_id,
+            expected_inode_id: Some(expected_child_inode_id),
+            actual_inode_id: Some(actual_child_inode_id),
             ..
         }) if expected_child_inode_id == old.inode_id
             && actual_child_inode_id == recreated.inode_id

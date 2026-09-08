@@ -224,6 +224,7 @@ async fn ensure_expected_destination_revision<S: ObjectStore + ?Sized>(
             inode_id: existing.inode_id,
             expected,
             actual,
+            assertion_index: None,
         }
         .into());
     }

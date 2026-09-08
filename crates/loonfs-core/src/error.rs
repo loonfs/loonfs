@@ -118,7 +118,10 @@ pub enum CoreError {
     },
     /// The requested binding generation is no longer current.
     #[error("inode `{inode_id}` is no longer bound at the generation the request named")]
-    BindingGenerationMismatch { inode_id: InodeId },
+    BindingGenerationMismatch {
+        inode_id: InodeId,
+        assertion_index: Option<u32>,
+    },
     #[error("commit id conflict for `{commit_id}`")]
     CommitIdReuseConflict {
         commit_id: String,
@@ -611,6 +614,14 @@ impl CoreError {
                 actual_head_seq: Some(*actual),
                 ..ErrorDetails::default()
             }),
+            CoreError::BindingGenerationMismatch {
+                inode_id,
+                assertion_index: Some(assertion_index),
+            } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                assertion_index: Some(*assertion_index),
+                ..ErrorDetails::default()
+            }),
             CoreError::CommitValidation(error) => error.details(),
             CoreError::FailedOperation {
                 operation_index,
@@ -914,6 +925,7 @@ mod tests {
             inode_id: InodeId(7),
             expected: RevisionNo(2),
             actual: Some(RevisionNo(5)),
+            assertion_index: None,
         });
         let details = stale.details().expect("stale-revision details");
         assert_eq!(details.inode_id, Some(InodeId(7)));
@@ -931,6 +943,7 @@ mod tests {
                 inode_id: InodeId(7),
                 expected: RevisionNo(2),
                 actual: None,
+                assertion_index: None,
             });
         let message = unversioned.to_string();
         assert!(message.contains("revision 2"), "{message}");

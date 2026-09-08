@@ -1835,8 +1835,8 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
     assert!(matches!(
         error,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
-            expected_child_inode_id: InodeId(1),
-            actual_child_inode_id: actual,
+            expected_inode_id: Some(InodeId(1)),
+            actual_inode_id: Some(actual),
             ..
         }) if actual == mismatching_inode
     ));
@@ -2002,6 +2002,358 @@ async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
             .expect_err("changed assertion changes identity");
         assert_eq!(conflict.code(), ErrorCode::CommitIdReuseConflict);
     }
+}
+
+fn scoped_directory(
+    commit_id: &str,
+    assertions: Vec<loonfs_api::CommitAssertion>,
+) -> CommitRequest {
+    commit_request(
+        commit_id,
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(format!("/{commit_id}")).expect("path"),
+            parents: false,
+        },
+    )
+    .assertions(assertions)
+}
+
+fn assertion_details(
+    result: &Result<loonfs_api::CommitResponse, CoreError>,
+    code: ErrorCode,
+    index: u32,
+) -> loonfs_api::ErrorDetails {
+    let error = result.as_ref().expect_err("assertion fails");
+    assert_eq!(error.code(), code);
+    let details = error.details().expect("assertion details");
+    assert_eq!(details.assertion_index, Some(index));
+    assert_eq!(details.operation_index, None);
+    details
+}
+
+#[tokio::test]
+async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_and_deletion() {
+    use loonfs_api::{CommitAssertion, RevisionNo};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/input",
+        b"input",
+        DestinationBehavior::NoReplace,
+        &context,
+        Some("seed"),
+    )
+    .await
+    .expect("seed");
+    let inode_id = resolve_path(&store, &namespace_id, "/input")
+        .await
+        .expect("input")
+        .inode_id;
+    let content = store_bytes_as_content(&store, &namespace_id, b"rewrite")
+        .await
+        .expect("content");
+    let assertion = CommitAssertion::FileRevision {
+        inode_id,
+        expected_revision_no: RevisionNo(1),
+    };
+    let put = |path: &str| FilesystemOperation::PutFile {
+        path: AbsolutePath::parse(path).expect("path"),
+        content_ref: content.content_ref().clone(),
+        behavior: DestinationBehavior::Replace,
+        expected_inode_id: None,
+        expected_revision_no: None,
+    };
+    let results = submit_commits_batch(
+        &store,
+        &namespace_id,
+        vec![
+            commit_request("unrelated", put("/other")),
+            scoped_directory("holds", vec![assertion.clone()]),
+            commit_request("rewrite", put("/input")),
+            scoped_directory("stale", vec![assertion.clone()]),
+            commit_request(
+                "delete",
+                FilesystemOperation::DeletePath {
+                    path: AbsolutePath::parse("/input").expect("path"),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: None,
+                },
+            ),
+            scoped_directory("deleted", vec![assertion]),
+            scoped_directory(
+                "later",
+                vec![CommitAssertion::Binding {
+                    path: AbsolutePath::parse("/stale").expect("path"),
+                    expected_inode_id: None,
+                    expected_binding_generation: None,
+                }],
+            ),
+        ],
+        &context,
+    )
+    .await;
+    for index in [0, 1, 2, 4, 6] {
+        results[index].as_ref().expect("admitted candidate");
+    }
+    let stale = assertion_details(&results[3], ErrorCode::StaleRevision, 0);
+    assert_eq!(stale.inode_id, Some(inode_id));
+    assert_eq!(stale.expected_revision_no, Some(RevisionNo(1)));
+    assert_eq!(stale.actual_revision_no, Some(RevisionNo(2)));
+    let deleted = assertion_details(&results[5], ErrorCode::StaleRevision, 0);
+    assert_eq!(deleted.inode_id, Some(inode_id));
+    assert_eq!(deleted.expected_revision_no, Some(RevisionNo(1)));
+    assert_eq!(deleted.actual_revision_no, None);
+    assert_eq!(
+        results[6].as_ref().expect("later").committed_seq,
+        ChangeSeq(6)
+    );
+    let head = load_namespace_head_control(&store, &namespace_id)
+        .await
+        .expect("head");
+    assert_eq!(head.state.next_inode_id, InodeId(6));
+}
+
+#[tokio::test]
+async fn binding_assertions_track_identity_absence_and_moves() {
+    use loonfs_api::CommitAssertion;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for (path, commit_id) in [("/input", "seed"), ("/other", "other")] {
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            path,
+            b"input",
+            DestinationBehavior::NoReplace,
+            &context,
+            Some(commit_id),
+        )
+        .await
+        .expect("seed file");
+    }
+    let input = resolve_path(&store, &namespace_id, "/input")
+        .await
+        .expect("input");
+    let other = resolve_path(&store, &namespace_id, "/other")
+        .await
+        .expect("other");
+    let binding = CommitAssertion::Binding {
+        path: AbsolutePath::parse("/input").expect("path"),
+        expected_inode_id: Some(input.inode_id),
+        expected_binding_generation: None,
+    };
+    let generation = CommitAssertion::Binding {
+        path: AbsolutePath::parse("/input").expect("path"),
+        expected_inode_id: Some(input.inode_id),
+        expected_binding_generation: input.binding_generation.clone(),
+    };
+    assert!(input.binding_generation.is_some());
+    let absent = CommitAssertion::Binding {
+        path: AbsolutePath::parse("/vacant").expect("path"),
+        expected_inode_id: None,
+        expected_binding_generation: None,
+    };
+    let move_file = |from: &str, to: &str| FilesystemOperation::MovePath {
+        from_path: AbsolutePath::parse(from).expect("source"),
+        to_path: AbsolutePath::parse(to).expect("destination"),
+        guard: loonfs_api::DestinationGuard {
+            behavior: DestinationBehavior::Replace,
+            ..Default::default()
+        },
+    };
+    let results = submit_commits_batch(
+        &store,
+        &namespace_id,
+        vec![
+            scoped_directory("unrelated", vec![]),
+            scoped_directory(
+                "holds",
+                vec![binding.clone(), generation.clone(), absent.clone()],
+            ),
+            commit_request("away", move_file("/input", "/away")),
+            commit_request("back", move_file("/away", "/input")),
+            scoped_directory("moved", vec![generation]),
+            scoped_directory("same-inode", vec![binding.clone()]),
+            commit_request("rebind", move_file("/other", "/input")),
+            scoped_directory("rebound", vec![binding]),
+            commit_request("bind-vacant", move_file("/input", "/vacant")),
+            scoped_directory("now-bound", vec![absent]),
+        ],
+        &context,
+    )
+    .await;
+    for index in [0, 1, 2, 3, 5, 6, 8] {
+        results[index].as_ref().expect("admitted candidate");
+    }
+    let moved = assertion_details(&results[4], ErrorCode::BindingGenerationMismatch, 0);
+    assert_eq!(moved.inode_id, Some(input.inode_id));
+    let rebound = assertion_details(&results[7], ErrorCode::PathConflict, 0);
+    assert_eq!(rebound.expected_inode_id, Some(input.inode_id));
+    assert_eq!(rebound.actual_inode_id, Some(other.inode_id));
+    let now_bound = assertion_details(&results[9], ErrorCode::PathConflict, 0);
+    assert_eq!(now_bound.expected_inode_id, None);
+    assert_eq!(now_bound.actual_inode_id, Some(other.inode_id));
+}
+
+#[tokio::test]
+async fn attributes_assertions_ignore_content_rewrites_and_reject_attribute_updates() {
+    use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, CommitAssertion};
+    use std::collections::BTreeMap;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/input",
+        b"input",
+        DestinationBehavior::NoReplace,
+        &context,
+        Some("seed"),
+    )
+    .await
+    .expect("seed");
+    let inode_id = resolve_path(&store, &namespace_id, "/input")
+        .await
+        .expect("input")
+        .inode_id;
+    let content = store_bytes_as_content(&store, &namespace_id, b"rewrite")
+        .await
+        .expect("content");
+    let assertion = CommitAssertion::Attributes {
+        inode_id,
+        expected_attributes_revision_no: AttributeRevisionNo(0),
+    };
+    let results = submit_commits_batch(
+        &store,
+        &namespace_id,
+        vec![
+            commit_request(
+                "rewrite",
+                FilesystemOperation::PutFileRevisionByInode {
+                    inode_id,
+                    content_ref: content.content_ref().clone(),
+                    expected_revision_no: loonfs_api::RevisionNo(1),
+                },
+            ),
+            scoped_directory("holds", vec![assertion.clone()]),
+            commit_request(
+                "update",
+                FilesystemOperation::UpdateAttributes {
+                    path: AbsolutePath::parse("/input").expect("path"),
+                    set: BTreeMap::from([(
+                        AttributeKey::parse("owner").expect("key"),
+                        AttributeValue::parse("hopper").expect("value"),
+                    )]),
+                    remove: vec![],
+                    expected_inode_id: None,
+                    expected_attributes_revision_no: None,
+                },
+            ),
+            scoped_directory("stale", vec![assertion]),
+        ],
+        &context,
+    )
+    .await;
+    for result in &results[..3] {
+        result.as_ref().expect("admitted candidate");
+    }
+    let stale = assertion_details(&results[3], ErrorCode::StaleAttributes, 0);
+    assert_eq!(stale.inode_id, Some(inode_id));
+    assert_eq!(
+        stale.expected_attributes_revision_no,
+        Some(AttributeRevisionNo(0))
+    );
+    assert_eq!(
+        stale.actual_attributes_revision_no,
+        Some(AttributeRevisionNo(1))
+    );
+}
+
+#[tokio::test]
+async fn mixed_assertions_report_the_first_failure_and_write_nothing() {
+    use loonfs_api::{CommitAssertion, RevisionNo};
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    engine
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::new(scoped_directory("seed", vec![]))],
+            &context,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .results
+        .remove(0)
+        .expect("seed");
+    let head = CommitAssertion::NamespaceHead {
+        expected_head_seq: ChangeSeq(0),
+    };
+    let scoped = CommitAssertion::FileRevision {
+        inode_id: InodeId(99),
+        expected_revision_no: RevisionNo(1),
+    };
+    let valid = CommitAssertion::NamespaceHead {
+        expected_head_seq: ChangeSeq(1),
+    };
+    store.take();
+    for (index, (assertions, code, failed_index)) in [
+        (vec![head.clone(), scoped.clone()], ErrorCode::StaleHead, 0),
+        (vec![scoped.clone(), head], ErrorCode::StaleRevision, 0),
+        (vec![valid, scoped], ErrorCode::StaleRevision, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = engine
+            .publish_batch(
+                &store,
+                vec![CommitCandidate::new(scoped_directory(
+                    &format!("mixed-{index}"),
+                    assertions,
+                ))],
+                &context,
+                &PublishTailOptions::default(),
+            )
+            .await
+            .results
+            .remove(0);
+        assertion_details(&result, code, failed_index);
+    }
+    let counts = store.counts();
+    assert_eq!(counts.puts, 0);
+    assert_eq!(counts.compare_and_swaps, 0);
+    assert_eq!(counts.deletes, 0);
 }
 
 #[tokio::test]

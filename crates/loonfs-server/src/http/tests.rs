@@ -110,6 +110,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "expires_at_ms",
     "fenced_writer_epoch",
     "file_created",
+    "file_revision",
     "from_display_name",
     "from_parent_inode_id",
     "grace_window_ms",
@@ -4629,6 +4630,63 @@ async fn stale_commit_assertion_returns_409_with_its_index() {
     assert_eq!(details.assertion_index, Some(0));
     assert_eq!(details.expected_head_seq, Some(ChangeSeq(1)));
     assert_eq!(details.actual_head_seq, Some(ChangeSeq(0)));
+    assert_eq!(details.operation_index, None);
+    state.writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn scoped_commit_assertion_returns_409_with_its_index() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, state) = app(
+        test_config(temp_dir.path(), "assertion-writer"),
+        AppOptions::default(),
+    )
+    .await
+    .expect("app");
+    state
+        .writer
+        .create_namespace(
+            &NamespaceId::parse("demo").expect("namespace"),
+            CreateNamespaceOptions::default(),
+        )
+        .await
+        .expect("namespace");
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v0/namespaces/demo/commits")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "commit_id": "stale-assertion",
+                        "actor": {"kind": "user", "id": "test-actor"},
+                        "assertions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_99", "expected_revision_no": 1}],
+                        "operations": [{"kind": "create_directory", "path": "/docs"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
+    assert_eq!(error.code, ErrorCode::StaleRevision.as_str());
+    let details = error.details.expect("details");
+    assert_eq!(details.assertion_index, Some(1));
+    assert_eq!(details.inode_id, Some(loonfs_api::InodeId(99)));
+    assert_eq!(
+        details.expected_revision_no,
+        Some(loonfs_api::RevisionNo(1))
+    );
+    assert_eq!(details.actual_revision_no, None);
     assert_eq!(details.operation_index, None);
     state.writer.shutdown().await.expect("shutdown");
 }

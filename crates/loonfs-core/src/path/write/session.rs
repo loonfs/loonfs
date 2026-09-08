@@ -1,17 +1,19 @@
 //! [`PublishPlanningSession`]: plans a batch's candidates in admission
 //! order, each seeing the rows earlier candidates would persist.
 
+use super::assertions::evaluate_assertions;
 use super::intent::CommitRequest;
 use super::planner::prepare_commit_against_publish_view;
 use crate::commit::{
     CandidateAllocation, CommitFingerprint, CommitPlan, InodeAllocator, ValidatedCommitPlan,
 };
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 #[cfg(test)]
 use loonfs_api::AbsolutePath;
+#[cfg(test)]
 use loonfs_api::CommitAssertion;
 #[cfg(test)]
 use loonfs_api::NamespaceId;
@@ -63,25 +65,15 @@ impl PublishPlanningSession {
         committed_at_ms: u64,
         allocation: &mut CandidateAllocation,
     ) -> Result<ValidatedCommitPlan> {
-        for (assertion_index, assertion) in request.assertions.iter().enumerate() {
-            match assertion {
-                CommitAssertion::NamespaceHead { expected_head_seq }
-                    if *expected_head_seq != self.head.seq =>
-                {
-                    return Err(CoreError::StaleHeadPrecondition {
-                        expected: *expected_head_seq,
-                        actual: self.head.seq,
-                        assertion_index: u32::try_from(assertion_index).ok(),
-                    });
-                }
-                CommitAssertion::NamespaceHead { .. } => {}
-            }
-        }
+        let base_view = base_view.with_durable_cache(&self.durable_cache);
+        let overlay = MetadataState::default();
+        let pre_state = base_view.with_overlay(&overlay, &self.accepted_rows, self.head.seq);
+        evaluate_assertions(&request.assertions, &self.head, &pre_state).await?;
         prepare_commit_against_publish_view(
             request,
             semantic_identity,
             &self.head,
-            base_view.with_durable_cache(&self.durable_cache),
+            base_view,
             &self.accepted_rows,
             committed_at_ms,
             allocation,
