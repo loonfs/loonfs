@@ -5,6 +5,7 @@
 
 mod active_deletions;
 mod attributes;
+mod bounded_pages;
 mod cache;
 mod cas_recovery;
 mod index_parity;
