@@ -193,12 +193,20 @@ mod tests {
     use loonfs_api::{ContentId, ContentRef, ContentRefKind};
 
     fn meta_for(bytes: &[u8]) -> PartialMeta {
-        PartialMeta::describe(&ContentRef::blob_v1(ContentId::generate(), bytes), None)
+        PartialMeta::describe(
+            &ContentRef::blob_v1(
+                loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                ContentId::generate(),
+                bytes,
+            ),
+            None,
+        )
     }
 
     fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef {
             kind: ContentRefKind::BlobV1,
+            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(bytes),

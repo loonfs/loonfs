@@ -47,7 +47,11 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             delta_index: 1,
             inode_id: InodeId(7),
             revision_no: RevisionNo(1),
-            content_ref: ContentRef::blob_v1(ContentId::generate(), b"revision"),
+            content_ref: ContentRef::blob_v1(
+                loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                ContentId::generate(),
+                b"revision",
+            ),
         },
         WalDelta::TombstoneSubtree {
             delta_index: 2,
@@ -470,8 +474,16 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 
 #[test]
 fn metadata_builder_tracks_the_highest_row_sequence() {
-    let content_ref = ContentRef::blob_v1(ContentId::generate(), b"first revision bytes");
-    let replacement_ref = ContentRef::blob_v1(ContentId::generate(), b"second revision bytes");
+    let content_ref = ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        b"first revision bytes",
+    );
+    let replacement_ref = ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        b"second revision bytes",
+    );
 
     let mut builder = MetadataStateBuilder::default();
     builder.push_inode(InodeRecord {

@@ -1395,7 +1395,11 @@ mod tests {
 
     #[test]
     fn file_revision_provenance_fields_are_pinned_on_the_wire() {
-        let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
+        let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::ContentId::generate(),
+            b"hello",
+        );
         let revision = FileRevision {
             inode_id: InodeId(2),
             revision_no: RevisionNo(3),
@@ -1429,6 +1433,7 @@ mod tests {
 
     fn sample_content_ref() -> ContentRef {
         ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id"),
             b"hello",
         )
@@ -1684,6 +1689,7 @@ mod tests {
             "path": "/docs/a.txt",
             "content_ref": {
                 "kind": "blob_v1",
+                "owner_namespace_id": "demo",
                 "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 1,
                 "checksum": {
@@ -1758,7 +1764,11 @@ mod tests {
 
     #[test]
     fn filesystem_operation_paths_keep_the_plain_string_wire_shape() {
-        let content_ref = ContentRef::blob_v1(ContentId::generate(), b"hello");
+        let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
+            b"hello",
+        );
         let cases = [
             (
                 FilesystemOperation::PutFile {
@@ -1830,7 +1840,7 @@ mod tests {
             serde_json::json!({
                 "kind": "put_file",
                 "path": "relative",
-                "content_ref": ContentRef::blob_v1(ContentId::generate(), b"hello")
+                "content_ref": ContentRef::blob_v1(crate::NamespaceId::parse("demo").expect("namespace id"), ContentId::generate(), b"hello")
             }),
             serde_json::json!({"kind": "delete_path", "path": "relative"}),
             serde_json::json!({

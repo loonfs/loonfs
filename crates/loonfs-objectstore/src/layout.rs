@@ -53,7 +53,7 @@ impl<'a> ParsedObjectKey<'a> {
         self.family
     }
 
-    /// Returns the namespace path component, or `None` for content-store-owned families.
+    /// Returns the namespace path component, or `None` for the content-store descriptor.
     pub fn owner_namespace_id(&self) -> Option<&'a str> {
         self.owner_namespace_id
     }
@@ -76,9 +76,9 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             None,
             Some(content_store_id),
         )),
-        ["content-stores", _, "objects", _, _, content_id] => Some(parsed(
+        ["content-stores", _, "objects", owner_namespace_id, _, _, content_id] => Some(parsed(
             DurableObjectFamily::ContentBlob,
-            None,
+            Some(owner_namespace_id),
             Some(content_id),
         )),
         ["namespaces", namespace, "gc", "run.json"] => {
@@ -239,10 +239,10 @@ fn parsed<'a>(
 mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        checkpoint_record, content_blob, content_store, metadata_compaction_lease,
-        metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
-        metadata_segment_prefix, upload_session, wal_floor, wal_head, wal_segment,
-        wal_segment_prefix,
+        checkpoint_record, content_blob, content_owner_prefix, content_store,
+        metadata_compaction_lease, metadata_compaction_segment, metadata_manifest_object,
+        metadata_root, metadata_segment, metadata_segment_prefix, upload_session, wal_floor,
+        wal_head, wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
@@ -321,7 +321,7 @@ mod tests {
                 Some(upload_id.as_str()),
             ),
             (
-                content_blob(&content_store_id, &content_id),
+                content_blob(&content_store_id, &namespace_id, &content_id),
                 DurableObjectFamily::ContentBlob,
                 Some(content_id.as_str()),
             ),
@@ -332,14 +332,37 @@ mod tests {
             assert_eq!(parsed.family(), family);
             assert_eq!(
                 parsed.owner_namespace_id(),
-                (!matches!(
-                    family,
-                    DurableObjectFamily::ContentBlob | DurableObjectFamily::ContentStore
-                ))
-                .then_some("ns-1")
+                (!matches!(family, DurableObjectFamily::ContentStore)).then_some("ns-1")
             );
             assert_eq!(parsed.identifier(), identifier);
         }
+        let a = NamespaceId::parse("a").expect("owner");
+        let ab = NamespaceId::parse("ab").expect("owner");
+        let a_prefix = content_owner_prefix(&content_store_id, &a);
+        let ab_prefix = content_owner_prefix(&content_store_id, &ab);
+        assert_eq!(
+            a_prefix,
+            format!("content-stores/{content_store_id}/objects/a/")
+        );
+        assert_eq!(
+            ab_prefix,
+            format!("content-stores/{content_store_id}/objects/ab/")
+        );
+        assert!(!ab_prefix.starts_with(&a_prefix));
+        for owner in [a, ab] {
+            let key = content_blob(&content_store_id, &owner, &content_id);
+            assert!(key.starts_with(&content_owner_prefix(&content_store_id, &owner)));
+            assert_eq!(
+                parse_object_key(&key)
+                    .expect("content key")
+                    .owner_namespace_id(),
+                Some(owner.as_str())
+            );
+        }
+        assert!(parse_object_key(&format!(
+            "content-stores/{content_store_id}/objects/ab/cd/{content_id}"
+        ))
+        .is_none());
     }
 
     #[test]

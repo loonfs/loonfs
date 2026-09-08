@@ -824,6 +824,10 @@
             "$ref": "#/components/schemas/ContentRefKind",
             "description": "Content strategy used by the referenced object."
           },
+          "owner_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that originally wrote the bytes."
+          },
           "size_bytes": {
             "description": "Complete byte length of the referenced content.",
             "format": "int64",
@@ -833,6 +837,7 @@
         },
         "required": [
           "kind",
+          "owner_namespace_id",
           "content_id",
           "size_bytes",
           "checksum"

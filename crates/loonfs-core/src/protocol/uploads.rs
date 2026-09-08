@@ -147,7 +147,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     ensure_upload_namespace_available(store, namespace_id).await?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
-    let object_key = content_key_for_id(&content_store_id, &content_id);
+    let object_key = content_key_for_id(&content_store_id, namespace_id, &content_id);
     let upload_id = create_upload_session(
         store,
         namespace_id,
@@ -178,10 +178,11 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
-    let object_key = content_key_for_id(&content_store_id, &content_id);
+    let object_key = content_key_for_id(&content_store_id, namespace_id, &content_id);
 
     let provider_upload_id =
-        create_content_multipart_upload(store, &content_store_id, &content_id).await?;
+        create_content_multipart_upload(store, &content_store_id, namespace_id, &content_id)
+            .await?;
     let session = NewUploadSession::direct_multipart(
         content_id.clone(),
         &provider_upload_id,
@@ -194,6 +195,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
             let _ = abort_unpublished_multipart_upload(
                 store,
                 &content_store_id,
+                namespace_id,
                 &content_id,
                 &provider_upload_id,
             )
@@ -274,7 +276,11 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     }
 
     Ok(MultipartPartTargets {
-        object_key: content_key_for_id(&content_store_id, &session.content_id),
+        object_key: content_key_for_id(
+            &content_store_id,
+            &session.namespace_id,
+            &session.content_id,
+        ),
         provider_upload_id: provider_upload_id.to_owned(),
         parts,
     })
@@ -301,12 +307,14 @@ fn multipart_session_upload(session: &UploadSessionState) -> Result<(&str, Check
 /// Builds a content reference from a client's upload claim.
 ///
 fn claimed_content_ref(
+    owner_namespace_id: NamespaceId,
     content_id: ContentId,
     claim: &UploadContentClaim,
     required_algorithm: ChecksumAlgorithm,
 ) -> Result<ContentRef> {
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
+        owner_namespace_id,
         content_id,
         size_bytes: claim.size_bytes,
         checksum: validate_upload_checksum(&claim.checksum, required_algorithm)?.clone(),
@@ -640,11 +648,18 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     match claim_staging_slot(store, namespace_id, upload_id).await? {
         StagingSlot::AlreadyStaged(staged) => {
             let content_ref = match payload {
-                ProxiedPayload::Bytes(bytes) => {
-                    ContentRef::blob_v1(loaded.content_id.clone(), bytes)
-                }
+                ProxiedPayload::Bytes(bytes) => ContentRef::blob_v1(
+                    loaded.namespace_id.clone(),
+                    loaded.content_id.clone(),
+                    bytes,
+                ),
                 ProxiedPayload::Stream(body) => {
-                    identify_streamed_payload(loaded.content_id.clone(), body).await?
+                    identify_streamed_payload(
+                        loaded.namespace_id.clone(),
+                        loaded.content_id.clone(),
+                        body,
+                    )
+                    .await?
                 }
             };
             if staged != content_ref {
@@ -662,14 +677,19 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     }
 
     let staged = match payload {
-        ProxiedPayload::Bytes(bytes) => {
-            stage_bytes_under_content_id(store, content_store_id, loaded.content_id.clone(), bytes)
-                .await
-                .map(|stored| (stored.into_content_ref(), false))
-        }
+        ProxiedPayload::Bytes(bytes) => stage_bytes_under_content_id(
+            store,
+            content_store_id,
+            loaded.namespace_id.clone(),
+            loaded.content_id.clone(),
+            bytes,
+        )
+        .await
+        .map(|stored| (stored.into_content_ref(), false)),
         ProxiedPayload::Stream(body) => stage_streamed_under_content_id(
             store,
             content_store_id,
+            loaded.namespace_id.clone(),
             loaded.content_id.clone(),
             body,
             StreamedPayloadKind::Request,
@@ -945,6 +965,7 @@ pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
     let stored = stage_bytes_under_content_id(
         store,
         catalog.content_store_id().clone(),
+        catalog.namespace_id().clone(),
         session.content_id,
         bytes,
     )
@@ -977,6 +998,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
     let staged = stage_streamed_under_content_id(
         store,
         content_store_id,
+        catalog.namespace_id().clone(),
         session.content_id,
         body,
         payload_kind,
@@ -988,7 +1010,11 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         // replay, and it fails loudly.
         return Err(CoreError::Internal(format!(
             "content object `{}` already holds bytes under a freshly minted identity",
-            content_key_for_id(catalog.content_store_id(), &staged.content_ref.content_id)
+            content_key_for_id(
+                catalog.content_store_id(),
+                &staged.content_ref.owner_namespace_id,
+                &staged.content_ref.content_id
+            )
         )));
     }
     complete_owned_staging(
@@ -1130,6 +1156,7 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
 /// terminal state is durable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AbandonedUpload {
+    owner_namespace_id: NamespaceId,
     content_id: ContentId,
     provider_multipart_upload_id: Option<String>,
 }
@@ -1143,6 +1170,7 @@ impl AbandonedUpload {
             UploadSessionMode::ServiceProxied { .. } | UploadSessionMode::DirectPut { .. } => None,
         };
         Self {
+            owner_namespace_id: state.namespace_id.clone(),
             content_id: state.content_id.clone(),
             provider_multipart_upload_id,
         }
@@ -1164,6 +1192,7 @@ impl AbandonedUpload {
             if !abort_unpublished_multipart_upload(
                 store,
                 content_store_id,
+                &self.owner_namespace_id,
                 &self.content_id,
                 provider_upload_id,
             )
@@ -1172,7 +1201,13 @@ impl AbandonedUpload {
                 return false;
             }
         }
-        delete_unpublished_content_object(store, content_store_id, &self.content_id).await
+        delete_unpublished_content_object(
+            store,
+            content_store_id,
+            &self.owner_namespace_id,
+            &self.content_id,
+        )
+        .await
     }
 }
 
@@ -1412,6 +1447,7 @@ fn completion_plan<'a>(
             ResolvedUploadCompletion::DirectPut { content },
         ) => Ok(CompletionPlan::DirectPut {
             requested: claimed_content_ref(
+                session.namespace_id.clone(),
                 session.content_id.clone(),
                 content,
                 *checksum_algorithm,
@@ -1426,6 +1462,7 @@ fn completion_plan<'a>(
             ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
         ) => Ok(CompletionPlan::DirectMultipart {
             requested: claimed_content_ref(
+                session.namespace_id.clone(),
                 session.content_id.clone(),
                 content,
                 *checksum_algorithm,
@@ -1581,7 +1618,11 @@ mod tests {
         let content_store_id = load_namespace_content_store_id(store, &namespace_id)
             .await
             .expect("content store id");
-        let content_key = content_blob(&content_store_id, &staged.content_ref.content_id);
+        let content_key = content_blob(
+            &content_store_id,
+            &staged.content_ref.owner_namespace_id,
+            &staged.content_ref.content_id,
+        );
         (
             namespace_id,
             content_store_id,
@@ -1783,9 +1824,13 @@ mod tests {
             size_bytes: 7,
             checksum: Checksum::crc32c(b"payload"),
         };
-        let content_ref =
-            claimed_content_ref(session.content_id.clone(), &content, required_algorithm)
-                .expect("the stored algorithm accepts the content claim");
+        let content_ref = claimed_content_ref(
+            session.namespace_id.clone(),
+            session.content_id.clone(),
+            &content,
+            required_algorithm,
+        )
+        .expect("the stored algorithm accepts the content claim");
         assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Crc32c);
 
         let part = CompletedUploadPart {
@@ -1818,9 +1863,13 @@ mod tests {
             size_bytes: 7,
             checksum: Checksum::sha256(b"payload"),
         };
-        assert!(
-            claimed_content_ref(session.content_id, &wrong_content, required_algorithm).is_err()
-        );
+        assert!(claimed_content_ref(
+            session.namespace_id.clone(),
+            session.content_id,
+            &wrong_content,
+            required_algorithm
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -1920,7 +1969,7 @@ mod tests {
             .await
             .expect("content store id");
         let content_id = ContentId::generate();
-        let content_key = content_blob(&content_store_id, &content_id);
+        let content_key = content_blob(&content_store_id, &namespace_id, &content_id);
         store
             .put(
                 &content_key,
@@ -1930,6 +1979,7 @@ mod tests {
             .await
             .expect("write unpublished content");
         let abandoned = AbandonedUpload {
+            owner_namespace_id: namespace_id.clone(),
             content_id,
             provider_multipart_upload_id: Some("unsupported-provider-upload".to_owned()),
         };

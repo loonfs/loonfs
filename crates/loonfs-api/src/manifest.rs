@@ -1224,6 +1224,7 @@ mod tests {
             committed_by: crate::ActorRef::loonfs_system(),
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
+                crate::NamespaceId::parse("demo").expect("namespace id"),
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
                 b"row key sample",
@@ -1301,6 +1302,7 @@ mod tests {
             committed_by: crate::ActorRef::loonfs_system(),
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
+                crate::NamespaceId::parse("demo").expect("namespace id"),
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
                 b"row key prefix sample",
@@ -1428,6 +1430,7 @@ mod tests {
                         committed_by: actor.clone(),
                         delta_index: 3,
                         content_ref: crate::ContentRef::blob_v1(
+                            crate::NamespaceId::parse("demo").expect("namespace id"),
                             crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                                 .expect("content id"),
                             b"attribution key test",

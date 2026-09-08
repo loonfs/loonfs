@@ -14,7 +14,7 @@ use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const TOKEN_VERSION: &str = "vct0";
+const TOKEN_VERSION: &str = "vct1";
 
 /// Evidence read from a durable upload session in its completed state.
 ///
@@ -213,11 +213,13 @@ pub fn verify_content_token(
     let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload_part)
         .map_err(|_| ContentTokenError::Malformed)?;
-    let payload: ContentTokenPayload = serde_json::from_slice(&payload_bytes)
+    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
         .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
-    if payload.version != TOKEN_VERSION {
+    if payload.get("version").and_then(serde_json::Value::as_str) != Some(TOKEN_VERSION) {
         return Err(ContentTokenError::Malformed);
     }
+    let payload: ContentTokenPayload = serde_json::from_value(payload)
+        .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
     if payload.namespace_id != *catalog.namespace_id() {
         return Err(ContentTokenError::NamespaceMismatch);
     }
@@ -292,7 +294,7 @@ mod tests {
     #[test]
     fn minted_content_token_passes_unchanged_into_embedded_verification() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
+        let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
         let token = mint_content_token(
             "secret",
             &receipt(&namespace, CONTENT_STORE, &content),
@@ -317,7 +319,7 @@ mod tests {
     fn prepared_admission_remains_bound_to_its_namespace() {
         let namespace = NamespaceId::parse("source").expect("namespace");
         let other_namespace = NamespaceId::parse("target").expect("namespace");
-        let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
+        let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
         let token = mint_content_token(
             "secret",
             &receipt(&namespace, CONTENT_STORE, &content),
@@ -337,9 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn prepared_content_does_not_change_the_signed_payload_encoding() {
+    fn token_encoding_signs_the_owner_and_rejects_the_previous_version() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(
+            namespace.clone(),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
         );
@@ -356,14 +359,30 @@ mod tests {
 
         assert_eq!(
             payload,
-            br#"{"version":"vct0","namespace_id":"demo","content_store_id":"cs_00000000000000000000000000000001","content_ref":{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
+            br#"{"version":"vct1","namespace_id":"demo","content_store_id":"cs_00000000000000000000000000000001","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
+        );
+        let mut old_payload: serde_json::Value = serde_json::from_slice(&payload).expect("payload");
+        old_payload["version"] = serde_json::json!("vct0");
+        old_payload["content_ref"]
+            .as_object_mut()
+            .expect("reference")
+            .remove("owner_namespace_id");
+        let payload_part =
+            super::base64_url(&serde_json::to_vec(&old_payload).expect("old payload"));
+        let signature = loonfs_objectstore::crypto::hmac_sha256(b"secret", payload_part.as_bytes());
+        let mut old_token = token;
+        old_token.token = format!("{payload_part}.{}", super::base64_url(&signature));
+        let catalog = catalog_entry(namespace, CONTENT_STORE);
+        assert_eq!(
+            verify_content_token("secret", &catalog, &old_token, 1_000),
+            Err(ContentTokenError::Malformed)
         );
     }
 
     #[test]
     fn verified_token_admission_expires_with_the_token() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
+        let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
         let issued_at_ms = 1_000;
         let token = mint_content_token(
             "secret",
@@ -399,8 +418,8 @@ mod tests {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let other_namespace = NamespaceId::parse("other").expect("namespace");
         let other_store = "cs_00000000000000000000000000000002";
-        let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
-        let other_content = ContentRef::blob_v1(ContentId::generate(), b"other");
+        let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
+        let other_content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"other");
         let issued_at_ms = 1_000;
         let token = mint_content_token(
             "secret",

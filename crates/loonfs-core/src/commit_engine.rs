@@ -693,7 +693,11 @@ mod tests {
         let proof = PreparedContent::for_durable_content_write(
             NamespaceId::parse("demo").expect("namespace"),
             ContentStoreId::parse("cs_00000000000000000000000000000001").expect("store"),
-            ContentRef::blob_v1(ContentId::generate(), b"proof"),
+            ContentRef::blob_v1(
+                loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                ContentId::generate(),
+                b"proof",
+            ),
         );
         let prepared = CommitCandidate::prepared(request.clone(), vec![proof; 100]);
         assert!(
@@ -752,7 +756,11 @@ mod tests {
             .semantic_identity(&namespace_id)
             .expect("operation limits must not affect identity");
 
-        let content_ref = ContentRef::blob_v1(ContentId::generate(), b"proof");
+        let content_ref = ContentRef::blob_v1(
+            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
+            b"proof",
+        );
         let prepared = PreparedContent::for_durable_content_write(
             namespace_id.clone(),
             ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id"),

@@ -893,8 +893,11 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
             .expect("load namespace catalog")
             .content_store_id()
             .clone();
-    let object_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &content_ref.content_id);
+    let object_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &content_ref.owner_namespace_id,
+        &content_ref.content_id,
+    );
     store
         .put_overwrite(&object_key, bytes::Bytes::from_static(b"other bytes"))
         .await

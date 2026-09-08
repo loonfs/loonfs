@@ -328,7 +328,11 @@ mod streamed_content {
         let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
             .await
             .expect("catalog");
-        let object_key = content_blob(catalog.content_store_id(), &first.content_ref.content_id);
+        let object_key = content_blob(
+            catalog.content_store_id(),
+            &first.content_ref.owner_namespace_id,
+            &first.content_ref.content_id,
+        );
         assert_eq!(
             store
                 .get(&object_key, None)
@@ -422,7 +426,11 @@ mod streamed_content {
             loonfs_core::control::load_namespace_catalog_entry(blocking.as_ref(), &namespace_id)
                 .await
                 .expect("catalog");
-        let object_key = content_blob(catalog.content_store_id(), &staged.content_ref.content_id);
+        let object_key = content_blob(
+            catalog.content_store_id(),
+            &staged.content_ref.owner_namespace_id,
+            &staged.content_ref.content_id,
+        );
         let stored = blocking
             .get(&object_key, None)
             .await
@@ -430,7 +438,11 @@ mod streamed_content {
             .expect("staged object exists");
         assert_eq!(
             staged.content_ref,
-            ContentRef::blob_v1(staged.content_ref.content_id.clone(), &stored),
+            ContentRef::blob_v1(
+                staged.content_ref.owner_namespace_id.clone(),
+                staged.content_ref.content_id.clone(),
+                &stored
+            ),
             "the recorded reference must describe the object byte for byte"
         );
         // The claim admits the first writer, so those are the bytes that last.
@@ -497,7 +509,11 @@ mod direct_multipart {
         let catalog = loonfs_core::control::load_namespace_catalog_entry(store, &namespace_id)
             .await
             .expect("catalog");
-        let object_key = content_blob(catalog.content_store_id(), &state.content_id);
+        let object_key = content_blob(
+            catalog.content_store_id(),
+            &state.namespace_id,
+            &state.content_id,
+        );
 
         Session {
             namespace_id,

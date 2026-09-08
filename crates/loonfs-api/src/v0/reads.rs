@@ -322,7 +322,11 @@ mod tests {
 
     #[test]
     fn a_file_entry_serializes_its_required_payload_with_the_kind() {
-        let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
+        let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::ContentId::generate(),
+            b"hello",
+        );
         let mut file = entry("/report.txt", Some(InodeId(1)), Some("report.txt"));
         file.kind = PathEntryKind::File {
             revision_no: RevisionNo(7),
@@ -385,7 +389,11 @@ mod tests {
             serde_json::to_value(InodeKind::Directory).expect("serialize directory inode kind")
         );
 
-        let content_ref = ContentRef::blob_v1(crate::ContentId::generate(), b"hello");
+        let content_ref = ContentRef::blob_v1(
+            crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::ContentId::generate(),
+            b"hello",
+        );
         let file = PathEntryKind::File {
             revision_no: RevisionNo(1),
             size_bytes: 5,

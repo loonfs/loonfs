@@ -24,7 +24,8 @@ use loonfs_core::control::load_namespace_head_control;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{
-    content_store, metadata_manifest_object, metadata_root, wal_floor, wal_head,
+    content_blob, content_owner_prefix, content_store, metadata_manifest_object, metadata_root,
+    wal_floor, wal_head,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -32,7 +33,6 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
 };
-use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -290,13 +290,6 @@ async fn namespace_keys<S: ObjectStore + ?Sized>(
         .list_prefix(&format!("namespaces/{}/", namespace_id.as_str()))
         .await
         .expect("list namespace prefix")
-}
-
-fn metadata_segment_counting_store(root: impl AsRef<Path>) -> RecordingStore<LocalFsStore> {
-    RecordingStore::new(
-        LocalFsStore::new(root.as_ref()).expect("store"),
-        KeyPredicate::metadata_segment(),
-    )
 }
 
 #[tokio::test]
@@ -567,13 +560,62 @@ async fn fork_install_recovers_when_the_target_head_lands_ambiguously() {
 
 #[tokio::test]
 async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
+    async fn upload_content<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        bytes: &[u8],
+        context: &MutationContext,
+    ) -> loonfs_api::ContentRef {
+        let engine = namespace_engine(store, namespace_id, context);
+        let upload = engine.begin_upload().await.expect("begin upload");
+        let staged = engine
+            .upload_content(upload.upload_id(), bytes)
+            .await
+            .expect("upload bytes");
+        let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
+            .await
+            .expect("catalog");
+        let completed = engine
+            .complete_upload(
+                &catalog,
+                upload.upload_id(),
+                loonfs_core::ResolvedUploadCompletion::KnownContent,
+            )
+            .await
+            .expect("complete upload");
+        assert_eq!(completed.response.content_ref(), Some(&staged.content_ref));
+        staged.content_ref
+    }
+
     let temp_dir = tempdir().expect("tempdir");
-    let store = metadata_segment_counting_store(temp_dir.path());
+    let store = RecordingStore::metadata_segments(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::content_blob(),
+    ));
     let context = mutation_context();
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
+    bootstrap_namespace(&store, &source_namespace_id, &context, false)
+        .await
+        .expect("bootstrap source");
+    let source_ref = upload_content(&store, &source_namespace_id, b"base", &context).await;
+    assert_eq!(source_ref.owner_namespace_id, source_namespace_id);
+    submit_operation(
+        &store,
+        &source_namespace_id,
+        test_commit_id(Some("seed-shared")),
+        FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
+            content_ref: source_ref,
+            behavior: DestinationBehavior::Replace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect("seed shared file");
     namespace_engine(&store, &source_namespace_id, &context)
         .create_checkpoint("test-pin".to_owned(), None)
         .await
@@ -582,15 +624,8 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let source_head = head_state(&store, &source_namespace_id).await;
     assert_eq!(source_head.seq, ChangeSeq(1));
     let content_store_id = source_head.content_store_id.clone();
-    let blobs_before = store
-        .list_prefix(&format!(
-            "content-stores/{}/blobs/",
-            content_store_id.as_str()
-        ))
-        .await
-        .expect("list blobs before fork");
-
     store.reset();
+    store.inner().reset();
     let forked = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .await
         .expect("fork namespace");
@@ -603,14 +638,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         "fork should validate manifest descriptors without loading metadata segment payloads"
     );
 
-    let blobs_after = store
-        .list_prefix(&format!(
-            "content-stores/{}/blobs/",
-            content_store_id.as_str()
-        ))
-        .await
-        .expect("list blobs after fork");
-    assert_eq!(blobs_after, blobs_before, "fork must not copy content");
     assert_eq!(
         namespace_keys(&store, &clone_namespace_id).await,
         vec![wal_head(&clone_namespace_id)],
@@ -661,12 +688,23 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .await
         .expect("clone stat");
     assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
+    let inherited_ref = source_entry.content_ref().expect("file content").clone();
+    assert_eq!(inherited_ref.owner_namespace_id, source_namespace_id);
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
             .await
             .expect("read clone")
             .bytes,
         b"base"
+    );
+    assert_eq!(store.inner().counts().puts, 0);
+    assert_eq!(
+        store.inner().take_get_keys(),
+        vec![content_blob(
+            &content_store_id,
+            &source_namespace_id,
+            &inherited_ref.content_id
+        )]
     );
     let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(0))
         .await
@@ -695,17 +733,46 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         b"base"
     );
 
-    let clone_write = write_file_bytes(
+    let uploaded_ref =
+        upload_content(&store, &clone_namespace_id, b"clone-after-fork", &context).await;
+    assert_eq!(uploaded_ref.owner_namespace_id, clone_namespace_id);
+    let clone_write = submit_operation(
         &store,
         &clone_namespace_id,
-        "/docs/shared.txt",
-        b"clone-after-fork",
+        test_commit_id(Some("clone-after-fork")),
+        FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
+            content_ref: uploaded_ref.clone(),
+            behavior: DestinationBehavior::Replace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
         &context,
-        Some("clone-after-fork"),
     )
     .await
     .expect("clone replace");
     assert_eq!(clone_write.committed_seq, ChangeSeq(2));
+    let owner_keys = store
+        .list_prefix(&content_owner_prefix(
+            &content_store_id,
+            &clone_namespace_id,
+        ))
+        .await
+        .expect("owner content");
+    assert_eq!(
+        owner_keys,
+        vec![content_blob(
+            &content_store_id,
+            &clone_namespace_id,
+            &uploaded_ref.content_id
+        )]
+    );
+    assert_eq!(
+        head_state(&store, &clone_namespace_id)
+            .await
+            .content_store_id,
+        content_store_id
+    );
     assert_eq!(
         read_file_bytes(&store, &source_namespace_id, "/docs/shared.txt")
             .await
@@ -766,6 +833,36 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .bytes,
         b"clone-after-fork"
     );
+    let engine = namespace_engine(&store, &clone_namespace_id, &context);
+    let mut revisions_compacted = false;
+    for _ in 0..16 {
+        let report = engine
+            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately)
+            .await
+            .expect("compact clone");
+        match report.outcome {
+            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            loonfs_core::MetadataReorganizeOutcome::UnitPublished { group, .. } => {
+                revisions_compacted |= group == loonfs_api::MetadataFamilyGroup::Revisions;
+            }
+            other => panic!("expected bounded compaction, got {other:?}"),
+        }
+    }
+    assert!(revisions_compacted);
+    let read_context = crate::common::read_context(&store, &clone_namespace_id).await;
+    let revisions = engine
+        .list_file_revisions_for_inode_page(
+            clone_entry.inode_id,
+            loonfs_api::PageRequest {
+                limit: loonfs_test_support::ids::page_limit(10),
+                cursor: None,
+            },
+            &read_context,
+        )
+        .await
+        .expect("compacted history");
+    assert_eq!(revisions.items.len(), 2);
+    assert_eq!(revisions.items[1].content_ref, inherited_ref);
 }
 
 #[tokio::test]

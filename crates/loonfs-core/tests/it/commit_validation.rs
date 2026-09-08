@@ -211,7 +211,13 @@ async fn unadmitted_content_fails_every_candidate_without_being_read() {
 #[tokio::test]
 async fn valid_content_admission_skips_durable_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = content_blob_counting_store(temp_dir.path());
+    let store = loonfs_test_support::stores::RecordingStore::new(
+        loonfs_test_support::stores::RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            loonfs_test_support::stores::KeyPredicate::any(),
+        ),
+        loonfs_test_support::stores::KeyPredicate::content_blob(),
+    );
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
@@ -259,26 +265,80 @@ async fn valid_content_admission_skips_durable_content_validation() {
     )
     .expect("verify token");
 
+    let mut publisher = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone());
     store.reset();
-    let responses = publish_namespace_commits_batch(
-        &store,
-        &namespace_id,
-        vec![CommitCandidate::prepared(
-            CommitRequest::single(
-                commit_id("put-admitted-content"),
-                loonfs_test_support::test_actor(),
-                None,
-                put_file("/docs/admitted.txt", content_ref),
-            ),
-            vec![prepared],
-        )],
-        &context,
-    )
-    .await;
+    let responses = publisher
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::prepared(
+                CommitRequest::single(
+                    commit_id("put-admitted-content"),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    put_file("/docs/admitted.txt", content_ref.clone()),
+                ),
+                vec![prepared.clone()],
+            )],
+            &context,
+            &loonfs_core::publish::PublishTailOptions::default(),
+        )
+        .await
+        .results;
 
     responses[0].as_ref().expect("admitted put commits");
     // A live admission is the fast path: no content read at all.
     assert_eq!(store.count(OperationClass::Read), 0);
+    let mut forged_ref = content_ref.clone();
+    forged_ref.owner_namespace_id = NamespaceId::parse("other").expect("owner");
+    let mut forged_token = token.clone();
+    forged_token.content_ref = forged_ref.clone();
+    assert_eq!(
+        verify_content_token(
+            "test-content-token-secret",
+            &catalog,
+            &forged_token,
+            context.now_ms
+        ),
+        Err(ContentTokenError::ContentRefMismatch)
+    );
+    let head_before = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
+        .await
+        .expect("head")
+        .state;
+    store.reset();
+    store.inner().reset();
+    let rejected = publisher
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::prepared(
+                CommitRequest::single(
+                    commit_id("forged-content-owner"),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    put_file("/docs/forged.txt", forged_ref),
+                ),
+                vec![prepared.clone()],
+            )],
+            &context,
+            &loonfs_core::publish::PublishTailOptions::default(),
+        )
+        .await
+        .results;
+    assert_eq!(
+        rejected[0].as_ref().expect_err("owner mismatch").code(),
+        ErrorCode::ContentNotPrepared
+    );
+    assert!(store.snapshot().is_empty());
+    assert_eq!(store.inner().counts().puts, 0);
+    assert_eq!(store.inner().counts().compare_and_swaps, 0);
+    assert_eq!(store.inner().counts().deletes, 0);
+    assert_eq!(
+        loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
+            .await
+            .expect("head")
+            .state,
+        head_before
+    );
 }
 
 #[tokio::test]

@@ -43,6 +43,7 @@ fn change_identity(change: &CommittedChange) -> (ChangeSeq, String, Option<Strin
     for event in events.as_array_mut().expect("events array") {
         if let Some(content_ref) = event.get_mut("content_ref") {
             content_ref["content_id"] = serde_json::Value::from("<normalized>");
+            content_ref["owner_namespace_id"] = serde_json::Value::from("<normalized>");
         }
         if let Some(binding_generation) = event.get_mut("binding_generation") {
             *binding_generation = serde_json::Value::from("<normalized>");

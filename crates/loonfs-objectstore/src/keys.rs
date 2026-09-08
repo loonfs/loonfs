@@ -160,10 +160,22 @@ pub fn content_store(content_store_id: &ContentStoreId) -> String {
     format!("content-stores/{content_store_id}/store.json")
 }
 
+/// Builds a listing prefix that excludes other owners, including longer namespace ids.
+pub fn content_owner_prefix(
+    content_store_id: &ContentStoreId,
+    owner_namespace_id: &NamespaceId,
+) -> String {
+    format!("content-stores/{content_store_id}/objects/{owner_namespace_id}/")
+}
+
 /// Builds the immutable content-object key for one content identity.
-pub fn content_blob(content_store_id: &ContentStoreId, content_id: &ContentId) -> String {
+pub fn content_blob(
+    content_store_id: &ContentStoreId,
+    owner_namespace_id: &NamespaceId,
+    content_id: &ContentId,
+) -> String {
     let [first_shard, second_shard] = content_id.shard_prefixes();
-    format!("content-stores/{content_store_id}/objects/{first_shard}/{second_shard}/{content_id}")
+    format!("content-stores/{content_store_id}/objects/{owner_namespace_id}/{first_shard}/{second_shard}/{content_id}")
 }
 
 /// Singleton durable progress for namespace garbage collection.
@@ -368,7 +380,7 @@ mod tests {
             ),
             (
                 "Content objects",
-                content_blob(&content_store_id(), &content_id()),
+                content_blob(&content_store_id(), &namespace_id(), &content_id()),
             ),
         ];
 
