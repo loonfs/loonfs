@@ -7,25 +7,20 @@ use sha2::{Digest, Sha256 as Sha2Sha256};
 use std::fmt;
 use thiserror::Error;
 
-/// A content reference kind serialized as a string.
-///
-/// Unknown values use [`ContentRefKind::Unsupported`], and writers must not create them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A supported content reference kind serialized as a string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
 pub enum ContentRefKind {
     /// One immutable content object, addressed by its random content id.
     BlobV1,
-    /// A content kind unknown to this build, preserved verbatim.
-    Unsupported(String),
 }
 
 impl ContentRefKind {
-    const BLOB_V1: &'static str = "blob_v1";
-
-    /// Returns the frozen wire spelling, including an unknown spelling preserved by a reader.
+    /// Returns the frozen wire spelling.
     pub fn as_str(&self) -> &str {
         match self {
-            Self::BlobV1 => Self::BLOB_V1,
-            Self::Unsupported(other) => other,
+            Self::BlobV1 => "blob_v1",
         }
     }
 }
@@ -33,28 +28,6 @@ impl ContentRefKind {
 impl fmt::Display for ContentRefKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-
-impl Serialize for ContentRefKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for ContentRefKind {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(match value.as_str() {
-            Self::BLOB_V1 => Self::BlobV1,
-            _ => Self::Unsupported(value),
-        })
     }
 }
 
@@ -336,12 +309,6 @@ impl fmt::Debug for Sha256 {
 /// Describes why a content reference cannot be part of a durable commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ContentRefValidationError {
-    /// The reference contains a content strategy this build cannot write.
-    #[error("unsupported content ref kind `{kind}`")]
-    UnsupportedKind {
-        /// Kind spelling carried by the rejected reference.
-        kind: String,
-    },
     /// The checksum is not in the algorithm's canonical form.
     #[error("invalid content ref checksum: {0}")]
     InvalidChecksum(ChecksumValidationError),
@@ -358,7 +325,6 @@ pub enum ContentRefValidationError {
 #[serde(deny_unknown_fields)]
 pub struct ContentRef {
     /// Content strategy used by the referenced object.
-    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub kind: ContentRefKind,
     /// Immutable identity of the referenced object.
     pub content_id: ContentId,
@@ -401,11 +367,6 @@ impl ContentRef {
     /// This is a shape check on the reference itself; proving that the
     /// object exists and matches is the storage layer's job.
     pub fn validate(&self) -> Result<(), ContentRefValidationError> {
-        if self.kind != ContentRefKind::BlobV1 {
-            return Err(ContentRefValidationError::UnsupportedKind {
-                kind: self.kind.as_str().to_owned(),
-            });
-        }
         self.checksum
             .validate()
             .map_err(ContentRefValidationError::InvalidChecksum)?;
@@ -434,15 +395,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_kind_is_preserved_verbatim_through_a_round_trip() {
-        let decoded: ContentRefKind =
-            serde_json::from_str("\"sparse_file_v9\"").expect("decode unknown kind");
+    fn unknown_kind_fails_to_decode() {
+        let error = serde_json::from_str::<ContentRefKind>("\"sparse_file_v9\"")
+            .expect_err("unknown content kind must be rejected");
         assert_eq!(
-            decoded,
-            ContentRefKind::Unsupported("sparse_file_v9".to_owned())
+            error.to_string(),
+            "unknown variant `sparse_file_v9`, expected `blob_v1` at line 1 column 16"
         );
-        let reencoded = serde_json::to_string(&decoded).expect("encode unknown kind");
-        assert_eq!(reencoded, "\"sparse_file_v9\"");
     }
 
     #[test]
@@ -496,14 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_an_unsupported_kind_and_a_malformed_checksum() {
-        let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
-        content_ref.kind = ContentRefKind::Unsupported("sparse_file_v9".to_owned());
-        assert!(matches!(
-            content_ref.validate(),
-            Err(ContentRefValidationError::UnsupportedKind { .. })
-        ));
-
+    fn validation_rejects_a_malformed_checksum() {
         let mut content_ref = ContentRef::blob_v1(content_id(), b"hello");
         content_ref.checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,

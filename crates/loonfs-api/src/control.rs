@@ -4,9 +4,9 @@
 
 use crate::envelope::EnvelopeCodecError;
 use crate::{
-    wal_segment_id_start_seq, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId,
-    ContentId, ContentRef, ContentRefKind, ContentStoreId, InodeId, ManifestNo, ManifestObjectId,
-    MetadataCompactionId, MetadataFamilyGroup, NamespaceId, UploadId, WalSegmentId,
+    wal_segment_id_start_seq, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId,
+    ContentRef, ContentStoreId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
+    MetadataFamilyGroup, NamespaceId, UploadId, WalSegmentId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -907,7 +907,7 @@ impl From<StrictUploadSessionMode> for UploadSessionMode {
 enum StrictProxiedStaging {
     Idle {},
     Claimed {},
-    Staged { content_ref: StrictContentRef },
+    Staged { content_ref: ContentRef },
 }
 
 impl From<StrictProxiedStaging> for ProxiedStaging {
@@ -915,14 +915,11 @@ impl From<StrictProxiedStaging> for ProxiedStaging {
         match staging {
             StrictProxiedStaging::Idle {} => Self::Idle,
             StrictProxiedStaging::Claimed {} => Self::Claimed,
-            StrictProxiedStaging::Staged { content_ref } => Self::Staged(content_ref.into()),
+            StrictProxiedStaging::Staged { content_ref } => Self::Staged(content_ref),
         }
     }
 }
 
-/// The status read back through the same strict content-ref decoder the
-/// rest of the record uses, so a completed session's reference is held to
-/// the durable schema rather than the wire one.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StrictUploadSessionRecordStatus {
@@ -931,7 +928,7 @@ enum StrictUploadSessionRecordStatus {
     },
     Completed {
         completed_at_ms: u64,
-        content_ref: StrictContentRef,
+        content_ref: ContentRef,
     },
     Aborted {
         aborted_at_ms: u64,
@@ -947,40 +944,11 @@ impl From<StrictUploadSessionRecordStatus> for UploadSessionRecordStatus {
                 content_ref,
             } => Self::Completed {
                 completed_at_ms,
-                content_ref: content_ref.into(),
+                content_ref,
             },
             StrictUploadSessionRecordStatus::Aborted { aborted_at_ms } => {
                 Self::Aborted { aborted_at_ms }
             }
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictContentRef {
-    kind: MutableContentRefKind,
-    content_id: ContentId,
-    size_bytes: u64,
-    checksum: Checksum,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum MutableContentRefKind {
-    BlobV1,
-}
-
-impl From<StrictContentRef> for ContentRef {
-    fn from(content_ref: StrictContentRef) -> Self {
-        let kind = match content_ref.kind {
-            MutableContentRefKind::BlobV1 => ContentRefKind::BlobV1,
-        };
-        Self {
-            kind,
-            content_id: content_ref.content_id,
-            size_bytes: content_ref.size_bytes,
-            checksum: content_ref.checksum,
         }
     }
 }
