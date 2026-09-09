@@ -2027,9 +2027,10 @@ retention floor at least as high. A lost put-if-absent loads the winner.
 If it covers the candidate's head sequence and number, the attempt is
 superseded. Otherwise the publisher rebuilds against the new predecessor
 and retries at the next number. Flush, bounded reorganization, streaming
-compaction, and retention use this path. A successful publication refreshes
-the hint with a plain PUT within its publication budget. An expired attempt
-leaves the hint unchanged. GC preserves the numbered manifest chain from
+compaction, and retention use this path. A successful publication raises
+the hint by compare-and-swap of the greater numbers within its publication
+budget, as in section 1.7. An expired attempt leaves the hint unchanged.
+GC preserves the numbered manifest chain from
 the hint through the current number so discovery can cross a lagging hint.
 These intermediate manifests do not protect their runs. A later publication
 that advances the hint makes the older, unpinned numbers eligible for deletion.
@@ -2037,11 +2038,33 @@ that advances the hint makes the older, unpinned numbers eligible for deletion.
 A namespace manifest records one namespace file-set version (the section 1.2
 table lists its contents).
 
-A checkpoint is a durable pin to one numbered manifest. Creation writes the
-pin, then loads the current manifest and checks its retention floor within
-`CHECKPOINT_VERIFY_BUDGET_MS`. A passed floor deletes the pin and fails with
-`checkpoint_unavailable`. The verify step does not reload the pinned manifest. Readers must prefer the current verified manifest plus the
-visible WAL segment chain over unverified or partial manifest artifacts.
+A checkpoint is a durable pin to one numbered manifest. Creation from the
+current head writes the pin, then loads the current manifest within
+`CHECKPOINT_VERIFY_BUDGET_MS`. Its number and payload checksum must match the
+pinned reference. A different identity, a deleted namespace, or a retention
+floor past the pinned head sequence invalidates the attempt. The creator
+deletes the pin and retries from a fresh basis, bounded by
+`CONTENTION_RETRY_LIMIT`. Exhausted retries or an exceeded verification
+budget return `checkpoint_unavailable`. Verification or cleanup errors
+never acknowledge the pin. Verification uses the current manifest load
+without another request.
+
+A snapshot fork writes a fork pin for the snapshot's manifest, then reloads
+the snapshot pin and requires that it still exists and has not expired.
+If that pin is missing or expired, the creator deletes the fork pin and
+returns `snapshot_gone`. This path does not check the current manifest or its
+retention floor: the snapshot pin protects its historical manifest under
+section 6.4 rule 8. Verification remains bounded by
+`CHECKPOINT_VERIFY_BUDGET_MS`.
+
+For a pin acknowledged from the current head, a collector either captured
+the pinned manifest as current and protects its runs, or captured a successor
+after the pin was durable and includes it in its complete pin listing. For a snapshot
+fork, the collector's complete listing includes the protecting snapshot pin
+or the fork pin written before the snapshot recheck.
+
+Readers must prefer the current verified manifest plus the visible WAL
+segment chain over unverified or partial manifest artifacts.
 
 The namespace manifest may reference zero or more immutable metadata runs.
 Runs are produced from committed state. Once the WAL below the retention
@@ -2354,14 +2377,17 @@ concurrent publications under these rules:
     repeats every pass. A failed delete is retried using the permanent
     tombstone. A deleted target that has not retired leaves the source pin.
 
-    Checkpoint creation writes its record and then verifies it against the
-    manifest. `verify_checkpoint_basis` refuses a deleted namespace. A record that
-    protects anything was therefore durable before deletion, and a complete
+    Checkpoint creation from the current head writes its record and then
+    verifies it against the current manifest. `verify_checkpoint_basis`
+    refuses a deleted namespace. Such a verified record
+    was therefore durable before deletion, and a complete
     post-deletion listing encounters it. A record written after the sweep
     passed its key cannot verify, so its creator releases it. If the creator
     crashes first, the pin has an absent target and blocks retirement until its creation
     grace passes. Neither case
-    permits an early release of a verified dependency.
+    permits an early release of a verified dependency. A snapshot fork instead
+    rechecks its protecting snapshot pin after writing the fork pin, as in
+    section 6.1.
 
 11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
    handles both halves. Retired namespaces also sweep their owner prefix
