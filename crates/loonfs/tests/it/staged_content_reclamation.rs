@@ -40,7 +40,6 @@ fn config() -> GcConfig {
     GcConfig {
         grace_window_ms: GRACE_MS,
         max_steps: None,
-        cursor: None,
     }
 }
 

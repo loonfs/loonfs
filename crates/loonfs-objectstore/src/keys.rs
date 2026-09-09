@@ -115,31 +115,6 @@ pub fn content_blob(
     format!("content-stores/{content_store_id}/objects/{owner_namespace_id}/{first_shard}/{second_shard}/{content_id}")
 }
 
-/// Singleton durable progress for namespace garbage collection.
-pub fn gc_run(namespace_id: &loonfs_api::NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/gc/run.json")
-}
-
-/// Scratch objects owned by completed and active collection runs.
-pub fn gc_runs_prefix(namespace_id: &loonfs_api::NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/gc/runs/")
-}
-
-/// One immutable page of a sorted GC mark table.
-pub fn gc_mark_page(
-    namespace_id: &loonfs_api::NamespaceId,
-    run_id: &loonfs_api::GcRunId,
-    table_id: &loonfs_api::GcMarkTableId,
-    page_index: u64,
-) -> String {
-    format!(
-        "{}{}/tables/{}/{page_index:020}.json",
-        gc_runs_prefix(namespace_id),
-        run_id,
-        table_id
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -231,9 +206,6 @@ mod tests {
                 .replace("{checkpoint_id}", "chk_00000000000000000000000000000001")
                 .replace("{job_id}", "cmp_00000000000000000000000000000001")
                 .replace("{group}", "bindings")
-                .replace("{gc_run_id}", "gcr_00000000000000000000000000000001")
-                .replace("{table_id}", "gct_00000000000000000000000000000001")
-                .replace("{page_index:020}", "00000000000000000000")
                 .replace("{segment_id}", "seg_00000000000000000000000000000001")
                 .replace("{upload_id}", "upl_00000000000000000000000000000001")
                 .replace("{content_id[4..6]}", &CONTENT_ID[4..6])
@@ -272,18 +244,6 @@ mod tests {
                 upload_session(&namespace_id(), &upload_id()),
             ),
             ("Hint", hint(&namespace_id())),
-            ("GC run", super::gc_run(&namespace_id())),
-            (
-                "GC mark pages",
-                super::gc_mark_page(
-                    &namespace_id(),
-                    &loonfs_api::GcRunId::parse("gcr_00000000000000000000000000000001")
-                        .expect("run"),
-                    &loonfs_api::GcMarkTableId::parse("gct_00000000000000000000000000000001")
-                        .expect("table"),
-                    0,
-                ),
-            ),
             (
                 "Content objects",
                 content_blob(&content_store_id(), &namespace_id(), &content_id()),

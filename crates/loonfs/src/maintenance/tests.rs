@@ -966,12 +966,13 @@ async fn reconciliation_recovers_a_hint_dropped_before_attachment() {
 
 #[tokio::test]
 async fn retired_fork_collection_schedules_the_source_namespace() {
-    use loonfs_objectstore::keys::gc_run;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::ObjectStore;
 
     let directory = tempfile::tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let store = Arc::new(loonfs_test_support::stores::RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        loonfs_test_support::stores::KeyPredicate::prefix("namespaces/source/"),
+    ));
     let writer = crate::FsWriter::builder_with_store(store.clone())
         .writer_id("gc-follow-up")
         .build()
@@ -1000,18 +1001,10 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
     let runner = MaintenanceRunner::builder(registry)
         .build()
         .expect("runner");
-    assert!(store
-        .head(&gc_run(&source))
-        .await
-        .expect("source progress")
-        .is_none());
+    store.reset();
     runner.handle().nudge(MaintenanceJobId::GC, &target);
     runner.drain().await.expect("collect target and source");
-    assert!(store
-        .head(&gc_run(&source))
-        .await
-        .expect("source progress")
-        .is_some());
+    assert!(store.counts().lists > 0);
     runner.shutdown().await.expect("shutdown runner");
     writer.shutdown().await.expect("shutdown writer");
 }

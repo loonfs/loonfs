@@ -1150,7 +1150,6 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(gc_data["namespace_id"], "demo");
         assert_eq!(gc_data["deleted"]["wal_segments"], 0);
         assert_eq!(gc_data["deleted"]["manifests"], 0);
-        assert_eq!(gc_data["retention_degraded"], false);
         assert!(gc_data.get("next_cursor").is_none());
         // Every retention reason is reported whether or not it happened, so
         // a consumer reads a field rather than probing for one, and the
@@ -1175,62 +1174,21 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(stdout_string(&quiet_gc).starts_with("gc for demo:"));
         assert!(!stderr_string(&quiet_gc).contains("pass 1:"));
 
-        // A one-step budget saves the control snapshot and returns a token
-        // that can finish marking on later calls.
-        let starved_gc = harness.run(&[
-            "--json",
-            "maintenance",
-            "gc",
-            "--max-steps",
-            "1",
-            "--profile",
-            profile,
-        ]);
-        assert_success(&starved_gc);
-        let starved_data = json_data(&starved_gc);
-        assert_eq!(starved_data["budget_exhausted"], true);
-        assert!(starved_data["next_cursor"]
-            .as_str()
-            .is_some_and(|cursor| !cursor.is_empty()));
-
-        // Supplying a budget requests one invocation and exposes durable
-        // progress instead of the CLI's default completion loop.
-        let bounded_gc = harness.run(&[
-            "--json",
-            "maintenance",
-            "gc",
-            "--max-steps",
-            "15",
-            "--profile",
-            profile,
-        ]);
-        assert_success(&bounded_gc);
-        let bounded_data = json_data(&bounded_gc);
-        let cursor = bounded_data["next_cursor"]
-            .as_str()
-            .filter(|cursor| !cursor.is_empty())
-            .expect("bounded pass returns a cursor")
-            .to_owned();
-
-        // Resumption advances the saved work and its reported progress number.
-        let resumed_gc = harness.run(&[
-            "--json",
-            "maintenance",
-            "gc",
-            "--max-steps",
-            "15",
-            "--cursor",
-            &cursor,
-            "--profile",
-            profile,
-        ]);
-        assert_success(&resumed_gc);
-        assert_ne!(
-            json_data(&resumed_gc)
-                .get("next_cursor")
-                .and_then(Value::as_str),
-            Some(cursor.as_str())
-        );
+        for _ in 0..2 {
+            let bounded = harness.run(&[
+                "--json",
+                "maintenance",
+                "gc",
+                "--max-steps",
+                "1",
+                "--profile",
+                profile,
+            ]);
+            assert_success(&bounded);
+            let data = json_data(&bounded);
+            assert_eq!(data["budget_exhausted"], true);
+            assert!(data.get("next_cursor").is_none());
+        }
 
         // Maintenance failures surface the registry code in both modes.
         let missing = harness.run(&[

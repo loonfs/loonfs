@@ -6,8 +6,8 @@
 
 use crate::error::CoreError;
 use crate::metadata::{
-    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord,
-    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
+    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
+    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::MetadataRow;
 
@@ -67,6 +67,15 @@ pub(crate) fn active_deletion_from_manifest_row(
     match row {
         MetadataRow::ActiveDeletion(record) => Ok(record),
         other => Err(foreign_row("active_deletion", &other)),
+    }
+}
+
+pub(crate) fn content_publication_from_manifest_row(
+    row: MetadataRow,
+) -> Result<ContentPublicationRecord, CoreError> {
+    match row {
+        MetadataRow::ContentPublication(record) => Ok(record),
+        other => Err(foreign_row("content_publication", &other)),
     }
 }
 

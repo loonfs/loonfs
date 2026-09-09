@@ -501,6 +501,26 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             }))
     }
 
+    pub(crate) async fn find_content_publication(
+        &self,
+        content_id: &loonfs_api::ContentId,
+    ) -> Result<Option<ChangeSeq>, CoreError> {
+        if let Some(seq) = self
+            .row_states()
+            .filter_map(|state| state.find_content_publication(content_id))
+            .filter(|seq| *seq <= self.visible_seq())
+            .max()
+        {
+            return Ok(Some(seq));
+        }
+        match self.manifest_segments() {
+            Some(segments) => {
+                manifest_index::content_publication(segments, content_id, self.visible_seq()).await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn find_commit_receipt(
         &self,
         commit_id: &CommitId,

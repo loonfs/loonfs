@@ -118,36 +118,42 @@ async fn run_maintenance_gc(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let single_pass = args.max_steps.is_some();
     let max_steps = Some(args.max_steps.unwrap_or(loonfs::DEFAULT_GC_MAX_STEPS));
-    let response = run_cursor_passes(
-        PassProgress::new(runtime),
-        single_pass,
-        args.cursor,
-        |cursor| async {
-            let response = context
-                .target
-                .run_maintenance(
-                    context.namespace(),
-                    RunMaintenanceRequest::Gc(GcRequest {
-                        grace_window_ms: args.grace_window_ms,
-                        max_steps,
-                        cursor,
-                    }),
-                )
-                .await?;
-            match response {
-                RunMaintenanceResponse::Gc(gc) => Ok(gc),
-                _ => Err(crate::error::CliError::new(
+    let mut progress = PassProgress::new(runtime);
+    let mut total = None;
+    loop {
+        let response = context
+            .target
+            .run_maintenance(
+                context.namespace(),
+                RunMaintenanceRequest::Gc(GcRequest {
+                    grace_window_ms: args.grace_window_ms,
+                    max_steps,
+                }),
+            )
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        let RunMaintenanceResponse::Gc(pass) = response else {
+            return Err(context.fail(
+                kind,
+                crate::error::CliError::new(
                     ErrorCode::ServerError.as_str(),
                     "maintenance GC returned a non-GC response",
-                )),
-            }
-        },
-        |pass| pass.next_cursor.clone(),
-        gc_pass_line,
-        accumulate_gc_response,
-    )
-    .await
-    .map_err(|error| context.fail(kind, error))?;
+                ),
+            ));
+        };
+        let changed =
+            pass.deleted != Default::default() || pass.released_checkpoints != Default::default();
+        let complete = single_pass || !pass.budget_exhausted || !changed;
+        progress.pass_completed(gc_pass_line(&pass));
+        match &mut total {
+            Some(total) => accumulate_gc_response(total, pass),
+            None => total = Some(pass),
+        }
+        if complete {
+            break;
+        }
+    }
+    let response = total.expect("GC loop should run at least once");
 
     Ok(context.output(
         kind,
@@ -239,9 +245,7 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
     total.released_checkpoints.add(&pass.released_checkpoints);
     total.retained_candidates += pass.retained_candidates;
     total.retained.add(&pass.retained);
-    total.retention_degraded |= pass.retention_degraded;
-    total.content_reclamation_deferred |= pass.content_reclamation_deferred;
-    total.budget_exhausted |= pass.budget_exhausted;
+    total.budget_exhausted = pass.budget_exhausted;
     // The summary keeps the soonest obligation any pass reported — the same
     // soonest-wake rule the maintenance runner applies. A later pass with
     // nothing deferred does not erase an earlier pass's pending horizon.
@@ -251,7 +255,6 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
         (a, b) => a.or(b),
     };
     total.reclaim_after_ms = pass.reclaim_after_ms.or(total.reclaim_after_ms);
-    total.next_cursor = pass.next_cursor;
 }
 
 async fn run_maintenance_checkpoint(

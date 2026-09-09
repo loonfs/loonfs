@@ -2,7 +2,7 @@
 //!
 //! Immutable objects use provider timestamps for age checks. Checkpoints use
 //! lifecycle timestamps stored in their records. The namespace sweep combines
-//! object age with the completed mark table.
+//! object age with current root references.
 
 use crate::checkpoint::record::{
     load_checkpoint_record_at_key, release_inspected_checkpoint_record, CheckpointRelease,
@@ -128,15 +128,6 @@ impl GraceAge {
     }
 }
 
-/// Reads how one candidate stands against the grace window.
-///
-/// Store failures surface unmapped so each collector keeps its own error
-/// vocabulary; everything about the reading itself — which timestamp, what
-/// an absent one means, what the window is measured against — is the same
-/// wherever objects age out, so it is decided once here. What being aged
-/// entitles a candidate to is the caller's question: the namespace sweep
-/// wants durable evidence of when the object stopped being referenced as
-/// well (`gc/live_set.rs`, `ReferenceAnchor`).
 pub(super) async fn grace_age<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
@@ -157,15 +148,7 @@ pub(super) async fn grace_age<S: ObjectStore + ?Sized>(
     )
 }
 
-/// Deletes one unreferenced candidate if the grace window has passed over
-/// it, and says what it decided otherwise.
-///
-/// This is the whole decision where the window's only job is to cover a
-/// write that may still be publishing: install debris a repair proved
-/// non-completable, and the keyspaces extensions collect for themselves.
-/// Where an object can also stop being referenced while something is still
-/// reading it, the window has to run from that moment instead, and the
-/// namespace sweep is what works out when it was.
+/// Deletes an unreferenced object once its provider timestamp passes the age gate.
 pub async fn delete_if_aged<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,

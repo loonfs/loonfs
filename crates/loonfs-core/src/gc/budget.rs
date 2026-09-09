@@ -1,14 +1,6 @@
 //! Work limits for a garbage-collection pass.
 
-/// Counts caller-defined work steps in one invocation. Namespace GC charges
-/// a source step for one root, checkpoint (including fork probes and its basis),
-/// or WAL segment. A merge step writes at most 512 entries. A revision step
-/// reads one data block, and a sweep step decides one candidate.
-///
-/// Listing, progress CAS, and mark-table lookups are supporting work rather
-/// than separate units. Source decoding is bounded by the existing manifest,
-/// WAL, and data-block formats; this is not a literal count of HTTP requests.
-/// A budget of one always permits one resumable step.
+/// Counts bounded work within one invocation.
 #[derive(Debug)]
 pub struct PassBudget {
     max_steps: Option<u64>,
@@ -16,7 +8,7 @@ pub struct PassBudget {
 }
 
 impl PassBudget {
-    /// Limits a pass to `max_steps` units; an absent limit allows the run to finish.
+    /// Limits a pass to `max_steps` units; an absent limit allows the call to finish.
     pub fn new(max_steps: Option<u64>) -> Self {
         Self {
             max_steps,

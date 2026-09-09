@@ -20,8 +20,8 @@ mod visibility;
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::MetadataState;
 pub use loonfs_api::wire::manifest::{
-    AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord, DirentryBindRecord,
+    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;

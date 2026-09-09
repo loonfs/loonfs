@@ -148,7 +148,6 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             &GcConfig {
                 grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
                 max_steps: None,
-                cursor: None,
             },
             &reclaimed,
         )

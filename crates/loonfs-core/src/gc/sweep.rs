@@ -1,12 +1,15 @@
-//! Sweep one candidate using completed durable marking evidence.
-use super::cursor::{CandidateFamily, CandidateFamilyExt};
+//! Sweep candidates against the live set loaded for this call.
+use super::families::CandidateFamily;
 use super::fork_checkpoints::{
     maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
     MissingBasisCheckpointSweep,
 };
+use super::live_set::LiveSet;
 use super::reap::{grace_age, sweep_checkpoint_record, CheckpointSweep, GraceAge};
-use super::references::References;
-use super::uploads::{sweep_upload_session, UploadSessionSweep, UploadSweepContext};
+use super::uploads::{
+    sweep_upload_session, PublicationView, UploadSessionSweep, UploadSweepContext,
+};
+use super::PassBudget;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
@@ -14,28 +17,37 @@ use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::ObjectStore;
 
-pub(super) struct Sweep<'a, 'store, S: ?Sized> {
+pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
     pub(super) store: &'store S,
     pub(super) namespace_id: &'a NamespaceId,
     pub(super) grace_window_ms: u64,
     pub(super) mutation: &'a MutationContext,
-    pub(super) references: References<'a, 'store, S>,
+    pub(super) live: &'a LiveSet,
+    pub(super) view: &'a PublicationView<'a, 'store, S>,
+    pub(super) budget: &'a mut PassBudget,
     pub(super) upload_sweep: UploadSweepContext<'a, S>,
     pub(super) checkpoints_retained: &'a mut bool,
     pub(super) report: &'a mut GcResponse,
 }
 
 impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
-    pub(super) async fn candidate(&mut self, family: CandidateFamily, key: &str) -> Result<()> {
+    /// Decides one listed key. Returns `false` when the key needs a store
+    /// request and the budget has none left; the key is then untouched.
+    pub(super) async fn candidate(&mut self, family: CandidateFamily, key: &str) -> Result<bool> {
         if !family.recognizes(key) {
             self.report.retain(RetainedReason::UnrecognizedKey);
             *self.checkpoints_retained |= family == CandidateFamily::Checkpoints;
-            return Ok(());
+            return Ok(true);
         }
-        if family == CandidateFamily::Checkpoints && self.references.missing_basis(key).await? {
+        if family == CandidateFamily::Checkpoints
+            && self.live.missing_basis_checkpoints.contains(key)
+        {
+            if !self.budget.try_charge() {
+                return Ok(false);
+            }
             self.process_missing_basis_checkpoint(key).await?;
             *self.checkpoints_retained = true;
-            return Ok(());
+            return Ok(true);
         }
         match family {
             CandidateFamily::WalSegments => {
@@ -51,23 +63,35 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                     .await
             }
             CandidateFamily::Checkpoints => {
+                if !self.budget.try_charge() {
+                    return Ok(false);
+                }
                 *self.checkpoints_retained |= !self.process_checkpoint(key).await?;
-                Ok(())
+                Ok(true)
             }
-            CandidateFamily::UploadSessions => self.process_upload_session(key).await,
+            CandidateFamily::UploadSessions => {
+                if !self.budget.try_charge() {
+                    return Ok(false);
+                }
+                self.process_upload_session(key).await?;
+                Ok(true)
+            }
             CandidateFamily::OwnedContent => {
-                let prefix = family.prefix(self.namespace_id, self.references.roots);
+                let prefix = family.prefix(self.namespace_id, self.live);
                 if !key.starts_with(&prefix)
                     || loonfs_objectstore::layout::parse_object_key(key).is_none_or(|parsed| {
                         parsed.owner_namespace_id() != Some(self.namespace_id.as_str())
                     })
                 {
                     self.report.retain(RetainedReason::UnrecognizedKey);
-                    return Ok(());
+                    return Ok(true);
+                }
+                if !self.budget.try_charge() {
+                    return Ok(false);
                 }
                 self.delete_key(key).await?;
                 self.report.deleted.retired_content_objects += 1;
-                Ok(())
+                Ok(true)
             }
         }
     }
@@ -76,31 +100,26 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         family: CandidateFamily,
         key: &str,
         deleted: fn(&mut DeletedObjectCounts) -> &mut u64,
-    ) -> Result<()> {
-        if self.references.roots.degraded
-            && matches!(
-                family,
-                CandidateFamily::MetadataSegments | CandidateFamily::Manifests
-            )
-        {
-            self.report.retain(RetainedReason::DegradedRoots);
-            return Ok(());
-        }
-        if family == CandidateFamily::Manifests && !self.references.roots.namespace_deleted {
+    ) -> Result<bool> {
+        if family == CandidateFamily::Manifests && !self.live.namespace_deleted {
             let number = loonfs_objectstore::layout::manifest_no_of(key);
             if self
-                .references
-                .roots
+                .live
                 .discovery_start_manifest_no
                 .is_none_or(|current| number.is_none_or(|number| number >= current))
             {
                 self.report.retain(RetainedReason::Referenced);
-                return Ok(());
+                return Ok(true);
             }
         }
-        if self.references.object(key).await? {
+        if self.live.objects.contains(key)
+            || (family == CandidateFamily::WalSegments && self.live.protects_wal(key))
+        {
             self.report.retain(RetainedReason::Referenced);
-            return Ok(());
+            return Ok(true);
+        }
+        if !self.budget.try_charge() {
+            return Ok(false);
         }
         // A compaction may publish output that is exactly the minimum age
         // old, so a segment must be strictly older before it goes.
@@ -112,9 +131,8 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         if self.sweep_aged(key, min_age_ms).await? {
             *deleted(&mut self.report.deleted) += 1;
         }
-        Ok(())
+        Ok(true)
     }
-
     async fn process_missing_basis_checkpoint(&mut self, key: &str) -> Result<()> {
         match release_missing_basis_checkpoint(
             self.store,
@@ -136,10 +154,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
     }
 
     async fn process_checkpoint(&mut self, key: &str) -> Result<bool> {
-        if self.references.object(key).await? {
-            self.report.retain(RetainedReason::Referenced);
-            return Ok(false);
-        }
         match maybe_release_fork_checkpoint(self.store, key, self.mutation).await? {
             ForkCheckpointSweep::Released => {
                 self.report.released_checkpoints.fork += 1;
@@ -156,7 +170,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             self.namespace_id,
             key,
             self.grace_window_ms,
-            self.references.roots.namespace_deleted,
+            self.live.namespace_deleted,
             self.mutation,
         )
         .await?
@@ -178,7 +192,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             self.report.retain(RetainedReason::UnrecognizedKey);
             return Ok(());
         };
-        match sweep_upload_session(&self.upload_sweep, &upload_id, &mut self.references).await? {
+        match sweep_upload_session(&self.upload_sweep, &upload_id, self.view).await? {
             UploadSessionSweep::Delete { reclaimed_content } => {
                 self.delete_key(key).await?;
                 self.report.deleted.upload_sessions += 1;
@@ -187,9 +201,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                 }
             }
             UploadSessionSweep::Retain { reclaimable_at_ms } => {
-                // A deadline is the difference between "come back then" and
-                // "ask again next pass", and the sweep already draws that
-                // line.
                 self.report.retain(match reclaimable_at_ms {
                     Some(_) => RetainedReason::UploadSessionWindow,
                     None => RetainedReason::UploadSessionUndecided,
@@ -200,14 +211,11 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         Ok(())
     }
 
-    /// Ages one unreferenced key out, recording the reason when it stays.
     async fn sweep_aged(&mut self, key: &str, grace_window_ms: u64) -> Result<bool> {
         match grace_age(self.store, key, grace_window_ms, self.mutation.now_ms)
             .await
             .map_err(|error| CoreError::store(key, &error))?
         {
-            // Nothing was decided about a key that is already gone, so
-            // nothing is counted for it either.
             GraceAge::Gone => return Ok(false),
             GraceAge::Young => {
                 self.report.retain(RetainedReason::WithinGraceWindow);
@@ -230,7 +238,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         }
     }
 
-    /// Records the earliest future reclamation deadline.
     fn note_reclamation_deadline(&mut self, at_ms: Option<u64>) {
         let Some(at_ms) = at_ms.filter(|at_ms| *at_ms > self.mutation.now_ms) else {
             return;

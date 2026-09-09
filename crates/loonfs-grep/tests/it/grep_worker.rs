@@ -2357,15 +2357,12 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
     assert_eq!(
         listed_prefixes,
         vec![
-            // Marking lists the records it roots from; the current manifest
-            // is discovered through the hint, never by listing.
             checkpoint_prefix(&live_namespace),
             wal_segment_prefix(&live_namespace),
-            metadata_segment_prefix(&live_namespace),
             metadata_manifest_prefix(&live_namespace),
-            checkpoint_prefix(&live_namespace),
+            wal_segment_prefix(&live_namespace),
+            metadata_segment_prefix(&live_namespace),
             upload_session_prefix(&live_namespace),
-            loonfs_objectstore::keys::gc_runs_prefix(&live_namespace),
         ],
         "core GC must list only its own core prefixes"
     );

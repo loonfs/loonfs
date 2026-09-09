@@ -173,7 +173,6 @@ const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("DeletedObjectCounts", "content_objects"),
     ("DeletedObjectCounts", "upload_sessions"),
     ("RunMaintenanceResponseGc", "budget_exhausted"),
-    ("RunMaintenanceResponseGc", "content_reclamation_deferred"),
     ("RunMaintenanceResponseGc", "deleted"),
     ("RunMaintenanceResponseGc", "released_checkpoints"),
     ("RunMaintenanceResponseGc", "retained"),

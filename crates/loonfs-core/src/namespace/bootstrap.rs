@@ -300,6 +300,7 @@ pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     )
 }
 

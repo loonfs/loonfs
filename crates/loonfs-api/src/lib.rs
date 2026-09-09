@@ -16,7 +16,6 @@ mod digest;
 pub mod env;
 mod envelope;
 mod error;
-mod gc;
 mod hex;
 mod ids;
 mod manifest;
@@ -33,11 +32,6 @@ mod wal;
 
 pub mod wire {
     //! Durable wire formats grouped by their owning format family.
-
-    /// Durable progress and mark tables for namespace garbage collection.
-    pub mod gc {
-        pub use crate::gc::*;
-    }
 
     pub mod hex {
         //! Lowercase hexadecimal primitives shared by durable codecs.
@@ -110,12 +104,12 @@ pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, next_public_ordinal, wal_segment_id_start_seq, BindingGeneration,
     BindingGenerationValidationError, ChangeSeq, CheckpointId, CommitId, CommitIdValidationError,
-    ContentId, ContentStoreId, GcMarkTableId, GcRunId, GeneratedIdValidationError,
-    GrepManifestObjectId, IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataCompactionId,
-    MetadataSegmentId, NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError,
-    PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalSegmentId, WriterEpoch, WriterId,
-    WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
-    MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
+    ContentId, ContentStoreId, GeneratedIdValidationError, GrepManifestObjectId, IndexSegmentId,
+    InodeId, InodeKind, ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey,
+    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PublicOrdinalRangeError,
+    RevisionNo, RunNo, UploadId, WalSegmentId, WriterEpoch, WriterId, WriterIdValidationError,
+    FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER,
+    ROOT_INODE_ID,
 };
 pub use manifest::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;

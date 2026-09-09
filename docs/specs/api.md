@@ -831,7 +831,7 @@ A maintenance run body names exactly one job with `kind`:
 | --- | --- | --- |
 | `metadata` | Optional `max_wal_tail_segments` | `wal_flush` and `reorganize` outcomes |
 | `metadata_compaction` | None | `compaction`, tagged by `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
-| `gc` | Optional `grace_window_ms`, `max_steps`, and `cursor` | The collection result |
+| `gc` | Optional `grace_window_ms` and `max_steps` | The collection result |
 | `retention` | None | `retention_floor_seq` |
 
 The response carries the same `kind`, the addressed `namespace_id`, and that
@@ -865,34 +865,15 @@ byte, and segment counts. `cancelled` means the caller cancelled the job.
 or all publication attempts lost. `fenced` means another process advanced
 the manifest's compactor epoch. These last three outcomes publish no manifest.
 
-For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the run uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window, `max_steps` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
-`max_steps` limits durable work steps in one invocation: one source object
-(including a checkpoint's fork probes and basis), one merge page, one revision
-data block, or one sweep candidate. Listing, progress writes, and reference
-lookups are supporting work, so this is not a literal count of provider
-requests. The minimum budget is one; even that budget eventually completes
-marking, content-reference collection, and sweeping across calls.
+For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window and `max_steps` limits one call. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace (format spec, section 6.4, rule 11).
 
-The server saves progress in one run per namespace. Calls without a cursor
-join an active run; after it completes, another call without a cursor starts a
-new one. A continuation token identifies the namespace, run, and last reported
-progress number. Its progress number is informational: clients cannot select
-a scan position or supply references. Older tokens for the active run resume
-its latest saved position. A token for a replaced run returns `invalid_request`.
+Responses contain counts for that call. Concurrent calls can overlap deletion
+attempts, so these counts are operational summaries. No collection state is
+saved between calls.
 
-The run keeps its original clock and grace policy across calls and hosts.
-Changing the caller's clock or grace override while resuming cannot make more
-objects old enough for that run to delete. Marking completes before any
-candidate is swept. While a budget interrupts marking,
-`content_reclamation_deferred` and `budget_exhausted` are true and
-`next_cursor` points to the saved work. Every committed step changes the
-reported progress number. Responses contain counts for that invocation;
-concurrent calls can overlap attempts, so counts are operational summaries,
-not an exactly-once deletion ledger.
-
-Step-driven GC defaults `max_steps` to 1024 and returns any `next_cursor`
-for a later step rather than looping internally. Nothing sweeps unless `gc`
-is present.
+GC defaults `max_steps` to 1024. Each request runs one stateless call.
+`GcRequest` accepts `grace_window_ms` and `max_steps`. It has no cursor.
+Nothing sweeps unless `gc` is present.
 
 The retention floor bounds incremental replay only. File revision history
 is never pruned: a revisions listing is always complete, however far the
@@ -1011,7 +992,7 @@ plus the grace window, an aborted session's grace, or a completed session's
 derived content-reclamation grace, or the retired namespace's
 `reclaim_after_ms`. A scheduler reads it to decide when to
 run the namespace again rather than tracking upload deadlines itself. It
-describes only what this pass examined — a pass that stopped on `next_cursor`
+describes only what this pass examined. A call with `budget_exhausted`
 saw part of the keyspace, and candidates that age out on their object
 timestamps carry no time here — so its absence is not a claim that nothing
 is owed.
@@ -1019,23 +1000,24 @@ is owed.
 `reclaim_after_ms` is present only when the deleted head records retirement.
 It is omitted for an active namespace or a deleted namespace still waiting on
 pins. A future deadline means the namespace is waiting on grace. Retirement
-is irrevocable and the deadline never changes. A run that started before the
-deadline reports it through `next_reclamation_at_ms` so a scheduler revisits,
-even if the invocation resumed after that deadline. Retirement itself deletes
-no content.
+is irrevocable and the deadline never changes. A call whose clock is before
+the deadline reports it through `next_reclamation_at_ms`. Retirement itself
+deletes no content.
 
-GC responses carry `next_cursor` while the reserved run has work remaining.
-The opaque token names the namespace and run. Server-owned progress supplies
-the phase and last-decided key; the token carries no deletion evidence.
-Resumed calls keep the run's captured roots, fixed clock, and sealed reference
-index. Mutable candidate lifecycles are checked when swept. A stale cursor
-may repeat work, and an inserted key before the saved position waits for the
-next full run. Each new run captures roots and starts enumeration again.
+Every call reads current durable roots and uses one fixed clock. It keeps
+its live set in memory and writes no collection progress. Candidate listings
+start at the beginning. `budget_exhausted` means the call reached `max_steps`
+with candidates remaining; a scheduler calls again without a continuation.
+The budget counts candidates that need a store request after the listing:
+an age check, a record read, or a deletion. A candidate the live set
+retains costs nothing, so referenced objects never exhaust the budget.
+Root discovery and its listings are not charged. Root read failures fail
+the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`,
 `content_objects`, and `retired_content_objects`. `released_checkpoints`
-contains `fork`, `expired`, and `missing_basis` counts. Every count field is
+contains `fork`, `expired`, `snapshot`, and `missing_basis` counts. Every count field is
 present, including zero values.
 
 `content_objects` counts reclamation through completed upload sessions.
@@ -1051,21 +1033,22 @@ that reason, and the fields sum to the total:
 
 | Reason | Means |
 | --- | --- |
-| `referenced` | Protected by the run's reference marks or needed for forward manifest discovery. |
+| `referenced` | Protected by current roots or needed for forward manifest discovery. |
 | `within_grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
-| `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and segment deletion was suppressed wholesale. `retention_degraded` is set too. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
-| `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork record its target may still reach, a released record still inside its grace, or an active pin doing its job. |
+| `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, a fork record its target may still reach, a released record still inside its grace, or an active pin doing its job. |
 | `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |
-| `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, or a reference set the pass could not establish. |
+| `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, a content cleanup failure, or a deleted namespace still waiting for retirement. |
 
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
 
 The current manifest and active checkpoint records protect their metadata
 segments. An unreferenced object becomes eligible for collection after its
-own provider timestamp is at least `grace_window_ms` old. A live namespace
+own provider timestamp is at least `grace_window_ms` old. Metadata segments
+use the separate `UNREFERENCED_SEGMENT_MIN_AGE_MS` age gate and must be
+strictly older than that bound. A live namespace
 also retains the manifest numbers needed for forward discovery from its
 hint. Those intermediate manifests do not protect their runs.
 
@@ -1077,7 +1060,7 @@ reclamation, with no fixed completion time or guarantee of physical erasure.
 
 Dependent forks and retained checkpoints delay retirement. A complete
 post-deletion checkpoint sweep must retain no record before GC records
-`reclaim_after_ms` on the deleted head. A later run that starts at or after
+`reclaim_after_ms` on the deleted head. A later call whose clock is at or after
 that deadline lists and deletes recognized content objects under that
 namespace's owner prefix. It keeps the head, content-store descriptor, and
 every other owner's prefix.
@@ -1511,7 +1494,7 @@ leave objects for later passes. A maintenance run with `kind` set to `gc` ages o
 metadata, and checkpoint records. Once a complete post-deletion checkpoint
 sweep retains no record, it records retirement on the deleted head as a fixed
 `reclaim_after_ms`. The head survives permanently. Retirement itself deletes
-no content. A later GC run starting at or after the deadline sweeps the
+no content. A later GC call whose clock is at or after the deadline sweeps the
 namespace's owner prefix, including previously published content whose upload
 record is gone. A deleted ancestor retains its entire owner prefix while a
 live descendant depends on it. The shared content-store descriptor and other

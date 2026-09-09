@@ -231,6 +231,7 @@ fn validate_run_index_parity(
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::ContentPublications
                 | MetadataRowFamily::Attributes => {}
             }
         }

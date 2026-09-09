@@ -494,7 +494,25 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
         );
     }
 
+    let published: std::collections::BTreeSet<_> = core_state
+        .revisions()
+        .iter()
+        .map(|row| (&row.content_ref.content_id, row.committed_seq))
+        .collect();
+    assert_eq!(core_state.content_publications().len(), published.len());
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
+    assert_eq!(
+        core_state
+            .content_publications()
+            .iter()
+            .map(|row| (&row.content_id, row.committed_seq, row.delta_index))
+            .collect::<Vec<_>>(),
+        model_state
+            .content_publications
+            .iter()
+            .map(|row| (&row.content_id, row.committed_seq, row.delta_index))
+            .collect::<Vec<_>>()
+    );
 }
 
 fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
@@ -705,4 +723,12 @@ fn normalize_inode(
         created_by,
         created_at_ms,
     )
+}
+
+#[test]
+fn repeated_content_in_one_commit_emits_one_publication() {
+    let content = content_ref("shared content");
+    let mut deltas = create_file(0, InodeId(2), InodeId(1), "one", content.clone());
+    deltas.extend(create_file(3, InodeId(3), InodeId(1), "two", content));
+    assert_states_match(&[deltas]);
 }

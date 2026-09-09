@@ -1,15 +1,4 @@
 //! Garbage collection for upload sessions and their content.
-//!
-//! Before completion, an expired open session can be aborted and its
-//! unpublished object deleted using only the session record.
-//!
-//! After completion, content may already be referenced by metadata. The
-//! collector waits for `CONTENT_RECLAMATION_GRACE_MS`, then consults the run's
-//! reference index before deleting the object. The grace period covers the
-//! receipt lifetime and any publication that receipt can authorize, so no new
-//! reference can appear after the index becomes eligible. On a retired
-//! namespace past its deadline every object under the owner prefix is dead,
-//! so a completed session is reclaimed without either wait.
 
 use crate::context::MutationContext;
 use crate::control_update::{
@@ -17,11 +6,66 @@ use crate::control_update::{
 };
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
+use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control_snapshot::NamespaceControlSnapshot;
+use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
 use loonfs_api::wire::control::{UploadSessionRecordStatus, UploadSessionState};
 use loonfs_api::{ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::ObjectStore;
+use tokio::sync::OnceCell;
+
+/// The metadata view that says whether completed content was ever
+/// published, loaded the first time a call needs it. Most calls never do.
+pub(super) struct PublicationView<'a, 'store, S: ObjectStore + ?Sized> {
+    store: &'store S,
+    namespace_id: &'a NamespaceId,
+    snapshot: Option<&'a NamespaceControlSnapshot>,
+    basis: &'a MetadataBasis,
+    view: OnceCell<LoadedMetadataView<'store, S>>,
+}
+
+impl<'a, 'store, S: ObjectStore + ?Sized> PublicationView<'a, 'store, S> {
+    /// `snapshot` is `None` on a deleted namespace, whose metadata answers
+    /// nothing.
+    pub(super) fn new(
+        store: &'store S,
+        namespace_id: &'a NamespaceId,
+        snapshot: Option<&'a NamespaceControlSnapshot>,
+        basis: &'a MetadataBasis,
+    ) -> Self {
+        Self {
+            store,
+            namespace_id,
+            snapshot,
+            basis,
+            view: OnceCell::new(),
+        }
+    }
+
+    async fn load(&self) -> Result<Option<&LoadedMetadataView<'store, S>>> {
+        let Some(snapshot) = self.snapshot else {
+            return Ok(None);
+        };
+        self.view
+            .get_or_try_init(|| {
+                load_metadata_view(
+                    self.store,
+                    self.namespace_id,
+                    ReadLoadContext::pinned_head(
+                        &snapshot.head.state,
+                        &snapshot.head.etag,
+                        self.basis,
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .await
+            .map(Some)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UploadSessionSweep {
@@ -29,7 +73,7 @@ pub(super) enum UploadSessionSweep {
     Retain {
         /// Earliest time this session may be reconsidered when retention is
         /// time-based. `None` means the pass must retry later for a non-time-based
-        /// reason, such as a lost CAS or an incomplete reference scan.
+        /// reason, such as a lost CAS or a deleted namespace awaiting retirement.
         reclaimable_at_ms: Option<u64>,
     },
     /// The session has nothing left to say and its key may be deleted.
@@ -78,7 +122,7 @@ impl<'a, S: ?Sized> UploadSweepContext<'a, S> {
 pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     sweep: &UploadSweepContext<'_, S>,
     upload_id: &UploadId,
-    references: &mut super::references::References<'_, '_, S>,
+    view: &PublicationView<'_, '_, S>,
 ) -> Result<UploadSessionSweep> {
     // This read selects the lifecycle branch only. Any state change is applied
     // through a later CAS using a fresh ETag.
@@ -128,7 +172,19 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             let reference = if sweep.retired_content {
                 ContentReference::Absent
             } else {
-                references.content(&content_ref.content_id).await?
+                match view.load().await? {
+                    Some(view)
+                        if view
+                            .metadata_view()
+                            .find_content_publication(&content_ref.content_id)
+                            .await?
+                            .is_some() =>
+                    {
+                        ContentReference::Referenced
+                    }
+                    Some(_) => ContentReference::Absent,
+                    None => ContentReference::Unknown,
+                }
             };
             match reference {
                 ContentReference::Unknown => Ok(retain_undated()),
@@ -233,7 +289,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Whether the complete run index can decide one content object.
+/// Whether the current view can decide one content object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ContentReference {
     Referenced,

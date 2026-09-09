@@ -660,6 +660,8 @@ const fn row_cluster(families: &'static [MetadataRowFamily]) -> RetentionCluster
 
 /// Revision rows are never dropped, so they are rewritten in key order.
 const REVISION_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Revisions])];
+const PUBLICATION_CLUSTERS: [RetentionCluster; 1] =
+    [row_cluster(&[MetadataRowFamily::ContentPublications])];
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
 const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Tombstones])];
 /// A receipt is kept or dropped by its own sequence against the floor.
@@ -687,6 +689,7 @@ pub(super) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
         MetadataFamilyGroup::Tombstones => &TOMBSTONE_CLUSTERS,
         MetadataFamilyGroup::ActiveDeletions => &ACTIVE_DELETION_CLUSTERS,
         MetadataFamilyGroup::CommitReceipts => &RECEIPT_CLUSTERS,
+        MetadataFamilyGroup::ContentPublications => &PUBLICATION_CLUSTERS,
         MetadataFamilyGroup::Attributes => &ATTRIBUTE_CLUSTERS,
     }
 }
@@ -1189,6 +1192,7 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
         | MetadataFamilyGroup::Tombstones
         | MetadataFamilyGroup::ActiveDeletions
         | MetadataFamilyGroup::CommitReceipts
+        | MetadataFamilyGroup::ContentPublications
         | MetadataFamilyGroup::Attributes => None,
     }
 }

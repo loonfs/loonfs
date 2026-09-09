@@ -95,10 +95,6 @@ impl ValidatedWalSegment {
         }
     }
 
-    pub(crate) fn object_key(&self) -> &str {
-        &self.object_key
-    }
-
     pub(crate) fn envelope(&self) -> &WalSegmentEnvelope {
         &self.envelope
     }

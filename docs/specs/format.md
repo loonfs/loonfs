@@ -23,8 +23,7 @@ the namespace commit history. `_no` is a monotonic counter scoped to a
 resource, such as a file, inode, or namespace. `_index` is a 0-based position
 inside a collection. `_number` is a 1-based position defined by a provider or
 tool.
-A named optional object member is omitted when absent; an empty positional slot,
-such as a merge level in `GcMarkIndex.levels`, remains `null`.
+A named optional object member is omitted when absent.
 `status` names a resource's lifecycle and `phase` names a computation's progress;
 both use `kind` as the discriminator when tagged.
 
@@ -98,8 +97,6 @@ The required durable object families and standard key patterns are:
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Hint** | Mutable | Starts forward discovery of numbered manifests; never authority. | `namespaces/{namespace_id}/hint.json` |
-| **GC run** | Mutable CAS | Coordinates marking and sweeping across calls and hosts; one active run per namespace. | `namespaces/{namespace_id}/gc/run.json` |
-| **GC mark pages** | Immutable | Sorted, checksummed reference tables and intermediate merge output. | `namespaces/{namespace_id}/gc/runs/{gc_run_id}/tables/{table_id}/{page_index:020}.json` |
 | **Content store descriptors** | Immutable | Identify the content domain held by a backend. | `content-stores/{content_store_id}/store.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{owner_namespace_id}/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
@@ -158,8 +155,8 @@ The namespace tree's lifecycle can be read off its grammar:
 - **Manifest numbers are names.** `manifests/{manifest_no:020}.json` holds
   exactly one object per number. The highest number is current. Discovery
   probes forward from the hint with GETs and never lists the collection.
-- **Other collections are not authoritative via enumeration.** GC lists
-  `wal/segments/`, `manifests/`, `segments/`, and checkpoint records.
+- **GC is the only lister for reclamation.** It lists `manifests/`,
+  `wal/segments/`, `segments/`, `checkpoints/`, and `uploads/`.
   WAL ids use `wal_`, a 20-digit start sequence, and a 16-character lowercase
   hex suffix. Metadata segment ids remain generated identities.
 - **Paths express ownership, not authority.** Envelopes and payloads still
@@ -341,7 +338,7 @@ The namespace head and mutable lifecycle records use compare-and-swap.
 The discovery hint uses plain PUT after installation.
 
 Six control-object kinds are registered: `wal_head`, `hint`,
-`checkpoint_record`, `upload_session`, `gc_run`, and `content_store`.
+`checkpoint_record`, `upload_session`, and `content_store`.
 Other kind strings are rejected.
 
 `hint.json` has kind `hint`, version 1, and a strict payload
@@ -898,7 +895,7 @@ target head with one create-if-absent. The target writes a number-zero hint and 
 head's `fork_basis` names the source manifest the target starts from, and the
 fork-owned checkpoint record is what keeps that manifest and its segments alive
 for as long as the target or a nested descendant may still need them.
-The immediate target head decides release, using the fixed GC run clock:
+The immediate target head decides release, using the fixed GC call clock:
 
 | Target head | Source checkpoint action |
 | --- | --- |
@@ -907,8 +904,8 @@ The immediate target head decides release, using the fixed GC run clock:
 | Active, same source and checkpoint id, different manifest | Corruption. |
 | Deleted, absent fork basis or another source or checkpoint id | Reclaimable. |
 | Deleted, same source and checkpoint id, absent deadline | Retain (`target_not_retired`). |
-| Deleted, same source and checkpoint id, deadline after the run clock | Retain (`target_retirement_grace`). |
-| Deleted, same source and checkpoint id, deadline at or before the run clock | Reclaimable. |
+| Deleted, same source and checkpoint id, deadline after the call clock | Retain (`target_retirement_grace`). |
+| Deleted, same source and checkpoint id, deadline at or before the call clock | Reclaimable. |
 
 An absent target retains the record until its lease expires. An unreadable
 head retains the record; an undecodable head is corruption. An absent expired
@@ -1985,9 +1982,7 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | WAL head | `wal_head` | JSON, uncompressed | 2 |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
-| GC run | `gc_run` | JSON, uncompressed | 1 |
 | Content store descriptor | `content_store` | JSON, uncompressed | 1 |
-| GC mark page | `gc_mark_page` | JSON, uncompressed | 1 |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -2065,7 +2060,7 @@ A row key contains hyphen-separated components. The first component is the singu
 
 The row's `kind` and its family serve different purposes. A row kind may appear in multiple families, so their names do not need to match. For example, a `direntry_bind` row appears in both `direntry_binds` and `direntry_child_binds`.
 
-The nine families and their exact grammar:
+The ten families and their exact grammar:
 
 | Family | Row key | Filter key |
 | --- | --- | --- |
@@ -2077,6 +2072,7 @@ The nine families and their exact grammar:
 | `tombstones` | `tombstone-{root_inode_id:020}-{generation.seq:020}-{generation.delta_index:010}` | `tombstone-{root_inode_id:020}` |
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` | the row key |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` | `commit-receipt-{commit_id_hex}` |
+| `content_publications` | `content-publication-{content_id}-{committed_seq:020}` | `content-publication-{content_id}` |
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` | `attribute-{inode_id:020}` |
 
 The family groups and their exact members:
@@ -2089,9 +2085,19 @@ The family groups and their exact members:
 | `tombstones` | `tombstones` |
 | `active_deletions` | `active_deletions` |
 | `commit_receipts` | `commit_receipts` |
+| `content_publications` | `content_publications` |
 | `attributes` | `attributes` |
 
 `direntry_binds` and `direntry_child_binds` store the same `direntry_bind` rows under different keys. The single `revisions` family stores `file_revision` rows. A row key therefore depends on both the row and its family.
+
+A `content_publication` row stores `content_id`, `committed_seq`, and
+`delta_index`. Each WAL delta that publishes a file revision also emits its
+publication row. Repeated references to the same content within one commit
+share one publication row with the first publishing delta index. The content
+id is stored directly in the key. The suffix uses the commit-receipt sequence
+grammar. Publication rows survive every
+rebuild at every floor, as file revisions do. A lookup checks in-memory rows
+before probing this family in the manifest with its Bloom filter key.
 
 The `inodes` and `active_deletions` families store the full row key in the filter. Inode lookups already know the full key, while active deletions are read only by range scans.
 
@@ -2486,31 +2492,30 @@ content still owned by upload-session records, and the owner prefix of a
 retired namespace, under the rules below. Published content in a live
 namespace is never swept, and a deleted ancestor's content stays while a
 descendant depends on it, so content can remain long after file or namespace
-deletion. GC and floor advancement are the only
-consumers of listing, and nothing sweeps by default: a pass runs only through
-the maintenance endpoint or an explicit maintenance-step opt-in.
+deletion. Collection runs only through explicit maintenance.
 
-Before reserving a new collection, a collector verifies the namespace head.
-An absent head means there is nothing to collect. WAL-head format version 2
-also gates this GC protocol: a version-1 collector must refuse the head
-before it can delete anything. The optional retirement deadline is part of the version-2 head payload, and
-the collection coordination required to interpret its references is what the
-version gates.
-There is no mixed-protocol collection or compatibility fallback.
+An absent head means there is nothing to collect. A call reads the head and,
+for a live namespace, discovers the current manifest by forward GETs from
+`hint.json`. It reads one complete checkpoint listing and each record before
+sweeping. Invalid or unreadable roots fail the call before deletion. A deleted
+namespace needs no current manifest; previous calls may already have deleted it.
 
-GC uses resumable listing mark-and-sweep. Its inputs are `wal/head.json`,
-`hint.json`, and the `manifests/`, `segments/`, `checkpoints/`, and
-`wal/segments/` collections. A live manifest roots every object key its
-`runs` list names, wherever that key sits. The pass also
-sweeps `uploads/`, and that sweep owns content reclamation as well; the two
-halves are split at the completed line and described in rule 11.
-Core GC never recognizes, lists specifically, or deletes any object below a
-namespace's `extensions/` prefix; grep collection is owned by `loonfs-grep`.
-Because floor, root, and checkpoint publication no longer serialize through
-one head CAS, two cross-object races must be closed explicitly —
-create-vs-collect (a record written while GC concludes its basis is
-unreferenced) and publish-in-flight (an object written moments before its
-publishing CAS) — under these rules:
+The collector writes no run object, reference table, phase, or cursor. It
+builds its live set in memory from the root manifests and checkpoint records.
+It lists `manifests/`, `wal/segments/`, `segments/`, `checkpoints/`, and `uploads/`
+from the start each call. The checkpoint listing used to read roots also
+supplies that call's checkpoint candidates. `max_steps` bounds the
+candidates that need a store request after the listing: an age check, a
+record read, or a deletion. A candidate the live set retains costs nothing.
+A stopped call reports `budget_exhausted` when candidates remain. A later
+call reads new roots and starts again. Root reads and their listings are not
+charged as sweep steps.
+
+Core GC never recognizes or deletes objects under `extensions/`. Grep owns
+its own collector. Concurrent namespace collectors independently read roots
+and delete only aged, unreferenced objects. Not-found during deletion is
+harmless. Publication budgets, object age gates, and grace windows protect
+concurrent publications under these rules:
 
 1. **Grace window.** A configured window `T` with a derived floor, not a
    free tuning parameter:
@@ -2562,7 +2567,7 @@ publishing CAS) — under these rules:
    or admits the final publication. `CONTENT_RECLAMATION_GRACE_MS` adds the
    receipt admission window to `GC_MIN_GRACE_WINDOW_MS`; it assumes this
    relative error bound also holds between receipt issuers, admitting hosts,
-   and collectors. Host clock drift over a run and any wall-clock steps must
+   and collectors. Host clock drift between calls and any wall-clock steps must
    fit within these bounds.
 
    Direct record expiry is different: hosts compare their current instant
@@ -2583,43 +2588,34 @@ publishing CAS) — under these rules:
    the stated provider and monotonic publication bounds hold; they do not
    cover an unbounded pause between a budget check and its write.
 
-   A manifest below the reserved current number is a deletion candidate when
+   A manifest below the current number observed in the call is a deletion candidate when
    no active checkpoint pins it and its provider timestamp is at least `T`
    old. The current manifest and every pinned manifest protect their runs
-   through the mark table.
+   through the in-memory live set.
 2. **Floor is necessary, not sufficient.** Being below the current manifest's retention floor only
    nominates an object for deletion.
-3. **One reserved run, one fixed clock.** Collectors reserve `gc/run.json`
-   by create-if-absent or CAS of a completed run **before** reading the head and discovering the current manifest
-   by forward GETs from the hint. Every collector joins this run. Its
-   `started_at_ms` and grace policy remain fixed through all pauses and
-   host changes. No candidate is deleted until its complete reference index
-   has been sealed. Every active checkpoint whose owner still stands protects its basis by
-   manifest number. Released records protect no manifest. Release is terminal and IDs are never reused.
-   Consequently a new valid pin transfers references from the captured root
-   or an already protected pin. A new immutable publication is protected by
-   the fixed cutoff and publication budgets; streaming compaction uses the
-   segment age and elapsed-time bound in rule 12. An arbitrarily paused older collector
-   retains these same protections and cannot advance a newer run's CAS state.
-   Mutable candidate lifecycles are still inspected when swept. The recorded
-   `now` makes paused and resumed passes consistent; it does not remove
-   host-to-provider or host-to-host skew. The starting host's clock error
-   remains part of every comparison that uses that run's instant.
-4. Manifest roots are the highest numbered manifest verified at reservation
-   and every manifest pinned by an active checkpoint whose owner still
-   stands. A namespace with no owned manifest uses its genesis or fork basis;
-   a fork-owned checkpoint on the source protects the foreign basis. On a
-   deleted namespace, only active pins protect manifests. The visible WAL
-   chain down to the manifest floor also remains rooted on live namespaces.
-   The head, hint, and completed GC run remain in their singleton slots.
-5. A manifest that an active checkpoint pins but cannot be loaded suppresses
-   manifest and segment deletion for the pass. An invalid manifest or
-   checkpoint record fails the pass with its object key. A missing hint
-   fails closed. Manifests at or above the reserved hint number cannot
-   be swept on a live namespace; discovery needs this contiguous chain.
-6. Only validated manifests are trusted to protect data.
-7. WAL needed to replay from the chosen metadata root to the head is never
-   deleted.
+3. **One call, one clock.** `context.now_ms` is fixed for every age, lease,
+   release, retirement, and owner-sweep decision in the call. A later call
+   has its own clock and reads its own roots. Clock error is covered by the
+   grace and age bounds in rule 1.
+4. Roots are the current manifest on a live namespace and every manifest
+   pinned by an active checkpoint record. An active record protects its
+   manifest for this call even if this call releases it. Released records
+   protect no manifest unless a fork target still requires the record under
+   rule 10. The live set contains those manifest identities and
+   every segment named by their runs, including foreign-owned segments.
+   The head and hint are never swept. A live namespace also keeps manifest
+   numbers at or above the hint observed during discovery; those intermediate
+   manifests protect no segments. A missing checkpoint basis can be released
+   under its existing lifecycle rule. An unreadable or invalid basis fails
+   the call; it never supplies an empty reference set.
+
+7. WAL needed to replay from the current manifest to the head is never
+   deleted. The protected floor is the lower of the retention floor and the
+   sequence after the current manifest's head sequence. A WAL segment is
+   dead only when a later-positioned segment starts at or below that floor.
+   All segments at or above that position stay, including a segment that
+   straddles the floor. A deleted namespace protects no WAL.
 8. **Retention wins residual races.** If the floor is ever observed ahead of
    an active checkpoint's basis, the checkpoint's objects remain protected;
    reconciling the floor is an explicit recovery action.
@@ -2634,7 +2630,7 @@ publishing CAS) — under these rules:
    only through upload sessions (rule 11).
 10. **Fork checkpoints require an exact reference.** Apply the target-head
     table in section 2.6. A deleted target naming this record retains it until
-    retirement is established and its deadline is at or before the fixed run
+    retirement is established and its deadline is at or before the fixed call
     clock. GC never reads the target's current manifest to classify a fork record.
     An unreadable target head retains; an undecodable head fails as corruption.
     An active target naming the same source and checkpoint id but a different
@@ -2667,26 +2663,23 @@ publishing CAS) — under these rules:
    completed never had a receipt, so nothing anywhere can reference it.
 
    A completed session in a namespace whose captured deleted head carries
-   `reclaim_after_ms` at or before the fixed run clock deletes its content
+   `reclaim_after_ms` at or before the fixed call clock deletes its content
    through the session cleanup helper, then deletes its record. It needs no
-   content reference index or additional completion grace. A duplicate delete
+   publication lookup or additional completion grace. A duplicate delete
    by the owner sweep is harmless. A deleted but unretired namespace retains
    completed sessions because its content references are unknown. Open and
    aborted sessions keep their lease, abort, and provider cleanup paths even
    after retirement. Provider upload state can exist outside object listings.
 
-   *At `completed`, ownership passes to the content half.* In an active namespace, completed content
-   may or may not have been published, and consumption is inferred from
-   metadata references rather than recorded on the session. A completed
-   session's content object is reclaimed only when all of the following
-   hold: `completed_at_ms` is older than the derived grace below; the pass is
-   not degraded (rule 5); and no content reference reachable from this
-   namespace's roots names it. The reachable set is the same root set the
-   rest of the pass uses — every revision in every manifest the live set
-   protects, which includes each fork basis a fork-owned record pins, plus
-   every `AppendFileRevision` in the retained WAL. Either way the session
-   record itself is then deleted; when the content is referenced, metadata
-   protects it from that point on.
+   A completed session in an active namespace waits until
+   `completed_at_ms + CONTENT_RECLAMATION_GRACE_MS`. The call builds one
+   metadata read view the first time a completed session needs deciding.
+   `find_content_publication(content_id)` checks the
+   WAL rows and then the manifest's `content_publications` family with a
+   Bloom probe. It never scans revision segments. A publication keeps the
+   object and deletes the session record. An absent publication deletes the
+   object first and then the record. A failed lookup deletes neither. A
+   failed content cleanup retains the record for retry.
 
    *The grace is derived, not tuned.* A reference can enter metadata only
    through a receipt, a receipt is minted only from a durable `completed`
@@ -2724,10 +2717,10 @@ publishing CAS) — under these rules:
    embedded raw-ref import (section 2.8) writes the verified bytes under a
    fresh destination-owned identity. A future identity-preserving copy would
    have to root the reference on the source side the way a fork does.
-12. **Unreferenced segments require a full day of age.** The mark table
+12. **Unreferenced segments require a full day of age.** The in-memory live set
    determines whether any root manifest lists a segment. An unlisted segment
    under `segments/` is a deletion candidate only when its provider age
-   exceeds `UNREFERENCED_SEGMENT_MIN_AGE_MS`, independently of the run's grace
+   exceeds `UNREFERENCED_SEGMENT_MIN_AGE_MS`, independently of the call's grace
    window. The clock-error allowance in rule 1 still applies.
 
    Streaming compaction checks its elapsed monotonic time before each
@@ -2744,21 +2737,18 @@ publishing CAS) — under these rules:
    `compactor_epoch` equals its claim. A newer claim fences every older
    compactor. Numbered manifest puts serialize claims and compaction output.
 
-13. **Namespace retirement requires a complete checkpoint sweep.** A run may
-    retire only if its reserved roots captured a deleted head with no
-    `reclaim_after_ms`. A run that captured an active head never retires it.
-    `GcRoots` stores both `namespace_deleted` and `reclaim_after_ms`.
-    `GcPhase::Sweeping.checkpoints_retained` records whether any listed
-    checkpoint survived: an active record, a newly released record, a released
-    record within grace, a lost compare-and-swap, or a record that disappeared
-    between listing and load. Uncertainty retains. Only deletion of every
-    encountered checkpoint, or an empty prefix, permits retirement.
+13. **Namespace retirement requires a complete checkpoint listing.** The
+    call must observe a deleted head without `reclaim_after_ms`. Retirement
+    waits until no encountered checkpoint remains active or released within
+    its grace. A newly released record, a lost compare-and-swap, an
+    unrecognized record key, or an uncertain record load prevents retirement.
+    A call stopped before finishing checkpoint cleanup cannot retire.
 
     At the end of the checkpoints family, GC re-reads the head and
     compare-and-swaps deleted with no deadline to deleted with this deadline:
 
     ```
-    deadline = fresh_invocation_now_ms + max(run.grace_window_ms,
+    deadline = context.now_ms + max(grace_window_ms,
                                              NAMESPACE_RETIREMENT_GRACE_MS)
     NAMESPACE_RETIREMENT_GRACE_MS = max(GC_MIN_GRACE_WINDOW_MS,
         DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_OPERATION_DEADLINE_MS
@@ -2766,125 +2756,54 @@ publishing CAS) — under these rules:
     DIRECT_TRANSFER_URL_TTL_MS = 15 * 60 * 1000
     ```
 
-    The fresh clock belongs to the invocation performing the swap, never the
-    run's start. A resumed run cannot backdate retirement. This grace covers
-    a download capability issued just before deletion, an in-flight read
-    within the publication budgets, one provider operation, and the clock
-    allowance. Core asserts the inequality at compile time.
+    The call's fixed clock stamps the deadline. This grace covers a download
+    capability issued just before deletion, an in-flight read within the
+    publication budgets, one provider operation, and the clock allowance.
+    Core asserts the inequality at compile time.
 
     Every other head field is preserved verbatim, and successor identity is
     checked. A lost compare-and-swap reloads the head. Another collector's
     deadline wins and remains unchanged. An active head is corruption because
     deletion is terminal. An uncertain transport outcome requires readback
     before deciding success or returning an error. An error writes no further
-    state. GC progress is not authority; the head's status is checked at the
+    state. The head's status is checked at the
     transition. Retirement releases fork records from descendants to
     ancestors. It deletes no content by itself.
 
 14. **Retired namespaces sweep their own content.** After upload sessions,
-    the `owned_content` family lists exactly
-    `content-stores/{content_store_id}/objects/{namespace_id}/`. Eligibility
-    is decided at family start, with `last_key: null`: captured roots must
-    be deleted and carry `reclaim_after_ms` at or before `started_at_ms`.
-    A run started before the deadline skips the family and reports the
-    deadline in `next_reclamation_at_ms`. Every other ineligible state skips
-    the family. Active namespaces never list their published content.
+    GC lists exactly `content-stores/{content_store_id}/objects/{namespace_id}/`
+    if the call observed a deleted head whose `reclaim_after_ms` is at or
+    before `context.now_ms`. A call before the deadline reports it in
+    `next_reclamation_at_ms` and skips this prefix. Active namespaces never
+    list their published content.
 
     Before listing, GC re-reads the head once. It must still be deleted,
     name the captured content store, and carry a deadline at or before the
-    fixed run clock. A mismatch fails with `namespace_corrupt`; a failed read
-    fails with the store error. Neither permits deletion or a progress write.
+    fixed call clock. A mismatch fails with `namespace_corrupt`; a failed read
+    fails with the store error. Neither permits deletion.
     Retirement cannot regress, so this check covers the whole family,
-    including resumed calls after a successful candidate.
+    within this call.
 
     Each candidate must parse as a content blob, name this exact owner, and
     start with the exact owner prefix. Anything else is retained as
     `unrecognized_key`. Recognized objects are deleted unconditionally under
-    rule 9. Not-found is harmless. A delete error ends the pass without
-    advancing the cursor past the failed key. Listing and deletion use the
-    existing bounded scan and step budget.
+    rule 9. Not-found is harmless. A delete error ends the call. The next call starts listing from the
+    beginning and can retry the failed key. Each deletion uses one step of the budget.
 
-    Each new run begins with no last key and lists again. An empty completed
+    Each call lists again from the start. An empty completed
     pass is never authority to stop listing. This removes late writes,
-    including objects inserted before a previous cursor. Heads, content-store
+    including objects inserted before the last key visited by an earlier call. Heads, content-store
     descriptors, and other owners' objects are never candidates for this
     family. The deleted head rejects new upload capabilities and commits;
     already-issued capabilities may still write until they expire.
 
-Deletion proceeds data first, records last, so a crash mid-sweep leaves
-orphaned data for the next pass rather than a record whose data vanished.
-To keep that true, every readable checkpoint record roots its basis for the
-duration of a pass, whatever its lifecycle, expiry, or owner — no exceptions.
-State, expiry, and owner fate gate only whether the record itself is a
-candidate. A fork-owned record that no target uses (rule 10) is rechecked and
-released with compare-and-swap on its current ETag. An active record is never
-deleted directly. A released fork record is retained while its target names
-it and the target-head table in rule 10 requires retention. A released record is deleted once its `released_at_ms` is a grace window old;
-because release is terminal, no second state is needed between deciding to
-delete and deleting, and a crash between the release CAS and the delete
-leaves a record the next pass reaps unconditionally.
-The collector persists the following state in the `gc_run` JSON control
-family, version 1. The common fields are `namespace_id`, `gc_run_id`,
-`step_no`, `started_at_ms`, `grace_window_ms`, and a tagged `phase`.
-`step_no` counts successful progress CAS writes. Resume positions use zero-based
-`page_index` and `entry_index`; `block_index` selects the next revision data block.
-The phases are:
-
-- `starting`: reservation exists; the control snapshot has not been captured.
-- `marking`: the fixed root summary, source cursor, retained WAL pointer and
-  floor, and a sorted mark index. Source scans visit the owned root,
-  active checkpoints by manifest number, and retained WAL.
-- `revisions`: the sealed object table, one entry/block position, and a
-  separate content index. Each immutable revision segment is read once per
-  run, one validated data block at a time. Shared descriptors use the
-  tightest protected manifest sequence bound.
-- `sealing`: merge the content index and object table into one complete table.
-- `sweeping`: that table, the small retention summary, `checkpoints_retained`,
-  candidate family, and exclusive last-decided key. The order is WAL segments,
-  metadata segments, manifests, checkpoints, upload sessions,
-  and owned content.
-- `cleaning`: exclusive last-decided scratch key. Only recognized mark pages
-  are removed, including abandoned pages from older runs.
-- `complete`: the next caller without this run's token may replace the record
-  by CAS and begin another run.
-
-The `gc_mark_page` JSON family, version 1, stores immutable sorted pages at
-`gc/runs/{gc_run_id}/tables/{table_id}/{page_index:020}.json`. Run IDs use `gcr_`
-and table IDs use `gct_`, each followed by 32 lowercase hex digits. The payload
-contains `namespace_id`, `gc_run_id`, `table_id`, `page_index`, and `entries`.
-Pages contain 1–512 strictly increasing keys and at most 8 MiB of encoded
-bytes. The shared envelope checksums the exact payload bytes. A table
-reference contains its ID, page count, and entry count; every nonfinal page
-is full. Readers validate envelope, identity, extent, page size/order, and
-key/value correspondence. Missing or invalid pages fail collection, never
-answer "not referenced."
-
-Entry keys distinguish object references (`object/` followed by the full
-object key), content IDs (`content/`), revision-segment tasks (`revision/`),
-and missing manifest or checkpoint-basis observations (`missing-manifest/`
-and `missing-basis/`). Tagged values preserve their meaning. Manifest marks
-carry the complete verified manifest reference; revision tasks carry the
-segment descriptor and sequence bound. Scan descriptors omit the optional
-inline bloom filter because full revision scans do not consult it. Equal keys
-must agree, except that
-identical revision descriptors combine by taking the smaller sequence bound.
-
-The index holds at most one table per binary merge level and one pending
-two-table merge. Each merge saves two input positions and the output extent;
-only a confirmed immutable page write followed by progress CAS advances those
-positions. A lost or ambiguous write cannot turn partial marking into sweep
-permission. Complete tables support binary-search lookup with a cache bounded
-by 64 pages and 16 MiB of encoded page bytes. Memory also includes the source
-manifest, WAL object, or metadata block being decoded; it does not grow with
-the total number of namespace roots or content IDs.
-
-This chooses extra temporary I/O for simple bounded merges: construction
-writes O(N log N) entries and retains intermediate tables until cleanup.
-An old worker can leave an unreferenced page after cleanup; a later run
-reaps it. The singleton run record itself stays in place, preventing deletion
-and recreation races. No marks, roots, or scan positions are trusted from
-client continuation tokens.
-
+An active checkpoint is never deleted directly. A fork-owned record that
+no target uses is rechecked and released by compare-and-swap on its current
+ETag. A released fork record stays while its target still requires it under
+rule 10. Other released records are deleted after their release grace.
+Release is terminal and checkpoint ids are never reused. Upload cleanup
+also deletes content before deleting the record, so interrupted cleanup
+leaves the evidence needed to retry.
 
 ### 6.5 Control-object cleanup
 

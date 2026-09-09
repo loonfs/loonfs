@@ -392,28 +392,3 @@ pub(crate) fn count_visible_wal_tail_segments(
 fn pointer_reaches_base(pointer: &WalSegmentPointer, stop_after_seq: ChangeSeq) -> bool {
     pointer.start_seq.0.saturating_sub(1) <= stop_after_seq.0
 }
-
-/// Loads one linked segment for a durable backwards scan. Both its pointer
-/// and internal commit sequence are verified before the caller marks it.
-pub(crate) async fn load_retained_segment<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    pointer: &WalSegmentPointer,
-) -> Result<ValidatedWalSegment, WalChainLoadError> {
-    let object_key = wal_segment(namespace_id, &pointer.segment_id);
-    let bytes = store
-        .get(&object_key, None)
-        .await
-        .map_err(|error| WalChainLoadError::ReadWal {
-            object_key: object_key.clone(),
-            message: error.public_message().into_owned(),
-        })?
-        .ok_or_else(|| WalChainLoadError::MissingWalObject {
-            object_key: object_key.clone(),
-        })?;
-    let envelope = decode_wal_segment_envelope_zstd(&bytes)
-        .map_err(|error| WalSegmentError::Codec(error.to_string()))?;
-    validate_pointer_matches_envelope(pointer, &object_key, &envelope)?;
-    validate_wal_segment_for_replay(namespace_id, envelope.payload().base_head_seq, &envelope)?;
-    Ok(ValidatedWalSegment::new(object_key, envelope))
-}

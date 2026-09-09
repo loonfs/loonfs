@@ -876,7 +876,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await
     }
 
-    pub(super) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
+    pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
         MetadataView::from_loaded_head(&self.head, &self.segments, self.wal_tail_rows.as_ref())
     }
 }

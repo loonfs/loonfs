@@ -10,6 +10,7 @@ use crate::cache::{GrepBlockCache, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
 use crate::codec::{
     extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
 };
+use crate::gc_cursor::{GcCursorKeyspace, NamespaceGcCursor};
 use crate::index_read::{load_data_block, load_index_block};
 use crate::keyspace::{grep_prefix, manifest_key, parse_key, root_key, segment_key, GrepKeyKind};
 use crate::reads::{published_revision, NamespaceReads};
@@ -25,9 +26,9 @@ use futures::StreamExt as _;
 use loonfs::{
     delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
     select_next_iterator, write_segments_in_waves, CheckpointFilesPageCursor, CoreError,
-    CreateCheckpointOptions, FsMaintenance, FsReader, GcCursorKeyspace, GraceAge,
-    NamespaceGcCursor, PassBudget, RuntimeError, SegmentBlockLoader, SegmentRowIterator,
-    StoreFailureClass, DEFAULT_GC_MAX_STEPS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    CreateCheckpointOptions, FsMaintenance, FsReader, GraceAge, PassBudget, RuntimeError,
+    SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, DEFAULT_GC_MAX_STEPS,
+    GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{

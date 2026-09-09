@@ -48,17 +48,14 @@ impl MaintenanceJob for GarbageCollectionJob {
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        continuation: Option<&str>,
+        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         let response = match self
             .maintenance
             .run_maintenance(
                 namespace_id,
-                RunMaintenanceRequest::Gc(GcRequest {
-                    cursor: continuation.map(str::to_owned),
-                    ..GcRequest::default()
-                }),
+                RunMaintenanceRequest::Gc(GcRequest::default()),
             )
             .await
         {
@@ -66,16 +63,6 @@ impl MaintenanceJob for GarbageCollectionJob {
             Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
                 return Ok(MaintenanceRunReport::concluded(
                     MaintenanceConclusion::NotEnabled,
-                ));
-            }
-            Err(error) if continuation.is_some() && error.code() == ErrorCode::InvalidRequest => {
-                tracing::warn!(
-                    namespace_id = %namespace_id,
-                    error = %error.public_message(),
-                    "collection rejected its resume position; restarting the pass"
-                );
-                return Ok(MaintenanceRunReport::concluded(
-                    MaintenanceConclusion::Superseded,
                 ));
             }
             Err(error) => return Err(error),
@@ -98,7 +85,7 @@ impl MaintenanceJob for GarbageCollectionJob {
         } else {
             None
         };
-        let mut report = gc_run_result(gc, continuation);
+        let mut report = gc_run_result(gc);
         report.follow_up = follow_up;
         Ok(report)
     }
@@ -108,24 +95,22 @@ impl MaintenanceJob for GarbageCollectionJob {
     }
 }
 
-fn gc_run_result(gc: GcResponse, submitted_cursor: Option<&str>) -> MaintenanceRunReport {
+fn gc_run_result(gc: GcResponse) -> MaintenanceRunReport {
     MaintenanceRunReport {
-        conclusion: gc_conclusion(&gc, submitted_cursor),
-        continuation: gc.next_cursor,
+        conclusion: gc_conclusion(&gc),
+        continuation: None,
         not_before_ms: gc.next_reclamation_at_ms,
         follow_up: None,
     }
 }
 
-fn gc_conclusion(gc: &GcResponse, submitted_cursor: Option<&str>) -> MaintenanceConclusion {
-    match gc.next_cursor.as_deref() {
-        Some(next_cursor) if Some(next_cursor) == submitted_cursor => {
-            MaintenanceConclusion::Blocked
-        }
-        Some(_) => MaintenanceConclusion::Progressed,
-        None if reclaimed_anything(gc) => MaintenanceConclusion::Progressed,
-        None if gc.budget_exhausted || gc.retention_degraded => MaintenanceConclusion::Blocked,
-        None => MaintenanceConclusion::Idle,
+fn gc_conclusion(gc: &GcResponse) -> MaintenanceConclusion {
+    if reclaimed_anything(gc) {
+        MaintenanceConclusion::Progressed
+    } else if gc.budget_exhausted {
+        MaintenanceConclusion::Blocked
+    } else {
+        MaintenanceConclusion::Idle
     }
 }
 

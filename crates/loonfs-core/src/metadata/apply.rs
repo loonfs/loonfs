@@ -2,8 +2,9 @@
 //! [`MetadataState`] rows.
 
 use super::{
-    AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord, DirentryBindRecord,
+    DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+    TombstoneRowAction,
 };
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
@@ -120,6 +121,13 @@ impl MetadataState {
                 revision_no,
                 content_ref,
             } => {
+                if self.find_content_publication(&content_ref.content_id) != Some(committed_seq) {
+                    self.push_content_publication_record(ContentPublicationRecord {
+                        content_id: content_ref.content_id.clone(),
+                        committed_seq,
+                        delta_index: *delta_index,
+                    });
+                }
                 self.push_revision_record(RevisionRecord {
                     inode_id: *inode_id,
                     revision_no: *revision_no,
