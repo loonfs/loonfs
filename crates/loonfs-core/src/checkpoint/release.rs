@@ -69,27 +69,34 @@ pub(super) async fn release_owned_checkpoint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     expected: CheckpointOwnerKind,
-    context: &MutationContext,
 ) -> Result<()> {
     let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
-        return Ok(());
+        return Err(match expected {
+            CheckpointOwnerKind::Snapshot => CoreError::SnapshotNotFound {
+                snapshot_id: checkpoint_id.clone(),
+            },
+            CheckpointOwnerKind::User | CheckpointOwnerKind::Fork => {
+                CoreError::CheckpointNotFound {
+                    checkpoint_id: checkpoint_id.clone(),
+                }
+            }
+        });
     };
     ensure_owner_is(checkpoint_id, &loaded.state.owner, expected)?;
-    release_checkpoint_record(store, namespace_id, checkpoint_id, context.now_ms).await
+    release_checkpoint_record(store, namespace_id, checkpoint_id).await
 }
 
 pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-    context: &MutationContext,
+    _context: &MutationContext,
 ) -> Result<ReleaseCheckpointResponse> {
     release_owned_checkpoint(
         store,
         namespace_id,
         checkpoint_id,
         CheckpointOwnerKind::User,
-        context,
     )
     .await?;
     Ok(ReleaseCheckpointResponse {

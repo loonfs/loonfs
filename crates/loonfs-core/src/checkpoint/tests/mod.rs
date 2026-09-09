@@ -67,7 +67,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataRow,
+    encode_namespace_manifest_json, lookup_keys, MetadataRow,
     MetadataRowFamily as ApiMetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
     NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
 };

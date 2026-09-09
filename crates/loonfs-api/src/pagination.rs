@@ -652,7 +652,7 @@ mod tests {
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(11),
             snapshot_id: Some(
-                crate::CheckpointId::parse("chk_00000000000000000000000000000001")
+                crate::CheckpointId::parse("pin_00000000000000000001-0000000000000001")
                     .expect("snapshot id"),
             ),
             directory_inode_id: InodeId(7),
@@ -844,7 +844,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let cursor = TestNamespaceCursor {
             namespace_id: namespace_id.clone(),
-            last_key: "namespaces/demo/checkpoints/checkpoint-42".to_owned(),
+            last_key: "namespaces/demo/pins/checkpoint-42".to_owned(),
         };
         let encoded = encode_cursor(&cursor).expect("encode cursor");
 

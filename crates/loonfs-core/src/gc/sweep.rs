@@ -1,9 +1,5 @@
 //! Sweep candidates against the live set loaded for this call.
 use super::families::CandidateFamily;
-use super::fork_checkpoints::{
-    maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
-    MissingBasisCheckpointSweep,
-};
 use super::live_set::LiveSet;
 use super::reap::{grace_age, sweep_checkpoint_record, CheckpointSweep, GraceAge};
 use super::uploads::{
@@ -37,16 +33,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         if !family.recognizes(key) {
             self.report.retain(RetainedReason::UnrecognizedKey);
             *self.checkpoints_retained |= family == CandidateFamily::Checkpoints;
-            return Ok(true);
-        }
-        if family == CandidateFamily::Checkpoints
-            && self.live.missing_basis_checkpoints.contains(key)
-        {
-            if !self.budget.try_charge() {
-                return Ok(false);
-            }
-            self.process_missing_basis_checkpoint(key).await?;
-            *self.checkpoints_retained = true;
             return Ok(true);
         }
         match family {
@@ -153,58 +139,29 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         }
         Ok(true)
     }
-    async fn process_missing_basis_checkpoint(&mut self, key: &str) -> Result<()> {
-        match release_missing_basis_checkpoint(
-            self.store,
-            self.namespace_id,
-            key,
-            self.grace_window_ms,
-            self.mutation,
-        )
-        .await?
-        {
-            MissingBasisCheckpointSweep::Released => {
-                self.report.released_checkpoints.missing_basis += 1;
-            }
-            MissingBasisCheckpointSweep::Retained => {
-                self.report.retain(RetainedReason::CheckpointNotReleasable);
-            }
-        }
-        Ok(())
-    }
-
     async fn process_checkpoint(&mut self, key: &str) -> Result<bool> {
-        match maybe_release_fork_checkpoint(self.store, key, self.mutation).await? {
-            ForkCheckpointSweep::Released => {
-                self.report.released_checkpoints.fork += 1;
-                return Ok(false);
-            }
-            ForkCheckpointSweep::Retained => {
-                self.report.retain(RetainedReason::CheckpointNotReleasable);
-                return Ok(false);
-            }
-            ForkCheckpointSweep::NotAnActiveFork => {}
-        }
-        match sweep_checkpoint_record(
+        let decision = sweep_checkpoint_record(
             self.store,
-            self.namespace_id,
             key,
             self.grace_window_ms,
             self.live.namespace_deleted,
             self.mutation,
         )
-        .await?
-        {
-            CheckpointSweep::Delete => {
-                self.delete_key(key).await?;
-                self.report.deleted.checkpoint_records += 1;
-                return Ok(true);
+        .await?;
+        let count = match decision {
+            CheckpointSweep::DeleteFork => &mut self.report.released_checkpoints.fork,
+            CheckpointSweep::DeleteUser => &mut self.report.released_checkpoints.expired,
+            CheckpointSweep::DeleteSnapshot => &mut self.report.released_checkpoints.snapshot,
+            CheckpointSweep::Gone => return Ok(true),
+            CheckpointSweep::Retain => {
+                self.report.retain(RetainedReason::CheckpointNotReleasable);
+                return Ok(false);
             }
-            CheckpointSweep::Released => self.report.released_checkpoints.expired += 1,
-            CheckpointSweep::ReleasedSnapshot => self.report.released_checkpoints.snapshot += 1,
-            CheckpointSweep::Retain => self.report.retain(RetainedReason::CheckpointNotReleasable),
-        }
-        Ok(false)
+        };
+        *count += 1;
+        self.delete_key(key).await?;
+        self.report.deleted.checkpoint_records += 1;
+        Ok(true)
     }
 
     async fn process_upload_session(&mut self, key: &str) -> Result<()> {

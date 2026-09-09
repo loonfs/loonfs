@@ -521,6 +521,6 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
             .reader
             .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
             .await,
-        ErrorCode::SnapshotGone,
+        ErrorCode::SnapshotNotFound,
     );
 }

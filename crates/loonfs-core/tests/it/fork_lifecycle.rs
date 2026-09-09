@@ -10,10 +10,7 @@ use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{
-    wire::control::{
-        decode_control_object, CheckpointOwner, CheckpointStatus, ContentStoreState,
-        ControlObjectKind,
-    },
+    wire::control::{decode_control_object, CheckpointOwner, ContentStoreState, ControlObjectKind},
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
     },
@@ -109,7 +106,7 @@ async fn snapshot_fork_keeps_its_tree_after_snapshot_release_and_source_gc() {
     assert_eq!(head.head_commit_id, snapshot_record.head_commit_id);
     assert_eq!(
         head.fork_basis.as_ref().expect("fork basis").manifest,
-        snapshot_record.manifest
+        snapshot_record.manifest()
     );
     assert_eq!(listed_names(&store, &target).await, ["shared.txt"]);
     assert_eq!(
@@ -200,7 +197,7 @@ async fn snapshot_release_during_fork_releases_the_attempt_without_installing_a_
     let target = namespace_id("target");
     let store = loonfs_test_support::stores::BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(format!("namespaces/{source}/checkpoints/")),
+        KeyPredicate::prefix(format!("namespaces/{source}/pins/")),
         OperationClass::PutCreateIfAbsent,
     );
     let context = mutation_context();
@@ -227,28 +224,10 @@ async fn snapshot_release_during_fork_releases_the_attempt_without_installing_a_
     );
     assert!(namespace_keys(&store, &target).await.is_empty());
     let records = store
-        .list_prefix(&format!("namespaces/{source}/checkpoints/"))
+        .list_prefix(&format!("namespaces/{source}/pins/"))
         .await
         .expect("list records");
-    let mut fork_records = 0;
-    for key in records {
-        let bytes = store
-            .get(&key, None)
-            .await
-            .expect("read record")
-            .expect("record exists");
-        let record = decode_control_object::<loonfs_api::wire::control::CheckpointRecordState>(
-            &bytes,
-            ControlObjectKind::CheckpointRecord,
-        )
-        .expect("decode record")
-        .into_payload();
-        if matches!(record.owner, CheckpointOwner::Fork { .. }) {
-            fork_records += 1;
-            assert!(matches!(record.status, CheckpointStatus::Released { .. }));
-        }
-    }
-    assert_eq!(fork_records, 1);
+    assert!(records.is_empty());
 }
 
 async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
@@ -653,7 +632,10 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
     assert_eq!(fork_basis.manifest.manifest_head_seq, ChangeSeq(1));
-    assert!(fork_basis.source_checkpoint_id.as_str().starts_with("chk_"));
+    assert_eq!(
+        fork_basis.source_checkpoint_id.manifest_no(),
+        fork_basis.manifest.manifest_no
+    );
 
     let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
         &store,
@@ -663,9 +645,9 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
-    assert_eq!(source_record.manifest.manifest_head_seq, ChangeSeq(1));
+    assert_eq!(source_record.manifest_head_seq, ChangeSeq(1));
     // The fork basis and checkpoint record must use the same manifest.
-    assert_eq!(source_record.manifest, fork_basis.manifest);
+    assert_eq!(source_record.manifest(), fork_basis.manifest);
     assert!(
         matches!(
             &source_record.owner,
@@ -987,17 +969,8 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("release descendant record");
     assert_eq!(released.released_checkpoints.fork, 1);
-    assert_eq!(released.reclaim_after_ms, None);
-    let retained = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
-        .await
-        .expect("released record keeps parent unretired");
-    assert_eq!(retained.reclaim_after_ms, None);
-    aged.now_ms += config.grace_window_ms;
-    let retired = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
-        .await
-        .expect("delete record and retire parent");
-    assert_eq!(retired.deleted.checkpoint_records, 1);
-    let parent_deadline = retired.reclaim_after_ms.expect("parent retired");
+    assert_eq!(released.deleted.checkpoint_records, 1);
+    let parent_deadline = released.reclaim_after_ms.expect("parent retired");
     let waiting = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
         .await
         .expect("wait for parent grace");
@@ -1007,28 +980,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("release parent record");
     assert_eq!(released.released_checkpoints.fork, 1);
-    assert_eq!(released.reclaim_after_ms, None);
-}
-
-#[tokio::test]
-async fn a_fork_that_loses_its_source_pin_installs_no_target() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store =
-        ReleasePinBeforeRenewalStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let context = mutation_context();
-    let source = namespace_id("source");
-    let clone = NamespaceId::parse("clone").expect("valid namespace id");
-    seed_source_namespace_for_fork(&store, &source, &context).await;
-
-    let error = fork_namespace(&store, &source, &clone, &context)
-        .await
-        .expect_err("a released source pin fails the fork");
-
-    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
-    assert!(
-        namespace_keys(&store, &clone).await.is_empty(),
-        "the target is not installed"
-    );
+    assert!(released.reclaim_after_ms.is_some());
 }
 
 #[tokio::test]
@@ -1044,7 +996,7 @@ async fn a_fork_survives_a_concurrent_collection_pass() {
     let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
     let collecting = loonfs_core::gc_namespace(store.as_ref(), &source, &gc_config, &context);
     let (forked, collected) = tokio::join!(forking, collecting);
-    forked.expect("the renewal fences the pass");
+    forked.expect("creation grace protects the fork");
     collected.expect("the pass finishes");
     assert_eq!(
         head_state(store.as_ref(), &clone).await.status,
@@ -1081,8 +1033,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
-    let manifest_key =
-        metadata_manifest_object(&source_namespace_id, &source_record.manifest.manifest_no);
+    let manifest_key = metadata_manifest_object(&source_namespace_id, &source_record.manifest_no);
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await
@@ -1124,10 +1075,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Prefix(format!(
-            "namespaces/{}/checkpoints/",
-            source_namespace_id.as_str()
-        )),
+        KeyMatcher::Prefix(format!("namespaces/{}/pins/", source_namespace_id.as_str())),
         InjectedCreateFailure::PermissionDenied {
             message: "injected source checkpoint failure",
         },
@@ -1366,110 +1314,6 @@ async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
         .await
         .expect("probe hint")
         .is_some());
-}
-
-/// Releases a fork checkpoint before its renewal can complete.
-#[derive(Debug)]
-struct ReleasePinBeforeRenewalStore {
-    inner: LocalFsStore,
-}
-
-impl ReleasePinBeforeRenewalStore {
-    fn new(inner: LocalFsStore) -> Self {
-        Self { inner }
-    }
-
-    async fn release_record(&self, key: &str) {
-        let bytes = self
-            .inner
-            .get(key, None)
-            .await
-            .expect("read record")
-            .expect("record exists");
-        let mut record = decode_control_object::<loonfs_api::wire::control::CheckpointRecordState>(
-            &bytes,
-            ControlObjectKind::CheckpointRecord,
-        )
-        .expect("decode record")
-        .into_payload();
-        record.status = CheckpointStatus::Released {
-            released_at_ms: 2_000,
-        };
-        let released = record;
-        self.inner
-            .put_overwrite(
-                key,
-                Bytes::from(
-                    loonfs_api::wire::control::encode_control_state(
-                        ControlObjectKind::CheckpointRecord,
-                        &released,
-                    )
-                    .expect("encode record"),
-                ),
-            )
-            .await
-            .expect("release record");
-    }
-}
-
-#[async_trait::async_trait]
-impl ObjectStore for ReleasePinBeforeRenewalStore {
-    async fn head(
-        &self,
-        key: &str,
-    ) -> Result<Option<loonfs_objectstore::ObjectMetadata>, loonfs_objectstore::ObjectStoreError>
-    {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<loonfs_objectstore::ByteRange>,
-    ) -> Result<Option<Bytes>, loonfs_objectstore::ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(
-        &self,
-        key: &str,
-    ) -> Result<Option<loonfs_objectstore::ObjectBody>, loonfs_objectstore::ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: loonfs_objectstore::PutMode,
-    ) -> Result<loonfs_objectstore::ObjectMetadata, loonfs_objectstore::ObjectStoreError> {
-        if matches!(mode, loonfs_objectstore::PutMode::CompareAndSwap { .. })
-            && key.contains("/checkpoints/")
-        {
-            self.release_record(key).await;
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), loonfs_objectstore::ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    async fn list_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, loonfs_objectstore::ObjectStoreError> {
-        self.inner.list_prefix(prefix).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> futures::stream::BoxStream<'static, Result<String, loonfs_objectstore::ObjectStoreError>>
-    {
-        self.inner.list_prefix_from_stream(prefix, start_after)
-    }
 }
 
 #[tokio::test]

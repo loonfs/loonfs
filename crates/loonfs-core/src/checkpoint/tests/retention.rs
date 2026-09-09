@@ -2,109 +2,6 @@
 
 use super::*;
 use loonfs_objectstore::keys::{checkpoint_prefix, wal_segment_prefix};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-#[derive(Debug)]
-struct ManifestChecksumMismatchOnceStore {
-    inner: LocalFsStore,
-    checkpoint_prefix: String,
-    manifest_key: String,
-    mismatched_manifest: Bytes,
-    mismatch_armed: AtomicUsize,
-    mismatch_injected: AtomicBool,
-    checkpoint_writes: AtomicUsize,
-}
-
-impl ManifestChecksumMismatchOnceStore {
-    fn new(
-        inner: LocalFsStore,
-        namespace_id: &NamespaceId,
-        manifest_key: String,
-        mismatched_manifest: Bytes,
-    ) -> Self {
-        Self {
-            inner,
-            checkpoint_prefix: checkpoint_prefix(namespace_id),
-            manifest_key,
-            mismatched_manifest,
-            mismatch_armed: AtomicUsize::new(0),
-            mismatch_injected: AtomicBool::new(false),
-            checkpoint_writes: AtomicUsize::new(0),
-        }
-    }
-
-    fn inner(&self) -> &LocalFsStore {
-        &self.inner
-    }
-
-    fn checkpoint_writes(&self) -> usize {
-        self.checkpoint_writes.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl ObjectStore for ManifestChecksumMismatchOnceStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        let full_object = range.is_none();
-        let stored = self.inner.get(key, range).await?;
-        if key == self.manifest_key
-            && full_object
-            && self
-                .mismatch_armed
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                == Ok(1)
-        {
-            return Ok(Some(self.mismatched_manifest.clone()));
-        }
-        Ok(stored)
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let creates_checkpoint =
-            key.starts_with(&self.checkpoint_prefix) && matches!(&mode, PutMode::CreateIfAbsent);
-        let result = self.inner.put(key, bytes, mode).await;
-        if result.is_ok() && creates_checkpoint {
-            self.checkpoint_writes.fetch_add(1, Ordering::SeqCst);
-            // Only the first verification observes the contradiction. If the
-            // operation retries, the next basis is sound and would hide it.
-            if !self.mismatch_injected.swap(true, Ordering::SeqCst) {
-                self.mismatch_armed.store(2, Ordering::SeqCst);
-            }
-        }
-        result
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
-    }
-}
 
 async fn current_manifest_no<S: ObjectStore + ?Sized>(
     store: &S,
@@ -641,16 +538,11 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
         "a new pin never lands on a released record's key"
     );
 
-    let released = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
-        .await
-        .expect("read checkpoint record")
-        .expect("record exists")
-        .state;
-    assert_eq!(
-        released.status,
-        loonfs_api::wire::control::CheckpointStatus::Released {
-            released_at_ms: context.now_ms
-        }
+    assert!(
+        load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+            .await
+            .expect("load pin")
+            .is_none()
     );
     let error = read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
         .await
@@ -663,26 +555,17 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
             .is_empty()
     );
 
-    // Releasing again is the same end state, not a revival and not an error.
-    let again = crate::checkpoint::release_checkpoint(
-        &store,
-        &namespace_id,
-        &first.checkpoint_id,
-        &context,
-    )
-    .await
-    .expect("repeat release");
-    assert_eq!(again.checkpoint_id, first.checkpoint_id);
     assert_eq!(
-        load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
-            .await
-            .expect("read checkpoint record")
-            .expect("record exists")
-            .state
-            .status,
-        loonfs_api::wire::control::CheckpointStatus::Released {
-            released_at_ms: context.now_ms
-        }
+        crate::checkpoint::release_checkpoint(
+            &store,
+            &namespace_id,
+            &first.checkpoint_id,
+            &context
+        )
+        .await
+        .expect_err("second release")
+        .code(),
+        ErrorCode::CheckpointNotFound
     );
 }
 
@@ -739,10 +622,6 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             .state;
         assert_eq!(record.owner.expires_at_ms(), expiry);
         assert_eq!(record.created_at_ms, 2_000);
-        assert_eq!(
-            record.status,
-            loonfs_api::wire::control::CheckpointStatus::Active {}
-        );
     }
 
     // The very first record is untouched by any of it: a pin taken without
@@ -754,10 +633,6 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         .state;
     assert_eq!(original.created_at_ms, 1_000, "creation instant is history");
     assert_eq!(original.owner.expires_at_ms(), Some(10_000));
-    assert_eq!(
-        original.status,
-        loonfs_api::wire::control::CheckpointStatus::Active {}
-    );
 }
 
 #[tokio::test]
@@ -794,14 +669,11 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
     )
     .await
     .expect("create checkpoint whose expiry has already passed");
-    assert_eq!(
+    assert!(
         load_checkpoint_record(&store, &namespace_id, &already_expired.checkpoint_id)
             .await
-            .expect("read checkpoint record")
-            .expect("record exists")
-            .state
-            .status,
-        loonfs_api::wire::control::CheckpointStatus::Active {}
+            .expect("load pin")
+            .is_some()
     );
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
@@ -815,7 +687,10 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
         &store,
         &namespace_id,
         &crate::gc::GcConfig::default(),
-        &test_context(),
+        &mutation_context(
+            "expired",
+            context.now_ms + crate::gc::GcConfig::default().grace_window_ms,
+        ),
     )
     .await
     .expect("gc pass");
@@ -863,15 +738,10 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_released() {
         .await
         .expect("gc pass");
     }
-    let record = load_checkpoint_record(&store, &namespace_id, &pin.checkpoint_id)
+    load_checkpoint_record(&store, &namespace_id, &pin.checkpoint_id)
         .await
         .expect("read checkpoint record")
-        .expect("an unexpiring pin survives every pass")
-        .state;
-    assert_eq!(
-        record.status,
-        loonfs_api::wire::control::CheckpointStatus::Active {}
-    );
+        .expect("an unexpiring pin survives every pass");
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
             .await
@@ -889,59 +759,51 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_released() {
 }
 
 #[tokio::test]
-async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/file.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let initial = crate::namespace::control_snapshot::load_control_snapshot(&store, &namespace_id)
         .await
-        .expect("create checkpoint");
+        .expect("initial manifest");
+    write_file_bytes(&store, &namespace_id, "/file", b"content", &context, None)
+        .await
+        .expect("write");
+    crate::checkpoint::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("flush");
     advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("advance floor");
-
-    // The bootstrap basis (seq 0) now sits below the floor (seq 1): a
-    // record pinned to it must fail post-write verification.
-    let stale = loonfs_api::wire::control::CheckpointRecordState {
-        checkpoint_id: checkpoint.checkpoint_id.clone(),
-        namespace_id: namespace_id.clone(),
-        manifest: loonfs_api::wire::control::ManifestRef {
-            owner_namespace_id: namespace_id.clone(),
-            manifest_no: ManifestNo(0),
-
-            manifest_head_seq: ChangeSeq(0),
-            manifest_payload_checksum: "sha256:stale".to_owned(),
-        },
-        head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
-        created_at_ms: context.now_ms,
-        owner: loonfs_api::wire::control::CheckpointOwner::User {
-            name: "test-pin".to_owned(),
+    let store = loonfs_test_support::stores::RecordingStore::new(
+        store,
+        loonfs_test_support::stores::KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+    );
+    let error = super::create::create_checkpoint_at_basis(
+        &store,
+        &namespace_id,
+        loonfs_api::wire::control::CheckpointOwner::User {
+            name: "old".to_owned(),
             expires_at_ms: None,
         },
-        status: loonfs_api::wire::control::CheckpointStatus::Active {},
-    };
-    let verified = super::record::verify_checkpoint_basis(&store, &stale)
+        initial.basis().manifest().clone(),
+        initial.head.state.head_commit_id.clone(),
+        &context,
+    )
+    .await
+    .expect_err("floor passed pin");
+    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert!(store
+        .list_prefix(&checkpoint_prefix(&namespace_id))
         .await
-        .expect("verification runs");
-    assert_eq!(
-        verified,
-        super::record::CheckpointBasisVerification::Invalid,
-        "sub-floor basis must not verify"
-    );
+        .expect("pins")
+        .is_empty());
+    assert_eq!(store.counts().create_if_absent_puts, 1);
+    assert_eq!(store.counts().deletes, 1);
 }
 
 #[tokio::test]
@@ -990,160 +852,45 @@ async fn checkpoint_verification_rejects_a_deleted_namespace() {
 }
 
 #[tokio::test]
-async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_record() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+async fn checkpoint_basis_verification_store_failure_deletes_the_record() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
-    bootstrap_namespace(&setup_store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let manifest_key = current_manifest_key(&setup_store, &namespace_id).await;
-    let manifest_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let selected_reads = Arc::clone(&manifest_reads);
-    let selected_manifest_key = manifest_key.clone();
-    let store = FailStore::matching(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        move |operation| {
-            operation.key() == selected_manifest_key
-                && matches!(
-                    operation.kind(),
-                    loonfs_test_support::stores::OperationKind::Get { .. }
-                )
-                && selected_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 3
-        },
-        InjectedError::Transport("injected basis verification failure".to_owned()),
+    let initial = crate::namespace::control_snapshot::load_control_snapshot(&store, &namespace_id)
+        .await
+        .expect("initial manifest");
+    let store = loonfs_test_support::stores::FailStore::new(
+        store,
+        loonfs_test_support::stores::KeyPredicate::exact(loonfs_objectstore::keys::hint(
+            &namespace_id,
+        )),
+        loonfs_test_support::stores::OperationClass::Read,
+        loonfs_test_support::stores::InjectedError::Transport("verification failed".to_owned()),
     );
     store.fail_next(1);
-
-    let error = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect_err("basis verification store failure must surface");
-
-    assert_eq!(error.code(), ErrorCode::ServerError);
-    match error {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-            ManifestLoadError::ReadManifest {
-                object_key,
-                message,
-            },
-        )) => {
-            assert_eq!(object_key, manifest_key);
-            assert_eq!(
-                message,
-                loonfs_objectstore::ObjectStoreErrorClass::Other.public_message()
-            );
-        }
-        other => panic!("expected a classified manifest store error, got {other:?}"),
-    }
-    assert_eq!(store.attempts(), 1, "only the verification read fails");
-    assert_eq!(
-        manifest_reads.load(std::sync::atomic::Ordering::SeqCst),
-        4,
-        "the injected failure follows the projection's manifest read"
-    );
-
-    let record_keys = store
-        .inner()
-        .list_prefix(&checkpoint_prefix(&namespace_id))
-        .await
-        .expect("list checkpoint records");
-    assert_eq!(record_keys.len(), 1, "the failed create wrote one record");
-    let checkpoint_id = record_keys[0]
-        .rsplit('/')
-        .next()
-        .and_then(|name| name.strip_suffix(".json"))
-        .and_then(|id| CheckpointId::parse(id).ok())
-        .expect("checkpoint record key");
-    let record = load_checkpoint_record(store.inner(), &namespace_id, &checkpoint_id)
-        .await
-        .expect("read checkpoint record")
-        .expect("record remains for cleanup inspection")
-        .state;
-    assert_eq!(
-        record.status,
-        loonfs_api::wire::control::CheckpointStatus::Released {
-            released_at_ms: context.now_ms
-        }
-    );
-}
-
-#[tokio::test]
-async fn checkpoint_checksum_disagreement_is_terminal_corruption_and_releases_record() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
-    bootstrap_namespace(&setup_store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-
-    let manifest_key = current_manifest_key(&setup_store, &namespace_id).await;
-    let manifest_bytes = setup_store
-        .get(&manifest_key, None)
-        .await
-        .expect("read manifest")
-        .expect("current manifest exists");
-    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    let record_checksum = manifest.payload_checksum().to_owned();
-    let mut mismatched_payload = manifest.into_payload();
-    mismatched_payload.next_inode_id = InodeId(mismatched_payload.next_inode_id.0 + 1);
-    let mismatched_manifest = encode_namespace_manifest_json(mismatched_payload)
-        .expect("build mismatched manifest")
-        .into_envelope();
-    let manifest_checksum = mismatched_manifest.payload_checksum().to_owned();
-    assert_ne!(record_checksum, manifest_checksum);
-    let mismatched_bytes = Bytes::from(
-        encode_namespace_manifest_json(mismatched_manifest.payload().clone())
-            .expect("encode mismatched manifest")
-            .into_bytes(),
-    );
-    let store = ManifestChecksumMismatchOnceStore::new(
-        setup_store,
+    let error = super::create::create_checkpoint_at_basis(
+        &store,
         &namespace_id,
-        manifest_key,
-        mismatched_bytes,
-    );
-
-    let error = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect_err("a durable checksum contradiction must fail checkpoint creation");
-
-    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    let CoreError::NamespaceCorrupt(message) = error else {
-        panic!("expected namespace corruption, got {error:?}");
-    };
-    assert!(message.contains(&record_checksum));
-    assert!(message.contains(&manifest_checksum));
-    assert_eq!(
-        store.checkpoint_writes(),
-        1,
-        "the checksum contradiction must not be retried under a new checkpoint id"
-    );
-
-    let record_keys = store
-        .inner()
+        loonfs_api::wire::control::CheckpointOwner::User {
+            name: "failed".to_owned(),
+            expires_at_ms: None,
+        },
+        initial.basis().manifest().clone(),
+        initial.head.state.head_commit_id.clone(),
+        &context,
+    )
+    .await
+    .expect_err("verification failed");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert!(store
         .list_prefix(&checkpoint_prefix(&namespace_id))
         .await
-        .expect("list checkpoint records");
-    assert_eq!(record_keys.len(), 1, "the failed create wrote one record");
-    let checkpoint_id = record_keys[0]
-        .rsplit('/')
-        .next()
-        .and_then(|name| name.strip_suffix(".json"))
-        .and_then(|id| CheckpointId::parse(id).ok())
-        .expect("checkpoint record key");
-    let record = load_checkpoint_record(store.inner(), &namespace_id, &checkpoint_id)
-        .await
-        .expect("read checkpoint record")
-        .expect("record remains for cleanup inspection")
-        .state;
-    assert_eq!(
-        record.status,
-        loonfs_api::wire::control::CheckpointStatus::Released {
-            released_at_ms: context.now_ms
-        }
-    );
+        .expect("pins")
+        .is_empty());
 }
 
 async fn wal_segment_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> usize {
@@ -2651,4 +2398,84 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         1,
         "the bindings group must end in one base run"
     );
+}
+
+#[tokio::test]
+async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_release() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("retained-pin").expect("namespace");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &namespace_id, "/first", b"first", &context, None)
+        .await
+        .expect("first write");
+    let pin = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("pin");
+    let pinned_files = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        .await
+        .expect("pinned files");
+    let pinned_segments = super::segment_keys_of_the_current_manifest(&store, &namespace_id).await;
+    write_file_bytes(&store, &namespace_id, "/second", b"second", &context, None)
+        .await
+        .expect("second write");
+    crate::checkpoint::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("flush");
+    let current_segments = super::compact_a_family_group(&store, &namespace_id, &context).await;
+    let only_pinned: Vec<_> = pinned_segments
+        .difference(&current_segments)
+        .cloned()
+        .collect();
+    assert!(!only_pinned.is_empty());
+    let floor = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance floor");
+    assert!(floor.retention_floor_seq > pin.checkpoint_seq);
+    let aged = mutation_context("gc", u64::MAX / 2);
+    crate::gc::gc_namespace(
+        &store,
+        &namespace_id,
+        &crate::gc::GcConfig::default(),
+        &aged,
+    )
+    .await
+    .expect("collect past the floor");
+    assert_eq!(
+        read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+            .await
+            .expect("pin readable"),
+        pinned_files
+    );
+    for key in &pinned_segments {
+        assert!(store.head(key).await.expect("pinned segment").is_some());
+    }
+    let manifest_key = metadata_manifest_object(&namespace_id, &pin.manifest_no);
+    assert!(store
+        .head(&manifest_key)
+        .await
+        .expect("pinned manifest")
+        .is_some());
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pin.checkpoint_id, &aged)
+        .await
+        .expect("release pin");
+    crate::gc::gc_namespace(
+        &store,
+        &namespace_id,
+        &crate::gc::GcConfig::default(),
+        &aged,
+    )
+    .await
+    .expect("collect released basis");
+    assert!(store
+        .head(&manifest_key)
+        .await
+        .expect("released manifest")
+        .is_none());
+    for key in &only_pinned {
+        assert!(store.head(key).await.expect("released segment").is_none());
+    }
 }

@@ -10,7 +10,7 @@ use loonfs::{
     FsWriter, GcConfig, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
     SharedObjectStore,
 };
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
+use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::{
     sha256_digest, AbsolutePath, ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse,
     IndexSegmentId, PageRequest, PaginationPolicy, RunNo, MAX_PUBLIC_INTEGER,
@@ -267,13 +267,11 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     drive_worker_to_current(&worker, &namespace_id, policy).await;
-    let checkpoint = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
-        .await
-        .expect("released checkpoint record remains until core GC");
-    assert!(matches!(
-        checkpoint.status,
-        CheckpointStatus::Released { .. }
-    ));
+    assert!(
+        control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
+            .await
+            .is_none()
+    );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("materialized query");
@@ -903,12 +901,10 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
         .expect("write the expired record");
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let finished = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
-        .await
-        .expect("the record survives until core GC reaps it");
     assert!(
-        matches!(finished.status, CheckpointStatus::Released { .. }),
-        "the attempt completed the backfill using that pin and then released it"
+        control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
+            .await
+            .is_none()
     );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
@@ -947,13 +943,10 @@ async fn assert_fresh_backfill_attempt(
         root.manifest_state().segments().is_empty(),
         "a rebootstrap discards the incomplete projection"
     );
-    let record = control::checkpoint_record(store, namespace_id, checkpoint_id)
-        .await
-        .expect("the new attempt's checkpoint record exists");
-    assert_eq!(
-        record.status,
-        CheckpointStatus::Active {},
-        "a fresh backfill attempt must hold a checkpoint that still pins its basis"
+    assert!(
+        control::checkpoint_record(store, namespace_id, checkpoint_id)
+            .await
+            .is_some()
     );
     checkpoint_id.clone()
 }

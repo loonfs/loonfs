@@ -105,11 +105,11 @@ fn checkpoint_summary(
     };
     loonfs_api::Checkpoint {
         namespace_id: record.namespace_id,
-        checkpoint_id: record.checkpoint_id,
+        checkpoint_id: record.pin_id,
         owner,
         created_at_ms: record.created_at_ms,
         expires_at_ms,
-        checkpoint_seq: record.manifest.manifest_head_seq,
-        manifest_no: record.manifest.manifest_no,
+        checkpoint_seq: record.manifest_head_seq,
+        manifest_no: record.manifest_no,
     }
 }

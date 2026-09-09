@@ -92,7 +92,7 @@ The required durable object families and standard key patterns are:
 | --- | --- | --- | --- |
 | **WAL segments** | Immutable | Commit contiguous records by number, or fence a writer with zero records. Carry `wal_no`, `writer_epoch`, `base_head_seq`, `start_seq`, `end_seq`, `next_inode_id`, and `records`. | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
 | **Namespace manifests** | Immutable | Record identity (`namespace_id`, `content_store_id`, `created_at_ms`, `fork_basis`), `status`, writer authority (`writer_epoch`, `writer`), `compactor_epoch`, `manifest_no`, `head_seq`, `head_commit_id`, `next_inode_id`, `base_seq`, `next_run_no`, `runs`, `last_folded_wal_no`, `retention_floor_seq`, and `retention_floor_wal_no`. Each segment reference keeps its owner. | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
-| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user, fork target, or snapshot). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
+| **Pin records** | Create and delete; snapshot expiry may extend | Pin one numbered manifest and its runs for a user, snapshot, or fork target. | `namespaces/{namespace_id}/pins/{pin_id}.json` |
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Hint** | Mutable | Starts forward discovery of numbered manifests and WAL objects; never authority. | `namespaces/{namespace_id}/hint.json` |
@@ -125,7 +125,11 @@ Namespaces share a content store exactly when their manifests name the same
 - WAL numbers start at 1 independently in every namespace. A segment's
   `wal_no` must equal its twenty-digit name. Readers probe consecutive
   numbers until the first missing object.
-- GC lists `manifests/`, `wal/`, `segments/`, `checkpoints/`, and `uploads/`.
+- Pin ids use `pin_{manifest_no:020}-{16 lowercase hex}`. The positive
+  manifest number positions the id; the random suffix distinguishes pins
+  over that manifest. The number is in the public ordinal range. Ids are
+  never reused.
+- GC lists `manifests/`, `wal/`, `segments/`, `pins/`, and `uploads/`.
   Metadata segment ids remain generated identities.
 - Creation and forks write the content-store descriptor, hint naming
   manifest 1 and WAL 0, and manifest 1, in that order. Manifest 1's
@@ -270,7 +274,7 @@ store content-store ids or object-store paths.
 
 ### 1.7 Mutable control-object rules
 
-Mutable lifecycle records use compare-and-swap. The discovery hint is
+Upload lifecycle changes and snapshot expiry extensions use compare-and-swap. The discovery hint is
 raised by compare-and-swap; each of its numbers only increases. Registered kinds are `hint`,
 `checkpoint_record`, `upload_session`, and `content_store`.
 
@@ -303,7 +307,26 @@ Durable decoders reject unknown envelope and payload fields. A changed
 shape requires its golden fixture to change. These format families are
 version 1.
 
-A durable object that references a namespace manifest stores this shape under `manifest`:
+A pin has kind `checkpoint_record`, version 1, and these payload fields:
+`namespace_id`, `pin_id`, `manifest_no`, `manifest_head_seq`,
+`manifest_payload_checksum`, `head_commit_id`, `created_at_ms`, and `owner`.
+The namespace and pin id must match the key. The manifest number must match
+both the id and the referenced manifest. Creation is put-if-absent. Release
+deletes the record. A missing pin cannot be released again.
+
+The owner is `user` with `name` and optional `expires_at_ms`, `snapshot` with
+`name` and required `expires_at_ms`, or `fork` with `target_namespace_id`.
+User and snapshot expiry permits deletion after a grace window. A user pin
+without expiry remains until explicit release, except on a deleted namespace.
+Deleted namespaces collect user and snapshot pins after creation grace.
+Fork collection follows section 2.6. A pin has no status, release timestamp,
+or fork lease. Snapshot extension changes only its expiry by compare-and-swap.
+
+A snapshot or checkpoint read derives the manifest number from the id and
+loads that numbered manifest under the namespace. It reads the pin body to
+confirm existence and owner validity, and verifies the manifest reference.
+
+A fork basis stores this reference under `manifest`:
 
 ```json
 {
@@ -314,9 +337,9 @@ A durable object that references a namespace manifest stores this shape under `m
 }
 ```
 
-`owner_namespace_id` identifies the namespace that stores the manifest and its segments. `manifest_no` is its number and determines its object key, and `manifest_head_seq` is the greatest namespace sequence it contains. `manifest_payload_checksum` must match the referenced envelope. Checkpoint records and fork bases use this shape, which rejects unknown fields.
+`owner_namespace_id` identifies the namespace that stores the manifest and its segments. `manifest_no` is its number and determines its object key, and `manifest_head_seq` is the greatest namespace sequence it contains. `manifest_payload_checksum` must match the referenced envelope. This shape rejects unknown fields. Pin records store the manifest fields directly.
 
-A checkpoint record must reference a manifest owned by its own namespace. A fork basis must reference a different namespace. Violations return `namespace_corrupt`.
+A pin references a manifest under its own namespace. A fork basis references a different namespace. Violations return `namespace_corrupt`.
 
 Grep manifests have no logical position or head sequence, so grep root pointers use the smaller shape defined in section 4.2.2.
 
@@ -785,7 +808,7 @@ namespace's content owner prefix. Retirement itself deletes no content.
 ### 2.6 Forks
 
 A fork starts independent metadata history in the source's content store.
-It first creates a verified, leased fork-owned source checkpoint. It then
+It first creates a verified fork-owned source pin. It then
 installs its own manifest 1 with the pinned source manifest's runs verbatim.
 Every segment reference keeps its owner, including earlier ancestors.
 New content and metadata segments use the target's own prefix.
@@ -803,15 +826,14 @@ GC compares it with the source checkpoint using the fixed call clock:
 | Deleted, same source and checkpoint id, deadline after the call clock | Retain (`target_retirement_grace`). |
 | Deleted, same source and checkpoint id, deadline at or before the call clock | Reclaimable. |
 
-An absent target retains the record until its lease expires. An unreadable
-target retains it; an invalid target is corruption. An absent expired target
-gets no tombstone. Installation must finish within the renewed lease margin.
+An absent target retains the pin until `created_at_ms + grace_window_ms`.
+An unreadable target retains it; an invalid target is corruption. An absent
+target gets no tombstone. The grace is the installation margin.
 
 For `A -> B -> C`, C's record prevents deleted B from retiring. A retains B's
 record until B retires and its deadline passes. After C retires and its
-deadline passes, B releases C's record. A later B collection deletes that
-record after release grace and retires B. Release proceeds from descendants
-to ancestors. Compaction does not change this rule.
+deadline passes, B deletes C's pin and can retire in the same complete pass.
+Release proceeds from descendants to ancestors. Compaction does not change this rule.
 
 An unflushed fork can itself be forked. Its manifest already lists its
 inherited files. Target reads never access source hints or source manifests
@@ -874,66 +896,26 @@ floor begins at zero for creation and at the pinned source sequence for a
 fork. A retention advance records the current manifest's head sequence and
 `last_folded_wal_no` as `retention_floor_seq` and `retention_floor_wal_no`.
 
-A checkpoint pins one namespace manifest version in a record under `checkpoints/`. It does not affect current visibility. The record stores a `manifest` reference (section 1.7), the `head_commit_id` at that manifest, and tagged `owner` and `status` fields. A `user` owner has a name and optional `expires_at_ms`. A `fork` owner has the target namespace and a required `expires_at_ms`. A `snapshot` owner has a name and a required `expires_at_ms`. The record has no top-level expiry field.
+A checkpoint pins one numbered namespace manifest under `pins/`. Its record
+follows section 1.7 and does not affect current visibility. Each create uses
+a fresh positioned id, even when the owner and manifest are unchanged.
 
-A `snapshot` owner represents an application-created read view. Its name is a
-label, not a key, and its expiry is required. A snapshot can be released
-explicitly or by garbage collection after it expires. Its record is deleted
-after the grace window.
+Creation writes the pin and loads the current manifest within the verify
+budget. If the namespace is deleted or its retention floor has passed the
+pinned manifest's head sequence, the creator deletes the pin and returns
+`checkpoint_unavailable`. A store error or an exceeded budget also deletes
+the pin. Verification does not reload the pinned manifest. A concurrent
+floor advance after verification leaves the pin protected under rule 8.
 
-Creation is write-then-verify: write the record active, then verify — under
-the self-enforced verify budget — that the floor has not passed the basis and
-the basis manifest still loads; on failure release the record and retry
-against a newer basis. Combined with the GC grace window and delete-time
-re-verification, this closes the create-vs-collect race: a record whose
-`created_at_ms` is inside the grace window is still inside its own verify
-budget, so nothing releases it for a basis it may yet prove.
-
-The `status` is monotonic. It has two values and one transition:
-
-```text
-Missing
-  -- create, under a freshly generated id -->
-active
-  -- one-way compare-and-swap: owner release, or GC observing a passed
-     expiry; stamps released_at_ms -->
-released { released_at_ms }
-  -- GC delete, released_at_ms + grace window -->
-Missing
-```
-
-`released` is terminal. A released record never returns to `active`, protects
-nothing, and serves no read. The only renewal is the expiry extension of an
-active fork-owned record during fork installation (section 3.9.2). A new pin
-is a new record under a new id. Ids are generated, never derived and never
-supplied by a caller, and a record id is never reused. Distinct pins over one
-basis are distinct records with independent lifecycles.
-
-No checkpoint status transition consults a provider object timestamp. Every
-instant the status depends on lives in the record: `created_at_ms` for the
-create-vs-collect grace, `owner.expires_at_ms` for the release, and
-`released_at_ms` for the deletion.
-
-An owner's `expires_at_ms` means "GC may release this without asking anyone".
-A user pin carries the caller's `ttl_ms`, or nothing at all, in which case it
-is held until released. A fork owner structurally requires one: it is the
-lease for a single fork attempt (section 3.9.2), and letting it pass is how an
-abandoned attempt becomes collectable; a fork owner without one fails ordinary
-strict deserialization as a missing field. A snapshot owner also requires an
-expiry. An expired record remains a root until garbage collection releases it.
-
-Explicit release is user-owned only, and it is idempotent: releasing an
-already-released or already-deleted record leaves the same end state. Owner
-release and expiry release converge for the same reason — both are the same
-one-way compare-and-swap to the same state — so the loser of a race re-reads,
-finds what it wanted, and writes nothing. A failed release CAS means the
-inspected state changed, so the record is retained without retry. Its basis
-becomes collectable only after the record itself is gone (records-last,
-"Garbage collection").
+A snapshot requires an unexpired snapshot owner for reads and extension.
+An expired snapshot stays a GC root until collection deletes it after expiry
+plus grace. A user pin
+remains readable while it exists, including after its expiry. Release
+checks the owner and deletes the pin; a later release returns not-found.
 
 A namespace manifest is the durable object for one namespace file-set version.
 It may reference zero or more immutable metadata runs; standalone checkpoint
-records under `checkpoints/` pin manifest versions for retention, fork, or
+records under `pins/` pin manifest versions for retention, fork, or
 stable read workflows. Each run is internally segmented without overlapping segment
 key ranges; different runs may overlap and readers apply the normal metadata
 visibility rules across all referenced runs. Within a segment, rows are stored
@@ -1486,7 +1468,7 @@ summary, and allocators. Its number, `retention_floor_seq`, and `retention_floor
 The new floors are the verified predecessor's `head_seq` and
 `last_folded_wal_no`. Neither decreases.
 Being below the floor makes an object a deletion candidate; deletion also
-requires the GC checks. If the floor passes an active checkpoint's basis,
+requires the GC checks. If the floor passes a pin's manifest head sequence,
 retention wins (section 6.4).
 
 A WAL flush materializes the current durable namespace
@@ -1508,8 +1490,8 @@ protocol.
 
 Creating a checkpoint pins one such manifest version deliberately for one
 owner. It first flushes the WAL tail as above, then writes
-`checkpoints/{id}.json` under a freshly generated id and verifies the basis
-after the write, releasing the record on failure and retrying under a new id.
+`pins/{pin_id}.json` under a freshly generated id and verifies the basis
+after the write, deleting the record on failure. A retry uses a new id.
 A live manifest does not need to be checkpoint-pinned; checkpoint records
 explain why a manifest version must be retained after a successor is published.
 
@@ -1539,26 +1521,27 @@ hint collisions are allowed. Only manifest 1 decides the namespace race.
 #### 3.9.2 Forking a namespace
 
 1. Create a verified fork-owned checkpoint at the source head, or pin a live
-   snapshot's manifest number and commit id. Its lease names the target.
+   snapshot's manifest number and commit id. Its owner names the target.
 2. Read and verify the pinned manifest. After the fork checkpoint is
    durable, recheck a selected snapshot. A lost snapshot releases the fork
-   checkpoint and returns `snapshot_gone` before target installation.
+   pin and returns `snapshot_gone` before target installation.
 3. Copy the source runs verbatim into target manifest 1. Copy its head
    sequence, head commit id, next inode id, next run number, and content-store
    id. Keep each segment owner. Set target identity, creation time,
    provenance, active status, no writer, and both epochs zero. Set
    `last_folded_wal_no` and `retention_floor_wal_no` zero and
    `retention_floor_seq` to the target's birth sequence.
-4. Renew the active fork checkpoint by compare-and-swap. Its remaining lease
-   must exceed the installation margin. Failure stops before installation.
+4. Check the elapsed installation budget. The GC grace reserves time for
+   the provider operation and clock allowance. Failure stops before installation.
 5. Put the descriptor, target hint naming manifest 1 and WAL 0, and target
    manifest 1, in that order. Descriptor and hint collisions are allowed.
 
 The target starts its WAL numbers at 1. Its first data commit is one sequence
 above the fork point. The fork copies no content or metadata segments.
 Its own manifest lists everything it reads, so it can be forked immediately.
-`FORK_CHECKPOINT_LEASE_MS` is two GC grace windows. An abandoned source
-checkpoint is releasable after its lease expires.
+Fork pins have no lease and are never renewed. The grace from `created_at_ms`
+is the install margin. `FORK_INSTALL_BUDGET_MS` reserves the provider deadline,
+attempt timeout, and clock allowance within the minimum grace window.
 
 #### 3.9.3 Conflicting installs
 
@@ -2045,9 +2028,10 @@ that advances the hint makes the older, unpinned numbers eligible for deletion.
 A namespace manifest records one namespace file-set version (the section 1.2
 table lists its contents).
 
-A checkpoint is a durable record that pins one manifest version. A checkpoint
-is useful only after both the checkpoint record and its referenced manifest
-are verified. Readers must prefer the current verified manifest plus the
+A checkpoint is a durable pin to one numbered manifest. Creation writes the
+pin, then loads the current manifest and checks its retention floor within
+`CHECKPOINT_VERIFY_BUDGET_MS`. A passed floor deletes the pin and fails with
+`checkpoint_unavailable`. The verify step does not reload the pinned manifest. Readers must prefer the current verified manifest plus the
 visible WAL segment chain over unverified or partial manifest artifacts.
 
 The namespace manifest may reference zero or more immutable metadata runs.
@@ -2182,12 +2166,12 @@ Invariants:
 - Compacted inputs MUST remain available until no retained manifest version
   or checkpoint record references them.
 
-Checkpoint records are standalone files under `checkpoints/`. Maintenance
+Checkpoint records are standalone files under `pins/`. Maintenance
 never creates one: automatic manifest publication leaves superseded manifests and
 folded-away segments unpinned, and garbage collection reaps them under the
-grace-window and delete-time re-verification rules ("Garbage collection").
+grace-window rules ("Garbage collection").
 A checkpoint record is a deliberate pin — fork sources and explicit maintenance
-checkpoints — and roots its basis while the record is active and its owner still stands.
+checkpoints — and roots its basis while the pin exists.
 
 ### 6.3 Retention management
 
@@ -2218,9 +2202,9 @@ Invalid or unreadable roots fail before deletion. Deleted namespaces also
 have a current manifest, which remains their permanent tombstone.
 
 The collector writes no run object, reference table, phase, or cursor. It
-builds its live set in memory from the root manifests and checkpoint records.
-It lists `manifests/`, `wal/`, `segments/`, `checkpoints/`, and `uploads/`
-from the start each call. The checkpoint listing used to read roots also
+builds its live set in memory from the current manifest and pin keys alone.
+It lists `manifests/`, `wal/`, `segments/`, `pins/`, and `uploads/`
+from the start each call. The pin listing used to identify roots also
 supplies that call's checkpoint candidates. `max_steps` bounds the
 candidates that need a store request after the listing: an age check, a
 record read, or a deletion. A candidate the live set retains costs nothing.
@@ -2276,8 +2260,8 @@ concurrent publications under these rules:
    evidence retains the object; a timestamp in the future also retains it.
 
    Record ages compare clocks on different hosts. Checkpoint deletion uses
-   `now_ms.saturating_sub(released_at_ms) >= T`; release of a checkpoint with
-   a verifiably absent basis uses the same comparison with `created_at_ms`.
+   expiry plus `T` for user and snapshot pins, and creation plus `T` for
+   absent fork targets or user and snapshot pins on deleted namespaces.
    Upload cleanup uses stored expiry, completion, and abort instants (rule
    11). The grace part of each inequality covers the same combined 180,000 ms
    allowance, now between the collector and the host that stamped the record
@@ -2289,7 +2273,7 @@ concurrent publications under these rules:
 
    Direct record expiry is different: hosts compare their current instant
    with a stored `expires_at_ms` without adding `GC_SAFETY_MARGIN_MS`.
-   `UPLOAD_SESSION_LEASE_MS`, caller-selected checkpoint leases, and snapshot
+   `UPLOAD_SESSION_LEASE_MS`, caller-selected checkpoint lifetimes, and snapshot
    expiries specify lifetimes, not skew allowances. No constant guarantees
    that these remain usable until the creating host reaches the deadline:
    a host ahead by `E` ms can reject or release them up to `E` ms early by
@@ -2297,16 +2281,15 @@ concurrent publications under these rules:
    Grace-delayed reclamation protects publication; it does not promise
    simultaneous expiry decisions or the full requested lifetime on every host.
 
-   Fork installation requires strictly more remaining lease time than
-   `FORK_INSTALL_MARGIN_MS = 330,000 ms`: one 150,000 ms provider operation
-   plus the 180,000 ms allowance. `FORK_CHECKPOINT_LEASE_MS` is twice the GC
-   grace floor. Streaming compaction reserves the same grace floor within
-   its segment minimum age (rule 12). These inequalities assume
-   the stated provider and monotonic publication bounds hold; they do not
-   cover an unbounded pause between a budget check and its write.
+   Fork installation consumes at most `FORK_INSTALL_BUDGET_MS = 900,000 ms`
+   before initiating the target manifest put. The creation grace reserves
+   the 150,000 ms provider bound and the 180,000 ms clock allowance.
+   Streaming compaction reserves the same grace floor within its segment
+   minimum age (rule 12). These bounds exclude unbounded pauses between a
+   budget check and its write.
 
    A manifest below the number the hint named at the start of the call is a
-   deletion candidate when no active checkpoint pins it and its provider
+   deletion candidate when no pin names it and its provider
    timestamp is at least `T` old. Its immediate successor, if present, must
    also be at least `T` old, so a reader that loaded a lagging hint can still
    fetch the predecessor.
@@ -2319,16 +2302,16 @@ concurrent publications under these rules:
    has its own clock and reads its own roots. Clock error is covered by the
    grace and age bounds in rule 1.
 4. Roots are the current manifest on a live namespace and every manifest
-   pinned by an active checkpoint record. An active record protects its
-   manifest for this call even if this call releases it. Released records
-   protect no manifest unless a fork target still requires the record under
-   rule 10. The live set contains those manifest identities and
-   every segment named by their runs, including foreign-owned segments.
-   The current manifest and hint are never swept. Every namespace also keeps manifest
-   numbers at or above the hint observed during discovery; those intermediate
-   manifests protect no segments. A missing checkpoint basis can be released
-   under its existing lifecycle rule. An unreadable or invalid basis fails
-   the call; it never supplies an empty reference set.
+   number in the complete `pins/` key listing. No pin body is read to build
+   this set. Each listed pin protects its manifest and every segment in its
+   runs for the whole call, even if the call deletes that pin. Pin bodies
+   are read only for deletion decisions, bounded by `max_steps`.
+   A pin naming an absent manifest is corruption; the error names the pin
+   key. An unreadable or invalid manifest fails before sweeping. There is
+   no missing-basis sweep.
+   The current manifest and hint are never swept. Manifest numbers at or
+   above the observed hint remain for discovery; intermediate numbers
+   protect no runs unless a pin names them.
 
 7. An active namespace protects every WAL number above either
    `last_folded_wal_no` or `retention_floor_wal_no` of its current manifest.
@@ -2336,9 +2319,9 @@ concurrent publications under these rules:
    A fence folds and reclaims by the same rule as a data segment.
    A deleted namespace protects no WAL.
 
-8. **Retention wins residual races.** If the floor is ever observed ahead of
-   an active checkpoint's basis, the checkpoint's objects remain protected;
-   reconciling the floor is an explicit recovery action.
+8. **Retention wins residual races.** A floor may pass a pin's manifest head
+   sequence. The pin still protects that manifest and its runs. Reads through
+   the pin use that manifest.
 9. **Immutable sweep families need no two-step deletion.** WAL segments,
    metadata segments and manifests, grep segments and manifests, and content
    blobs are published under conditional or immutable-object protocols.
@@ -2353,16 +2336,16 @@ concurrent publications under these rules:
     clock. GC reads the target's current manifest to classify a fork record.
     An unreadable manifest retains; an invalid manifest fails as corruption.
     An active target naming the same source and checkpoint id but a different
-    manifest is corruption. An absent target retains until its lease expires;
-    GC writes no tombstone for an absent expired target.
+    manifest is corruption. An absent target retains until creation plus grace; GC deletes the pin
+    after that deadline and writes no target tombstone.
 
     Checkpoint creation writes its record and then verifies it against the
     manifest. `verify_checkpoint_basis` refuses a deleted namespace. A record that
     protects anything was therefore durable before deletion, and a complete
     post-deletion listing encounters it. A record written after the sweep
     passed its key cannot verify, so its creator releases it. If the creator
-    crashes first, the record is active with an absent target and an unexpired
-    lease. It blocks the next pass until the lease expires. Neither case
+    crashes first, the pin has an absent target and blocks retirement until its creation
+    grace passes. Neither case
     permits an early release of a verified dependency.
 
 11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
@@ -2458,9 +2441,8 @@ concurrent publications under these rules:
 
 13. **Namespace retirement requires a complete checkpoint listing.** The
     call must observe a deleted manifest without `reclaim_after_ms`. Retirement
-    waits until no encountered checkpoint remains active or released within
-    its grace. A newly released record, a lost compare-and-swap, an
-    unrecognized record key, or an uncertain record load prevents retirement.
+    waits until no encountered pin remains. A retained pin, an unrecognized
+    key, or an uncertain pin load prevents retirement.
     A call stopped before finishing checkpoint cleanup cannot retire.
 
     At the end of the checkpoints family, GC re-reads the manifest and
@@ -2516,19 +2498,17 @@ concurrent publications under these rules:
     family. The deleted manifest rejects new upload capabilities and commits;
     already-issued capabilities may still write until they expire.
 
-An active checkpoint is never deleted directly. A fork-owned record that
-no target uses is rechecked and released by compare-and-swap on its current
-ETag. A released fork record stays while its target still requires it under
-rule 10. Other released records are deleted after their release grace.
-Release is terminal and checkpoint ids are never reused. Upload cleanup
-also deletes content before deleting the record, so interrupted cleanup
-leaves the evidence needed to retry.
+Pins are deleted directly. User and snapshot pins become collectable at
+expiry plus grace, or creation plus grace on a deleted namespace. Permanent
+user pins on live namespaces require explicit release. Fork pins follow
+rule 10. Pin ids are never reused. Upload cleanup deletes content before
+its record, so interrupted cleanup retains the evidence needed to retry.
 
 ### 6.5 Control-object cleanup
 
 Upload sessions are moved to a terminal state and cleaned by the GC pass
 ("Garbage collection", rule 11). Implementations may additionally clean up
-other expired control-plane objects. Mutable control objects MUST first enter
+other expired control-plane objects. Upload control objects MUST first enter
 a terminal state by conditional write under the inspected etag, and any
 provider-side state they own MUST be cleaned only after that write lands; a
 failed conditional write retains them. This is control-plane maintenance, not

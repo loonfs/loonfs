@@ -414,9 +414,9 @@
         "type": "integer"
       },
       "CheckpointId": {
-        "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version.",
-        "example": "chk_00000000000000000000000000000002",
-        "pattern": "^chk_[0-9a-f]{32}$",
+        "description": "Durable checkpoint identifier.\n\nThe manifest number determines which namespace manifest it pins.",
+        "example": "pin_00000000000000000001-0000000000000002",
+        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
         "type": "string"
       },
       "Checksum": {
@@ -2524,7 +2524,7 @@
             "type": "integer"
           },
           "expires_at_ms": {
-            "description": "When the snapshot lease expires, in Unix milliseconds.",
+            "description": "When the snapshot expires, in Unix milliseconds.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4302,7 +4302,7 @@
                 }
               }
             },
-            "description": "Snapshot released or expired"
+            "description": "Snapshot expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -4321,7 +4321,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/release": {
       "post": {
-        "description": "Releases a snapshot by id. Repeated releases succeed.",
+        "description": "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
         "operationId": "release_snapshot",
         "parameters": [
           {

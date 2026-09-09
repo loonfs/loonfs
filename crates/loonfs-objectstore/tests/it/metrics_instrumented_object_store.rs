@@ -256,9 +256,9 @@ async fn instrumented_store_forwards_start_after_listing() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let prefix = "namespaces/ns-1/checkpoints/";
-    let first = format!("{prefix}chk_00000000000000000000000000000001.json");
-    let second = format!("{prefix}chk_00000000000000000000000000000002.json");
+    let prefix = "namespaces/ns-1/pins/";
+    let first = format!("{prefix}pin_00000000000000000001-0000000000000001.json");
+    let second = format!("{prefix}pin_00000000000000000001-0000000000000002.json");
     for key in [&first, &second] {
         store
             .put_overwrite(key, bytes(b"checkpoint"))
@@ -319,7 +319,7 @@ async fn classifies_durable_key_families() {
         .put_overwrite(
             &checkpoint_record(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_api::CheckpointId::parse("chk_00000000000000000000000000000001")
+                &loonfs_api::CheckpointId::parse("pin_00000000000000000001-0000000000000001")
                     .expect("valid checkpoint id"),
             ),
             bytes(b"checkpoint"),

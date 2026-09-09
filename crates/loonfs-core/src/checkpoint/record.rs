@@ -1,28 +1,14 @@
-//! Checkpoint records stored under `checkpoints/`.
-//!
-//! A checkpoint record pins one metadata manifest for garbage collection.
-//! Creation writes an active record and then verifies its basis against the
-//! retention floor. Failed verification releases the record. Release is
-//! one-way, and garbage collection later removes aged released records.
+//! Pin creation, point reads, deletion, and floor verification.
 
-use super::load::{ensure_manifest_reference_matches, load_namespace_manifest_envelope};
-use super::ManifestLoadError;
 use crate::control_object::{
-    expect_identity_field, expect_namespace, expect_own_manifest, load_control_object,
-    ControlObjectLoadError, LoadedControl,
+    expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
+    LoadedControl,
 };
-use crate::control_update::{
-    create_control_object_under_generated_id, retry_while_contended, settle_control_write,
-    CasAttempt, WriteEvidence,
-};
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::limits::FORK_CHECKPOINT_LEASE_MS;
-use crate::namespace::control_snapshot::load_control_snapshot;
+use crate::control_update::create_control_object_under_generated_id;
+use crate::error::{CoreError, Result};
+use crate::namespace::control::load_current_manifest;
 use bytes::Bytes;
-use loonfs_api::wire::control::{
-    encode_control_state, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    ControlObjectKind,
-};
+use loonfs_api::wire::control::{encode_control_state, CheckpointRecordState, ControlObjectKind};
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -31,7 +17,7 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 pub(crate) fn encode_checkpoint_record(
     record: &CheckpointRecordState,
 ) -> crate::error::Result<Bytes> {
-    let object_key = checkpoint_record(&record.namespace_id, &record.checkpoint_id);
+    let object_key = checkpoint_record(&record.namespace_id, &record.pin_id);
     encode_control_state(ControlObjectKind::CheckpointRecord, record)
         .map(Bytes::from)
         .map_err(|error| CoreError::Codec {
@@ -46,7 +32,7 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     record: &CheckpointRecordState,
 ) -> Result<()> {
     let encoded = encode_checkpoint_record(record)?;
-    let object_key = checkpoint_record(&record.namespace_id, &record.checkpoint_id);
+    let object_key = checkpoint_record(&record.namespace_id, &record.pin_id);
     create_control_object_under_generated_id(store, &object_key, encoded).await?;
     Ok(())
 }
@@ -73,15 +59,19 @@ pub(crate) async fn load_checkpoint_record_at_key<S: ObjectStore + ?Sized>(
             expect_identity_field(
                 "checkpoint id",
                 checkpoint_id.as_str(),
-                state.checkpoint_id.as_str(),
+                state.pin_id.as_str(),
             )?;
-            expect_own_manifest(&state.namespace_id, &state.manifest)
+            expect_identity_field(
+                "manifest number",
+                &checkpoint_id.manifest_no().to_string(),
+                &state.manifest_no.to_string(),
+            )
         },
     )
     .await
 }
 
-fn checkpoint_key_ids(
+pub(crate) fn checkpoint_key_ids(
     object_key: &str,
 ) -> std::result::Result<(NamespaceId, CheckpointId), ControlObjectLoadError> {
     let expected_family = "checkpoint record";
@@ -132,224 +122,16 @@ pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CheckpointRelease {
-    Released,
-    LostRace,
-}
-
-/// Tries one `active -> released` transition using the loaded ETag.
-pub(crate) async fn release_inspected_checkpoint_record<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    loaded: LoadedCheckpointRecord,
-    released_at_ms: u64,
-) -> Result<CheckpointRelease> {
-    let expected_etag = loaded.etag;
-    let mut next = loaded.state;
-    next.status = CheckpointStatus::Released { released_at_ms };
-    let encoded = encode_checkpoint_record(&next)?;
-    let settled = settle_control_write(
-        match store
-            .compare_and_swap(object_key, &expected_etag, encoded)
-            .await
-        {
-            Ok(_) => CasAttempt::Settled(CheckpointRelease::Released),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => {
-                CasAttempt::Contended(CheckpointRelease::LostRace)
-            }
-            Err(error @ ObjectStoreError::Transport { .. }) => CasAttempt::Ambiguous(error, ()),
-            Err(error) => return Err(CoreError::store(object_key, &error)),
-        },
-        |_, ()| async {
-            match load_checkpoint_record_at_key(store, object_key).await {
-                Ok(current) if current.state.status != (CheckpointStatus::Active {}) => {
-                    Ok(WriteEvidence::Landed(CheckpointRelease::Released))
-                }
-                Ok(current) if current.etag != expected_etag => {
-                    Ok(WriteEvidence::Lost(CheckpointRelease::LostRace))
-                }
-                Ok(_) => Ok(WriteEvidence::Unknown),
-                Err(ControlObjectLoadError::MissingObject { .. }) => {
-                    Ok(WriteEvidence::Landed(CheckpointRelease::Released))
-                }
-                Err(error) => Err(CoreError::ControlObjectLoad(error)),
-            }
-        },
-    )
-    .await?;
-    Ok(match settled {
-        Ok(outcome) | Err(outcome) => outcome,
-    })
-}
-
-/// Releases a checkpoint record, retrying CAS conflicts.
 pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-    released_at_ms: u64,
 ) -> Result<()> {
-    let object_key = &checkpoint_record(namespace_id, checkpoint_id);
-    retry_while_contended(
-        || async move {
-            let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id)
-                .await?
-                .filter(|loaded| loaded.state.status == (CheckpointStatus::Active {}))
-            else {
-                return Ok::<_, CoreError>(CasAttempt::Settled(()));
-            };
-            Ok(
-                match release_inspected_checkpoint_record(store, object_key, loaded, released_at_ms)
-                    .await?
-                {
-                    CheckpointRelease::Released => CasAttempt::Settled(()),
-                    CheckpointRelease::LostRace => {
-                        CasAttempt::Contended(CoreError::contention_exhausted(object_key))
-                    }
-                },
-            )
-        },
-        |_, ()| async { Ok(WriteEvidence::Unknown) },
-    )
-    .await?
-}
-
-/// Renews a fork checkpoint immediately before installing its target.
-///
-/// This compare-and-swap races with GC release. The new expiry must differ
-/// from the stored value so a stale release cannot use the old ETag.
-pub(crate) async fn renew_fork_checkpoint_for_install<S: ObjectStore + ?Sized>(
-    store: &S,
-    source_namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
-    expected_target_namespace_id: &NamespaceId,
-    now_ms: u64,
-) -> Result<u64> {
-    let object_key = &checkpoint_record(source_namespace_id, checkpoint_id);
-    retry_while_contended(
-        || async move {
-            let Some(loaded) =
-                load_checkpoint_record(store, source_namespace_id, checkpoint_id).await?
-            else {
-                return Err(fork_checkpoint_unavailable(
-                    source_namespace_id,
-                    checkpoint_id,
-                    expected_target_namespace_id,
-                    "the record is gone".to_owned(),
-                ));
-            };
-            let current_expiry = inspect_fork_record(
-                &loaded.state,
-                source_namespace_id,
-                checkpoint_id,
-                expected_target_namespace_id,
-            )?;
-            let later_expiry = current_expiry.checked_add(1).ok_or_else(|| {
-                fork_checkpoint_unavailable(
-                    source_namespace_id,
-                    checkpoint_id,
-                    expected_target_namespace_id,
-                    "the lease expiry cannot be extended".to_owned(),
-                )
-            })?;
-            let renewed_expiry = later_expiry.max(now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS));
-            let mut next = loaded.state;
-            next.owner = CheckpointOwner::Fork {
-                target_namespace_id: expected_target_namespace_id.clone(),
-                expires_at_ms: renewed_expiry,
-            };
-            let encoded = encode_checkpoint_record(&next)?;
-            match store
-                .compare_and_swap(object_key, &loaded.etag, encoded)
-                .await
-            {
-                Ok(_) => Ok(CasAttempt::Settled(renewed_expiry)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
-                    CoreError::contention_exhausted(object_key),
-                )),
-                Err(error @ ObjectStoreError::Transport { .. }) => {
-                    Ok(CasAttempt::Ambiguous(error, renewed_expiry))
-                }
-                Err(error) => Err(CoreError::store(object_key, &error)),
-            }
-        },
-        |_, renewed_expiry| async move {
-            let Some(current) =
-                load_checkpoint_record(store, source_namespace_id, checkpoint_id).await?
-            else {
-                return Err(fork_checkpoint_unavailable(
-                    source_namespace_id,
-                    checkpoint_id,
-                    expected_target_namespace_id,
-                    "the record is gone".to_owned(),
-                ));
-            };
-            let expires_at_ms = inspect_fork_record(
-                &current.state,
-                source_namespace_id,
-                checkpoint_id,
-                expected_target_namespace_id,
-            )?;
-            if expires_at_ms >= renewed_expiry {
-                Ok(WriteEvidence::Landed(expires_at_ms))
-            } else {
-                Ok(WriteEvidence::Lost(CoreError::contention_exhausted(
-                    object_key,
-                )))
-            }
-        },
-    )
-    .await?
-}
-
-fn inspect_fork_record(
-    state: &CheckpointRecordState,
-    source_namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
-    expected_target_namespace_id: &NamespaceId,
-) -> Result<u64> {
-    if state.status != (CheckpointStatus::Active {}) {
-        return Err(fork_checkpoint_unavailable(
-            source_namespace_id,
-            checkpoint_id,
-            expected_target_namespace_id,
-            format!("the record is `{}`", state.status),
-        ));
+    let object_key = checkpoint_record(namespace_id, checkpoint_id);
+    match store.delete(&object_key).await {
+        Ok(()) | Err(ObjectStoreError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(CoreError::store(&object_key, &error)),
     }
-    let CheckpointOwner::Fork {
-        target_namespace_id,
-        expires_at_ms,
-    } = &state.owner
-    else {
-        return Err(fork_checkpoint_unavailable(
-            source_namespace_id,
-            checkpoint_id,
-            expected_target_namespace_id,
-            "the record is not fork-owned".to_owned(),
-        ));
-    };
-    if target_namespace_id != expected_target_namespace_id {
-        return Err(fork_checkpoint_unavailable(
-            source_namespace_id,
-            checkpoint_id,
-            expected_target_namespace_id,
-            format!("the record pins target `{target_namespace_id}`"),
-        ));
-    }
-    Ok(*expires_at_ms)
-}
-
-fn fork_checkpoint_unavailable(
-    source_namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
-    expected_target_namespace_id: &NamespaceId,
-    reason: String,
-) -> CoreError {
-    CoreError::CheckpointUnavailable(format!(
-        "fork of `{source_namespace_id}` into `{expected_target_namespace_id}` cannot renew its \
-         source checkpoint `{checkpoint_id}`: {reason}"
-    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,60 +140,26 @@ pub(crate) enum CheckpointBasisVerification {
     Invalid,
 }
 
-/// Checks that a record's basis is still intact: the retention floor has
-/// not passed it, and the basis manifest still loads with the expected
-/// checksum.
-///
-/// Creation calls this after the record is durable. Without the re-check, a
-/// record written just as garbage collection decides to trim the same
-/// manifest could pin state that is already gone.
 pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
 ) -> Result<CheckpointBasisVerification> {
-    let snapshot = load_control_snapshot(store, &record.namespace_id).await?;
-    if snapshot.head.state.status.is_deleted() {
-        return Ok(CheckpointBasisVerification::Invalid);
-    }
-    let floor_seq = snapshot.retention_floor_seq;
-    if floor_seq > record.manifest.manifest_head_seq {
-        return Ok(CheckpointBasisVerification::Invalid);
-    }
-    // House rule: Err is not converted into absence or false unless the name says so.
-    let manifest = match load_namespace_manifest_envelope(
-        store,
-        &record.namespace_id,
-        &record.manifest.manifest_no,
+    let manifest = load_current_manifest(store, &record.namespace_id).await?;
+    Ok(
+        if manifest.envelope.payload().status.is_deleted()
+            || manifest.state.retention_floor_seq > record.manifest_head_seq
+        {
+            CheckpointBasisVerification::Invalid
+        } else {
+            CheckpointBasisVerification::Verified
+        },
     )
-    .await
-    {
-        Ok(manifest) => manifest,
-        Err(ManifestLoadError::MissingManifest { .. }) => {
-            return Ok(CheckpointBasisVerification::Invalid)
-        }
-        Err(error) => {
-            return Err(CoreError::MetadataProjection(
-                MetadataProjectionLoadError::ManifestLoad(error),
-            ))
-        }
-    };
-    // Both durable objects loaded successfully, so any disagreement is
-    // corruption rather than a retention race that a new checkpoint can fix.
-    ensure_manifest_reference_matches(
-        &format!(
-            "checkpoint `{}` for namespace `{}`",
-            record.checkpoint_id, record.namespace_id
-        ),
-        &record.manifest,
-        &manifest,
-    )?;
-    Ok(CheckpointBasisVerification::Verified)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, ManifestRef};
+    use loonfs_api::wire::control::CheckpointOwner;
     use loonfs_api::{ChangeSeq, CommitId, ManifestNo};
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -433,15 +181,12 @@ mod tests {
 
     fn record(namespace_id: NamespaceId, checkpoint_id: CheckpointId) -> CheckpointRecordState {
         CheckpointRecordState {
-            checkpoint_id,
+            pin_id: checkpoint_id,
             namespace_id: namespace_id.clone(),
-            manifest: ManifestRef {
-                owner_namespace_id: namespace_id,
-                manifest_no: ManifestNo(1),
+            manifest_no: ManifestNo(1),
 
-                manifest_head_seq: ChangeSeq(1),
-                manifest_payload_checksum: "sha256:test".to_owned(),
-            },
+            manifest_head_seq: ChangeSeq(1),
+            manifest_payload_checksum: "sha256:test".to_owned(),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
                 .expect("commit id"),
             created_at_ms: 1,
@@ -449,7 +194,6 @@ mod tests {
                 name: "test".to_owned(),
                 expires_at_ms: None,
             },
-            status: CheckpointStatus::Active {},
         }
     }
 
@@ -468,10 +212,10 @@ mod tests {
     #[tokio::test]
     async fn listed_loader_rejects_invalid_key_ids() {
         let (_directory, store) = local_store();
-        let checkpoint_id = "chk_00000000000000000000000000000001";
+        let checkpoint_id = "pin_00000000000000000001-0000000000000001";
         let invalid_keys = [
-            format!("namespaces/not valid/checkpoints/{checkpoint_id}.json"),
-            "namespaces/demo/checkpoints/not-a-checkpoint.json".to_owned(),
+            format!("namespaces/not valid/pins/{checkpoint_id}.json"),
+            "namespaces/demo/pins/not-a-checkpoint.json".to_owned(),
         ];
 
         for object_key in invalid_keys {
@@ -483,13 +227,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loader_rejects_a_record_pinning_another_namespaces_manifest() {
+    async fn loader_rejects_a_pin_number_that_disagrees_with_its_key() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let checkpoint_id = checkpoint("chk_00000000000000000000000000000001");
+        let checkpoint_id = checkpoint("pin_00000000000000000001-0000000000000001");
         let object_key = checkpoint_record(&namespace_id, &checkpoint_id);
         let mut foreign = record(namespace_id, checkpoint_id);
-        foreign.manifest.owner_namespace_id = namespace("other");
+        foreign.manifest_no = ManifestNo(2);
         let bytes = encode_checkpoint_record(&foreign).expect("record bytes");
         store
             .put_overwrite(&object_key, bytes)
@@ -498,12 +242,12 @@ mod tests {
 
         let error = load_checkpoint_record_at_key(&store, &object_key)
             .await
-            .expect_err("a foreign manifest owner should fail");
+            .expect_err("a mismatched manifest number should fail");
 
         assert!(matches!(
             error,
             ControlObjectLoadError::IdentityMismatch { field, .. }
-                if field == "manifest owner namespace"
+                if field == "manifest number"
         ));
     }
 
@@ -516,7 +260,7 @@ mod tests {
 
         let (_directory, store) = local_store();
         let key_namespace_id = namespace("demo");
-        let key_checkpoint_id = checkpoint("chk_00000000000000000000000000000001");
+        let key_checkpoint_id = checkpoint("pin_00000000000000000001-0000000000000001");
         let object_key = checkpoint_record(&key_namespace_id, &key_checkpoint_id);
 
         let cases = [
@@ -529,7 +273,7 @@ mod tests {
                 "embedded checkpoint id",
                 record(
                     key_namespace_id.clone(),
-                    checkpoint("chk_00000000000000000000000000000002"),
+                    checkpoint("pin_00000000000000000001-0000000000000002"),
                 ),
                 Mismatch::CheckpointId,
             ),

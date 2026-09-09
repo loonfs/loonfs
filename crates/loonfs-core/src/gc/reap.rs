@@ -1,104 +1,69 @@
-//! Reaping: age-gated deletion of unreachable objects.
-//!
-//! Immutable objects use provider timestamps for age checks. Checkpoints use
-//! lifecycle timestamps stored in their records. The namespace sweep combines
-//! object age with current root references.
+//! Age checks and pin deletion decisions.
 
-use crate::checkpoint::record::{
-    load_checkpoint_record_at_key, release_inspected_checkpoint_record, CheckpointRelease,
-};
+use super::fork_checkpoints::{classify_fork_checkpoint, ForkCheckpointReachability};
+use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
-use loonfs_api::{NamespaceId, RetainedReason};
+use loonfs_api::wire::control::CheckpointOwner;
+use loonfs_api::RetainedReason;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CheckpointSweep {
-    /// The record is released and its release has aged past the grace
-    /// window; the key may be deleted.
-    Delete,
-    /// This pass flipped the record `active -> released`.
-    Released,
-    /// This pass flipped a snapshot record `active -> released`.
-    ReleasedSnapshot,
+    DeleteFork,
+    DeleteUser,
+    DeleteSnapshot,
+    Gone,
     Retain,
 }
 
-/// True once a record's own lease has passed. Checkpoint aging reads the
-/// record, never the object's provider timestamp: the record carries every
-/// instant its lifecycle depends on.
-pub(super) fn lease_expired(record: &CheckpointRecordState, now_ms: u64) -> bool {
-    record
-        .owner
-        .expires_at_ms()
-        .is_some_and(|expires_at_ms| expires_at_ms <= now_ms)
-}
-
-/// Advances one collectable checkpoint record along the only path it has.
-///
-/// An active record whose lease has passed — or one on a terminally deleted
-/// namespace, where nothing can read it again — is released by
-/// compare-and-swap on the exact etag inspected, stamping the release
-/// instant. A released record is deletable once that stamp is a grace window
-/// old. Nothing here reads a provider timestamp: `released_at_ms` and
-/// `created_at_ms` are what the record's own age is measured from, and
-/// `expires_at_ms` is what its lease is measured from.
-///
-/// A failed CAS means the record changed and is retained without retry.
 pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
     key: &str,
     grace_window_ms: u64,
     namespace_deleted: bool,
     context: &MutationContext,
 ) -> Result<CheckpointSweep> {
-    let loaded = load_checkpoint_record_at_key(store, key).await;
-    let loaded = match loaded {
-        Ok(loaded) => loaded,
-        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(CheckpointSweep::Retain),
+    let record = match load_checkpoint_record_at_key(store, key).await {
+        Ok(loaded) => loaded.state,
+        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(CheckpointSweep::Gone),
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
-    let record = &loaded.state;
-    if let CheckpointStatus::Released { released_at_ms } = record.status {
-        let aged = context.now_ms.saturating_sub(released_at_ms) >= grace_window_ms;
-        return Ok(if aged {
-            CheckpointSweep::Delete
-        } else {
-            CheckpointSweep::Retain
-        });
-    }
-    // A fork pin is never released here, whatever its lease says: only the
-    // fork arm knows whether the target is still reading through it
-    // (`fork_checkpoints.rs`), and it has already had its say by this point.
-    if matches!(record.owner, CheckpointOwner::Fork { .. }) {
-        return Ok(CheckpointSweep::Retain);
-    }
-    // An unexpired pin on a live namespace is exactly what a checkpoint is
-    // for. On a tombstone every pin is dead weight, but a create still in
-    // flight must not be raced, so that arm waits out the grace window from
-    // the record's own creation stamp.
-    let releasable = lease_expired(record, context.now_ms)
-        || (namespace_deleted
-            && context.now_ms.saturating_sub(record.created_at_ms) >= grace_window_ms);
-    if !releasable {
-        return Ok(CheckpointSweep::Retain);
-    }
-    let snapshot = matches!(record.owner, CheckpointOwner::Snapshot { .. });
-    match release_inspected_checkpoint_record(store, key, loaded, context.now_ms).await? {
-        CheckpointRelease::Released if snapshot => Ok(CheckpointSweep::ReleasedSnapshot),
-        CheckpointRelease::Released => Ok(CheckpointSweep::Released),
-        CheckpointRelease::LostRace => {
-            tracing::debug!(
-                namespace_id = %namespace_id,
-                object_key = key,
-                "checkpoint release lost its inspected etag; retaining"
+    let deletion = match &record.owner {
+        CheckpointOwner::User { .. } => CheckpointSweep::DeleteUser,
+        CheckpointOwner::Snapshot { .. } => CheckpointSweep::DeleteSnapshot,
+        CheckpointOwner::Fork {
+            target_namespace_id,
+        } => {
+            return Ok(
+                match classify_fork_checkpoint(
+                    store,
+                    &record,
+                    target_namespace_id,
+                    grace_window_ms,
+                    context,
+                )
+                .await?
+                {
+                    ForkCheckpointReachability::Reclaimable => CheckpointSweep::DeleteFork,
+                    ForkCheckpointReachability::Retained { reason } => {
+                        tracing::debug!(object_key = key, reason, "retaining fork pin");
+                        CheckpointSweep::Retain
+                    }
+                },
             );
-            Ok(CheckpointSweep::Retain)
         }
-    }
+    };
+    let expired = record.owner.expires_at_ms().is_some_and(|expiry| {
+        context.now_ms >= expiry && context.now_ms.saturating_sub(expiry) >= grace_window_ms
+    });
+    let deleted =
+        namespace_deleted && context.now_ms.saturating_sub(record.created_at_ms) >= grace_window_ms;
+    Ok(if expired || deleted {
+        deletion
+    } else {
+        CheckpointSweep::Retain
+    })
 }
 
 /// Where one unreferenced candidate stands against the grace window.

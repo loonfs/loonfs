@@ -1172,7 +1172,7 @@ mod tests {
                             manifest_payload_checksum: "sha256:source".to_owned(),
                         },
                         source_checkpoint_id: crate::CheckpointId::parse(
-                            "chk_00000000000000000000000000000001",
+                            "pin_00000000000000000001-0000000000000001",
                         )
                         .expect("checkpoint"),
                     })

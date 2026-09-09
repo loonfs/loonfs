@@ -200,7 +200,7 @@ async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
 }
 
 #[tokio::test]
-async fn released_runs_advance_the_last_inspected_key_cursor() {
+async fn released_pins_are_absent_from_later_pages() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");

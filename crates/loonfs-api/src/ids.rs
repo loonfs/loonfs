@@ -577,13 +577,53 @@ impl CommitId {
 string_id! {
     /// Durable checkpoint identifier.
     ///
-    /// A checkpoint is a durable bookmark to a namespace manifest version.
+    /// The manifest number determines which namespace manifest it pins.
     CheckpointId,
-    prefix = "chk",
+    error = GeneratedIdValidationError,
+    validate = validate_checkpoint_id,
     schema(
-        pattern = r"^chk_[0-9a-f]{32}$",
-        example = "chk_00000000000000000000000000000002"
+        pattern = r"^pin_[0-9]{20}-[0-9a-f]{16}$",
+        example = "pin_00000000000000000001-0000000000000002"
     )
+}
+
+impl CheckpointId {
+    /// Generates a new pin for the given manifest number.
+    pub fn generate(manifest_no: ManifestNo) -> Self {
+        let entropy = generated_id("pin");
+        Self::parse(format!("pin_{:020}-{}", manifest_no.0, &entropy[4..20]))
+            .expect("the pinned manifest number should be valid")
+    }
+
+    /// Returns the manifest number encoded in this id.
+    pub fn manifest_no(&self) -> ManifestNo {
+        ManifestNo(
+            self.0[4..24]
+                .parse()
+                .expect("a pin id should contain a manifest number"),
+        )
+    }
+}
+
+fn validate_checkpoint_id(value: &str) -> Result<(), GeneratedIdValidationError> {
+    let valid = value
+        .strip_prefix("pin_")
+        .and_then(|body| body.split_once('-'))
+        .is_some_and(|(number, entropy)| {
+            number.len() == 20
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && number
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|number| ManifestNo::parse(number).ok())
+                    .is_some_and(|number| number.0 > 0)
+                && entropy.len() == 16
+                && entropy.bytes().all(is_lower_hex_byte)
+        });
+    if !valid {
+        return Err(generated_id_error(value, "must be `pin_` followed by a twenty-digit positive manifest number, `-`, and sixteen lowercase hex characters".to_owned()));
+    }
+    Ok(())
 }
 
 string_id! {
@@ -975,10 +1015,10 @@ mod tests {
             "cs_00000000000000000000000000000001"
         );
         assert_eq!(
-            CheckpointId::try_from("chk_00000000000000000000000000000001")
+            CheckpointId::try_from("pin_00000000000000000001-0000000000000001")
                 .expect("valid checkpoint id")
                 .as_str(),
-            "chk_00000000000000000000000000000001"
+            "pin_00000000000000000001-0000000000000001"
         );
         assert_eq!(
             NameKey::try_from("report.txt".to_owned())
@@ -1010,11 +1050,11 @@ mod tests {
             "cs_00000000000000000000000000000001"
         );
         let checkpoint_id: CheckpointId =
-            serde_json::from_str(r#""chk_00000000000000000000000000000001""#)
+            serde_json::from_str(r#""pin_00000000000000000001-0000000000000001""#)
                 .expect("valid checkpoint id json");
         assert_eq!(
             checkpoint_id.as_str(),
-            "chk_00000000000000000000000000000001"
+            "pin_00000000000000000001-0000000000000001"
         );
 
         let namespace_error = serde_json::from_str::<NamespaceId>(r#""invalid/name""#)
@@ -1064,7 +1104,7 @@ mod tests {
     fn generated_upload_wal_metadata_segment_and_checkpoint_ids_reject_hyphenated_ids() {
         assert!(UploadId::parse("upl_00000000000000000000000000000001").is_ok());
         assert!(MetadataSegmentId::parse("seg_00000000000000000000000000000001").is_ok());
-        assert!(CheckpointId::parse("chk_00000000000000000000000000000001").is_ok());
+        assert!(CheckpointId::parse("pin_00000000000000000001-0000000000000001").is_ok());
         assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
         // The two positional families are told apart by their prefix, never
         // by context.
@@ -1076,14 +1116,31 @@ mod tests {
     fn generated_runtime_ids_use_lower_hex_bodies() {
         let upload_id = UploadId::generate();
         let metadata_segment_id = MetadataSegmentId::generate();
-        let checkpoint_id = CheckpointId::generate();
+        let checkpoint_id = CheckpointId::generate(ManifestNo(1));
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
         assert_generated_id_shape(metadata_segment_id.as_str(), "seg");
-        assert_generated_id_shape(checkpoint_id.as_str(), "chk");
+        assert_eq!(checkpoint_id.manifest_no(), ManifestNo(1));
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
         assert!(MetadataSegmentId::parse(metadata_segment_id.as_str()).is_ok());
         assert!(CheckpointId::parse(checkpoint_id.as_str()).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_ids_order_and_validate_their_manifest_numbers() {
+        let first = CheckpointId::parse("pin_00000000000000000009-ffffffffffffffff").expect("pin");
+        let second = CheckpointId::parse("pin_00000000000000000010-0000000000000000").expect("pin");
+        assert!(first < second);
+        assert_eq!(second.manifest_no(), ManifestNo(10));
+        for invalid in [
+            "pin_00000000000000000000-0000000000000000".to_owned(),
+            format!("pin_{:020}-0000000000000000", MAX_PUBLIC_INTEGER + 1),
+            "pin_00000000000000000001-000000000000000G".to_owned(),
+            "pin_1-0000000000000000".to_owned(),
+            "pin_00000000000000000001-00000000000000000".to_owned(),
+        ] {
+            assert!(CheckpointId::parse(invalid).is_err());
+        }
     }
 
     #[test]

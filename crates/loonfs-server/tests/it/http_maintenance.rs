@@ -238,7 +238,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(diagnostics.live_snapshots, 0);
     assert_eq!(diagnostics.live_checkpoints, 2);
 
-    // Releasing a checkpoint twice returns the same result.
+    // Release removes the record from the inventory.
     let released = post_checkpoint_release(
         &server_url,
         namespace.as_str(),
@@ -257,8 +257,8 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         namespace.as_str(),
         first.checkpoint_id.as_str(),
     )
-    .expect("repeat release");
-    assert_eq!(released_again, released);
+    .expect_err("repeat release");
+    assert_eq!(released_again.code, "checkpoint_not_found");
     let diagnostics = client
         .get_namespace_diagnostics(&namespace)
         .await

@@ -123,6 +123,5 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
         || gc.deleted.retired_content_objects > 0
         || gc.released_checkpoints.fork > 0
         || gc.released_checkpoints.expired > 0
-        || gc.released_checkpoints.missing_basis > 0
         || gc.released_checkpoints.snapshot > 0
 }

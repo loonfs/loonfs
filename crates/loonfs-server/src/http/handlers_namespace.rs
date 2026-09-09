@@ -510,7 +510,7 @@ pub(super) async fn list_snapshots(
             (status = 400, description = "Invalid id or ttl", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Snapshot not found", body = ApiError),
-            (status = 410, description = "Snapshot released or expired", body = ApiError),
+            (status = 410, description = "Snapshot expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -547,7 +547,7 @@ pub(super) async fn extend_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
         tag = "namespaces",
         summary = "Release snapshot",
-        description = "Releases a snapshot by id. Repeated releases succeed.",
+        description = "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("snapshot_id" = String, Path, description = "Snapshot id")
@@ -671,7 +671,7 @@ pub(super) async fn create_checkpoint(
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
         tag = "maintenance",
         summary = "List checkpoints",
-        description = "Lists one page of active checkpoints in checkpoint-id order. Expired checkpoints remain visible until collection releases them. Released checkpoints are omitted. The cursor resumes a live listing and does not create a snapshot.",
+        description = "Lists existing pins in checkpoint-id order. Expired pins remain visible until collection deletes them after expiry plus grace. The cursor resumes a live listing.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
@@ -715,16 +715,16 @@ pub(super) async fn list_checkpoints(
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
         tag = "maintenance",
         summary = "Release checkpoint",
-        description = "Releases a user-owned checkpoint pin by id. Idempotent: releasing an already-released or reaped record succeeds. The record is reaped by a later garbage-collection pass; its pinned data becomes collectable only on the pass after that.",
+        description = "Deletes a user-owned checkpoint pin. A missing id returns checkpoint_not_found. Garbage collection can reclaim its unreferenced manifest and runs.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("checkpoint_id" = String, Path, description = "Checkpoint id")
         ),
         responses(
-            (status = 200, description = "Checkpoint release accepted (including an already released or reaped checkpoint)", body = ReleaseCheckpointResponse),
+            (status = 200, description = "Checkpoint pin deleted", body = ReleaseCheckpointResponse),
             (status = 400, description = "Invalid id, or the checkpoint is owned by another operation", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 404, description = "Namespace or checkpoint not found", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )

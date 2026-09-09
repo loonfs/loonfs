@@ -76,8 +76,8 @@ impl Client {
             .await
     }
 
-    /// Releases a user-owned checkpoint pin by id (maintenance API group). Idempotent:
-    /// releasing an already-released or reaped record succeeds.
+    /// Deletes a user-owned checkpoint pin through the maintenance API.
+    /// A missing id returns `checkpoint_not_found`.
     pub async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,

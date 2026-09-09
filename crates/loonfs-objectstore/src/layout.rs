@@ -15,7 +15,7 @@ pub enum DurableObjectFamily {
     MetadataManifest,
     /// Classifies an immutable metadata segment.
     MetadataSegment,
-    /// Classifies a mutable checkpoint lifecycle record.
+    /// Classifies a pin to a numbered manifest.
     CheckpointRecord,
     /// Classifies a mutable upload-session lifecycle record.
     UploadSession,
@@ -98,7 +98,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
-        ["namespaces", namespace, "checkpoints", checkpoint] => {
+        ["namespaces", namespace, "pins", checkpoint] => {
             checkpoint.strip_suffix(".json").map(|identifier| {
                 parsed(
                     DurableObjectFamily::CheckpointRecord,
@@ -190,8 +190,8 @@ mod tests {
         let manifest_object_id = ManifestNo(400);
         let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000000000001")
             .expect("metadata segment id");
-        let checkpoint_id =
-            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id");
+        let checkpoint_id = CheckpointId::parse("pin_00000000000000000001-0000000000000001")
+            .expect("checkpoint id");
         let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
         let content_store_id =
             ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id");

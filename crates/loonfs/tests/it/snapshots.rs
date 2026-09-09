@@ -166,14 +166,14 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
 }
 
 #[tokio::test]
-async fn snapshot_release_recovers_an_ambiguously_landed_record_write() {
+async fn snapshot_release_reports_an_uncertain_delete_without_recreating_the_pin() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("snapshot-ambiguous-release");
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
-            OperationClass::CompareAndSwap,
+            OperationClass::Delete,
             InjectedError::Transport("lost snapshot release acknowledgement".to_owned()),
         )
         .apply_then_fail(),
@@ -196,10 +196,18 @@ async fn snapshot_release_recovers_an_ambiguously_landed_record_write() {
         .expect("create snapshot");
     store.fail_next(1);
 
-    fs.writer
-        .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
-        .await
-        .expect("reconcile the durable snapshot release");
+    assert_core_error_kind(
+        fs.writer
+            .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
+            .await,
+        ErrorCode::ServerError,
+    );
+    assert_core_error_kind(
+        fs.writer
+            .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
+            .await,
+        ErrorCode::SnapshotNotFound,
+    );
 
     assert_eq!(store.attempts(), 1);
     let listed = list_snapshots(&fs.reader, &namespace_id)

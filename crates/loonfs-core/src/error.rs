@@ -147,6 +147,10 @@ pub enum CoreError {
     CheckpointUnavailable(String),
     #[error("invalid checkpoint request: {0}")]
     InvalidCheckpointRequest(String),
+    #[error("checkpoint `{checkpoint_id}` was not found")]
+    CheckpointNotFound {
+        checkpoint_id: loonfs_api::CheckpointId,
+    },
     #[error("snapshot `{snapshot_id}` was not found")]
     SnapshotNotFound {
         snapshot_id: loonfs_api::CheckpointId,
@@ -420,6 +424,7 @@ impl CoreError {
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
+            CoreError::CheckpointNotFound { .. } => ErrorCode::CheckpointNotFound,
             CoreError::SnapshotNotFound { .. } => ErrorCode::SnapshotNotFound,
             CoreError::SnapshotGone { .. } => ErrorCode::SnapshotGone,
             CoreError::SnapshotQuotaExceeded { .. } => ErrorCode::SnapshotQuotaExceeded,
@@ -527,6 +532,7 @@ impl CoreError {
             | CoreError::ShuttingDown
             | CoreError::CheckpointUnavailable(_)
             | CoreError::InvalidCheckpointRequest(_)
+            | CoreError::CheckpointNotFound { .. }
             | CoreError::SnapshotNotFound { .. }
             | CoreError::SnapshotGone { .. }
             | CoreError::SnapshotQuotaExceeded { .. }

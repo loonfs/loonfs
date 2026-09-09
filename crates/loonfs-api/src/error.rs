@@ -117,6 +117,7 @@ error_codes! {
     NamespaceNotFound => "namespace_not_found",
     NamespaceDeleted => "namespace_deleted",
     NamespaceExists => "namespace_exists",
+    CheckpointNotFound => "checkpoint_not_found",
     SnapshotNotFound => "snapshot_not_found",
     SnapshotGone => "snapshot_gone",
     SnapshotQuotaExceeded => "snapshot_quota_exceeded",
@@ -172,6 +173,7 @@ impl ErrorCode {
             ErrorCode::ContentTooLarge => ErrorKind::ContentTooLarge,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
+            | ErrorCode::CheckpointNotFound
             | ErrorCode::SnapshotNotFound
             | ErrorCode::PathNotFound
             | ErrorCode::InodeNotFound
@@ -240,6 +242,7 @@ impl ErrorCode {
             | ErrorCode::NamespaceNotFound
             | ErrorCode::NamespaceDeleted
             | ErrorCode::NamespaceExists
+            | ErrorCode::CheckpointNotFound
             | ErrorCode::SnapshotNotFound
             | ErrorCode::SnapshotGone
             | ErrorCode::SnapshotQuotaExceeded

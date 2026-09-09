@@ -729,7 +729,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Releases one snapshot. Repeated releases succeed.
+    /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
     pub(crate) async fn release_snapshot(
         &self,
         namespace_id: &NamespaceId,

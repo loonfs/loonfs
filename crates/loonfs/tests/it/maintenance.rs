@@ -6,20 +6,18 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CheckpointOwnerSummary, CommitId, CreateCheckpointOptions, CreateNamespaceOptions,
-    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, ManifestNo,
-    MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
-    RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore, WalFlushStepOutcome,
+    ChangeSeq, CommitId, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
+    DeleteNamespaceOptions, ErrorCode, ManifestNo, MetadataCompactionOutcome, NamespaceId,
+    PutFileOptions, ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse,
+    SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::{AdvanceRetentionRequest, GcRequest, MetadataCompactionRequest};
-use loonfs_objectstore::keys::{checkpoint_prefix, hint, metadata_manifest_object};
+use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
-};
+use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -618,62 +616,6 @@ fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
         .expect("status after lost race");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
     assert_eq!(status.wal_tail_segments, 2);
-}
-
-#[tokio::test]
-async fn fork_recovers_an_ambiguously_landed_checkpoint_renewal() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source = namespace_id("fork-ambiguous-renewal-source");
-    let target = namespace_id("fork-ambiguous-renewal-target");
-    let store = Arc::new(
-        FailStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(checkpoint_prefix(&source)),
-            OperationClass::CompareAndSwap,
-            InjectedError::Transport("lost fork checkpoint renewal acknowledgement".to_owned()),
-        )
-        .apply_then_fail(),
-    );
-    let object_store: SharedObjectStore = store.clone();
-    let fs = open_runtime_async(object_store, "fork-ambiguous-renewal").await;
-    fs.create_namespace(&source, CreateNamespaceOptions::default())
-        .await
-        .expect("create source namespace");
-    fs.put_file_bytes(
-        &source,
-        "/docs/hello.txt",
-        b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("write source file");
-    store.fail_next(1);
-
-    let forked = fs
-        .writer
-        .fork_namespace(&source, &target)
-        .await
-        .expect("reconcile the durable fork checkpoint renewal");
-
-    assert_eq!(store.attempts(), 1);
-    assert_eq!(forked.namespace_id, target);
-    let checkpoints = collect_checkpoints(&fs.maintenance, &source)
-        .await
-        .expect("list source checkpoints");
-    let fork_checkpoint = checkpoints
-        .checkpoints
-        .iter()
-        .find(|checkpoint| {
-            matches!(
-                &checkpoint.owner,
-                CheckpointOwnerSummary::Fork {
-                    target_namespace_id,
-                    ..
-                } if target_namespace_id == &target
-            )
-        })
-        .expect("fork checkpoint remains installed");
-    assert_eq!(fork_checkpoint.namespace_id, source);
 }
 
 #[tokio::test]

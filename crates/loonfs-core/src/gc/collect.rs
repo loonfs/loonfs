@@ -27,7 +27,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
         Err(error) => return Err(error.into()),
     };
-    let live = LiveSet::load(store, namespace_id, &snapshot, context).await?;
+    let live = LiveSet::load(store, namespace_id, &snapshot).await?;
     let basis = snapshot.basis();
     let view = PublicationView::new(
         store,

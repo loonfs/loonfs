@@ -1234,7 +1234,6 @@ struct SnapshotsExpected {
     current_revision_no: u64,
     current_entry_names: Vec<String>,
     snapshot_change_seqs: Vec<u64>,
-    snapshot_gone: ErrorStatusExpected,
     snapshot_not_found: ErrorStatusExpected,
     revision_with_snapshot: ErrorStatusExpected,
     zero_ttl: ErrorStatusExpected,
@@ -1502,18 +1501,24 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     assert_eq!(listed.snapshots[0].snapshot_id, snapshot.snapshot_id);
 
     let release_url = format!("{snapshots_url}/{snapshot_id}/release");
-    for label in ["release snapshot", "release snapshot again"] {
-        let released: ReleaseSnapshotResponse = raw_success_json(
-            harness
-                .raw_client
-                .post(&release_url)
-                .bearer_auth(AUTH_TOKEN),
-            label,
-        )
-        .await;
-        assert_eq!(released.namespace_id, namespace);
-        assert_eq!(released.snapshot_id, snapshot.snapshot_id);
-    }
+    let released: ReleaseSnapshotResponse = raw_success_json(
+        harness
+            .raw_client
+            .post(&release_url)
+            .bearer_auth(AUTH_TOKEN),
+        "release snapshot",
+    )
+    .await;
+    assert_eq!(released.namespace_id, namespace);
+    assert_eq!(released.snapshot_id, snapshot.snapshot_id);
+    let released_again = harness
+        .raw_client
+        .post(&release_url)
+        .bearer_auth(AUTH_TOKEN)
+        .send()
+        .await
+        .expect("send second snapshot release");
+    assert_raw_status_error(released_again, &expected.snapshot_not_found).await;
 
     let released_read = harness
         .raw_client
@@ -1526,7 +1531,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .send()
         .await
         .expect("send released snapshot read");
-    assert_raw_status_error(released_read, &expected.snapshot_gone).await;
+    assert_raw_status_error(released_read, &expected.snapshot_not_found).await;
     let released_extend = harness
         .raw_client
         .post(format!("{snapshots_url}/{snapshot_id}/extend"))
@@ -1537,7 +1542,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .send()
         .await
         .expect("send released snapshot extend");
-    assert_raw_status_error(released_extend, &expected.snapshot_gone).await;
+    assert_raw_status_error(released_extend, &expected.snapshot_not_found).await;
 
     let unknown_read = harness
         .raw_client

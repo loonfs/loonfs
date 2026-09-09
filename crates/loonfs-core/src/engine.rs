@@ -881,9 +881,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Releases a user-owned checkpoint by id.
     ///
-    /// Idempotent: releasing an already-released or reaped record succeeds.
-    /// The record is reaped by a later garbage-collection pass; its basis
-    /// becomes collectable only on the pass after that.
+    /// A missing pin returns `checkpoint_not_found`.
+    /// Deletion makes its unreferenced manifest and runs collectable.
     pub async fn release_checkpoint(
         &self,
         checkpoint_id: &CheckpointId,
@@ -915,7 +914,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Releases a snapshot. Repeated releases succeed.
+    /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
     pub async fn release_snapshot(
         &self,
         checkpoint_id: &CheckpointId,

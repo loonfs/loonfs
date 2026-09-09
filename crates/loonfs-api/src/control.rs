@@ -109,38 +109,6 @@ pub struct ManifestRef {
     pub manifest_payload_checksum: String,
 }
 
-/// Monotonic status of a durable checkpoint record.
-///
-/// A new record starts active and pins its basis. Explicit release or expiry
-/// moves it to the terminal released status by compare-and-swap. Released
-/// records serve no reads and are deleted after the release grace period.
-/// Creating another pin always creates a new record id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CheckpointStatus {
-    /// Protects the checkpoint basis and permits reads.
-    ///
-    /// The braces make serde reject a stray `released_at_ms`; a unit variant
-    /// would silently accept and discard that field.
-    Active {},
-    /// Terminal: the pin is gone and the record is waiting to be deleted.
-    Released {
-        /// Unix-millisecond stamp written by the release compare-and-swap,
-        /// and the only input to when the record may be deleted.
-        released_at_ms: u64,
-    },
-}
-
-impl std::fmt::Display for CheckpointStatus {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let status = match self {
-            Self::Active {} => "active",
-            Self::Released { .. } => "released",
-        };
-        formatter.write_str(status)
-    }
-}
-
 /// Durable owner and expiry policy of a checkpoint record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -155,14 +123,10 @@ pub enum CheckpointOwner {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at_ms: Option<u64>,
     },
-    /// Keeps a source basis alive for a fork target. GC releases it once the
-    /// target no longer references it, or when its lease expires before the
-    /// target is created.
+    /// Keeps the source manifest and its runs readable by the target.
     Fork {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,
-        /// Lease bounding the fork attempt before its target manifest is installed.
-        expires_at_ms: u64,
     },
     /// An application-created read view with a required expiry.
     Snapshot {
@@ -178,39 +142,44 @@ impl CheckpointOwner {
     pub fn expires_at_ms(&self) -> Option<u64> {
         match self {
             Self::User { expires_at_ms, .. } => *expires_at_ms,
-            Self::Fork { expires_at_ms, .. } => Some(*expires_at_ms),
+            Self::Fork { .. } => None,
             Self::Snapshot { expires_at_ms, .. } => Some(*expires_at_ms),
         }
     }
 }
 
-/// A checkpoint record: pins one metadata manifest (its basis) so garbage
-/// collection keeps everything the manifest references.
-///
-/// Stored as its own object under `checkpoints/`; never part of a manifest
-/// and never an input to latest visibility. Created write-then-verify: the
-/// record is written `active`, then the basis manifest is re-verified
-/// against the floor, and a failed verification flips the record to
-/// `released`.
+/// A pin stored under `pins/`; see format specification section 1.7.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointRecordState {
-    /// Freshly generated record identity, one per logical pin. Nothing
-    /// derives it, and no caller supplies it, so a new pin can never land on
-    /// a released record's key.
-    pub checkpoint_id: CheckpointId,
-    /// Source namespace whose manifest and metadata remain pinned.
+    /// Namespace containing the pinned manifest.
     pub namespace_id: NamespaceId,
-    /// Manifest pinned by this record. Its owner must be `namespace_id`.
-    pub manifest: ManifestRef,
-    /// Commit identity at the pinned manifest head, verified against its payload.
+    /// Positions this record at its manifest number.
+    pub pin_id: CheckpointId,
+    /// Must equal the number in `pin_id`.
+    pub manifest_no: ManifestNo,
+    /// Greatest sequence in the pinned manifest.
+    pub manifest_head_seq: ChangeSeq,
+    /// Verifies the referenced manifest payload.
+    pub manifest_payload_checksum: String,
+    /// Commit at the pinned manifest head.
     pub head_commit_id: CommitId,
-    /// Unix-millisecond creation stamp used by GC grace policy, never validity ordering.
+    /// Creation time used by collection grace.
     pub created_at_ms: u64,
-    /// Party and expiry policy that determine when this pin can be released.
+    /// Determines when collection may delete this record.
     pub owner: CheckpointOwner,
-    /// Current status, advanced only by the one-way release compare-and-swap.
-    pub status: CheckpointStatus,
+}
+
+impl CheckpointRecordState {
+    /// Builds the reference for reads through this pin.
+    pub fn manifest(&self) -> ManifestRef {
+        ManifestRef {
+            owner_namespace_id: self.namespace_id.clone(),
+            manifest_no: self.pin_id.manifest_no(),
+            manifest_head_seq: self.manifest_head_seq,
+            manifest_payload_checksum: self.manifest_payload_checksum.clone(),
+        }
+    }
 }
 
 /// Who most recently acquired the writer epoch, and when.

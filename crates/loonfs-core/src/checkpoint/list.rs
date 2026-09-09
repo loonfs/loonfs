@@ -1,13 +1,10 @@
-//! Lists active checkpoint records for a namespace.
-//!
-//! The listing reads the `checkpoints/` prefix and excludes released records.
+//! Lists existing pins as checkpoints.
 
 use super::record::load_checkpoint_record_at_key;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
 use futures::StreamExt;
-use loonfs_api::wire::control::CheckpointStatus;
 use loonfs_api::{Checkpoint, NamespaceCursor, NamespaceId, Page, PageCursor, PageRequest};
 use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::ObjectStore;
@@ -61,12 +58,6 @@ impl CheckpointPageCursor {
     }
 }
 
-/// Lists active checkpoints in ascending checkpoint-id order.
-///
-/// Expired checkpoints remain active until collection releases them, so they
-/// are included. Released checkpoints are omitted. Fork-owned records are
-/// included because they also pin data. The namespace head is read first so
-/// a missing namespace does not look like an empty checkpoint list.
 pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -103,9 +94,6 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
             Err(ControlObjectLoadError::MissingObject { .. }) => continue,
             Err(error) => return Err(CoreError::ControlObjectLoad(error)),
         };
-        if loaded.state.status != (CheckpointStatus::Active {}) {
-            continue;
-        }
         let record = loaded.state;
         checkpoints.push(super::checkpoint_summary(record));
     }
@@ -151,7 +139,7 @@ mod cursor_tests {
                 "format_version": 1,
                 "kind": "checkpoint_inventory",
                 "namespace_id": "demo",
-                "last_key": "namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json",
+                "last_key": "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json",
                 "future_field": {"ignored": true}
             }))
             .expect("encode cursor"),
@@ -161,7 +149,7 @@ mod cursor_tests {
             .expect("decode cursor with additive field");
         assert_eq!(
             cursor.last_key(),
-            Some("namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json")
+            Some("namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json")
         );
     }
 

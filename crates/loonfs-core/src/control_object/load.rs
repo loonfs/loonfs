@@ -2,7 +2,7 @@
 
 use super::ControlObjectLoadError;
 use crate::error::StoreFailureClass;
-use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, ManifestRef};
+use loonfs_api::wire::control::{decode_control_object, ControlObjectKind};
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -93,18 +93,6 @@ pub(crate) fn expect_identity_field(
         expected: expected.to_owned(),
         actual: actual.to_owned(),
     })
-}
-
-/// Requires a root or checkpoint record to reference its own namespace.
-pub(crate) fn expect_own_manifest(
-    namespace_id: &NamespaceId,
-    manifest: &ManifestRef,
-) -> Result<(), EmbeddedIdentityMismatch> {
-    expect_identity_field(
-        "manifest owner namespace",
-        namespace_id.as_str(),
-        manifest.owner_namespace_id.as_str(),
-    )
 }
 
 fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadError {

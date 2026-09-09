@@ -909,7 +909,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .as_str()
             .expect("json string")
             .to_owned();
-        assert!(checkpoint_id.starts_with("chk_"));
+        assert!(checkpoint_id.starts_with("pin_"));
 
         // Names are labels rather than unique keys. Reusing one creates a
         // second checkpoint with a different id.
@@ -1088,8 +1088,11 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "--profile",
             profile,
         ]);
-        assert_success(&release_again);
-        assert_eq!(json_data(&release_again), release_data);
+        assert_failure(&release_again);
+        assert_eq!(
+            parse_json(&release_again.stderr)["error"]["code"],
+            "checkpoint_not_found"
+        );
 
         let advanced_retention =
             harness.run(&["maintenance", "retention", "advance", "--profile", profile]);

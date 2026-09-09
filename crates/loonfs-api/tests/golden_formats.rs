@@ -19,10 +19,9 @@
 //!   decoding could erase a field introduced by an unsupported writer.
 
 use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    ContentStoreState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintState, ManifestRef,
-    NamespaceStatus, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
-    UploadSessionState, WriterBlock,
+    decode_control_object, CheckpointOwner, CheckpointRecordState, ContentStoreState,
+    ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintState, ManifestRef, NamespaceStatus,
+    ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus, UploadSessionState, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -404,7 +403,7 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                     "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
                         .to_owned(),
             },
-            source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
+            source_checkpoint_id: checkpoint_id("pin_00000000000000000002-0000000000000002"),
         }),
         ..sample_manifest_payload()
     }
@@ -585,50 +584,50 @@ fn control_objects_match_golden_bytes() {
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
-            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
+            pin_id: checkpoint_id("pin_00000000000000000002-0000000000000002"),
             namespace_id: namespace_id(),
-            manifest: sample_manifest_ref(2),
+            manifest_no: (sample_manifest_ref(2)).manifest_no,
+            manifest_head_seq: (sample_manifest_ref(2)).manifest_head_seq,
+            manifest_payload_checksum: (sample_manifest_ref(2)).manifest_payload_checksum.clone(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: CheckpointOwner::User {
                 name: "nightly".to_owned(),
                 expires_at_ms: None,
             },
-            status: CheckpointStatus::Active {},
         },
     );
-    // The fork owner is a durable encoding of its own: the tagged `owner`
-    // changes the document, and a fork record always carries its lease.
     check_control_golden(
         "control_checkpoint_record_fork.v1.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
-            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000004"),
+            pin_id: checkpoint_id("pin_00000000000000000004-0000000000000004"),
             namespace_id: namespace_id(),
-            manifest: sample_manifest_ref(4),
+            manifest_no: (sample_manifest_ref(4)).manifest_no,
+            manifest_head_seq: (sample_manifest_ref(4)).manifest_head_seq,
+            manifest_payload_checksum: (sample_manifest_ref(4)).manifest_payload_checksum.clone(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: CheckpointOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
-                expires_at_ms: 2_463_000,
             },
-            status: CheckpointStatus::Active {},
         },
     );
     check_control_golden(
         "control_checkpoint_record_snapshot.v1.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
-            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000006"),
+            pin_id: checkpoint_id("pin_00000000000000000006-0000000000000006"),
             namespace_id: namespace_id(),
-            manifest: sample_manifest_ref(6),
+            manifest_no: (sample_manifest_ref(6)).manifest_no,
+            manifest_head_seq: (sample_manifest_ref(6)).manifest_head_seq,
+            manifest_payload_checksum: (sample_manifest_ref(6)).manifest_payload_checksum.clone(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: CheckpointOwner::Snapshot {
                 name: "report-run".to_owned(),
                 expires_at_ms: 9_000,
             },
-            status: CheckpointStatus::Active {},
         },
     );
     check_control_golden(
@@ -646,28 +645,6 @@ fn control_objects_match_golden_bytes() {
             status: UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,
                 content_ref: sample_content_ref(),
-            },
-        },
-    );
-    // The released status and the direct-put session shape are durable
-    // encodings of their own: `status` and `mode` change the document. A
-    // released record carries the instant its grace window runs from, and
-    // there is no third checkpoint status to pin.
-    check_control_golden(
-        "control_checkpoint_record_released.v1.json",
-        ControlObjectKind::CheckpointRecord,
-        CheckpointRecordState {
-            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000003"),
-            namespace_id: namespace_id(),
-            manifest: sample_manifest_ref(3),
-            head_commit_id: commit_id(),
-            created_at_ms: 3_000,
-            owner: CheckpointOwner::User {
-                name: "nightly".to_owned(),
-                expires_at_ms: Some(9_000),
-            },
-            status: CheckpointStatus::Released {
-                released_at_ms: 9_000,
             },
         },
     );
@@ -772,8 +749,6 @@ fn every_durable_status_is_a_kind_tagged_object() {
         "namespace_manifest.v1.json",
         "namespace_manifest.deleted.v1.json",
         "namespace_manifest.retired.v1.json",
-        "control_checkpoint_record.v1.json",
-        "control_checkpoint_record_released.v1.json",
         "control_upload_session.v1.json",
     ];
     for fixture in fixtures {
@@ -871,60 +846,24 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
 }
 
 #[test]
-fn checkpoint_records_reject_an_untagged_or_unknown_status() {
-    for untagged in ["active", "released", "condemned"] {
-        assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-            "control_checkpoint_record.v1.json",
-            ControlObjectKind::CheckpointRecord,
-            |payload| payload["status"] = serde_json::Value::from(untagged),
-        );
-    }
-    // A third status is not a tag this format knows either.
-    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-        "control_checkpoint_record.v1.json",
+fn snapshot_checkpoint_records_reject_a_missing_expiry() {
+    let fixture = "control_checkpoint_record_snapshot.v1.json";
+    let message = assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        fixture,
         ControlObjectKind::CheckpointRecord,
-        |payload| payload["status"]["kind"] = serde_json::Value::from("condemned"),
+        |payload| {
+            payload
+                .get_mut("owner")
+                .expect("owner")
+                .as_object_mut()
+                .expect("owner object")
+                .remove("expires_at_ms");
+        },
     );
-    // A release without its stamp cannot be aged, so it is not a release.
-    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-        "control_checkpoint_record.v1.json",
-        ControlObjectKind::CheckpointRecord,
-        |payload| payload["status"]["kind"] = serde_json::Value::from("released"),
+    assert!(
+        message.contains("missing field `expires_at_ms`"),
+        "unexpected refusal for `{fixture}`: {message}"
     );
-}
-
-#[test]
-fn active_checkpoint_records_reject_release_stamps() {
-    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-        "control_checkpoint_record.v1.json",
-        ControlObjectKind::CheckpointRecord,
-        |payload| payload["status"]["released_at_ms"] = serde_json::Value::from(9_000),
-    );
-}
-
-#[test]
-fn fork_and_snapshot_checkpoint_records_reject_a_missing_expiry() {
-    for fixture in [
-        "control_checkpoint_record_fork.v1.json",
-        "control_checkpoint_record_snapshot.v1.json",
-    ] {
-        let message = assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-            fixture,
-            ControlObjectKind::CheckpointRecord,
-            |payload| {
-                payload
-                    .get_mut("owner")
-                    .expect("owner")
-                    .as_object_mut()
-                    .expect("owner object")
-                    .remove("expires_at_ms");
-            },
-        );
-        assert!(
-            message.contains("missing field `expires_at_ms`"),
-            "unexpected refusal for `{fixture}`: {message}"
-        );
-    }
 }
 
 #[test]
@@ -1177,23 +1116,17 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
         (
             ControlObjectKind::CheckpointRecord,
             serde_json::to_value(CheckpointRecordState {
-                checkpoint_id: checkpoint_id("chk_00000000000000000000000000000005"),
+                pin_id: checkpoint_id("pin_00000000000000000005-0000000000000005"),
                 namespace_id: namespace_id(),
-                manifest: ManifestRef {
-                    owner_namespace_id: namespace_id(),
-                    manifest_no: ManifestNo(5),
+                manifest_no: ManifestNo(5),
 
-                    manifest_head_seq: ChangeSeq(5),
-                    manifest_payload_checksum: sha256_digest(b"manifest"),
-                },
+                manifest_head_seq: ChangeSeq(5),
+                manifest_payload_checksum: sha256_digest(b"manifest"),
                 head_commit_id: commit_id(),
                 created_at_ms: 3_000,
                 owner: CheckpointOwner::User {
                     name: "nightly".to_owned(),
                     expires_at_ms: None,
-                },
-                status: CheckpointStatus::Released {
-                    released_at_ms: 4_000,
                 },
             })
             .expect("checkpoint state"),

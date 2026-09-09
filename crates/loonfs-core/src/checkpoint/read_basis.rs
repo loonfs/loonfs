@@ -8,7 +8,7 @@ use super::scan::VerifiedMetadataSegments;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::{CheckpointRecordState, CheckpointStatus, ManifestRef};
+use loonfs_api::wire::control::{CheckpointRecordState, ManifestRef};
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -46,8 +46,9 @@ pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore 
     segment_cache: Option<&'a MetadataSegmentCache>,
     record: CheckpointRecordState,
 ) -> Result<PinnedCheckpointBasis<'a, S>> {
-    let checkpoint_id = &record.checkpoint_id;
-    let segments = load_manifest_segments(store, segment_cache, &record.manifest)
+    let checkpoint_id = &record.pin_id;
+    let manifest = record.manifest();
+    let segments = load_manifest_segments(store, segment_cache, &manifest)
         .await
         .map_err(|error| match error {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
@@ -57,10 +58,7 @@ pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore 
             )),
             other => other,
         })?;
-    Ok(PinnedCheckpointBasis {
-        manifest: record.manifest,
-        segments,
-    })
+    Ok(PinnedCheckpointBasis { manifest, segments })
 }
 
 /// Loads the namespace state pinned by `checkpoint_id`.
@@ -109,11 +107,5 @@ async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
             "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
         )));
     };
-    if record.status != (CheckpointStatus::Active {}) {
-        return Err(CoreError::CheckpointUnavailable(format!(
-            "checkpoint `{checkpoint_id}` is `{}` and no longer pins its basis",
-            record.status
-        )));
-    }
     Ok(record)
 }

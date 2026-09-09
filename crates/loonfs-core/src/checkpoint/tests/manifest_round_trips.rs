@@ -253,9 +253,9 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert!(CheckpointId::parse(record.checkpoint_id.as_str()).is_ok());
-    assert_eq!(record.manifest.manifest_head_seq, ChangeSeq(0));
-    assert_eq!(record.manifest.manifest_no, ManifestNo(1));
+    assert!(CheckpointId::parse(record.pin_id.as_str()).is_ok());
+    assert_eq!(record.manifest_head_seq, ChangeSeq(0));
+    assert_eq!(record.manifest_no, ManifestNo(1));
     let published =
         load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(1))
             .await
@@ -450,12 +450,8 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest.manifest_no, first.manifest_no);
-    assert_eq!(record.manifest.manifest_head_seq, first.checkpoint_seq);
-    assert_eq!(
-        record.status,
-        loonfs_api::wire::control::CheckpointStatus::Active {}
-    );
+    assert_eq!(record.manifest_no, first.manifest_no);
+    assert_eq!(record.manifest_head_seq, first.checkpoint_seq);
 
     // A new basis mints a new record; both files exist side by side.
     write_file_bytes(
@@ -610,7 +606,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             .expect("read checkpoint record")
             .expect("record exists")
             .state;
-        assert_eq!(record.manifest.manifest_no, response.manifest_no);
+        assert_eq!(record.manifest_no, response.manifest_no);
     }
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
@@ -940,9 +936,9 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest.manifest_no, covering_manifest_no);
+    assert_eq!(record.manifest_no, covering_manifest_no);
     assert_eq!(
-        record.manifest.manifest_payload_checksum,
+        record.manifest_payload_checksum,
         manifest_without_checkpoint.payload_checksum()
     );
 }

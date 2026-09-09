@@ -195,15 +195,14 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
         .await
         .expect("read diagnostics after release");
     assert_eq!(diagnostics.live_snapshots, 0);
-    assert_eq!(
-        release_snapshot(
-            &harness.server_url,
-            namespace.as_str(),
-            created.snapshot_id.as_str(),
-        )
-        .expect("repeat release"),
-        released
-    );
+    let (status, error) = release_snapshot(
+        &harness.server_url,
+        namespace.as_str(),
+        created.snapshot_id.as_str(),
+    )
+    .expect_err("repeat release");
+    assert_eq!(status, 404);
+    assert_eq!(error.code, "snapshot_not_found");
     let (status, error) = extend_snapshot(
         &harness.server_url,
         namespace.as_str(),
@@ -211,9 +210,8 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
         20_000,
     )
     .expect_err("released snapshot cannot extend");
-    assert_eq!(status, 410);
-    assert_eq!(error.code, "snapshot_gone");
-    assert!(error.message.contains("released"));
+    assert_eq!(status, 404);
+    assert_eq!(error.code, "snapshot_not_found");
 
     harness.server.abort();
 }
@@ -259,14 +257,15 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
     assert_eq!(status, 400);
     assert_eq!(error.code, "invalid_request");
 
-    let unknown = "chk_ffffffffffffffffffffffffffffffff";
+    let unknown = "pin_00000000000000000001-ffffffffffffffff";
     let (status, error) = extend_snapshot(&harness.server_url, namespace.as_str(), unknown, 500)
         .expect_err("unknown snapshot must fail extension");
     assert_eq!(status, 404);
     assert_eq!(error.code, "snapshot_not_found");
-    let released = release_snapshot(&harness.server_url, namespace.as_str(), unknown)
-        .expect("unknown snapshot release is idempotent");
-    assert_eq!(released.snapshot_id.as_str(), unknown);
+    let (status, error) = release_snapshot(&harness.server_url, namespace.as_str(), unknown)
+        .expect_err("unknown snapshot release");
+    assert_eq!(status, 404);
+    assert_eq!(error.code, "snapshot_not_found");
 
     harness.server.abort();
 }

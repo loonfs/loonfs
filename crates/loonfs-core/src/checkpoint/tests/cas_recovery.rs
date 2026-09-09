@@ -339,7 +339,7 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
         .await
         .expect("record")
         .expect("present");
-    assert_eq!(losing.state.manifest, winning.state.manifest);
+    assert_eq!(losing.state.manifest(), winning.state.manifest());
 }
 
 #[derive(Debug)]

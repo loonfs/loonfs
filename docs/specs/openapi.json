@@ -469,7 +469,7 @@
             "type": "integer"
           },
           "expires_at_ms": {
-            "description": "The automatic release time in Unix milliseconds, or `None` until an explicit release.",
+            "description": "Expiry in Unix milliseconds; collection waits one further grace window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -498,9 +498,9 @@
         "type": "object"
       },
       "CheckpointId": {
-        "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version.",
-        "example": "chk_00000000000000000000000000000002",
-        "pattern": "^chk_[0-9a-f]{32}$",
+        "description": "Durable checkpoint identifier.\n\nThe manifest number determines which namespace manifest it pins.",
+        "example": "pin_00000000000000000001-0000000000000002",
+        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
         "type": "string"
       },
       "CheckpointOwnerFork": {
@@ -1124,7 +1124,7 @@
         "description": "Object counts deleted by one garbage-collection pass, grouped by family.",
         "properties": {
           "checkpoint_records": {
-            "description": "Released checkpoint records deleted after their grace window.",
+            "description": "Pin records deleted by this pass.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3291,12 +3291,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "missing_basis": {
-            "description": "Active records released because their basis manifests are gone.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "snapshot": {
             "description": "Snapshot-owned records released after expiry or terminal namespace deletion.",
             "format": "int64",
@@ -3307,7 +3301,6 @@
         "required": [
           "fork",
           "expired",
-          "missing_basis",
           "snapshot"
         ],
         "type": "object"
@@ -3816,7 +3809,7 @@
             "type": "integer"
           },
           "expires_at_ms": {
-            "description": "When the snapshot lease expires, in Unix milliseconds.",
+            "description": "When the snapshot expires, in Unix milliseconds.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4470,7 +4463,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/checkpoints": {
       "get": {
-        "description": "Lists one page of active checkpoints in checkpoint-id order. Expired checkpoints remain visible until collection releases them. Released checkpoints are omitted. The cursor resumes a live listing and does not create a snapshot.",
+        "description": "Lists existing pins in checkpoint-id order. Expired pins remain visible until collection deletes them after expiry plus grace. The cursor resumes a live listing.",
         "operationId": "list_checkpoints",
         "parameters": [
           {
@@ -4664,7 +4657,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release": {
       "post": {
-        "description": "Releases a user-owned checkpoint pin by id. Idempotent: releasing an already-released or reaped record succeeds. The record is reaped by a later garbage-collection pass; its pinned data becomes collectable only on the pass after that.",
+        "description": "Deletes a user-owned checkpoint pin. A missing id returns checkpoint_not_found. Garbage collection can reclaim its unreferenced manifest and runs.",
         "operationId": "release_checkpoint",
         "parameters": [
           {
@@ -4695,7 +4688,7 @@
                 }
               }
             },
-            "description": "Checkpoint release accepted (including an already released or reaped checkpoint)"
+            "description": "Checkpoint pin deleted"
           },
           "400": {
             "content": {
@@ -4725,7 +4718,7 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace or checkpoint not found"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7767,7 +7760,7 @@
                 }
               }
             },
-            "description": "Snapshot released or expired"
+            "description": "Snapshot expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7786,7 +7779,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release": {
       "post": {
-        "description": "Releases a snapshot by id. Repeated releases succeed.",
+        "description": "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
         "operationId": "release_snapshot",
         "parameters": [
           {
