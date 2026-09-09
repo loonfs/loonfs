@@ -2,7 +2,7 @@
 //!
 //! Immutable objects use provider timestamps for age checks. Checkpoints use
 //! lifecycle timestamps stored in their records. The namespace sweep combines
-//! object age with the reference anchor from `gc/live_set.rs`.
+//! object age with the completed mark table.
 
 use crate::checkpoint::record::{
     load_checkpoint_record_at_key, release_inspected_checkpoint_record, CheckpointRelease,

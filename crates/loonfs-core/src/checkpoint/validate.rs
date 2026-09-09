@@ -9,9 +9,7 @@ use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
     NamespaceManifestPayload, RunTier,
 };
-use loonfs_api::{
-    manifest_object_id_manifest_no, ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, RunNo,
-};
+use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -20,7 +18,6 @@ use std::collections::HashSet;
 pub(super) fn validate_namespace_manifest(
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
-    manifest_object_id: &ManifestObjectId,
     object_key: &str,
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<(), ManifestLoadError> {
@@ -36,25 +33,6 @@ pub(super) fn validate_namespace_manifest(
             object_key: object_key.to_owned(),
             expected: manifest_no,
             actual: manifest.payload().manifest_no,
-        });
-    }
-    if manifest_object_id_manifest_no(manifest.payload().manifest_object_id.as_str())
-        != Some(manifest.payload().manifest_no)
-    {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: format!(
-                "manifest object id `{}` does not encode manifest number `{}`",
-                manifest.payload().manifest_object_id,
-                manifest.payload().manifest_no
-            ),
-        });
-    }
-    if manifest.payload().manifest_object_id != *manifest_object_id {
-        return Err(ManifestLoadError::ManifestObjectIdMismatch {
-            object_key: object_key.to_owned(),
-            expected: manifest_object_id.clone(),
-            actual: manifest.payload().manifest_object_id.clone(),
         });
     }
     Ok(())
@@ -77,6 +55,12 @@ pub(super) fn validate_manifest_materialization_ranges(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
+    if payload.retention_floor_seq > payload.head_seq {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: "retention floor is beyond the manifest head sequence".to_owned(),
+        });
+    }
     if payload.base_seq > payload.head_seq {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),

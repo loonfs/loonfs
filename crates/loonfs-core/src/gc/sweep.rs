@@ -94,6 +94,18 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             self.report.retain(RetainedReason::DegradedRoots);
             return Ok(());
         }
+        if family == CandidateFamily::Manifests && !self.references.roots.namespace_deleted {
+            let number = loonfs_objectstore::layout::manifest_no_of(key);
+            if self
+                .references
+                .roots
+                .discovery_start_manifest_no
+                .is_none_or(|current| number.is_none_or(|number| number >= current))
+            {
+                self.report.retain(RetainedReason::Referenced);
+                return Ok(());
+            }
+        }
         if self.references.object(key).await? {
             self.report.retain(RetainedReason::Referenced);
             return Ok(());
@@ -274,15 +286,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             }
             GraceAge::Unknown => {
                 self.report.retain(RetainedReason::NoProviderTimestamp);
-                return Ok(false);
-            }
-            GraceAge::Aged
-                if matches!(
-                    self.references.roots.anchor,
-                    loonfs_api::wire::gc::GcReferenceAnchor::Missing {}
-                ) =>
-            {
-                self.report.retain(RetainedReason::NoReferenceManifest);
                 return Ok(false);
             }
             GraceAge::Aged => {}

@@ -187,7 +187,6 @@ pub(crate) mod control {
     use loonfs::SharedObjectStore;
     use loonfs_api::wire::control::{
         decode_control_object, CheckpointRecordState, ControlObjectKind, HeadState,
-        MetadataRootState,
     };
     use loonfs_api::{CheckpointId, NamespaceId};
     use loonfs_objectstore::keys;
@@ -212,13 +211,11 @@ pub(crate) mod control {
     pub(crate) async fn metadata_root(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
-    ) -> MetadataRootState {
-        let bytes = control_bytes(store, &keys::metadata_root(namespace_id))
+    ) -> loonfs::control::CurrentManifest {
+        loonfs::control::load_namespace_current_manifest(store.as_ref(), namespace_id)
             .await
-            .expect("metadata root exists");
-        decode_control_object::<MetadataRootState>(&bytes, ControlObjectKind::MetadataRoot)
-            .expect("decode metadata root")
-            .into_payload()
+            .expect("current manifest")
+            .state
     }
 
     pub(crate) async fn checkpoint_record(

@@ -1,21 +1,31 @@
-//! Typed loaders for the namespace's control objects: head, metadata root,
-//! and WAL floor.
+//! Loads namespace heads and discovers numbered manifests through their hints.
 
 use crate::control_object::{
-    expect_foreign_fork_basis, expect_namespace, expect_own_manifest, load_control_object,
-    ControlObjectLoadError, LoadedControl,
+    expect_foreign_fork_basis, expect_namespace, load_control_object, ControlObjectLoadError,
+    LoadedControl,
 };
 use crate::error::CoreError;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control_snapshot::load_head_and_metadata_basis;
-use loonfs_api::wire::control::{ControlObjectKind, HeadState, MetadataRootState, WalFloorState};
+use loonfs_api::wire::control::{ControlObjectKind, HeadState, HintState, ManifestRef};
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::keys::{metadata_root, wal_floor, wal_head};
+use loonfs_objectstore::keys::{hint, wal_head};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) type LoadedHeadObject = LoadedControl<HeadState>;
-pub(crate) type LoadedMetadataRootObject = LoadedControl<MetadataRootState>;
-pub(crate) type LoadedWalFloorObject = LoadedControl<WalFloorState>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentManifest {
+    pub manifest: ManifestRef,
+    pub retention_floor_seq: loonfs_api::ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedManifest {
+    pub object_key: String,
+    pub discovery_start_manifest_no: loonfs_api::ManifestNo,
+    pub state: CurrentManifest,
+    pub envelope: loonfs_api::wire::manifest::NamespaceManifestEnvelope,
+}
 
 pub(crate) fn ensure_namespace_live(head: &HeadState) -> crate::error::Result<()> {
     if head.status.is_deleted() {
@@ -26,46 +36,137 @@ pub(crate) fn ensure_namespace_live(head: &HeadState) -> crate::error::Result<()
     Ok(())
 }
 
-pub(crate) async fn load_wal_floor_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn update_manifest_hint<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<LoadedWalFloorObject, ControlObjectLoadError> {
-    let object_key = wal_floor(expected_namespace_id);
-    load_control_object(
-        store,
-        object_key,
-        ControlObjectKind::WalFloor,
-        |state: &WalFloorState| expect_namespace(expected_namespace_id, &state.namespace_id),
-    )
-    .await
-}
-
-pub(crate) async fn load_metadata_root_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<LoadedMetadataRootObject, ControlObjectLoadError> {
-    let object_key = metadata_root(expected_namespace_id);
-    load_control_object(
-        store,
-        object_key,
-        ControlObjectKind::MetadataRoot,
-        |state: &MetadataRootState| {
-            expect_namespace(expected_namespace_id, &state.namespace_id)?;
-            expect_own_manifest(&state.namespace_id, &state.manifest)
+    namespace_id: &NamespaceId,
+    manifest_no: loonfs_api::ManifestNo,
+) -> crate::error::Result<()> {
+    let object_key = hint(namespace_id);
+    let bytes = loonfs_api::wire::control::encode_control_state(
+        ControlObjectKind::Hint,
+        &HintState {
+            namespace_id: namespace_id.clone(),
+            manifest_no,
         },
     )
-    .await
+    .map_err(|error| CoreError::Codec {
+        object_key: object_key.clone(),
+        message: error.to_string(),
+    })?;
+    store
+        .put_overwrite(&object_key, bytes::Bytes::from(bytes))
+        .await
+        .map_err(|error| CoreError::store(&object_key, &error))?;
+    Ok(())
 }
 
-pub(crate) async fn load_metadata_root_object_if_present<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_current_manifest<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<Option<LoadedMetadataRootObject>, ControlObjectLoadError> {
-    match load_metadata_root_object(store, expected_namespace_id).await {
-        Ok(loaded) => Ok(Some(loaded)),
-        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
-        Err(error) => Err(error),
+    namespace_id: &NamespaceId,
+) -> Result<LoadedManifest, ControlObjectLoadError> {
+    load_current_manifest_if_present(store, namespace_id)
+        .await?
+        .ok_or_else(|| ControlObjectLoadError::MissingObject {
+            object_key: loonfs_objectstore::keys::metadata_manifest_object(
+                namespace_id,
+                &loonfs_api::ManifestNo(1),
+            ),
+        })
+}
+
+pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
+    let object_key = hint(namespace_id);
+    let hint = load_control_object(
+        store,
+        object_key.clone(),
+        ControlObjectKind::Hint,
+        |state: &HintState| expect_namespace(namespace_id, &state.namespace_id),
+    )
+    .await
+    .map_err(|error| match error {
+        ControlObjectLoadError::MissingObject { .. } => ControlObjectLoadError::Codec {
+            object_key: object_key.clone(),
+            message: "namespace hint is missing".to_owned(),
+        },
+        error => error,
+    })?;
+    let mut manifest_no = hint.state.manifest_no;
+    let mut current = if manifest_no == loonfs_api::ManifestNo(0) {
+        None
+    } else {
+        Some(
+            load_discovered_manifest(store, namespace_id, manifest_no)
+                .await?
+                .ok_or_else(|| ControlObjectLoadError::Codec {
+                    object_key,
+                    message: format!("hinted manifest `{manifest_no}` is missing"),
+                })?,
+        )
+    };
+    while let Ok(next) = manifest_no.successor() {
+        let Some(manifest) = load_discovered_manifest(store, namespace_id, next).await? else {
+            break;
+        };
+        if current.as_ref().is_some_and(|previous| {
+            previous.state.manifest.manifest_head_seq > manifest.state.manifest.manifest_head_seq
+                || previous.state.retention_floor_seq > manifest.state.retention_floor_seq
+        }) {
+            return Err(ControlObjectLoadError::Codec {
+                object_key: manifest.object_key,
+                message: "manifest lowers its predecessor's head sequence or retention floor"
+                    .to_owned(),
+            });
+        }
+        current = Some(manifest);
+        manifest_no = next;
     }
+    if let Some(current) = &mut current {
+        current.discovery_start_manifest_no = hint.state.manifest_no;
+    }
+    Ok(current)
+}
+
+async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_no: loonfs_api::ManifestNo,
+) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
+    let object_key = loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &manifest_no);
+    let bytes =
+        store
+            .get(&object_key, None)
+            .await
+            .map_err(|error| ControlObjectLoadError::Store {
+                object_key: object_key.clone(),
+                message: error.public_message().into_owned(),
+                class: crate::error::StoreFailureClass::of(&error),
+            })?;
+    let envelope = bytes
+        .map(|bytes| {
+            crate::checkpoint::decode_manifest_at(namespace_id, manifest_no, &object_key, &bytes)
+        })
+        .transpose()
+        .map_err(|error| ControlObjectLoadError::Codec {
+            object_key: object_key.clone(),
+            message: error.to_string(),
+        })?;
+    Ok(envelope.map(|envelope| LoadedManifest {
+        object_key,
+        discovery_start_manifest_no: manifest_no,
+        state: CurrentManifest {
+            manifest: ManifestRef {
+                owner_namespace_id: namespace_id.clone(),
+                manifest_no,
+                manifest_head_seq: envelope.payload().head_seq,
+                manifest_payload_checksum: envelope.payload_checksum().to_owned(),
+            },
+            retention_floor_seq: envelope.payload().retention_floor_seq,
+        },
+        envelope,
+    }))
 }
 
 pub(crate) async fn load_head_object<S: ObjectStore + ?Sized>(
@@ -100,11 +201,11 @@ pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
     )
 }
 
-pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<LoadedControl<MetadataRootState>, ControlObjectLoadError> {
-    load_metadata_root_object(store, expected_namespace_id).await
+) -> Result<LoadedManifest, ControlObjectLoadError> {
+    load_current_manifest(store, expected_namespace_id).await
 }
 
 /// Loads the head and authorized metadata basis as one consistent read anchor.
@@ -130,9 +231,7 @@ mod tests {
     use loonfs_api::wire::control::{
         encode_control_state, ForkBasis, ManifestRef, NamespaceStatus,
     };
-    use loonfs_api::{
-        ChangeSeq, CheckpointId, ContentStoreId, ManifestNo, ManifestObjectId, WriterEpoch,
-    };
+    use loonfs_api::{ChangeSeq, CheckpointId, ContentStoreId, ManifestNo, WriterEpoch};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::{tempdir, TempDir};
 
@@ -150,10 +249,7 @@ mod tests {
         ManifestRef {
             owner_namespace_id: owner.clone(),
             manifest_no: ManifestNo(1),
-            manifest_object_id: ManifestObjectId::parse(
-                "man_00000000000000000001-0123456789abcdef",
-            )
-            .expect("valid manifest object id"),
+
             manifest_head_seq: ChangeSeq(1),
             manifest_payload_checksum: "sha256:test".to_owned(),
         }
@@ -170,34 +266,6 @@ mod tests {
             .put_overwrite(object_key, Bytes::from(bytes))
             .await
             .expect("write control object");
-    }
-
-    #[tokio::test]
-    async fn root_loader_rejects_a_manifest_owned_by_another_namespace() {
-        let (_directory, store) = local_store();
-        let namespace_id = namespace("demo");
-        let root = MetadataRootState {
-            namespace_id: namespace_id.clone(),
-            manifest: manifest_ref(&namespace("other")),
-            updated_at_ms: 1_000,
-        };
-        write_control(
-            &store,
-            &metadata_root(&namespace_id),
-            ControlObjectKind::MetadataRoot,
-            &root,
-        )
-        .await;
-
-        let error = load_metadata_root_object(&store, &namespace_id)
-            .await
-            .expect_err("a foreign manifest owner should fail");
-
-        assert!(matches!(
-            error,
-            ControlObjectLoadError::IdentityMismatch { field, .. }
-                if field == "manifest owner namespace"
-        ));
     }
 
     #[tokio::test]

@@ -1910,7 +1910,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .expect("a fork target has a basis manifest");
     let manifest_key = metadata_manifest_object(
         &target_basis.manifest.owner_namespace_id,
-        &target_basis.manifest.manifest_object_id,
+        &target_basis.manifest.manifest_no,
     );
     let manifest_bytes = store
         .get(&manifest_key, None)

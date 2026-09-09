@@ -31,7 +31,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     // The default cache config carries a decoded-byte budget, so a scan wider
     // than the small-scan limit populates the cache instead of reading through.
     let cache = super::MetadataSegmentCache::new(Default::default());
@@ -39,7 +39,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         &store,
         Some(&cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load segments");
@@ -61,7 +61,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         &store,
         Some(&cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load fresh segments");
@@ -103,7 +103,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         &store,
         Some(&cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load fresh segments");
@@ -131,7 +131,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         &store,
         Some(&degenerate),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load segments against a degenerate budget");
@@ -154,7 +154,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     // Concurrent scans over one shared cache must not multiply fetches:
     // single-flight covers blocks racing before the first insert lands, and
     // population covers everything after.
@@ -165,7 +165,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
         &store,
         Some(&cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load solo segments");
@@ -185,7 +185,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
         &store,
         Some(&paired_cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load first segments");
@@ -193,7 +193,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
         &store,
         Some(&paired_cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load second segments");
@@ -241,14 +241,14 @@ async fn cached_manifest_carries_its_scan_order_runs() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create second checkpoint");
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
 
     let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
     let first = super::load_manifest_segments_for_inspection(
         &store,
         Some(&cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load first segments");
@@ -256,7 +256,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
         &store,
         Some(&cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load second segments");
@@ -301,15 +301,11 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
         .await
         .expect("write b");
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let segments = super::load_manifest_segments_for_inspection(
-        &store,
-        None,
-        &namespace_id,
-        &manifest_object_id,
-    )
-    .await
-    .expect("load segments");
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
+    let segments =
+        super::load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
+            .await
+            .expect("load segments");
 
     let docs_inode_id = InodeId(2);
     let lower_bound = format!("direntry-bind-{:020}-", docs_inode_id.0);
@@ -407,13 +403,13 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .await
         .expect("second checkpoint");
 
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
     let segments = super::load_manifest_segments_for_inspection(
         &store,
         Some(&cache),
         &namespace_id,
-        &manifest_object_id,
+        &manifest_number,
     )
     .await
     .expect("load segments");
@@ -478,7 +474,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     )
     .await
     .expect("write hello");
-    let manifest_object_id = {
+    let manifest_number = {
         checkpoint_then_reorganize(
             &store,
             &namespace_id,
@@ -486,21 +482,17 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
             MetadataLsmPolicy::default(),
         )
         .await;
-        current_manifest_object_id(&store, &namespace_id).await
+        current_manifest_number(&store, &namespace_id).await
     };
 
     // The cold-boot shape: a view with no shared cache attached. Repeating
     // a lookup must not re-fetch — the per-view memo is the only reuse this
     // configuration has, and without it a cold list degrades from one fetch
     // per block to one fetch per lookup.
-    let segments = super::load_manifest_segments_for_inspection(
-        &store,
-        None,
-        &namespace_id,
-        &manifest_object_id,
-    )
-    .await
-    .expect("load segments");
+    let segments =
+        super::load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
+            .await
+            .expect("load segments");
     store.reset();
     let key = "inode-00000000000000000001";
     assert!(segments
@@ -561,9 +553,9 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
             .await
             .expect("create checkpoint");
     }
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
             .await
             .expect("load segments");
     let direntry_descriptors: Vec<_> = segments
@@ -624,7 +616,10 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     // the inline copy is an accelerator, never an answer of its own.
     let mut stripped_payload = segments.manifest().payload().clone();
     stripped_payload.manifest_no = ManifestNo(stripped_payload.manifest_no.0 + 1);
-    stripped_payload.manifest_object_id = ManifestObjectId::generate(stripped_payload.manifest_no);
+    stripped_payload.manifest_no = stripped_payload
+        .manifest_no
+        .successor()
+        .expect("next number");
     for descriptor in stripped_payload
         .runs
         .iter_mut()
@@ -632,7 +627,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     {
         descriptor.filter_inline = None;
     }
-    let stripped_object_id = stripped_payload.manifest_object_id.clone();
+    let stripped_object_id = stripped_payload.manifest_no;
     let stripped = encode_namespace_manifest_json(stripped_payload)
         .expect("stripped manifest envelope")
         .into_envelope();
@@ -682,9 +677,9 @@ async fn corrupt_inline_filter_fails_the_lookup() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
             .await
             .expect("load segments");
     let descriptor = segments
@@ -753,9 +748,9 @@ async fn checkpointed_direntry_segment() -> (
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
             .await
             .expect("load segments");
     let mut descriptor = segments
@@ -1021,9 +1016,9 @@ async fn multi_block_direntry_segment() -> (
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
             .await
             .expect("load segments");
     let mut descriptor = segments

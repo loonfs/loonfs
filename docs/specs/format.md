@@ -69,7 +69,7 @@ A conforming object-store layer must provide the following behavior.
 | **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
 | **Full-object reads with identity metadata** | Mutable control-object readers must receive object bytes and the opaque compare token for those same bytes from one read operation, so one observation's payload cannot be paired with another observation's compare token. |
 | **Strong consistency** | A successful put/delete operation must become authoritative immediately after it succeeds. |
-| **Prefix enumeration** | Manifest discovery, WAL segment discovery for reclamation, and general namespace inspection need a reliable way to enumerate objects by prefix. Listings return keys in ascending lexicographic order; the conformance probes assert this. |
+| **Prefix enumeration** | WAL segment discovery for reclamation and general namespace inspection need a reliable way to enumerate objects by prefix. Listings return keys in ascending lexicographic order; the conformance probes assert this. |
 | **Deterministic key scoping** | Providers must not allow objects outside the configured namespace or tenant prefix to leak into operations. |
 | **Consistent error signaling for failed preconditions** | Higher layers need one generic way to detect stale writes and retry or fail safely. |
 
@@ -93,29 +93,27 @@ The required durable object families and standard key patterns are:
 | --- | --- | --- | --- |
 | **WAL head** | Mutable | Defines the namespace's durable identity and current state: content store, fork provenance, visible sequence, writer epoch, writer metadata, replay hints, visible WAL tip, and deleted retirement deadline. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/wal_{start_seq:020}-{suffix}.wal.zst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user, fork target, or snapshot). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
 | **Compaction staging** | Immutable | Holds segments written by a streaming compaction before publication. The descriptor stores the job id used to derive this key. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
 | **Compaction leases** | Mutable group slot | An `active` lease owns a running job's output. `completed` and `reaping` jobs release the group. Slots are replaced by CAS and never deleted. | `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json` |
 | **Compaction output protection** | Mutable deadline | Before each publication attempt, a job records its lease deadline beside the sealed output. This record remains until the output prefix is empty. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/protection.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
-| **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
+| **Hint** | Mutable | Starts forward discovery of numbered manifests; never authority. | `namespaces/{namespace_id}/hint.json` |
 | **GC run** | Mutable CAS | Coordinates marking and sweeping across calls and hosts; one active run per namespace. | `namespaces/{namespace_id}/gc/run.json` |
 | **GC mark pages** | Immutable | Sorted, checksummed reference tables and intermediate merge output. | `namespaces/{namespace_id}/gc/runs/{gc_run_id}/tables/{table_id}/{page_index:020}.json` |
-| **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content store descriptors** | Immutable | Identify the content domain held by a backend. | `content-stores/{content_store_id}/store.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{owner_namespace_id}/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
 `.sst.zst` identifies the block encoding: sorted rows with each block compressed using zstd. Metadata and grep segments use this encoding. `.wal.zst` identifies the WAL encoding.
 
-The WAL subtree has one mutable head, one optional mutable floor, and the
+The WAL subtree has one mutable head and the
 immutable segment collection:
 
 ```text
 namespaces/{namespace_id}/wal/
 ├── head.json
-├── floor.json
 └── segments/{segment_id}.wal.zst
 ```
 
@@ -145,7 +143,7 @@ the namespaces whose heads name it.
 WAL segment names sort by history position (section 1.3); recovery still
 follows `head.visible_wal_tip` and the predecessor links inside verified WAL
 envelopes. Listing order is an inspection and reclamation convenience, never
-recovery authority. `wal/head.json` and `wal/floor.json` live outside the
+recovery authority. `wal/head.json` lives outside the
 `wal/segments/` listing prefix, so a reclamation listing of segments yields
 only segment keys.
 
@@ -158,19 +156,15 @@ key parser and are never core-GC candidates.
 
 The namespace tree's lifecycle can be read off its grammar:
 
-- **`{subsystem}/{role}.json` objects are mutable singletons with one job**:
-  compare-and-swap pointers and proofs (`wal/head.json`, `wal/floor.json`,
-  and `metadata/root.json`) that are never swept. If a
-  singleton cannot be explained in one sentence, it is too broad.
-- **Collections are never authoritative via enumeration** (`wal/segments/`,
-  `metadata/manifests/`, `metadata/segments/`, `uploads/`,
-  `content-stores/.../objects/`). A record in a collection matters only when a
-  pointer, chain link, or checkpoint reaches it — except to GC, which
-  lists collections to find garbage and roots. WAL segment and namespace
-  manifest ids are a family prefix (`wal_`, `man_`), then a 20-digit
-  position, then a 16-character lowercase hex suffix, so listings stay
-  ordered while concurrent writers avoid fighting for one immutable object
-  name.
+- **The head and hint are namespace singletons.** `wal/head.json` uses
+  compare-and-swap. `hint.json` uses plain PUT after installation. Neither is swept.
+- **Manifest numbers are names.** `manifests/{manifest_no:020}.json` holds
+  exactly one object per number. The highest number is current. Discovery
+  probes forward from the hint with GETs and never lists the collection.
+- **Other collections are not authoritative via enumeration.** GC lists
+  `wal/segments/`, `manifests/`, `metadata/segments/`, and checkpoint records.
+  WAL ids use `wal_`, a 20-digit start sequence, and a 16-character lowercase
+  hex suffix. Metadata segment ids remain generated identities.
 - **Paths express ownership, not authority.** Envelopes and payloads still
   validate namespace id, object id, family, checksum, and sequence fields;
   the same fact is never encoded twice (the row family lives in the manifest
@@ -182,14 +176,13 @@ The namespace tree's lifecycle can be read off its grammar:
   the tombstone that retires the namespace id.
 - **Creation and forking install the head with one conditional write.** Both
   build a complete active head in memory and install it with create-if-absent.
-  Nothing under the new namespace's prefix is written before that write, so
-  there is no partial namespace to classify, complete, or reap. Creation
-  first writes the content domain descriptor outside that prefix. A create
+  Both install `hint.json` with number zero before the head. Creation also
+  writes the content domain descriptor before the head. A create
   or fork that loses the conditional write answers `namespace_exists`, or `namespace_deleted` against a
   tombstone, unless the head it finds is its own earlier attempt, which
   succeeds idempotently (section 3.9.3).
 
-Names are never authority anywhere — recovery follows the head and its
+Manifest numbers select the current file set. WAL recovery follows the head and its
 references.
 
 The required invariants of this layout are:
@@ -201,8 +194,8 @@ The required invariants of this layout are:
 > **Fencing authority is writer epoch plus CAS.** Wall-clock time never
 > gates commit validity, and fenced sessions never reacquire on their own.
 
-> **Nothing correct depends on listing.** GC and floor advancement alone
-> list — under a safety window, with delete-time re-verification, and with
+> **Nothing correct depends on listing.** GC alone
+> lists — under a safety window, with delete-time re-verification, and with
 > retention winning every ambiguous race.
 
 > **Throughput is group commit; deadlines are local monotonic budgets a
@@ -349,18 +342,23 @@ store content-store ids or object-store paths.
 
 ### 1.7 Mutable control-object rules
 
-Small mutable objects such as the namespace head must use compare-and-swap
-semantics. These objects must remain small enough that guarded rewrite is
-practical.
+The namespace head and mutable lifecycle records use compare-and-swap.
+The discovery hint uses plain PUT after installation.
 
-Nine control-object kinds are registered: `wal_head`, `wal_floor`,
-`metadata_root`, `checkpoint_record`, `upload_session`, `compaction_lease`,
-`compaction_output_protection`, `gc_run`, and `content_store`. A control-object
-envelope carrying any other kind string is rejected, not skipped.
+Eight control-object kinds are registered: `wal_head`, `hint`,
+`checkpoint_record`, `upload_session`, `compaction_lease`,
+`compaction_output_protection`, `gc_run`, and `content_store`. Other kind
+strings are rejected.
 
-The WAL floor and the metadata root are the only control objects that carry
-`updated_at_ms`. That field records when the object's last rewrite succeeded,
-and nothing reads it for ordering or validity.
+`hint.json` has kind `hint`, version 1, and a strict payload
+`{ namespace_id, manifest_no }`. Creation and fork install it with
+put-if-absent before the head. Number zero means no manifest yet. Each
+successful manifest publication writes its number to the hint with a plain
+PUT. The last write wins. The hint never selects the current version.
+Readers GET the hinted manifest, then successive numbers until a GET returns
+404, bounded by the manifest number write stop. A lagging hint is normal.
+A missing hint is namespace corruption, as is a missing head in an installed
+namespace. Discovery never uses LIST.
 
 A compaction lease carries `expires_at_ms`. The job writes its current time
 plus `METADATA_COMPACTION_LEASE_EXPIRY_MS` when it creates or refreshes the
@@ -379,15 +377,14 @@ A durable object that references a namespace manifest stores this shape under `m
 {
   "owner_namespace_id": "demo",
   "manifest_no": 2,
-  "manifest_object_id": "man_00000000000000000002-0123456789abcdef",
   "manifest_head_seq": 17,
   "manifest_payload_checksum": "sha256:<64 lowercase hex>"
 }
 ```
 
-`owner_namespace_id` identifies the namespace that stores the manifest and its segments. `manifest_no` is its logical position, `manifest_object_id` is its immutable object id, and `manifest_head_seq` is the greatest namespace sequence it contains. `manifest_payload_checksum` must match the referenced envelope. Metadata roots, checkpoint records, and fork bases all use this shape, which rejects unknown fields.
+`owner_namespace_id` identifies the namespace that stores the manifest and its segments. `manifest_no` is its number and determines its object key, and `manifest_head_seq` is the greatest namespace sequence it contains. `manifest_payload_checksum` must match the referenced envelope. Checkpoint records and fork bases use this shape, which rejects unknown fields.
 
-A metadata root or checkpoint record must reference a manifest owned by its own namespace. A fork basis must reference a different namespace. Violations return `namespace_corrupt`.
+A checkpoint record must reference a manifest owned by its own namespace. A fork basis must reference a different namespace. Violations return `namespace_corrupt`.
 
 Grep manifests have no logical position or head sequence, so grep root pointers use the smaller shape defined in section 4.2.2.
 
@@ -908,7 +905,7 @@ the target's owner prefix. Inherited references keep their original owners.
 There is no content domain rotation at a fork point. The fork point is the
 source namespace's current head. Every attempt creates its own leased,
 verified fork-owned source checkpoint at that head, then installs the complete
-target head with one create-if-absent. The target writes no manifest, no root, and no floor: the
+target head with one create-if-absent. The target writes a number-zero hint and no manifest: the
 head's `fork_basis` names the source manifest the target starts from, and the
 fork-owned checkpoint record is what keeps that manifest and its segments alive
 for as long as the target or a nested descendant may still need them.
@@ -986,9 +983,8 @@ content store. Inode identity does not cross the namespace boundary.
 
 Readers reconstruct authoritative state from:
 
-1. the current head and the metadata root, fetched concurrently;
-2. the materialized metadata basis: the namespace manifest named by
-   `metadata/root.json`, or, when that pointer is absent, the basis the head
+1. the current head and the highest numbered manifest, discovered concurrently;
+2. the materialized metadata basis: that manifest, or, before the first publication, the basis the head
    itself resolves (section 2.9.1); and
 3. the visible WAL segment chain after that basis through `head.seq`,
    replayed as logical commits in ascending `seq` order.
@@ -1065,23 +1061,19 @@ predecessor hints. For example:
 Chain links remain the history authority. The tip plus hints may prefetch or
 count the bounded tail; hints never become GC roots by themselves.
 
-`wal/floor.json` is the symmetrical pair to the head — the earliest retained
-commit boundary next to the latest visible one. It records `floor_seq` and an
-update stamp. It is updated only by monotonic compare-and-swap on its
-own etag by floor advancement, which is a GC-family operation: it never
-touches the WAL head, so the head changes only when commits land. A missing,
-stale, or unverifiable floor means "retain more history", never less, and the
-floor never affects live commit visibility.
+The current manifest's `retention_floor_seq` is the namespace's retention
+floor. Each publication carries its predecessor's floor forward and never
+lowers it. Without an owned manifest, a created namespace retains from zero
+and a fork retains from `fork_basis.manifest.manifest_head_seq`.
 
-Create and fork do not write a floor. Without one, a created namespace retains history from sequence 0. A fork retains history from `fork_basis.manifest.manifest_head_seq`, the first sequence in the target's history. The first retention-floor advance creates the floor object.
+The highest numbered manifest is the read and recovery basis. Its `head_seq`
+never decreases. A same-sequence successor may reorganize runs or advance
+retention. If the discovered manifest is ahead of the observed head, the
+reader reloads the head to reconcile the two reads.
 
-`metadata/root.json` is the read and recovery pointer. It stores `namespace_id`, one `manifest` reference (section 1.7), and `updated_at_ms`. Updates use compare-and-swap and cannot decrease `manifest.manifest_head_seq`. An update at the same sequence may select a different manifest after compaction. An update at a lower sequence has no effect. The root does not define live visibility; a stale root only requires more WAL replay. If a reader sees `root.manifest.manifest_head_seq > head.seq`, it reloads the head because the two reads may have occurred on opposite sides of a commit.
-
-Create and fork write no root either. `metadata/root.json` is created by the
-namespace's first flush or reorganization, which is the first moment there is
-a materialized file set worth pointing at. Until then the head resolves the
-basis on its own. Once the root exists it is the basis, and `fork_basis`
-becomes provenance only.
+Create and fork install a hint with number zero. The first flush publishes
+manifest number one. Until then the head resolves the basis. An owned
+manifest takes precedence over the head's `fork_basis` for reads.
 
 A checkpoint pins one namespace manifest version in a record under `checkpoints/`. It does not affect current visibility. The record stores a `manifest` reference (section 1.7), the `head_commit_id` at that manifest, and tagged `owner` and `status` fields. A `user` owner has a name and optional `expires_at_ms`. A `fork` owner has the target namespace and a required `expires_at_ms`. A `snapshot` owner has a name and a required `expires_at_ms`. The record has no top-level expiry field.
 
@@ -1156,27 +1148,27 @@ Each commit stores `commit_id`, `semantic_commit_fingerprint`, `committed_by`, `
 #### 2.9.1 Resolving the metadata basis
 
 The basis is the materialized starting point every read and every flush
-builds on. A namespace publishes `metadata/root.json` at its first flush, not
-at creation, so the basis is resolved from the head plus that root when the
-root exists. There are exactly three cases, and none of them is a fallback
+builds on. A namespace publishes its first numbered manifest at its first flush, not
+at creation. The basis is resolved from the head and the owned manifest
+when one exists. There are exactly three cases, and none of them is a fallback
 for another.
 
-1. **`metadata/root.json` is present: the basis is the manifest it names**,
+1. **An owned manifest exists: the basis is the highest numbered manifest, found through the hint**,
    under this namespace's own prefix. This is the steady state, and the two
    rules below no longer run.
-2. **The root is absent and the head carries no `fork_basis`: the basis is
+2. **No owned manifest exists and the head carries no `fork_basis`: the basis is
    the built-in genesis state.** It is exactly one root-inode row, at
    sequence zero. No manifest object is loaded, and none was ever written —
-   create publishes a head and nothing else, so a created namespace with no
+   create installs a head and a number-zero hint, so a created namespace with no
    manifest is the expected shape rather than a missing object.
-3. **The root is absent and the head carries a `fork_basis`: the basis is the
+3. **No owned manifest exists and the head carries a `fork_basis`: the basis is the
    source namespace's manifest.** The head names it:
-   `fork_basis.manifest.manifest_object_id`, read under
+   `fork_basis.manifest.manifest_no`, read under
    `fork_basis.manifest.owner_namespace_id`'s prefix.
 
 Case 3 is the only cross-namespace read in the format, and the head is the
 only thing that may authorize one. Call this rule the **head-authorized
-foreign basis**: no manifest, root, checkpoint, or segment may send a reader
+foreign basis**: no manifest, hint, checkpoint, or segment may send a reader
 into another namespace's prefix on its own say-so, because only the head is
 carried forward verbatim by every publication and so only the head can be
 trusted to still mean what it said when the fork happened.
@@ -1368,13 +1360,11 @@ The reader builds an in-memory metadata state from two kinds of durable
 object:
 
 1. Read the namespace **head** object (the namespace's identity, current
-   `seq`, and visible WAL tip) and `metadata/root.json` (the manifest
-   pointer), concurrently. The head also supplies the `content_store_id`
+   `seq`, and visible WAL tip) and the highest numbered manifest through the hint, concurrently. The head also supplies the `content_store_id`
    every later step needs.
-2. Load and verify the manifest the root references; its payload checksum
-   must match the root's `manifest.manifest_payload_checksum`. The manifest
+2. Load and verify the current manifest. The manifest
    references one or more materialized metadata runs through its `head_seq`.
-   When the root is absent, resolve the basis from the head instead
+   Before the first owned manifest, resolve the basis from the head
    (section 2.9.1): the genesis state, or the head-authorized source
    manifest.
 3. Use the visible WAL tip named by the head to identify the visible segment
@@ -1387,8 +1377,7 @@ The result is a metadata view pinned to one `seq`.
 For latest path `stat` and directory `list`, an implementation may avoid
 hydrating a complete metadata state. The reader may query verified metadata run segments and the visible WAL tail
 overlay directly, provided it applies the same visibility rules and treats
-missing or corrupt manifest/WAL objects as hard errors. An absent
-`metadata/root.json` is not one of those errors: it resolves through the head
+missing or corrupt manifest/WAL objects as hard errors. Before the first manifest publication, the basis resolves through the head
 under section 2.9.1 like any other basis load.
 
 #### 3.2.2 Visibility rules
@@ -1747,7 +1736,7 @@ as a permanent key because the id may be reused after its receipt is removed.
 
 The retention floor may advance only after the system has enough verified
 material to keep replay safe at or after that point: advancement derives its
-target from the manifest `metadata/root.json` references and verifies that
+target from the current manifest and verifies that
 every metadata segment that basis references still exists before the floor
 moves. The probe is advisory — the atomic guarantee is the garbage
 collector's obligation to never remove reachable objects ("Garbage
@@ -1755,23 +1744,28 @@ collection") — but a segment that already disappeared must block the floor
 while replay can still rebuild the lost state. Corruption discovered after
 advancement is caught by read-path checksum validation.
 
-A namespace with no `metadata/root.json` has nothing to derive a target from,
+A namespace with no owned manifest has nothing to derive a target from,
 so its floor never advances; it retains from its birth sequence until a flush
-publishes a root (section 2.9).
+publishes a manifest (section 2.9).
 
-Advancement updates only `wal/floor.json` with compare-and-swap, creating the object on the first advance. The update stores `floor_seq` and never lowers the floor. `floor_seq <= metadata/root.manifest.manifest_head_seq` must hold. Being below the floor makes an object a deletion candidate, but deletion also requires verification at delete time. If the floor passes an active checkpoint's basis, retention wins ("Garbage collection").
+Advancement publishes the next manifest number with the same runs, head
+summary, and allocators. Only its number and `retention_floor_seq` differ.
+The new floor is the verified predecessor's `head_seq` and never decreases.
+Being below the floor makes an object a deletion candidate; deletion also
+requires the GC checks. If the floor passes an active checkpoint's basis,
+retention wins (section 6.4).
 
 A WAL flush materializes the current durable namespace
 file-set version: if there is no manifest for the current head, the
 implementation writes one absorbing the visible WAL tail and publishes it by
-monotonic CAS on `metadata/root.json` — never by touching the WAL head, so
+put-if-absent of the next manifest number. The WAL head stays unchanged, so
 head watchers observe only commits. The flush is the latest-state
 maintenance operation and creates no checkpoint record; a superseded manifest
 becomes a garbage-collection candidate once nothing pins it.
 
 Every metadata publication — WAL flush and reorganization alike —
 self-enforces the metadata publication budget, measured from before its
-first segment object is written until its root compare-and-swap is initiated.
+first segment object is written until its manifest put-if-absent is initiated.
 A publication that exceeds the budget aborts without publishing: its
 immutable outputs stay unreachable and are reclaimed by garbage collection
 after the grace window. This bound (with the WAL publish budget for
@@ -1784,7 +1778,7 @@ owner. It first flushes the WAL tail as above, then writes
 `checkpoints/{id}.json` under a freshly generated id and verifies the basis
 after the write, releasing the record on failure and retrying under a new id.
 A live manifest does not need to be checkpoint-pinned; checkpoint records
-explain why a manifest version must be retained after the root moves on.
+explain why a manifest version must be retained after a successor is published.
 
 ### 3.9 Namespace creation and forks
 
@@ -1815,15 +1809,13 @@ absence. Only a missing head permits creation to proceed.
 Build the complete active genesis head: sequence 0, the
 genesis commit id, writer epoch 0, the next inode id after the root inode,
 a freshly minted content store id, and no fork basis. Write the descriptor
-for that domain with create-if-absent (section 2.4.1), then install the head
+for that domain and the number-zero hint with create-if-absent (section 2.4.1), then install the head
 with create-if-absent. The initial read does not reserve the namespace id;
 the conditional head write still decides races and retains the recovery
 rules in section 3.9.3.
 
-No manifest, root, or floor is prepared before the head write, and none is
-written after it: the genesis basis is built in (section 2.9.1). The root
-and floor objects appear when the namespace's first flush and first
-retention advance need them.
+The genesis basis is built in (section 2.9.1). The first flush publishes the
+first manifest.
 
 #### 3.9.2 Forking a namespace
 
@@ -1856,7 +1848,7 @@ The renewal races with garbage collection on the same record. If GC releases the
 
 `FORK_CHECKPOINT_LEASE_MS` is two GC grace windows (section 6, rule 1): one for checkpoint creation and one for target installation.
 
-The fork does not copy content blobs or source metadata segments, and it does not write a target manifest, root, or floor. The target starts its own WAL one sequence above `fork_basis.manifest.manifest_head_seq`. New WAL segments, checkpoints, and metadata segments are stored under the target namespace. Until the first target flush creates a root, readers resolve the basis from the head (section 2.9.1).
+The fork does not copy content blobs or source metadata segments, and it writes a number-zero target hint before installing the head. It writes no target manifest. The target starts its own WAL one sequence above `fork_basis.manifest.manifest_head_seq`. New WAL segments, checkpoints, and metadata segments are stored under the target namespace. Until the first target flush publishes a manifest, readers resolve the basis from the head (section 2.9.1).
 
 #### 3.9.3 Conflicting installs
 
@@ -2002,9 +1994,8 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Grep manifest | `grep_manifest` | JSON, uncompressed | 1 |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the grep manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 4 |
+| Hint | `hint` | JSON, uncompressed | 1 |
 | WAL head | `wal_head` | JSON, uncompressed | 2 |
-| WAL floor | `wal_floor` | JSON, uncompressed | 1 |
-| Metadata root | `metadata_root` | JSON, uncompressed | 1 |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
 | Compaction lease | `compaction_lease` | JSON, uncompressed | 3 |
@@ -2159,8 +2150,8 @@ stored payload fragment before decoding, reject unknown versions and kind
 mismatches without fallback, and validate namespace, status, fold,
 run-allocation, and segment invariants at every boundary. A manifest
 load additionally requires the loaded envelope's `payload_checksum` to equal
-what the pointer promised, which is the same binding a metadata root holds
-over its namespace manifest. Both root pointers and immutable manifests reject
+what the pointer promised. Checkpoint and fork references bind namespace
+manifests by the same checksum rule. Both root pointers and immutable manifests reject
 unknown envelope and payload fields, including nested state and descriptors.
 
 The nested `index` object holds what every phase has — the in-progress
@@ -2327,6 +2318,20 @@ never creates a second source of truth for the filesystem.
 
 ### 6.1 Manifest publication and checkpoint verification
 
+Publication writes `manifests/{predecessor_no + 1:020}.json` with
+put-if-absent. Exactly one object exists per number. A legal successor has
+the predecessor's number plus one, a head sequence at least as high, and a
+retention floor at least as high. A lost put-if-absent loads the winner.
+If it covers the candidate's head sequence and number, the attempt is
+superseded. Otherwise the publisher rebuilds against the new predecessor
+and retries at the next number. Flush, bounded reorganization, streaming
+compaction, and retention use this path. A successful publication refreshes
+the hint with a plain PUT within its publication budget. An expired attempt
+leaves the hint unchanged. GC preserves the numbered manifest chain from
+the hint through the current number so discovery can cross a lagging hint.
+These intermediate manifests do not protect their runs. A later publication
+that advances the hint makes the older, unpinned numbers eligible for deletion.
+
 A namespace manifest records one namespace file-set version (the section 1.2
 table lists its contents).
 
@@ -2445,11 +2450,11 @@ Invariants:
   or checkpoint record references them.
 
 Checkpoint records are standalone files under `checkpoints/`. Maintenance
-never creates one: automatic root advancement leaves superseded manifests and
+never creates one: automatic manifest publication leaves superseded manifests and
 folded-away segments unpinned, and garbage collection reaps them under the
 grace-window and delete-time re-verification rules ("Garbage collection").
 A checkpoint record is a deliberate pin — fork sources and explicit maintenance
-checkpoints — and roots its basis for as long as the record exists.
+checkpoints — and roots its basis while the record is active and its owner still stands.
 
 ### 6.3 Retention management
 
@@ -2461,7 +2466,9 @@ retained in full.
 A retention floor may advance only when the system has enough verified
 material to support readers from the new floor forward, and it never
 advances implicitly: the default posture retains everything, and the floor
-moves only when an operator requests an explicit retention advance.
+moves only when an operator requests an explicit retention advance. The
+current manifest stores the floor. Advancement verifies its segments and
+publishes the next number with the same runs and head sequence.
 
 ### 6.4 Garbage collection
 
@@ -2483,8 +2490,8 @@ version gates.
 There is no mixed-protocol collection or compatibility fallback.
 
 GC uses resumable listing mark-and-sweep. Its inputs are `wal/head.json`,
-`wal/floor.json`, `metadata/root.json`, the seven point-read compaction lease
-keys, and the `metadata/manifests/`, `metadata/segments/`,
+`hint.json`, the seven point-read compaction lease
+keys, and the `manifests/`, `metadata/segments/`,
 `metadata/compactions/`, `checkpoints/`, and `wal/segments/` collections. A live manifest roots every object key its
 `runs` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
@@ -2509,7 +2516,7 @@ publishing CAS) — under these rules:
 
    The constants live in one place (`loonfs-core`'s `limits` module; the
    provider bounds in `loonfs-objectstore`), every publication self-enforces
-   its budget by refusing to initiate its root compare-and-swap once the
+   its budget by refusing to initiate its manifest put-if-absent once the
    budget is spent, and provider operations consume one deadline across
    retries. Multipart transfers of large immutable payloads carry no
    whole-operation deadline; the floor's provider terms remain the
@@ -2574,38 +2581,19 @@ publishing CAS) — under these rules:
    the stated provider and monotonic publication bounds hold; they do not
    cover an unbounded pause between a budget check and its write.
 
-   An object's provider timestamp says when it appeared, not when it stopped
-   being referenced, and those differ for every object a publication once
-   named. `T` therefore also runs from the unreferencing, which the
-   **reference manifest generation** dates. A lost root compare-and-swap can
-   leave multiple immutable manifest candidates with one `manifest_no`, and
-   an older root no longer records which candidate won. Call R the newest
-   manifest generation under the namespace's own prefix whose surviving
-   candidates all have provider timestamps at least `T` old. R roots every
-   candidate key in that generation, the union of their `segments` and
-   content references, and every WAL segment above the lowest `head_seq` any
-   candidate carries. The published candidate is therefore included even
-   when its same-generation siblings are abandoned. An unreferenced object
-   is deleted only when the current root set, R, and the object's own age all
-   agree. A
-   namespace that has published no manifest needs no R: nothing has ever
-   stopped referencing anything under it, and its floor cannot have advanced
-   past its birth sequence without a root. A namespace whose manifests are
-   all younger than `T` has no R available, and the pass then deletes no aged
-   object at all rather than deleting against evidence it does not have. A
-   terminally deleted namespace needs no R either: no read can reach a
-   tombstone. R protects itself, so a pass never sweeps away the evidence the
-   next pass needs.
-2. **Floor is necessary, not sufficient.** Being below `wal/floor.json` only
+   A manifest below the reserved current number is a deletion candidate when
+   no active checkpoint pins it and its provider timestamp is at least `T`
+   old. The current manifest and every pinned manifest protect their runs
+   through the mark table.
+2. **Floor is necessary, not sufficient.** Being below the current manifest's retention floor only
    nominates an object for deletion.
 3. **One reserved run, one fixed clock.** Collectors reserve `gc/run.json`
-   by create-if-absent or CAS of a completed run **before** reading the root,
-   head, and floor snapshot. Every collector joins this run. Its
+   by create-if-absent or CAS of a completed run **before** reading the head and discovering the current manifest
+   by forward GETs from the hint. Every collector joins this run. Its
    `started_at_ms` and grace policy remain fixed through all pauses and
    host changes. No candidate is deleted until its complete reference index
-   has been sealed. Every readable checkpoint record in a live namespace
-   protects its basis, including released records; only the later sweep can
-   remove those records. Release is terminal and IDs are never reused.
+   has been sealed. Every active checkpoint whose owner still stands protects its basis by
+   manifest number. Released records protect no manifest. Release is terminal and IDs are never reused.
    Consequently a new valid pin transfers references from the captured root
    or an already protected pin. A new immutable publication is protected by
    the fixed cutoff and publication budgets; streaming compaction uses the
@@ -2615,29 +2603,18 @@ publishing CAS) — under these rules:
    `now` makes paused and resumed passes consistent; it does not remove
    host-to-provider or host-to-host skew. The starting host's clock error
    remains part of every comparison that uses that run's instant.
-4. Roots: `metadata/root.json`; the reference manifest R (rule 1); active
-   checkpoint records whose owner still
-   stands — a user or snapshot pin until its expiry passes, a fork pin until
-   nothing can read through it any more (rule 10); and the visible chain from
-   `wal/head.json.visible_wal_tip` down to the floor. A namespace with no
-   root of its own has no manifest or segment to protect under its own prefix;
-   its basis, if it has a foreign one, is protected on the source side by
-   the fork-owned checkpoint record. On a terminally
-   deleted namespace the root set shrinks to fork-owned records protecting
-   a target that is active or not past retirement grace (and their bases): reads
-   are impossible and deletion is terminal, so user and snapshot pins, the final replay chain, and the
-   last manifest protect nothing and age out. The head survives as the
-   id-retiring tombstone, together with the root and floor objects if the
-   namespace ever wrote them. Completed GC progress also stays in its
-   singleton slot so a paused collector cannot replace a newer run.
-5. A root the pass cannot resolve causes retention, not deletion: a root
-   manifest that is absent, or that the store will not hand over,
-   suppresses manifest and segment deletion for the whole pass. A root that
-   is corrupt is a different case, because retaining it would suppress
-   deletion on every later pass as well and nothing would ever say why. An
-   object under `checkpoints/` that does not decode as a checkpoint record,
-   and a referenced manifest that reads but fails validation, both fail the
-   pass and are reported with the object key.
+4. Manifest roots are the highest numbered manifest verified at reservation
+   and every manifest pinned by an active checkpoint whose owner still
+   stands. A namespace with no owned manifest uses its genesis or fork basis;
+   a fork-owned checkpoint on the source protects the foreign basis. On a
+   deleted namespace, only active pins protect manifests. The visible WAL
+   chain down to the manifest floor also remains rooted on live namespaces.
+   The head, hint, and completed GC run remain in their singleton slots.
+5. A manifest that an active checkpoint pins but cannot be loaded suppresses
+   manifest and segment deletion for the pass. An invalid manifest or
+   checkpoint record fails the pass with its object key. A missing hint
+   fails closed. Manifests at or above the reserved hint number cannot
+   be swept on a live namespace; discovery needs this contiguous chain.
 6. Only validated manifests are trusted to protect data.
 7. WAL needed to replay from the chosen metadata root to the head is never
    deleted.
@@ -2656,7 +2633,7 @@ publishing CAS) — under these rules:
 10. **Fork checkpoints require an exact reference.** Apply the target-head
     table in section 2.6. A deleted target naming this record retains it until
     retirement is established and its deadline is at or before the fixed run
-    clock. GC never reads the target's metadata root to classify a fork record.
+    clock. GC never reads the target's current manifest to classify a fork record.
     An unreadable target head retains; an undecodable head fails as corruption.
     An active target naming the same source and checkpoint id but a different
     manifest is corruption. An absent target retains until its lease expires;
@@ -2783,12 +2760,12 @@ publishing CAS) — under these rules:
    `reaping` fences that job permanently. The group slot can be replaced by
    a new job with a new identity; a replaced job never regains ownership.
 
-   Before each root publication attempt, after refreshing the group lease,
+   Before each manifest publication attempt, after refreshing the group lease,
    the job confirms an output-protection record at
    `metadata/compactions/{job_id}/protection.json`. It contains `namespace_id`,
    `job_id`, and `expires_at_ms`, and its deadline only advances by CAS. No
    output writes follow the first protection record. Confirming protection
-   before the root CAS also covers a crash immediately after publication.
+   before the manifest put-if-absent also covers a crash immediately after publication.
 
    After the final publication attempt, the job changes its group slot to
    `completed` by CAS, immediately admitting the next job. A failed completion
@@ -2823,11 +2800,11 @@ publishing CAS) — under these rules:
    `METADATA_COMPACTION_LEASE_MISSED_REFRESHES` times the refresh interval,
    and it must itself cover one provider operation plus
    `GC_MIN_GRACE_WINDOW_MS`. The refresh write precedes the finalization
-   budget; both that write and the final root compare-and-swap consume a
+   budget; both that write and the final manifest put-if-absent consume a
    provider bound. Rule 1 derives the clock-error allowance for this check.
    That inequality is also what completes the fence — a job that refreshed
    at the top of an attempt cannot have its prefix claimed before that
-   attempt's root compare-and-swap.
+   attempt's manifest put-if-absent.
 
    Group slots are never deleted by GC. They stay available for replacement
    by CAS, which prevents a paused collector from deleting a newer job's
@@ -2837,7 +2814,7 @@ publishing CAS) — under these rules:
    other. A lease that does not decode, or whose namespace, group, job identity, or terminal status disagrees
    with its location, fails the pass and is reported: nothing else reads the object,
    so believing a corrupt one would keep its named job's output alive forever
-   and nothing would ever say why. Every other rule — the reference anchor,
+   and nothing would ever say why. Every other rule — the manifest roots,
    the complete run index, degraded roots — applies here exactly as it
    applies to `metadata/segments/`.
 
@@ -2930,9 +2907,7 @@ The phases are:
 - `starting`: reservation exists; the control snapshot has not been captured.
 - `marking`: the fixed root summary, source cursor, retained WAL pointer and
   floor, and a sorted mark index. Source scans visit the owned root,
-  checkpoints, anchor-generation discovery, that generation's candidates,
-  and retained WAL. A generation uses inclusive first/last keys rather than
-  a growing list of candidates.
+  active checkpoints by manifest number, and retained WAL.
 - `revisions`: the sealed object table, one entry/block position, and a
   separate content index. Each immutable revision segment is read once per
   run, one validated data block at a time. Shared descriptors use the

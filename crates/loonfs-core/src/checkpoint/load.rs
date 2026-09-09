@@ -19,7 +19,7 @@ use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use loonfs_api::wire::control::{HeadState, ManifestRef};
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, NamespaceManifestEnvelope};
-use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -63,12 +63,6 @@ pub(crate) fn ensure_manifest_reference_matches(
             reference.manifest_no.to_string(),
             payload.manifest_no.to_string(),
         ))
-    } else if reference.manifest_object_id != payload.manifest_object_id {
-        Some((
-            "manifest_object_id",
-            reference.manifest_object_id.to_string(),
-            payload.manifest_object_id.to_string(),
-        ))
     } else if reference.manifest_head_seq != payload.head_seq {
         Some((
             "manifest_head_seq",
@@ -89,7 +83,7 @@ pub(crate) fn ensure_manifest_reference_matches(
     };
     Err(CoreError::NamespaceCorrupt(format!(
         "{reference_name} records manifest `{}` field `{field}` as `{referenced}`, but the manifest carries `{actual}`",
-        reference.manifest_object_id,
+        reference.manifest_no,
     )))
 }
 
@@ -158,19 +152,14 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
 pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_object_id: &ManifestObjectId,
+    manifest_no: &ManifestNo,
 ) -> Result<NamespaceManifestEnvelope, ManifestLoadError> {
-    let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
-    load_namespace_manifest_envelope_if_present(
-        store,
-        namespace_id,
-        manifest_object_id,
-        &manifest_key,
-    )
-    .await?
-    .ok_or(ManifestLoadError::MissingManifest {
-        object_key: manifest_key,
-    })
+    let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
+    load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_no, &manifest_key)
+        .await?
+        .ok_or(ManifestLoadError::MissingManifest {
+            object_key: manifest_key,
+        })
 }
 
 /// Loads a durable manifest reference and verifies every field before exposing its segments.
@@ -183,7 +172,7 @@ pub(crate) async fn load_manifest_segments<'a, S: ObjectStore + ?Sized>(
         store,
         segment_cache,
         &reference.owner_namespace_id,
-        &reference.manifest_object_id,
+        &reference.manifest_no,
     )
     .await
     .map_err(|error| {
@@ -207,9 +196,9 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    manifest_object_id: &ManifestObjectId,
+    manifest_no: &ManifestNo,
 ) -> Result<VerifiedMetadataSegments<'a, S>, ManifestLoadError> {
-    let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
+    let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
     // Manifests are immutable per object key, so the decoded and validated
     // envelope is cacheable forever under that key.
     let fetch = || async {
@@ -236,13 +225,7 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
                 message: err.to_string(),
             }
         })?;
-        validate_namespace_manifest(
-            namespace_id,
-            manifest.payload().manifest_no,
-            manifest_object_id,
-            &manifest_key,
-            &manifest,
-        )?;
+        validate_namespace_manifest(namespace_id, *manifest_no, &manifest_key, &manifest)?;
         validate_manifest(&manifest_key, manifest.payload())?;
         let scan_runs = Arc::new(runs_in_reorganization_order(manifest.payload()));
         Ok(DecodedMetadataSegmentBlock::Manifest {
@@ -299,7 +282,7 @@ pub(crate) fn head_from_manifest(
 pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_object_id: &ManifestObjectId,
+    manifest_no: &ManifestNo,
     manifest_key: &str,
 ) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
     let Some(manifest_bytes) = store
@@ -317,18 +300,22 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
     else {
         return Ok(None);
     };
-    let manifest = decode_namespace_manifest_json(&manifest_bytes).map_err(|err| {
+    decode_manifest_at(namespace_id, *manifest_no, manifest_key, &manifest_bytes).map(Some)
+}
+
+pub(crate) fn decode_manifest_at(
+    namespace_id: &NamespaceId,
+    manifest_no: ManifestNo,
+    manifest_key: &str,
+    manifest_bytes: &[u8],
+) -> Result<NamespaceManifestEnvelope, ManifestLoadError> {
+    let manifest = decode_namespace_manifest_json(manifest_bytes).map_err(|error| {
         ManifestLoadError::ManifestCodec {
             object_key: manifest_key.to_owned(),
-            message: err.to_string(),
+            message: error.to_string(),
         }
     })?;
-    validate_namespace_manifest(
-        namespace_id,
-        manifest.payload().manifest_no,
-        manifest_object_id,
-        manifest_key,
-        &manifest,
-    )?;
-    Ok(Some(manifest))
+    validate_namespace_manifest(namespace_id, manifest_no, manifest_key, &manifest)?;
+    validate_manifest(manifest_key, manifest.payload())?;
+    Ok(manifest)
 }

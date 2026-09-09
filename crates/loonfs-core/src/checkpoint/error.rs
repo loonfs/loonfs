@@ -1,7 +1,7 @@
 //! Manifest load errors, classified as corruption versus store trouble.
 
 use loonfs_api::wire::manifest::MetadataRowFamily;
-use loonfs_api::{ManifestNo, ManifestObjectId, NamespaceId};
+use loonfs_api::{ManifestNo, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -38,30 +38,6 @@ pub enum ManifestLoadError {
         object_key: String,
         expected: ManifestNo,
         actual: ManifestNo,
-    },
-    #[error(
-        "namespace manifest object id mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    ManifestObjectIdMismatch {
-        object_key: String,
-        expected: ManifestObjectId,
-        actual: ManifestObjectId,
-    },
-    #[error(
-        "namespace manifest object conflict for `{object_key}` manifest `{manifest_no}`: the immutable key contains different bytes"
-    )]
-    ManifestObjectConflict {
-        object_key: String,
-        manifest_no: ManifestNo,
-    },
-    #[error(
-        "namespace manifest conflict for `{object_key}` manifest `{manifest_no}`: expected payload checksum `{expected_payload_checksum}`, actual `{actual_payload_checksum}`"
-    )]
-    ManifestConflict {
-        object_key: String,
-        manifest_no: ManifestNo,
-        expected_payload_checksum: String,
-        actual_payload_checksum: String,
     },
     #[error("namespace manifest `{object_key}` is missing row family `{family:?}`")]
     MissingRowFamily {
@@ -109,9 +85,6 @@ impl ManifestLoadError {
             | Self::ManifestCodec { .. }
             | Self::ManifestNamespaceMismatch { .. }
             | Self::ManifestNoMismatch { .. }
-            | Self::ManifestObjectIdMismatch { .. }
-            | Self::ManifestObjectConflict { .. }
-            | Self::ManifestConflict { .. }
             | Self::MissingRowFamily { .. }
             | Self::DuplicateRowFamily { .. }
             | Self::RunManifestMismatch { .. }

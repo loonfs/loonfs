@@ -71,10 +71,8 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .into_iter()
         .find(|run| run.run_no == delta.run_no)
         .expect("folded delta run is valid");
-    let manifest_key = metadata_manifest_object(
-        &namespace_id,
-        &materialized.manifest.payload().manifest_object_id,
-    );
+    let manifest_key =
+        metadata_manifest_object(&namespace_id, &materialized.manifest.payload().manifest_no);
     let mut actual_tail = MetadataStateBuilder::default();
     inspection_materialization::append_manifest_segments_to_metadata(
         &store,
@@ -297,68 +295,15 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
         .expect("corrupt manifest");
 
     match load_current_projection(&store, &namespace_id).await {
-        Err(CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-            ManifestLoadError::ManifestCodec { .. },
-        ))) => {}
+        Err(CoreError::ControlObjectLoad(
+            crate::control_object::ControlObjectLoadError::Codec { .. },
+        )) => {}
         other => panic!("expected manifest codec manifest load error, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn recovery_rejects_a_root_head_seq_that_disagrees_with_its_manifest() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("materialize the committed state");
-
-    let loaded_root = load_metadata_root_object(&store, &namespace_id)
-        .await
-        .expect("load root");
-    assert_eq!(loaded_root.state.manifest.manifest_head_seq, ChangeSeq(1));
-    let mut root = loaded_root.state;
-    root.manifest.manifest_head_seq = ChangeSeq(0);
-    let bytes = loonfs_api::wire::control::encode_control_state(
-        loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-        &root,
-    )
-    .expect("encode contradictory root");
-    store
-        .put_overwrite(
-            &loonfs_objectstore::keys::metadata_root(&namespace_id),
-            Bytes::from(bytes),
-        )
-        .await
-        .expect("install contradictory root");
-
-    let error = load_current_projection(&store, &namespace_id)
-        .await
-        .expect_err("the root coordinates must bind the manifest payload");
-    match error {
-        CoreError::NamespaceCorrupt(message) => {
-            assert!(message.contains("manifest_head_seq"), "{message}");
-        }
-        other => panic!("expected namespace corruption, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn current_reads_reject_a_missing_root_after_retention_advances() {
+async fn current_reads_reject_a_missing_hint_after_retention_advances() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -384,7 +329,7 @@ async fn current_reads_reject_a_missing_root_after_retention_advances() {
         .expect("advance retention");
 
     store
-        .delete(&loonfs_objectstore::keys::metadata_root(&namespace_id))
+        .delete(&loonfs_objectstore::keys::hint(&namespace_id))
         .await
         .expect("lose the recovery root");
 
@@ -393,10 +338,7 @@ async fn current_reads_reject_a_missing_root_after_retention_advances() {
         Err(error) => error,
     };
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    assert!(
-        error.to_string().contains("root object is missing"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("hint is missing"), "{error}");
 }
 
 #[tokio::test]
@@ -404,7 +346,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let manifest_key = format!("{}man_{:020}-", metadata_manifest_prefix(&namespace_id), 2);
+    let manifest_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
     let store = ConflictOnManifestCreateStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         manifest_key,
@@ -424,16 +366,10 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     .await
     .expect("write hello");
 
-    match create_checkpoint(&store, &namespace_id, &context).await {
-        Err(CoreError::NamespaceCorrupt(message))
-            if message.contains("already exists with a different payload") => {}
-        other => panic!("expected conflicting manifest corruption error, got {other:?}"),
-    }
-
-    let materialization = load_current_projection(&store, &namespace_id)
+    let error = create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("materialization");
-    assert_eq!(materialization.root.manifest.manifest_no, ManifestNo(1));
+        .expect_err("invalid winning manifest");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
 #[tokio::test]
@@ -894,7 +830,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),
-        manifest_object_id: manifest_object_id(manifest_no(materialization.head.seq)),
+
         head_seq: materialization.head.seq,
         head_commit_id: materialization.head.head_commit_id.clone(),
         base_seq: first,
@@ -923,7 +859,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     match load_manifest_metadata_state_for_inspection_from_manifest(
         &store,
         &namespace_id,
-        &metadata_manifest_object(&namespace_id, &manifest.payload().manifest_object_id),
+        &metadata_manifest_object(&namespace_id, &manifest.payload().manifest_no),
         &manifest,
     )
     .await
@@ -998,97 +934,6 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
 }
 
 #[tokio::test]
-async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-
-    let materialization = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("materialization");
-    let manifest = build_namespace_manifest_from_metadata_state(
-        &store,
-        &namespace_id,
-        ManifestMetadataSource {
-            head: &materialization.head,
-            basis_manifest_no: Some(materialization.root.manifest.manifest_no),
-            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-            metadata_state: &materialization.metadata_state,
-        },
-        MetadataLsmPolicy::default(),
-        ManifestNo(1),
-    )
-    .await
-    .expect("build manifest");
-
-    write_namespace_manifest(&store, manifest.payload().clone())
-        .await
-        .expect("first manifest write");
-    write_namespace_manifest(&store, manifest.payload().clone())
-        .await
-        .expect("same manifest write is idempotent");
-}
-
-#[tokio::test]
-async fn write_namespace_manifest_conflict_different_payload_is_error() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-
-    let materialization = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("materialization");
-    let manifest = build_namespace_manifest_from_metadata_state(
-        &store,
-        &namespace_id,
-        ManifestMetadataSource {
-            head: &materialization.head,
-            basis_manifest_no: Some(materialization.root.manifest.manifest_no),
-            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-            metadata_state: &materialization.metadata_state,
-        },
-        MetadataLsmPolicy::default(),
-        ManifestNo(1),
-    )
-    .await
-    .expect("build manifest");
-    let mut conflicting_payload = manifest.payload().clone();
-    conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
-    let conflicting_manifest = encode_namespace_manifest_json(conflicting_payload)
-        .expect("build conflicting manifest")
-        .into_envelope();
-
-    write_namespace_manifest(&store, manifest.payload().clone())
-        .await
-        .expect("first manifest write");
-    let error = write_namespace_manifest(&store, conflicting_manifest.payload().clone())
-        .await
-        .expect_err("different same-id manifest must conflict");
-
-    assert_eq!(
-        CoreError::MetadataProjection(error.clone()).code(),
-        ErrorCode::NamespaceCorrupt
-    );
-    match error {
-        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestObjectConflict {
-            manifest_no,
-            ..
-        }) => {
-            assert_eq!(manifest_no, ManifestNo(1));
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1126,15 +971,11 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     )
     .await
     .expect("build manifest");
-    write_namespace_manifest(&store, manifest_without_checkpoint.payload().clone())
-        .await
-        .expect("write manifest");
-    publish_metadata_root(
+    publish_manifest(
         &store,
         &namespace_id,
         &manifest_without_checkpoint,
-        Some(materialization.root.manifest.manifest_object_id.clone()),
-        context.now_ms,
+        Some(materialization.root.manifest.manifest_no),
     )
     .await
     .expect("publish manifest");

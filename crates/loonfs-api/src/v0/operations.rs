@@ -898,11 +898,11 @@ pub struct FlushWalResponse {
     pub namespace_id: NamespaceId,
     /// Head sequence the flush attempted to cover.
     pub target_head_seq: ChangeSeq,
-    /// Manifest `metadata/root.json` references after the operation.
+    /// Current manifest number after the operation.
     pub manifest_no: ManifestNo,
     /// Sequence covered by that manifest.
     pub manifest_head_seq: ChangeSeq,
-    /// What this call did to the metadata root.
+    /// Whether this call published the current manifest.
     pub outcome: FlushWalOutcome,
 }
 
@@ -934,14 +934,12 @@ pub struct GcRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RetainedCandidates {
-    /// Candidates found reachable during the final check before deletion.
+    /// Candidates protected by reference marks or manifest discovery.
     pub referenced: u64,
     /// Unreachable candidates younger than the grace window by their provider timestamps.
     pub within_grace_window: u64,
     /// Unreachable candidates without provider timestamps.
     pub no_provider_timestamp: u64,
-    /// Unreachable candidates without a reference manifest old enough to cover the grace window.
-    pub no_reference_manifest: u64,
     /// Candidates retained because root resolution failed.
     pub degraded_roots: u64,
     /// Unrecognized keys retained from object families scanned by garbage collection.
@@ -1098,8 +1096,6 @@ pub enum RetainedReason {
     WithinGraceWindow,
     /// Counts into [`RetainedCandidates::no_provider_timestamp`].
     NoProviderTimestamp,
-    /// Counts into [`RetainedCandidates::no_reference_manifest`].
-    NoReferenceManifest,
     /// Counts into [`RetainedCandidates::degraded_roots`].
     DegradedRoots,
     /// Counts into [`RetainedCandidates::unrecognized_key`].
@@ -1118,7 +1114,6 @@ impl RetainedReason {
             Self::Referenced => &mut retained.referenced,
             Self::WithinGraceWindow => &mut retained.within_grace_window,
             Self::NoProviderTimestamp => &mut retained.no_provider_timestamp,
-            Self::NoReferenceManifest => &mut retained.no_reference_manifest,
             Self::DegradedRoots => &mut retained.degraded_roots,
             Self::UnrecognizedKey => &mut retained.unrecognized_key,
             Self::CheckpointNotReleasable => &mut retained.checkpoint_not_releasable,
@@ -1130,12 +1125,11 @@ impl RetainedReason {
 
 impl RetainedCandidates {
     /// Returns every reason and count in a fixed order.
-    pub fn by_reason(&self) -> [(&'static str, u64); 9] {
+    pub fn by_reason(&self) -> [(&'static str, u64); 8] {
         let Self {
             referenced,
             within_grace_window,
             no_provider_timestamp,
-            no_reference_manifest,
             degraded_roots,
             unrecognized_key,
             checkpoint_not_releasable,
@@ -1146,7 +1140,6 @@ impl RetainedCandidates {
             ("referenced", referenced),
             ("within_grace_window", within_grace_window),
             ("no_provider_timestamp", no_provider_timestamp),
-            ("no_reference_manifest", no_reference_manifest),
             ("degraded_roots", degraded_roots),
             ("unrecognized_key", unrecognized_key),
             ("checkpoint_not_releasable", checkpoint_not_releasable),
@@ -1161,7 +1154,6 @@ impl RetainedCandidates {
             referenced,
             within_grace_window,
             no_provider_timestamp,
-            no_reference_manifest,
             degraded_roots,
             unrecognized_key,
             checkpoint_not_releasable,
@@ -1171,7 +1163,6 @@ impl RetainedCandidates {
         self.referenced += referenced;
         self.within_grace_window += within_grace_window;
         self.no_provider_timestamp += no_provider_timestamp;
-        self.no_reference_manifest += no_reference_manifest;
         self.degraded_roots += degraded_roots;
         self.unrecognized_key += unrecognized_key;
         self.checkpoint_not_releasable += checkpoint_not_releasable;

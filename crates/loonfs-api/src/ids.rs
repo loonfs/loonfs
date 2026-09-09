@@ -714,50 +714,6 @@ string_id! {
     prefix = "gmf"
 }
 
-/// Family prefix carried by every namespace manifest object id.
-const MANIFEST_OBJECT_ID_PREFIX: &str = "man";
-/// Field a manifest object id's 20-digit position encodes.
-const MANIFEST_OBJECT_ID_POSITION_FIELD: &str = "manifest_no";
-
-string_id! {
-    /// Durable object id for one namespace manifest candidate.
-    ManifestObjectId,
-    error = GeneratedIdValidationError,
-    validate = |value: &str| {
-        parse_position_suffix_id(
-            MANIFEST_OBJECT_ID_PREFIX,
-            MANIFEST_OBJECT_ID_POSITION_FIELD,
-            value,
-        )
-        .map(|_| ())
-    }
-}
-
-impl ManifestObjectId {
-    /// Returns a unique object id that sorts by manifest number.
-    pub fn generate(manifest_no: ManifestNo) -> Self {
-        Self(format!(
-            "{MANIFEST_OBJECT_ID_PREFIX}_{:020}-{}",
-            manifest_no.0,
-            generated_position_suffix()
-        ))
-    }
-}
-
-/// Returns the manifest number in an object id's 20-digit position.
-pub fn manifest_object_id_manifest_no(object_id: &str) -> Option<ManifestNo> {
-    let (position, _) = parse_position_suffix_id(
-        MANIFEST_OBJECT_ID_PREFIX,
-        MANIFEST_OBJECT_ID_POSITION_FIELD,
-        object_id,
-    )
-    .ok()?;
-    position
-        .parse()
-        .ok()
-        .and_then(|value| ManifestNo::parse(value).ok())
-}
-
 /// Family prefix carried by every WAL segment id.
 const WAL_SEGMENT_ID_PREFIX: &str = "wal";
 /// Field a WAL segment id's 20-digit position encodes.
@@ -973,9 +929,8 @@ impl fmt::Display for InodeKind {
 mod tests {
     use super::{
         next_public_ordinal, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentId,
-        ContentStoreId, InodeId, ManifestNo, ManifestObjectId, MetadataSegmentId, NameKey,
-        NamespaceId, RevisionNo, RunNo, UploadId, WalSegmentId, WriterEpoch, WriterId,
-        MAX_PUBLIC_INTEGER,
+        ContentStoreId, InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
+        RunNo, UploadId, WalSegmentId, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributeRevisionNo;
     use std::collections::BTreeSet;
@@ -1128,19 +1083,12 @@ mod tests {
                 .as_str(),
             "report.txt"
         );
-        assert_eq!(
-            ManifestObjectId::try_from("man_00000000000000000042-0123456789abcdef")
-                .expect("valid manifest object id")
-                .as_str(),
-            "man_00000000000000000042-0123456789abcdef"
-        );
 
         assert!(NamespaceId::try_from("invalid/name").is_err());
         assert!(CommitId::try_from("invalid/name").is_err());
         assert!(ContentStoreId::try_from("cs_0000000000000000000000000000000g").is_err());
         assert!(CheckpointId::try_from("chk_0000000000000000000000000000000g").is_err());
         assert!(NameKey::try_from("a/b").is_err());
-        assert!(ManifestObjectId::try_from("42-0123456789abcdef").is_err());
     }
 
     #[test]
@@ -1216,19 +1164,13 @@ mod tests {
         assert!(CheckpointId::parse("chk_00000000000000000000000000000001").is_ok());
         assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
         assert!(WalSegmentId::parse("wal_00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
-        assert!(ManifestObjectId::parse("man_00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
         assert!(WalSegmentId::parse("wal_412-9f2a6c0e4b7d4a90").is_err());
         assert!(WalSegmentId::parse("wal_00000000000000000412-9F2A6C0E4B7D4A90").is_err());
-        assert!(ManifestObjectId::parse("man_412-9f2a6c0e4b7d4a90").is_err());
-        assert!(ManifestObjectId::parse("man_00000000000000000412-9F2A6C0E4B7D4A90").is_err());
-        assert!(ManifestObjectId::parse("mf_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         assert!(WalSegmentId::parse("seg_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         // The two positional families are told apart by their prefix, never
         // by context.
         assert!(WalSegmentId::parse("00000000000000000412-9f2a6c0e4b7d4a90").is_err());
-        assert!(ManifestObjectId::parse("00000000000000000412-9f2a6c0e4b7d4a90").is_err());
         assert!(WalSegmentId::parse("man_00000000000000000412-9f2a6c0e4b7d4a90").is_err());
-        assert!(ManifestObjectId::parse("wal_00000000000000000412-9f2a6c0e4b7d4a90").is_err());
         assert!(MetadataSegmentId::parse(["seg", "123"].join("-")).is_err());
         assert!(CheckpointId::parse(["chk", "123"].join("-")).is_err());
     }
@@ -1237,7 +1179,6 @@ mod tests {
     fn generated_runtime_ids_use_lower_hex_bodies() {
         let upload_id = UploadId::generate();
         let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
-        let manifest_object_id = ManifestObjectId::generate(ManifestNo(413));
         let metadata_segment_id = MetadataSegmentId::generate();
         let checkpoint_id = CheckpointId::generate();
 
@@ -1245,14 +1186,10 @@ mod tests {
         assert!(wal_segment_id
             .as_str()
             .starts_with("wal_00000000000000000412-"));
-        assert!(manifest_object_id
-            .as_str()
-            .starts_with("man_00000000000000000413-"));
         assert_generated_id_shape(metadata_segment_id.as_str(), "seg");
         assert_generated_id_shape(checkpoint_id.as_str(), "chk");
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
         assert!(WalSegmentId::parse(wal_segment_id.as_str()).is_ok());
-        assert!(ManifestObjectId::parse(manifest_object_id.as_str()).is_ok());
         assert!(MetadataSegmentId::parse(metadata_segment_id.as_str()).is_ok());
         assert!(CheckpointId::parse(checkpoint_id.as_str()).is_ok());
     }
@@ -1260,17 +1197,11 @@ mod tests {
     #[test]
     fn generated_positional_ids_are_not_reused_across_samples() {
         let mut wal_segment_ids = BTreeSet::new();
-        let mut manifest_object_ids = BTreeSet::new();
         for _ in 0..128 {
             let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
             assert!(
                 wal_segment_ids.insert(wal_segment_id.clone()),
                 "generated duplicate WAL segment id {wal_segment_id}"
-            );
-            let manifest_object_id = ManifestObjectId::generate(ManifestNo(412));
-            assert!(
-                manifest_object_ids.insert(manifest_object_id.clone()),
-                "generated duplicate manifest object id {manifest_object_id}"
             );
         }
     }
@@ -1284,22 +1215,6 @@ mod tests {
         assert_eq!(super::wal_segment_id_start_seq("not-a-segment-id"), None);
         assert_eq!(
             super::wal_segment_id_start_seq("wal_00009007199254740992-9f2a6c0e4b7d4a90"),
-            None
-        );
-    }
-
-    #[test]
-    fn manifest_object_id_manifest_no_reads_the_position_digits() {
-        assert_eq!(
-            super::manifest_object_id_manifest_no("man_00000000000000000412-9f2a6c0e4b7d4a90"),
-            Some(ManifestNo(412))
-        );
-        assert_eq!(
-            super::manifest_object_id_manifest_no("not-a-manifest-object-id"),
-            None
-        );
-        assert_eq!(
-            super::manifest_object_id_manifest_no("man_00009007199254740992-9f2a6c0e4b7d4a90"),
             None
         );
     }

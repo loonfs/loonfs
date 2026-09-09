@@ -540,8 +540,8 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> VerifiedMetadataSegments<'a, S> {
-    let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
-    load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
+    let manifest_number = current_manifest_number(store, namespace_id).await;
+    load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
         .await
         .expect("load the current manifest's segments")
 }
@@ -790,7 +790,7 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
     load_manifest_materialization_for_inspection(
         store,
         namespace_id,
-        load_metadata_root_object(store, namespace_id)
+        load_current_manifest(store, namespace_id)
             .await
             .expect("read root")
             .state
@@ -927,7 +927,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     seed_bindings_workload(&store, &namespace_id).await;
-    let before = current_manifest_object_id(&store, &namespace_id).await;
+    let before = current_manifest_number(&store, &namespace_id).await;
 
     let report = super::super::reorganize_metadata_step(
         &store,
@@ -944,7 +944,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     assert_eq!(group, MetadataFamilyGroup::Bindings);
     assert!(spec.input_rows() > 0, "the plan must report what it reads");
     assert_eq!(
-        current_manifest_object_id(&store, &namespace_id).await,
+        current_manifest_number(&store, &namespace_id).await,
         before,
         "a step that plans a compaction publishes nothing"
     );
@@ -2150,7 +2150,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
         group,
     )
     .await;
-    let manifest_before = current_manifest_object_id(
+    let manifest_before = current_manifest_number(
         &LocalFsStore::new(interrupted_dir.path()).expect("store"),
         &namespace_id,
     )
@@ -2180,7 +2180,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
             cancelled_attempts += 1;
         }
         assert_eq!(
-            current_manifest_object_id(&store, &namespace_id).await,
+            current_manifest_number(&store, &namespace_id).await,
             manifest_before,
             "a cancelled attempt publishes nothing"
         );
@@ -2412,7 +2412,7 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
     else {
         panic!("nothing cancelled this job while it read");
     };
-    let manifest_before = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_before = current_manifest_number(&store, &namespace_id).await;
 
     // The claim the worker holds, taken before the collector's. That is the
     // whole shape of the race: the worker's etag is the one it last wrote,
@@ -2460,7 +2460,7 @@ async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothin
         "a fenced job reports it rather than publishing, got {finalization:?}"
     );
     assert_eq!(
-        current_manifest_object_id(&store, &namespace_id).await,
+        current_manifest_number(&store, &namespace_id).await,
         manifest_before,
         "and the root must not have moved"
     );
@@ -3179,7 +3179,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
 
     let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
     let visible = visible_namespace(&store, &namespace_id).await;
-    let manifest_before = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_before = current_manifest_number(&store, &namespace_id).await;
 
     // The attempt dies partway through, which is what a cancellation and a
     // kill leave behind alike: staged segments and nothing else. The
@@ -3227,7 +3227,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             "a cancelled job's claim stands until it expires"
         );
         assert_eq!(
-            current_manifest_object_id(&store, &namespace_id).await,
+            current_manifest_number(&store, &namespace_id).await,
             manifest_before,
             "a job that died must publish nothing"
         );
@@ -3317,7 +3317,9 @@ impl ObjectStore for FlushDuringFinalizationStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key.ends_with(".manifest.json") && self.flushed.fetch_add(1, Ordering::SeqCst) == 0 {
+        if loonfs_objectstore::layout::manifest_no_of(key).is_some()
+            && self.flushed.fetch_add(1, Ordering::SeqCst) == 0
+        {
             super::super::flush::flush_wal(&self.inner, &self.namespace_id, &test_context())
                 .await
                 .expect("the competing flush must publish");
@@ -3436,72 +3438,6 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     );
 }
 
-/// When the namespace's root was last published.
-async fn root_updated_at_ms<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
-    load_metadata_root_object(store, namespace_id)
-        .await
-        .expect("read metadata root")
-        .state
-        .updated_at_ms
-}
-
-#[tokio::test]
-async fn a_rebased_publication_never_moves_the_root_timestamp_backward() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let Ok(result) = run_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        small_segment_policy(),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    else {
-        panic!("nothing cancelled this job");
-    };
-
-    // A flush lands while the job runs, stamping the root a minute past the
-    // context the job carries.
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/landed-while-the-job-ran.txt",
-        b"landed while the job ran\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write a file the flush will publish");
-    let later = mutation_context(context.writer_id.as_str(), context.now_ms + 60_000);
-    flush::flush_wal(&store, &namespace_id, &later)
-        .await
-        .expect("the flush must publish");
-    let flushed_at_ms = root_updated_at_ms(&store, &namespace_id).await;
-    assert!(
-        flushed_at_ms >= later.now_ms,
-        "the flush must stamp the root with its own time"
-    );
-
-    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
-
-    let published_at_ms = root_updated_at_ms(&store, &namespace_id).await;
-    assert!(
-        published_at_ms > context.now_ms,
-        "the root must carry publication time, not the time the job was planned at"
-    );
-    assert!(
-        published_at_ms >= flushed_at_ms,
-        "a job rebased over a newer flush must not move the root's timestamp backwards"
-    );
-}
-
 #[tokio::test]
 async fn a_cancellation_after_the_last_row_publishes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3523,7 +3459,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     else {
         panic!("nothing cancelled this job while it read");
     };
-    let manifest_before = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_before = current_manifest_number(&store, &namespace_id).await;
     let visible_before = visible_namespace(&store, &namespace_id).await;
 
     cancellation.cancel();
@@ -3542,7 +3478,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
         "a cancelled finalization must publish nothing, got {finalization:?}"
     );
     assert_eq!(
-        current_manifest_object_id(&store, &namespace_id).await,
+        current_manifest_number(&store, &namespace_id).await,
         manifest_before,
         "the manifest must be where the job found it"
     );
@@ -3596,10 +3532,12 @@ impl ObjectStore for CancelAtTheFirstPublicationStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key.ends_with(".manifest.json") {
+        if loonfs_objectstore::layout::manifest_no_of(key).is_some() {
             self.manifests.fetch_add(1, Ordering::SeqCst);
         }
-        if key.ends_with("/metadata/root.json") && matches!(mode, PutMode::CompareAndSwap { .. }) {
+        if loonfs_objectstore::layout::manifest_no_of(key).is_some()
+            && matches!(mode, PutMode::CreateIfAbsent)
+        {
             self.cancellation.cancel();
             return Err(ObjectStoreError::PreconditionFailed {
                 object_key: key.to_owned(),
@@ -3642,7 +3580,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
     else {
         panic!("nothing cancelled this job while it read");
     };
-    let manifest_before = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_before = current_manifest_number(&store, &namespace_id).await;
 
     let cancelling_store = CancelAtTheFirstPublicationStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -3669,184 +3607,10 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         "only the attempt that was running when the token was set may build a manifest"
     );
     assert_eq!(
-        current_manifest_object_id(&store, &namespace_id).await,
+        current_manifest_number(&store, &namespace_id).await,
         manifest_before,
         "and nothing may be published"
     );
-}
-
-fn mismatched_references(reference: &ManifestRef) -> Vec<(&'static str, ManifestRef)> {
-    let mut number = reference.clone();
-    number.manifest_no = ManifestNo(reference.manifest_no.0 + 1);
-    let mut sequence = reference.clone();
-    sequence.manifest_head_seq = ChangeSeq(reference.manifest_head_seq.0 - 1);
-    let mut checksum = reference.clone();
-    checksum.manifest_payload_checksum = format!("sha256:{}", "0".repeat(64));
-    vec![
-        ("manifest_no", number),
-        ("manifest_head_seq", sequence),
-        ("manifest_payload_checksum", checksum),
-    ]
-}
-
-async fn replace_root_reference(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    reference: ManifestRef,
-) -> Bytes {
-    use loonfs_api::wire::control::{encode_control_state, ControlObjectKind};
-    let mut root = load_metadata_root_object(store, namespace_id)
-        .await
-        .expect("load root")
-        .state;
-    root.manifest = reference;
-    let bytes = Bytes::from(
-        encode_control_state(ControlObjectKind::MetadataRoot, &root).expect("encode root"),
-    );
-    store
-        .put_overwrite(&metadata_root(namespace_id), bytes.clone())
-        .await
-        .expect("replace root reference");
-    bytes
-}
-
-fn assert_reference_corrupt(error: CoreError, field: &str) {
-    assert!(
-        matches!(&error, CoreError::NamespaceCorrupt(message) if message.contains(field)),
-        "expected corrupt {field}, got {error:?}"
-    );
-}
-
-#[tokio::test]
-async fn compaction_rejects_mismatched_manifest_references_before_writing() {
-    let directory = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let root = load_metadata_root_object(&store, &namespace_id)
-        .await
-        .expect("root")
-        .state;
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
-    super::super::load::load_manifest_segments(&store, Some(&cache), &root.manifest)
-        .await
-        .expect("warm manifest cache");
-
-    for (field, reference) in mismatched_references(&root.manifest) {
-        let error = super::super::load::load_manifest_segments(&store, Some(&cache), &reference)
-            .await
-            .err()
-            .expect("cache hits must verify the reference too");
-        assert_reference_corrupt(error, field);
-        let corrupted = replace_root_reference(&store, &namespace_id, reference).await;
-        let recording = RecordingStore::new(store.clone(), KeyPredicate::any());
-        let error = load_current_projection(&recording, &namespace_id)
-            .await
-            .expect_err("ordinary reads must reject the reference");
-        assert_reference_corrupt(error, field);
-        for max_bytes in [usize::MAX, 1] {
-            let error = reorganize_metadata_step(
-                &recording,
-                &namespace_id,
-                &test_context(),
-                MetadataLsmPolicy {
-                    max_delta_runs: NonZeroUsize::MIN,
-                    max_decoded_input_bytes_per_step: NonZeroUsize::new(max_bytes)
-                        .expect("nonzero budget"),
-                    ..MetadataLsmPolicy::default()
-                },
-                MetadataCompactionPolicy::default(),
-            )
-            .await
-            .expect_err("bounded merges and full-job planning must reject the reference");
-            assert_reference_corrupt(error, field);
-        }
-        let error = run_metadata_compaction_job(
-            &recording,
-            &namespace_id,
-            &test_context(),
-            &spec,
-            MetadataLsmPolicy::default(),
-            &MetadataCompactionCancellation::default(),
-        )
-        .await
-        .expect_err("job startup must reject the reference");
-        assert_reference_corrupt(error, field);
-        assert_eq!(
-            recording.counts().puts,
-            0,
-            "no output or lease may be written"
-        );
-        assert_eq!(recording.counts().compare_and_swaps, 0);
-        assert_eq!(
-            store
-                .get(&metadata_root(&namespace_id), None)
-                .await
-                .expect("read root"),
-            Some(corrupted),
-        );
-    }
-}
-
-#[tokio::test]
-async fn compaction_finalization_rechecks_the_complete_manifest_reference() {
-    let directory = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let result = run_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        small_segment_policy(),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("build staged output");
-    let timer = StdMonotonicTimer::default();
-    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
-    let root = load_metadata_root_object(&store, &namespace_id)
-        .await
-        .expect("root")
-        .state;
-    for (field, reference) in mismatched_references(&root.manifest) {
-        let corrupted = replace_root_reference(&store, &namespace_id, reference).await;
-        let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
-        let recording = RecordingStore::new(
-            store.clone(),
-            KeyPredicate::new(move |key| key != lease_key),
-        );
-        let error = finalize_metadata_compaction(
-            &recording,
-            &namespace_id,
-            &spec,
-            &snapshot_keys,
-            result.clone(),
-            &MetadataCompactionCancellation::default(),
-            &mut lease,
-        )
-        .await
-        .expect_err("finalization must reject an inconsistent reference");
-        assert_reference_corrupt(error, field);
-        assert_eq!(
-            recording.counts().puts,
-            0,
-            "no replacement manifest may be written"
-        );
-        assert_eq!(
-            store
-                .get(&metadata_root(&namespace_id), None)
-                .await
-                .expect("read root"),
-            Some(corrupted),
-            "finalization must not replace the inconsistent root",
-        );
-    }
 }
 
 #[tokio::test]
@@ -3962,7 +3726,7 @@ async fn completed_output_protection_does_not_hold_the_group() {
 }
 
 #[tokio::test]
-async fn output_protection_is_durable_before_the_root_cas() {
+async fn output_protection_is_durable_before_manifest_publication() {
     use super::super::compaction_lease::load_output_protection;
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3972,8 +3736,8 @@ async fn output_protection_is_durable_before_the_root_cas() {
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
     let gated = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(loonfs_objectstore::keys::metadata_root(&namespace_id)),
-        OperationClass::CompareAndSwap,
+        KeyPredicate::manifest(&namespace_id),
+        OperationClass::Put,
     );
     gated.block_next();
     let context = test_context();

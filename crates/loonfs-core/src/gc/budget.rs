@@ -1,7 +1,7 @@
 //! Work limits for a garbage-collection pass.
 
 /// Counts caller-defined work steps in one invocation. Namespace GC charges
-/// a source step for one root, checkpoint (including fork probes and its basis), anchor candidate,
+/// a source step for one root, checkpoint (including fork probes and its basis),
 /// or WAL segment. A merge step writes at most 512 entries. A revision step
 /// reads one data block, and a sweep step decides one candidate.
 ///

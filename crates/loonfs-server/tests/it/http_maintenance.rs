@@ -524,12 +524,12 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
         .expect("construct store")
         .into_shared();
-    let root = loonfs::control::load_namespace_metadata_root_control(&store, &namespace)
+    let root = loonfs::control::load_namespace_current_manifest(&store, &namespace)
         .await
         .expect("metadata root");
     store
         .put_overwrite(
-            &metadata_manifest_object(&namespace, &root.state.manifest.manifest_object_id),
+            &metadata_manifest_object(&namespace, &root.state.manifest.manifest_no),
             Bytes::from_static(br#"{"bad":"json"}"#),
         )
         .await

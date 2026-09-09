@@ -49,6 +49,7 @@ pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
 pub use self::flush::{ensure_metadata_publication_budget, fold_wal_tail, next_run_no_after};
 pub use self::list::CheckpointPageCursor;
+pub(crate) use self::load::decode_manifest_at;
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
 pub use self::reorganize::{
     MetadataCompactionPolicy, MetadataReorganizeOutcome, MetadataReorganizeReport,
@@ -78,8 +79,6 @@ pub(crate) use self::load::{
     load_basis_metadata_segments, load_namespace_manifest_envelope,
     load_namespace_manifest_envelope_if_present, LoadedMetadataBasis,
 };
-#[cfg(test)]
-pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::record::load_checkpoint_record;
 pub(crate) use self::release::release_checkpoint;
 pub use self::reorganize::metadata_maintenance_due;

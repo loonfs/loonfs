@@ -131,8 +131,8 @@ pub mod control {
         load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
     };
     pub use crate::namespace::control::{
-        load_namespace_checkpoint_record_control, load_namespace_head_control,
-        load_namespace_metadata_root_control, load_namespace_read_anchor,
+        load_namespace_checkpoint_record_control, load_namespace_current_manifest,
+        load_namespace_head_control, load_namespace_read_anchor, CurrentManifest, LoadedManifest,
     };
     pub use crate::namespace::MetadataBasis;
 }

@@ -2,7 +2,7 @@
 use super::cursor::CandidateFamilyExt;
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::gc::*;
-use loonfs_objectstore::keys::{checkpoint_prefix, gc_runs_prefix, metadata_manifest_prefix};
+use loonfs_objectstore::keys::{checkpoint_prefix, gc_runs_prefix};
 
 pub(super) fn run(state: &GcRunState) -> Result<()> {
     if state.grace_window_ms < crate::limits::GC_MIN_GRACE_WINDOW_MS {
@@ -17,29 +17,6 @@ pub(super) fn run(state: &GcRunState) -> Result<()> {
                 } if manifest.owner_namespace_id != state.namespace_id => return Err(invalid()),
                 GcMarkSource::Checkpoints { last_key } => {
                     position_key(last_key.as_deref(), &checkpoint_prefix(&state.namespace_id))?
-                }
-                GcMarkSource::AnchorDiscovery {
-                    last_key,
-                    current,
-                    aged,
-                    ..
-                } => {
-                    position_key(
-                        last_key.as_deref(),
-                        &metadata_manifest_prefix(&state.namespace_id),
-                    )?;
-                    for range in current.iter().chain(aged) {
-                        manifest_range(state, range)?;
-                    }
-                }
-                GcMarkSource::AnchorManifests { range, last_key } => {
-                    manifest_range(state, range)?;
-                    if last_key
-                        .as_ref()
-                        .is_some_and(|key| key < &range.first_key || key > &range.last_key)
-                    {
-                        return Err(invalid());
-                    }
                 }
                 _ => {}
             }
@@ -72,23 +49,6 @@ pub(super) fn run(state: &GcRunState) -> Result<()> {
             position_key(last_key.as_deref(), &gc_runs_prefix(&state.namespace_id))?
         }
         GcPhase::Starting {} | GcPhase::Complete {} => {}
-    }
-    Ok(())
-}
-
-fn manifest_range(state: &GcRunState, range: &GcManifestRange) -> Result<()> {
-    let prefix = metadata_manifest_prefix(&state.namespace_id);
-    if range.first_key > range.last_key {
-        return Err(invalid());
-    }
-    for key in [&range.first_key, &range.last_key] {
-        position_key(Some(key), &prefix)?;
-        let generation = loonfs_objectstore::layout::manifest_object_id_of(key)
-            .and_then(|id| id.ok())
-            .and_then(|id| loonfs_api::manifest_object_id_manifest_no(id.as_str()));
-        if generation != Some(range.manifest_no) {
-            return Err(invalid());
-        }
     }
     Ok(())
 }

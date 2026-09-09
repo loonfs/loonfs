@@ -496,14 +496,13 @@ async fn foreign_metadata_segment_owners(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<NamespaceId> {
-    let root =
-        loonfs_core::control::load_namespace_metadata_root_control(store.as_ref(), namespace_id)
-            .await
-            .expect("load metadata root")
-            .state;
+    let root = loonfs_core::control::load_namespace_current_manifest(store.as_ref(), namespace_id)
+        .await
+        .expect("load metadata root")
+        .state;
     let key = loonfs_objectstore::keys::metadata_manifest_object(
         namespace_id,
-        &root.manifest.manifest_object_id,
+        &root.manifest.manifest_no,
     );
     let bytes = store
         .get(&key, None)

@@ -160,8 +160,8 @@ pub mod downloads {
 /// use [`FsReader`] and [`FsWriter`].
 pub mod control {
     pub use loonfs_core::control::{
-        load_namespace_catalog_entry, load_namespace_head_control,
-        load_namespace_metadata_root_control, ControlObjectLoadError, LoadedControl,
+        load_namespace_catalog_entry, load_namespace_current_manifest, load_namespace_head_control,
+        ControlObjectLoadError, CurrentManifest, LoadedControl, LoadedManifest,
         NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
     };
 }

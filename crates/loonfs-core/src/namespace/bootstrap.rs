@@ -190,6 +190,25 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     head: &HeadState,
 ) -> Result<NamespaceHeadInstall, CoreError> {
+    let hint_key = loonfs_objectstore::keys::hint(namespace_id);
+    let hint_bytes = encode_control_state(
+        ControlObjectKind::Hint,
+        &loonfs_api::wire::control::HintState {
+            namespace_id: namespace_id.clone(),
+            manifest_no: loonfs_api::ManifestNo(0),
+        },
+    )
+    .map_err(|error| CoreError::Codec {
+        object_key: hint_key.clone(),
+        message: error.to_string(),
+    })?;
+    match store
+        .put_if_absent(&hint_key, Bytes::from(hint_bytes))
+        .await
+    {
+        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
+        Err(error) => return Err(CoreError::store(&hint_key, &error)),
+    }
     let object_key = wal_head(namespace_id);
     let bytes = encode_control_state(ControlObjectKind::WalHead, head).map_err(|error| {
         CoreError::Codec {

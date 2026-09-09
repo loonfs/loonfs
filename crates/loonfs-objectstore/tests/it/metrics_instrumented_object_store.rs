@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use futures::TryStreamExt;
-use loonfs_api::ManifestObjectId;
+use loonfs_api::ManifestNo;
 use loonfs_objectstore::keys::{
     checkpoint_record, metadata_manifest_object, metadata_segment, wal_head, wal_segment,
 };
@@ -299,8 +299,7 @@ async fn classifies_durable_key_families() {
         .put_overwrite(
             &metadata_manifest_object(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &ManifestObjectId::parse("man_00000000000000000002-0123456789abcdef")
-                    .expect("valid manifest object id"),
+                &ManifestNo(2),
             ),
             bytes(b"manifest"),
         )

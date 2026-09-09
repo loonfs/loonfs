@@ -3434,14 +3434,8 @@
             "minimum": 0,
             "type": "integer"
           },
-          "no_reference_manifest": {
-            "description": "Unreachable candidates without a reference manifest old enough to cover the grace window.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "referenced": {
-            "description": "Candidates found reachable during the final check before deletion.",
+            "description": "Candidates protected by reference marks or manifest discovery.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3475,7 +3469,6 @@
           "referenced",
           "within_grace_window",
           "no_provider_timestamp",
-          "no_reference_manifest",
           "degraded_roots",
           "unrecognized_key",
           "checkpoint_not_releasable",

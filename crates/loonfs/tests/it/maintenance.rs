@@ -580,13 +580,12 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     assert_eq!(status.wal_tail_segments, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
+    let root = block_on(loonfs_core::control::load_namespace_current_manifest(
         &raw_store,
         &namespace_id,
     ))
     .expect("metadata root");
-    let manifest_key =
-        metadata_manifest_object(&namespace_id, &root.state.manifest.manifest_object_id);
+    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest.manifest_no);
     let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
         .expect("read namespace manifest")
         .expect("namespace manifest exists");

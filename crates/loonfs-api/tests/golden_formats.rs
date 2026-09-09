@@ -21,9 +21,9 @@
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
     CompactionLeaseStatus, ContentStoreState, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
-    HeadState, ManifestRef, MetadataCompactionLeaseState, MetadataRootState, NamespaceStatus,
+    HeadState, HintState, ManifestRef, MetadataCompactionLeaseState, NamespaceStatus,
     ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus, UploadSessionState,
-    WalFloorState, WalSegmentPointer, WriterBlock,
+    WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -38,7 +38,7 @@ use loonfs_api::wire::wal::{
 use loonfs_api::{
     sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
     Attributes, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId,
-    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, ManifestObjectId,
+    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo,
     MetadataCompactionId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo, UploadId,
     WalSegmentId, WriterEpoch, WriterId,
 };
@@ -120,11 +120,6 @@ fn commit_id() -> CommitId {
 
 fn checkpoint_id(value: &str) -> CheckpointId {
     CheckpointId::parse(value).expect("valid checkpoint id")
-}
-
-fn manifest_object_id(manifest_no: u64, suffix: &str) -> ManifestObjectId {
-    ManifestObjectId::parse(format!("man_{manifest_no:020}-{suffix}"))
-        .expect("valid manifest object id")
 }
 
 fn content_id(value: &str) -> ContentId {
@@ -326,7 +321,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
-        manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
+
         head_seq: ChangeSeq(2),
         head_commit_id: commit_id(),
         base_seq: ChangeSeq(2),
@@ -374,7 +369,7 @@ fn sample_manifest_ref(number: u64) -> ManifestRef {
     ManifestRef {
         owner_namespace_id: namespace_id(),
         manifest_no: ManifestNo(number),
-        manifest_object_id: manifest_object_id(number, "0123456789abcdef"),
+
         manifest_head_seq: ChangeSeq(number),
         manifest_payload_checksum:
             "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
@@ -418,7 +413,7 @@ fn sample_fork_head_state() -> HeadState {
             manifest: ManifestRef {
                 owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 manifest_no: ManifestNo(2),
-                manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
+
                 manifest_head_seq: ChangeSeq(2),
                 manifest_payload_checksum:
                     "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
@@ -660,21 +655,11 @@ fn control_objects_match_golden_bytes() {
         sample_fork_head_state(),
     );
     check_control_golden(
-        "control_wal_floor.v1.json",
-        ControlObjectKind::WalFloor,
-        WalFloorState {
+        "control_hint.v1.json",
+        ControlObjectKind::Hint,
+        HintState {
             namespace_id: namespace_id(),
-            floor_seq: ChangeSeq(1),
-            updated_at_ms: 3_000,
-        },
-    );
-    check_control_golden(
-        "control_metadata_root.v1.json",
-        ControlObjectKind::MetadataRoot,
-        MetadataRootState {
-            namespace_id: namespace_id(),
-            manifest: sample_manifest_ref(2),
-            updated_at_ms: 3_000,
+            manifest_no: ManifestNo(2),
         },
     );
     check_control_golden(
@@ -951,19 +936,14 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
         ControlObjectKind::WalHead,
         add_unknown,
     );
+    assert_control_payload_edit_is_corrupt::<HintState>(
+        "control_hint.v1.json",
+        ControlObjectKind::Hint,
+        add_unknown,
+    );
     assert_control_payload_edit_is_corrupt::<ContentStoreState>(
         "control_content_store.v1.json",
         ControlObjectKind::ContentStore,
-        add_unknown,
-    );
-    assert_control_payload_edit_is_corrupt::<WalFloorState>(
-        "control_wal_floor.v1.json",
-        ControlObjectKind::WalFloor,
-        add_unknown,
-    );
-    assert_control_payload_edit_is_corrupt::<MetadataRootState>(
-        "control_metadata_root.v1.json",
-        ControlObjectKind::MetadataRoot,
         add_unknown,
     );
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
@@ -1044,11 +1024,6 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         |payload| payload["owner"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     // Manifest references reject unknown fields in every control object.
-    assert_control_payload_edit_is_corrupt::<MetadataRootState>(
-        "control_metadata_root.v1.json",
-        ControlObjectKind::MetadataRoot,
-        |payload| payload["manifest"]["field_from_the_future"] = serde_json::Value::from(true),
-    );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
@@ -1399,7 +1374,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
                 manifest: ManifestRef {
                     owner_namespace_id: namespace_id(),
                     manifest_no: ManifestNo(5),
-                    manifest_object_id: manifest_object_id(5, "0123456789abcdef"),
+
                     manifest_head_seq: ChangeSeq(5),
                     manifest_payload_checksum: sha256_digest(b"manifest"),
                 },
@@ -2816,9 +2791,7 @@ fn gc_progress_and_mark_pages_match_golden_bytes() {
         namespace_deleted: false,
         reclaim_after_ms: None,
         degraded: false,
-        anchor: GcReferenceAnchor::Manifest {
-            head_seq: ChangeSeq(4),
-        },
+        discovery_start_manifest_no: Some(ManifestNo(4)),
     };
     let index = GcMarkIndex {
         levels: vec![Some(table.clone())],
@@ -2938,7 +2911,6 @@ fn gc_progress_rejects_unknown_fields_inside_progress_and_merge_state() {
         "/phase",
         "/phase/work",
         "/phase/work/roots",
-        "/phase/work/roots/anchor",
         "/phase/work/source",
         "/phase/work/index",
         "/phase/work/index/levels/0",

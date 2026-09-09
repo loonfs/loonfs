@@ -13,10 +13,7 @@ use super::compaction_lease::{group_lease_state, GroupLeaseState};
 use super::error::ManifestLoadError;
 use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after, next_run_no_after};
 use super::load::load_manifest_segments;
-use super::publish::{
-    manifest_write_failure, publish_metadata_root, write_namespace_manifest,
-    ManifestPublicationOutcome,
-};
+use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{
     delta_run_count, runs_in_fold_order, MetadataFamilyGroup, MetadataLsmPolicy,
     MetadataRunManifest, REORGANIZE_FAMILY_GROUPS,
@@ -32,7 +29,7 @@ use loonfs_api::wire::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     RunTier,
 };
-use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId, RunNo};
+use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
@@ -141,8 +138,8 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     timer: &dyn MonotonicTimer,
 ) -> Result<MetadataReorganizeReport> {
     // The publication budget covers the whole unit: measurement starts
-    // before any segment object is written and gates the root
-    // compare-and-swap below.
+    // before any segment object is written and gates the manifest
+    // put-if-absent below.
     let publication_started_ms = timer.monotonic_now_ms();
     // A streaming compaction keeps the floor read with this root.
     let snapshot = load_control_snapshot(store, namespace_id)
@@ -247,8 +244,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             (!run.segments.is_empty()).then_some(run)
         })
         .collect();
-    let manifest = write_replacement_manifest(
-        store,
+    let manifest = build_replacement_manifest(
         namespace_id,
         previous,
         surviving,
@@ -257,16 +253,16 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             placement: input.placement,
         },
         floor_seq,
-    )
-    .await?;
+    )?;
 
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
-    match publish_metadata_root(
+    match publish_manifest(
         store,
         namespace_id,
         &manifest,
-        Some(root.manifest.manifest_object_id.clone()),
-        context.now_ms,
+        Some(root.manifest.manifest_no),
+        timer,
+        publication_started_ms,
     )
     .await?
     {
@@ -838,11 +834,8 @@ pub(super) struct ReplacementOutput {
     pub(super) placement: MergePlacement,
 }
 
-/// Writes a replacement manifest from surviving and newly produced runs.
-///
-/// The resulting runs determine the base sequence and next run number.
-pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
-    store: &S,
+/// The surviving and new runs determine the base sequence and next run number.
+pub(super) fn build_replacement_manifest(
     namespace_id: &NamespaceId,
     previous: &NamespaceManifestEnvelope,
     surviving: Vec<MetadataRunRef>,
@@ -869,29 +862,19 @@ pub(super) async fn write_replacement_manifest<S: ObjectStore + ?Sized>(
         .min()
         .expect("a replacement manifest should hold at least one run");
     let retention_floor_seq = previous.payload().retention_floor_seq.max(floor_seq);
-    // One generated object id, one write. The generated id ends in 16 random
-    // hex characters, so the key is this unit's alone and a conflict under it
-    // is corruption rather than contention.
     let manifest_no = next_manifest_no_after(previous.payload().manifest_no)?;
-    let manifest_object_id = ManifestObjectId::generate(manifest_no);
-    write_namespace_manifest(
-        store,
-        NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_no,
-            manifest_object_id,
-            head_seq: previous.payload().head_seq,
-            head_commit_id: previous.payload().head_commit_id.clone(),
-            base_seq,
-            writer_epoch: previous.payload().writer_epoch,
-            next_inode_id: previous.payload().next_inode_id,
-            next_run_no,
-            retention_floor_seq,
-            runs,
-        },
-    )
-    .await
-    .map_err(manifest_write_failure)
+    encode_manifest(NamespaceManifestPayload {
+        namespace_id: namespace_id.clone(),
+        manifest_no,
+        head_seq: previous.payload().head_seq,
+        head_commit_id: previous.payload().head_commit_id.clone(),
+        base_seq,
+        writer_epoch: previous.payload().writer_epoch,
+        next_inode_id: previous.payload().next_inode_id,
+        next_run_no,
+        retention_floor_seq,
+        runs,
+    })
 }
 
 #[cfg(test)]

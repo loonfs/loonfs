@@ -8,9 +8,7 @@ use super::run::gc_namespace;
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::tests::{
-    build_namespace_manifest_from_metadata_state, compact_a_family_group_into_staging,
-    create_checkpoint, load_current_projection, mutation_context, write_test_file,
-    ManifestMetadataSource,
+    compact_a_family_group_into_staging, create_checkpoint, mutation_context, write_test_file,
 };
 use crate::checkpoint::MetadataCompactionPolicy;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
@@ -29,15 +27,11 @@ use loonfs_api::wire::control::{
     UploadSessionState,
 };
 use loonfs_api::wire::gc::*;
-use loonfs_api::{
-    ChangeSeq, CheckpointId, ContentRef, ContentStoreId, ManifestNo, ManifestObjectId, NamespaceId,
-    UploadId,
-};
+use loonfs_api::{CheckpointId, ContentRef, ContentStoreId, ManifestNo, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_compaction_lease, metadata_compaction_segment,
-    metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
-    metadata_segment_object_key, metadata_segment_prefix, wal_head, wal_segment,
-    wal_segment_prefix,
+    metadata_manifest_object, metadata_manifest_prefix, metadata_segment, metadata_segment_prefix,
+    wal_head, wal_segment, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,7 +91,7 @@ async fn marking_units<S: ObjectStore + ?Sized>(
 
 #[derive(Default)]
 struct LiveSet {
-    manifests: BTreeSet<ManifestObjectId>,
+    manifests: BTreeSet<ManifestNo>,
     wal_segments: BTreeSet<String>,
     segments: BTreeSet<String>,
     checkpoint_keys: BTreeSet<String>,
@@ -166,7 +160,7 @@ async fn marked<S: ObjectStore + ?Sized>(
             }
         }
         if let GcMarkValue::Manifest { manifest } = entry.value {
-            live.manifests.insert(manifest.manifest_object_id);
+            live.manifests.insert(manifest.manifest_no);
         }
         MarkTables::<S>::advance(&table, &mut position);
     }
@@ -572,7 +566,7 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
     .expect("read record")
     .expect("record exists")
     .state;
-    let basis_key = metadata_manifest_object(&namespace_id, &record.manifest.manifest_object_id);
+    let basis_key = metadata_manifest_object(&namespace_id, &record.manifest.manifest_no);
     store.delete(&basis_key).await.expect("drop basis manifest");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -641,8 +635,8 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .await
         .expect("gc pass");
     assert!(report.deleted.wal_segments >= 1);
-    assert!(report.deleted.metadata_segments >= 1);
-    assert!(report.deleted.manifests >= 1);
+    assert_eq!(report.deleted.metadata_segments, 0);
+    assert_eq!(report.deleted.manifests, 0);
     // The pin on a tombstone has one route out, the same as every other
     // pin: released here, deleted a grace window after that release.
     assert_eq!(report.released_checkpoints.expired, 1);
@@ -652,6 +646,8 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .await
         .expect("gc pass past the release grace window");
     assert!(report.deleted.checkpoint_records >= 1);
+    assert!(report.deleted.metadata_segments >= 1);
+    assert!(report.deleted.manifests >= 1);
     assert!(!report.retention_degraded);
 
     for prefix in [
@@ -670,7 +666,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     // collection candidate.
     for key in [
         loonfs_objectstore::keys::wal_head(&namespace_id),
-        loonfs_objectstore::keys::metadata_root(&namespace_id),
+        loonfs_objectstore::keys::hint(&namespace_id),
     ] {
         assert!(
             store.head(&key).await.expect("head").is_some(),
@@ -708,7 +704,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
 
     // The deleted source keeps exactly what the living clone needs.
     let fork_record = read_fork_record(&store, &source).await;
-    let basis_key = metadata_manifest_object(&source, &fork_record.manifest.manifest_object_id);
+    let basis_key = metadata_manifest_object(&source, &fork_record.manifest.manifest_no);
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
@@ -1403,20 +1399,14 @@ async fn a_corrupt_marked_manifest_fails_the_scan_and_an_unreadable_one_makes_it
     let setup = context(1_000);
     namespace_with_a_scan_worth_bounding(store.inner(), &namespace_id, &setup).await;
     let live = live_set(store.inner(), &namespace_id, &setup).await;
-    let manifest_object_id = live.manifests.iter().next().expect("live manifest").clone();
-    let manifest_key = metadata_manifest_object(&namespace_id, &manifest_object_id);
+    let manifest_number = *live.manifests.iter().next().expect("live manifest");
+    let manifest_key = metadata_manifest_object(&namespace_id, &manifest_number);
 
     store.fail_all();
-    let (state, _) = mark_state(&store, &namespace_id, &setup)
+    let error = mark_state(&store, &namespace_id, &setup)
         .await
-        .expect("a manifest store failure remains conservative");
-    assert!(matches!(
-        state.phase,
-        GcPhase::Sweeping {
-            roots: GcRoots { degraded: true, .. },
-            ..
-        }
-    ));
+        .expect_err("discovery read fails closed");
+    assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
 
     store.clear();
     store
@@ -1778,193 +1768,6 @@ fn aged_before_now(
         inner,
         KeyPredicate::new(move |key| already_written.contains(key)),
     )
-}
-
-/// Folds the delta runs into fresh base segments, which is what leaves the
-/// previous run segments unreferenced.
-async fn fold_metadata<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) {
-    let fold_policy = crate::checkpoint::MetadataLsmPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..Default::default()
-    };
-    let mut folded = false;
-    for _ in 0..16 {
-        let report = crate::checkpoint::reorganize_metadata_step(
-            store,
-            namespace_id,
-            context,
-            fold_policy,
-            MetadataCompactionPolicy::default(),
-        )
-        .await
-        .expect("reorganize step");
-        if matches!(
-            report.outcome,
-            crate::checkpoint::MetadataReorganizeOutcome::NotNeeded { .. }
-        ) {
-            folded = true;
-            break;
-        }
-    }
-    assert!(folded, "the fold must reach a steady state");
-}
-
-#[tokio::test]
-async fn a_read_pinned_before_a_fold_still_reads_after_the_sweep() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    for round in 0..3 {
-        write_test_file(
-            &inner,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            &format!("gc-anchor-{round}"),
-            &setup,
-        )
-        .await;
-        crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
-            .await
-            .expect("flush wal");
-    }
-    // Everything the namespace holds at this point is a grace window old;
-    // the fold below writes the only young objects.
-    let before_fold = namespace_key_set(&inner, &namespace_id).await;
-    let store = aged_before_now(inner, before_fold);
-
-    let pinned = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("pin a read anchor");
-
-    fold_metadata(&store, &namespace_id, &setup).await;
-
-    let after_fold = context(now_after_newest_object(store.inner(), &namespace_id, 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &after_fold)
-        .await
-        .expect("gc pass right after the fold");
-
-    // The read fails if garbage collection removed the manifest or any of its
-    // segments.
-    pinned
-        .resolve_path("/docs/file-0.txt", AttributeInclusion::Omit)
-        .await
-        .expect("the pinned anchor still resolves through its own segments");
-    assert_eq!(
-        report.deleted.metadata_segments, 0,
-        "the fold unreferenced these segments a moment ago, not a grace window ago"
-    );
-
-    // A grace window after the fold, the anchor moves on to the folded
-    // manifest and the superseded segments are collectable.
-    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("gc pass a grace window after the fold");
-    assert!(
-        report.deleted.metadata_segments > 0,
-        "folded-away segments must still be reclaimed, one window later"
-    );
-    stat_root(&store, &namespace_id).await;
-}
-
-#[tokio::test]
-async fn an_old_unpublished_manifest_cannot_replace_the_published_grace_anchor() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    for round in 0..3 {
-        write_test_file(
-            &inner,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            &format!("gc-orphan-anchor-{round}"),
-            &setup,
-        )
-        .await;
-        crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
-            .await
-            .expect("flush wal");
-    }
-
-    let projection = load_current_projection(&inner, &namespace_id)
-        .await
-        .expect("load current projection");
-    let next_manifest_no = ManifestNo(projection.root.manifest.manifest_no.0 + 1);
-    let orphan = build_namespace_manifest_from_metadata_state(
-        &inner,
-        &namespace_id,
-        ManifestMetadataSource {
-            head: &projection.head,
-            basis_manifest_no: Some(projection.root.manifest.manifest_no),
-            retention_floor_seq: ChangeSeq(0),
-            metadata_state: &projection.metadata_state,
-        },
-        crate::checkpoint::MetadataLsmPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            ..Default::default()
-        },
-        next_manifest_no,
-    )
-    .await
-    .expect("build unpublished manifest");
-    let mut orphan_payload = orphan.into_payload();
-    orphan_payload.manifest_object_id =
-        ManifestObjectId::parse(format!("man_{:020}-0000000000000000", next_manifest_no.0))
-            .expect("ordered orphan manifest id");
-    let orphan = loonfs_api::wire::manifest::encode_namespace_manifest_json(orphan_payload)
-        .expect("re-envelope orphan manifest")
-        .into_envelope();
-    crate::checkpoint::write_namespace_manifest(&inner, orphan.payload().clone())
-        .await
-        .expect("write unpublished manifest");
-
-    let already_written = namespace_key_set(&inner, &namespace_id).await;
-    let store = aged_before_now(inner, already_written);
-    let pinned = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("pin the published root");
-
-    let report = crate::checkpoint::reorganize_metadata_step(
-        &store,
-        &namespace_id,
-        &setup,
-        crate::checkpoint::MetadataLsmPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            ..Default::default()
-        },
-        MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("publish one replacement manifest");
-    assert!(matches!(
-        report.outcome,
-        crate::checkpoint::MetadataReorganizeOutcome::UnitPublished { .. }
-    ));
-
-    let after_publication = context(now_after_newest_object(store.inner(), &namespace_id, 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &after_publication)
-        .await
-        .expect("gc pass after replacement publication");
-    assert!(
-        report.deleted.metadata_segments > 0,
-        "the pass should find old segments the replacement no longer references"
-    );
-    pinned
-        .resolve_path("/docs/file-0.txt", AttributeInclusion::Omit)
-        .await
-        .expect("the published grace anchor remains readable");
 }
 
 /// Every reason's count, summed — what `retained_candidates` must equal.
@@ -2628,164 +2431,6 @@ async fn a_published_jobs_group_slot_survives_gc() {
 }
 
 #[tokio::test]
-async fn an_object_the_anchor_predates_is_kept_by_its_own_age_alone() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&inner, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
-        .await
-        .expect("flush wal");
-
-    // The namespace ages past the window; the orphan below is written after
-    // it, so no manifest can ever have named it.
-    let published = namespace_key_set(&inner, &namespace_id).await;
-    let store = aged_before_now(inner, published);
-    let orphan_key = metadata_segment(
-        &namespace_id,
-        &loonfs_api::MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef")
-            .expect("valid metadata segment id"),
-    );
-    store
-        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan segment"))
-        .await
-        .expect("write an unreferenced segment");
-
-    let young = context(now_after_newest_object(store.inner(), &namespace_id, 0).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &young)
-        .await
-        .expect("gc pass while the orphan is young");
-    assert_eq!(report.deleted.metadata_segments, 0);
-    assert_eq!(
-        report.retained.within_grace_window, 1,
-        "the orphan is kept by its own write time, and the pass says so"
-    );
-    assert_eq!(report.retained.no_reference_manifest, 0);
-
-    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("gc pass once the orphan has aged");
-    assert_eq!(report.deleted.metadata_segments, 1);
-    assert!(store
-        .head(&orphan_key)
-        .await
-        .expect("head orphan")
-        .is_none());
-}
-
-#[tokio::test]
-async fn a_pass_with_no_aged_manifest_reaps_nothing_and_says_why() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&inner, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
-        .await
-        .expect("flush wal");
-    let orphan_key = metadata_segment(
-        &namespace_id,
-        &loonfs_api::MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef")
-            .expect("valid metadata segment id"),
-    );
-    inner
-        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan segment"))
-        .await
-        .expect("write an unreferenced segment");
-
-    // Only the orphan is old: the manifests are all inside the window, so
-    // the pass has no anchor to reason from.
-    let store = aged_before_now(inner, BTreeSet::from([orphan_key.clone()]));
-    let young = context(now_after_newest_object(store.inner(), &namespace_id, 0).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &young)
-        .await
-        .expect("gc pass with no aged manifest");
-
-    assert_eq!(report.deleted.metadata_segments, 0);
-    assert_eq!(report.deleted.wal_segments, 0);
-    assert_eq!(report.deleted.manifests, 0);
-    assert_eq!(
-        report.retained.no_reference_manifest, 1,
-        "the aged orphan is the one candidate the missing anchor spared"
-    );
-    assert_eq!(reason_total(&report), report.retained_candidates);
-    assert!(store
-        .head(&orphan_key)
-        .await
-        .expect("head orphan")
-        .is_some());
-
-    // Once a manifest ages past the window, the same orphan is collectable.
-    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("gc pass once a manifest anchors it");
-    assert_eq!(report.deleted.metadata_segments, 1);
-    assert_eq!(report.retained.no_reference_manifest, 0);
-}
-
-#[tokio::test]
-async fn a_budget_that_dies_before_the_anchor_sweeps_nothing() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
-    let orphan_key = wal_segment(
-        &namespace_id,
-        &loonfs_api::WalSegmentId::parse("wal_00000000000000000000-0123456789abcdef")
-            .expect("valid WAL segment id"),
-    );
-    inner
-        .put_if_absent(&orphan_key, Bytes::from_static(b"orphan"))
-        .await
-        .expect("write an unreferenced segment");
-
-    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
-    let (live, marking) = marked(&inner, &namespace_id, &aged).await;
-    let chain_units = u64::try_from(live.wal_segments.len()).expect("segment count fits");
-    // Leave part of marking unfinished; no candidate may be decided.
-    let mut starved = config();
-    starved.max_steps = Some(marking - chain_units - 1);
-    let report = gc_namespace(&inner, &namespace_id, &starved, &aged)
-        .await
-        .expect("pass that could not finish its anchor");
-
-    assert!(report.budget_exhausted);
-    assert!(report.next_cursor.is_some());
-    assert_eq!(report.retained_candidates, 0, "no candidate was examined");
-    assert_eq!(
-        (
-            report.deleted.wal_segments,
-            report.deleted.metadata_segments,
-            report.deleted.manifests,
-        ),
-        (0, 0, 0)
-    );
-    assert!(inner
-        .head(&orphan_key)
-        .await
-        .expect("head orphan")
-        .is_some());
-
-    // The same namespace, unbounded: the anchor is established and the
-    // orphan goes.
-    let report = gc_namespace(&inner, &namespace_id, &config(), &aged)
-        .await
-        .expect("unbounded rerun");
-    assert!(!report.budget_exhausted);
-    assert_eq!(report.deleted.wal_segments, 1);
-}
-
-#[tokio::test]
 async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2868,12 +2513,12 @@ async fn gc_pass(
     }
 }
 
-async fn assert_record_reaped_and_basis_kept(
+async fn assert_record_and_basis_reaped(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     pass: &GcResponse,
     checkpoint_id: &loonfs_api::CheckpointId,
-    manifest_object_id: &ManifestObjectId,
+    manifest_number: &ManifestNo,
 ) {
     assert_eq!(pass.deleted.checkpoint_records, 1);
     assert!(!pass.retention_degraded);
@@ -2884,39 +2529,23 @@ async fn assert_record_reaped_and_basis_kept(
             .is_none(),
         "the released record goes on the pass that decides it"
     );
-    let basis = crate::checkpoint::load_namespace_manifest_envelope(
-        store,
-        namespace_id,
-        manifest_object_id,
-    )
-    .await
-    .expect("the basis manifest survives its record");
-    for descriptor in basis.payload().runs.iter().flat_map(|run| &run.segments) {
-        assert!(
-            store
-                .head(&metadata_segment_object_key(descriptor))
-                .await
-                .expect("head segment")
-                .is_some(),
-            "the basis segments survive the record too"
-        );
-    }
+    assert!(store
+        .head(&metadata_manifest_object(namespace_id, manifest_number))
+        .await
+        .expect("probe basis")
+        .is_none());
 }
 
 async fn assert_basis_reaped(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
-    pass: &GcResponse,
-    manifest_object_id: &ManifestObjectId,
+    _pass: &GcResponse,
+    manifest_number: &ManifestNo,
 ) {
-    assert!(
-        pass.deleted.manifests >= 1,
-        "the basis manifest is reaped once its record is gone"
-    );
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         store,
         namespace_id,
-        manifest_object_id
+        manifest_number
     )
     .await
     .is_err());
@@ -2962,12 +2591,12 @@ async fn assert_a_dead_records_cascade(max_steps: Option<usize>) {
     let first_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_steps)
         .await
         .expect("first gc pass");
-    assert_record_reaped_and_basis_kept(
+    assert_record_and_basis_reaped(
         &store,
         &namespace_id,
         &first_pass,
         &first.checkpoint_id,
-        &first_record.manifest.manifest_object_id,
+        &first_record.manifest.manifest_no,
     )
     .await;
 
@@ -2978,7 +2607,7 @@ async fn assert_a_dead_records_cascade(max_steps: Option<usize>) {
         &store,
         &namespace_id,
         &second_pass,
-        &first_record.manifest.manifest_object_id,
+        &first_record.manifest.manifest_no,
     )
     .await;
     stat_root(&store, &namespace_id).await;
@@ -3159,12 +2788,12 @@ async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
     let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("first gc pass");
-    assert_record_reaped_and_basis_kept(
+    assert_record_and_basis_reaped(
         &store,
         &namespace_id,
         &first_pass,
         &pinned.checkpoint_id,
-        &pinned_record.manifest.manifest_object_id,
+        &pinned_record.manifest.manifest_no,
     )
     .await;
 
@@ -3175,7 +2804,7 @@ async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
         &store,
         &namespace_id,
         &second_pass,
-        &pinned_record.manifest.manifest_object_id,
+        &pinned_record.manifest.manifest_no,
     )
     .await;
     // Releasing an already-reaped record stays idempotent success.
@@ -3452,14 +3081,23 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged_out)
         .await
         .expect("second post-expiry pass");
-    assert_record_reaped_and_basis_kept(
+    assert_eq!(second_pass.deleted.checkpoint_records, 1);
+    assert!(crate::checkpoint::load_checkpoint_record(
         &store,
         &namespace_id,
-        &second_pass,
-        &expiring.checkpoint_id,
-        &expiring_record.manifest.manifest_object_id,
+        &expiring.checkpoint_id
     )
-    .await;
+    .await
+    .expect("record read")
+    .is_none());
+    assert!(store
+        .head(&metadata_manifest_object(
+            &namespace_id,
+            &expiring_record.manifest.manifest_no
+        ))
+        .await
+        .expect("pinned basis")
+        .is_some());
     // The unexpired pin — same basis, different owner — still roots it.
     let survivor =
         crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &lasting.checkpoint_id)
@@ -3470,7 +3108,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
-        &survivor.manifest.manifest_object_id,
+        &survivor.manifest.manifest_no,
     )
     .await
     .is_ok());
@@ -3541,7 +3179,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         crate::checkpoint::load_namespace_manifest_envelope(
             &store,
             &namespace_id,
-            &keeper.manifest.manifest_object_id,
+            &keeper.manifest.manifest_no,
         )
         .await
         .is_ok(),
@@ -3721,7 +3359,7 @@ async fn gc_retains_active_checkpoint_bases() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
-        &first_record.manifest.manifest_object_id,
+        &first_record.manifest.manifest_no,
     )
     .await
     .is_ok());
@@ -3823,12 +3461,12 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     let second_pass = gc_namespace(&store, &source, &config(), &aged_out)
         .await
         .expect("second gc pass");
-    assert_record_reaped_and_basis_kept(
+    assert_record_and_basis_reaped(
         &store,
         &source,
         &second_pass,
         &fork_record.checkpoint_id,
-        &fork_record.manifest.manifest_object_id,
+        &fork_record.manifest.manifest_no,
     )
     .await;
 
@@ -3840,7 +3478,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
         &store,
         &source,
         &third_pass,
-        &fork_record.manifest.manifest_object_id,
+        &fork_record.manifest.manifest_no,
     )
     .await;
     stat_root(&store, &source).await;
@@ -3972,7 +3610,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &source,
-        &fork_record.manifest.manifest_object_id,
+        &fork_record.manifest.manifest_no,
     )
     .await
     .is_ok());
@@ -4004,7 +3642,7 @@ async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
     create_checkpoint(&store, &source, &setup)
         .await
         .expect("advance root past the fork basis");
-    let basis_key = metadata_manifest_object(&source, &fork_record.manifest.manifest_object_id);
+    let basis_key = metadata_manifest_object(&source, &fork_record.manifest.manifest_no);
     store.delete(&basis_key).await.expect("drop basis manifest");
 
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
@@ -4064,7 +3702,7 @@ async fn gc_retains_a_released_fork_record_when_its_target_lives() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &source,
-        &fork_record.manifest.manifest_object_id,
+        &fork_record.manifest.manifest_no,
     )
     .await
     .is_ok());
@@ -4135,7 +3773,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
         assert!(crate::checkpoint::load_namespace_manifest_envelope(
             &store,
             &source,
-            &fork_record.manifest.manifest_object_id,
+            &fork_record.manifest.manifest_no,
         )
         .await
         .is_ok());
@@ -4159,12 +3797,12 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     let reaping = gc_namespace(&store, &source, &tight, &aged_out)
         .await
         .expect("gc past the release grace window");
-    assert_record_reaped_and_basis_kept(
+    assert_record_and_basis_reaped(
         &store,
         &source,
         &reaping,
         &abandoned.checkpoint_id,
-        &fork_record.manifest.manifest_object_id,
+        &fork_record.manifest.manifest_no,
     )
     .await;
     stat_root(&store, &source).await;
@@ -4296,63 +3934,7 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
 }
 
 #[tokio::test]
-async fn a_corrupt_reference_anchor_fails_and_an_unreadable_one_reads_as_missing() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let store = FailStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationClass::Read,
-        InjectedError::Transport("reference manifest timed out".to_owned()),
-    );
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("checkpoint");
-    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-
-    store.fail_all();
-    let (state, _) = mark_state(&store, &namespace_id, &aged)
-        .await
-        .expect("a store failure retains metadata");
-    assert!(matches!(
-        state.phase,
-        GcPhase::Sweeping {
-            roots: GcRoots {
-                anchor: GcReferenceAnchor::Missing {},
-                ..
-            },
-            ..
-        }
-    ));
-
-    store.clear();
-    let manifest_key = store
-        .inner()
-        .list_prefix(&metadata_manifest_prefix(&namespace_id))
-        .await
-        .expect("list manifests")
-        .into_iter()
-        .next()
-        .expect("published manifest");
-    store
-        .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
-        .await
-        .expect("corrupt reference manifest");
-    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let error = mark_state(&store, &namespace_id, &aged)
-        .await
-        .expect_err("a corrupt reference anchor must surface");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(&manifest_key));
-}
-
-#[tokio::test]
-async fn a_corrupt_root_manifest_fails_the_pass_and_an_unreadable_one_degrades_it() {
+async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = FailStore::new(
@@ -4383,16 +3965,10 @@ async fn a_corrupt_root_manifest_fails_the_pass_and_an_unreadable_one_degrades_i
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
 
     store.fail_all();
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
-        .expect("a read failure degrades the pass instead of failing it");
-    assert!(report.retention_degraded);
-    assert!(
-        report.retained.degraded_roots > 0,
-        "the pass counts what the degraded roots made it keep: {report:?}"
-    );
-    assert_eq!(report.deleted.manifests, 0);
-    assert_eq!(report.deleted.metadata_segments, 0);
+        .expect_err("discovery read fails closed");
+    assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
     assert_eq!(
         namespace_keys(store.inner(), &namespace_id).await,
         before,
@@ -4914,8 +4490,8 @@ async fn stale_cursor_preserves_new_publications_with_the_original_cutoff() {
             "live object `{key}` must survive stale-cursor resumption"
         );
     }
-    for manifest_object_id in live.manifests {
-        let key = metadata_manifest_object(&namespace_id, &manifest_object_id);
+    for manifest_number in live.manifests {
+        let key = metadata_manifest_object(&namespace_id, &manifest_number);
         assert!(
             store
                 .head(&key)
@@ -5832,4 +5408,92 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             .expect("session")
             .is_none());
     }
+}
+
+#[tokio::test]
+async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagging_hint() {
+    use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintState};
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/one", "one", &setup).await;
+    let pinned = create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("pin");
+    for index in 2..=3 {
+        write_test_file(
+            &store,
+            &namespace_id,
+            &format!("/file-{index}"),
+            &format!("write-{index}"),
+            &setup,
+        )
+        .await;
+        crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+            .await
+            .expect("flush");
+    }
+    let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current");
+    let bytes = encode_control_state(
+        ControlObjectKind::Hint,
+        &HintState {
+            namespace_id: namespace_id.clone(),
+            manifest_no: ManifestNo(0),
+        },
+    )
+    .expect("hint");
+    store
+        .put_overwrite(
+            &loonfs_objectstore::keys::hint(&namespace_id),
+            Bytes::from(bytes),
+        )
+        .await
+        .expect("rewind hint");
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("collect");
+    assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(
+        crate::namespace::control::load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("discovery after deferred sweep")
+            .state,
+        current.state
+    );
+    write_test_file(&store, &namespace_id, "/four", "four", &setup).await;
+    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+        .await
+        .expect("refresh hint by publishing");
+    let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current");
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("collect after publication");
+    assert_eq!(report.deleted.manifests, 2);
+    assert_eq!(
+        store
+            .list_prefix(&metadata_manifest_prefix(&namespace_id))
+            .await
+            .expect("list for assertion"),
+        vec![
+            metadata_manifest_object(&namespace_id, &pinned.manifest_no),
+            metadata_manifest_object(&namespace_id, &current.state.manifest.manifest_no),
+        ]
+    );
+    assert_eq!(
+        crate::namespace::control::load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("discovery after sweep")
+            .state,
+        current.state
+    );
 }

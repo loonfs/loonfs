@@ -52,7 +52,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_manifest = load_namespace_manifest_envelope(
         store,
         source_namespace_id,
-        &source_record.manifest.manifest_object_id,
+        &source_record.manifest.manifest_no,
     )
     .await
     .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;

@@ -26,7 +26,7 @@ use super::load::{
     load_manifest_metadata_state_for_inspection_from_manifest,
     load_manifest_segments_for_inspection,
 };
-use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
+use super::publish::{encode_manifest, ManifestPublicationOutcome};
 use super::record::load_checkpoint_record;
 use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
@@ -49,10 +49,8 @@ use super::{
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::catalog::load_namespace_catalog_entry;
-use crate::namespace::control::{
-    load_head_object, load_metadata_root_object, load_wal_floor_object,
-};
-use crate::namespace::status::{load_namespace, load_namespace_diagnostics};
+use crate::namespace::control::{load_current_manifest, load_head_object};
+use crate::namespace::status::load_namespace_diagnostics;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
 use crate::protocol::list_changes_after;
@@ -68,7 +66,7 @@ use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::wire::control::{HeadState, ManifestRef, MetadataRootState};
+use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataRow,
     MetadataRowFamily as ApiMetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
@@ -80,11 +78,11 @@ use loonfs_api::wire::sst_blocks::{
 };
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,
-    ManifestNo, ManifestObjectId, NameKey, NamespaceId, RevisionNo, RunNo,
+    ManifestNo, NameKey, NamespaceId, RevisionNo, RunNo,
 };
 use loonfs_objectstore::keys::{
-    metadata_manifest_object, metadata_manifest_prefix, metadata_root, metadata_segment_object_key,
-    wal_floor, wal_head, wal_segment,
+    hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
+    wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -195,7 +193,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
 #[derive(Debug)]
 pub(crate) struct CurrentProjection {
     pub(crate) head: HeadState,
-    pub(crate) root: MetadataRootState,
+    pub(crate) root: crate::namespace::control::CurrentManifest,
     pub(crate) metadata_state: MetadataState,
 }
 
@@ -362,7 +360,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
             }
         }
     }
-    load_metadata_root_object(store, namespace_id)
+    load_current_manifest(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
@@ -404,7 +402,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<CurrentFileState> {
-    let manifest_no = load_metadata_root_object(store, namespace_id)
+    let manifest_no = load_current_manifest(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
@@ -482,9 +480,9 @@ pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>
     namespace_id: &NamespaceId,
 ) -> BTreeSet<String> {
     let staging_prefix = loonfs_objectstore::keys::metadata_compaction_prefix(namespace_id);
-    let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
+    let manifest_number = current_manifest_number(store, namespace_id).await;
     let staged: BTreeSet<String> =
-        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
             .await
             .expect("load the published manifest")
             .manifest()
@@ -517,16 +515,16 @@ pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     );
 }
 
-async fn current_manifest_object_id<S: ObjectStore + ?Sized>(
+async fn current_manifest_number<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> ManifestObjectId {
-    load_metadata_root_object(store, namespace_id)
+) -> ManifestNo {
+    load_current_manifest(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
         .manifest
-        .manifest_object_id
+        .manifest_no
 }
 
 async fn current_manifest_key<S: ObjectStore + ?Sized>(
@@ -535,13 +533,8 @@ async fn current_manifest_key<S: ObjectStore + ?Sized>(
 ) -> String {
     metadata_manifest_object(
         namespace_id,
-        &current_manifest_object_id(store, namespace_id).await,
+        &current_manifest_number(store, namespace_id).await,
     )
-}
-
-fn manifest_object_id(manifest_no: ManifestNo) -> ManifestObjectId {
-    ManifestObjectId::parse(format!("man_{:020}-0123456789abcdef", manifest_no.0))
-        .expect("valid manifest object id")
 }
 
 pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
@@ -550,7 +543,7 @@ pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
 ) -> Result<CurrentProjection, CoreError> {
     let (head, metadata_state) =
         load_checkpoint_projection_metadata_state(store, namespace_id).await?;
-    let root = load_metadata_root_object(store, namespace_id)
+    let root = load_current_manifest(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .state;
@@ -699,16 +692,10 @@ async fn write_file_and_checkpoint(
 }
 
 #[derive(Debug)]
-enum ManifestConflictReplacement {
-    Fixed(Vec<u8>),
-    MutateCandidateNextInode,
-}
-
-#[derive(Debug)]
 struct ConflictOnManifestCreateStore {
     inner: LocalFsStore,
     manifest_key: String,
-    replacement: ManifestConflictReplacement,
+    replacement: Vec<u8>,
     injected: Mutex<bool>,
 }
 
@@ -717,16 +704,7 @@ impl ConflictOnManifestCreateStore {
         Self {
             inner,
             manifest_key,
-            replacement: ManifestConflictReplacement::Fixed(replacement_bytes),
-            injected: Mutex::new(false),
-        }
-    }
-
-    fn mutate_next_inode(inner: LocalFsStore, manifest_key: String) -> Self {
-        Self {
-            inner,
-            manifest_key,
-            replacement: ManifestConflictReplacement::MutateCandidateNextInode,
+            replacement: replacement_bytes,
             injected: Mutex::new(false),
         }
     }
@@ -772,25 +750,7 @@ impl ObjectStore for ConflictOnManifestCreateStore {
                 should_inject
             };
             if should_inject {
-                let replacement_bytes = match &self.replacement {
-                    ManifestConflictReplacement::Fixed(bytes) => Bytes::copy_from_slice(bytes),
-                    ManifestConflictReplacement::MutateCandidateNextInode => {
-                        let candidate = decode_namespace_manifest_json(&bytes)
-                            .map_err(|error| ObjectStoreError::transport(key, error.to_string()))?;
-                        let mut payload = candidate.into_payload();
-                        payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
-                        let mutated = encode_namespace_manifest_json(payload)
-                            .map(|encoded| encoded.into_envelope())
-                            .map_err(|error| ObjectStoreError::transport(key, error.to_string()))?;
-                        Bytes::from(
-                            encode_namespace_manifest_json(mutated.payload().clone())
-                                .map(|encoded| encoded.into_bytes())
-                                .map_err(|error| {
-                                    ObjectStoreError::transport(key, error.to_string())
-                                })?,
-                        )
-                    }
-                };
+                let replacement_bytes = Bytes::copy_from_slice(&self.replacement);
                 self.inner.put_overwrite(key, replacement_bytes).await?;
                 return Err(ObjectStoreError::PreconditionFailed {
                     object_key: key.to_owned(),
@@ -837,7 +797,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     policy: MetadataLsmPolicy,
     manifest_no: ManifestNo,
 ) -> crate::error::Result<NamespaceManifestEnvelope> {
-    let manifest_object_id = ManifestObjectId::generate(manifest_no);
     let head = source.head;
     let metadata_state = source.metadata_state;
     let head_seq = head.seq;
@@ -931,7 +890,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     encode_namespace_manifest_json(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no,
-        manifest_object_id,
+
         head_seq,
         head_commit_id: head.head_commit_id.clone(),
         base_seq,
@@ -952,4 +911,39 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 #[cfg(test)]
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
     payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0)
+}
+
+pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    payload: NamespaceManifestPayload,
+) -> Result<NamespaceManifestEnvelope, CoreError> {
+    let key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
+    let (envelope, bytes) = encode_namespace_manifest_json(payload)
+        .expect("fixture envelope")
+        .into_parts();
+    store
+        .put_if_absent(&key, Bytes::from(bytes))
+        .await
+        .map_err(|error| CoreError::store(&key, &error))?;
+    Ok(envelope)
+}
+
+async fn publish_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest: &NamespaceManifestEnvelope,
+    expected_predecessor: Option<ManifestNo>,
+) -> Result<ManifestPublicationOutcome, CoreError> {
+    use crate::time::{MonotonicTimer, StdMonotonicTimer};
+    let timer = StdMonotonicTimer::default();
+    let started_ms = timer.monotonic_now_ms();
+    super::publish::publish_manifest(
+        store,
+        namespace_id,
+        manifest,
+        expected_predecessor,
+        &timer,
+        started_ms,
+    )
+    .await
 }

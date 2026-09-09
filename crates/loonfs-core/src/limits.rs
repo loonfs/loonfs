@@ -109,7 +109,7 @@ pub const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
 
 /// Self-enforced budget for one metadata publication — WAL flush or
 /// reorganization — measured from before the first segment object is written
-/// until the root compare-and-swap is initiated. A publication that exceeds
+/// until the manifest put-if-absent is initiated. A publication that exceeds
 /// it aborts without publishing; its immutable outputs remain unreachable
 /// garbage-collection candidates.
 pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;

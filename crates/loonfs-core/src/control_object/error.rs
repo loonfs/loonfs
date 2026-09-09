@@ -16,25 +16,6 @@ pub enum ControlObjectLoadError {
         root_manifest_head_seq: loonfs_api::ChangeSeq,
         head_seq: loonfs_api::ChangeSeq,
     },
-    #[error("retention floor seq `{floor_seq}` is beyond the reloaded head seq `{head_seq}`")]
-    FloorAheadOfHead {
-        floor_seq: loonfs_api::ChangeSeq,
-        head_seq: loonfs_api::ChangeSeq,
-    },
-    #[error(
-        "retention floor seq `{floor_seq}` is beyond metadata root seq `{root_manifest_head_seq}`"
-    )]
-    FloorAheadOfRoot {
-        floor_seq: loonfs_api::ChangeSeq,
-        root_manifest_head_seq: loonfs_api::ChangeSeq,
-    },
-    #[error(
-        "namespace `{namespace_id}` retention floor stands at `{floor_seq}`, but its metadata root object is missing"
-    )]
-    MissingRootAfterFloor {
-        namespace_id: NamespaceId,
-        floor_seq: loonfs_api::ChangeSeq,
-    },
     #[error(
         "control object namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
@@ -89,11 +70,8 @@ impl ControlObjectLoadError {
 
         match self {
             Self::MissingObject { .. } => ErrorCode::NamespaceNotFound,
-            Self::RootAheadOfHead { .. }
-            | Self::FloorAheadOfHead { .. }
-            | Self::FloorAheadOfRoot { .. } => ErrorCode::StaleHead,
-            Self::MissingRootAfterFloor { .. }
-            | Self::NamespaceMismatch { .. }
+            Self::RootAheadOfHead { .. } => ErrorCode::StaleHead,
+            Self::NamespaceMismatch { .. }
             | Self::IdentityMismatch { .. }
             | Self::ForkBasisOwnerIsSelf { .. }
             | Self::KeyLayout { .. }
