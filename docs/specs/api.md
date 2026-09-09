@@ -452,7 +452,7 @@ not the input ref.
 
 A commit is one request: a `commit_id` — a client-generated stable
 idempotency key that must be reused verbatim for safe retries — a required
-application-supplied opaque `actor` identifier, an optional `message` (a human-readable annotation that is part of the commit's
+application-supplied opaque `actor_id` identifier, an optional `message` (a human-readable annotation that is part of the commit's
 identity), an optional ordered `assertions` array, and an ordered, non-empty list of path operations. A request with
 one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same commit and fingerprint alike.
@@ -551,15 +551,15 @@ Assertions are admission conditions, stored only through the fingerprint in WAL 
 
 ### Actor attribution
 
-Every commit includes a required actor as a JSON string. The application supplies
+Every commit includes a required `actor_id` as a JSON string. The application supplies
 a stable opaque identifier with the identity scope it needs. LoonFS preserves
 it on the commit and the metadata created by that commit. LoonFS does not
 authenticate the actor or resolve profile information. The application must
 authenticate the user and authorize the operation before sending the request.
 Use a stable internal ID, not an email address or display name.
 
-The actor id is part of the semantic commit fingerprint. Reusing a
-`commit_id` with a different actor id fails with
+The `actor_id` is part of the semantic commit fingerprint. Reusing a
+`commit_id` with a different `actor_id` fails with
 `commit_id_reuse_conflict`. The commit timestamp is not part of the
 fingerprint.
 
@@ -628,7 +628,7 @@ commit retries; that is the cheapest retry and the one the server can
 answer on its own.
 
 **Prepared content.** Prepare bytes once, retain the returned content, then publish
-with the same explicit commit ID, path, actor, and options on each attempt.
+with the same explicit commit ID, path, `actor_id`, and options on each attempt.
 Preparation alone does not publish a file or extend the completed upload's
 lifetime.
 
@@ -1359,7 +1359,7 @@ tokens naming other refs are ignored.
 ```json
 {
   "commit_id": "commit-a",
-  "actor": "document-importer",
+  "actor_id": "document-importer",
   "content_tokens": [
     {
       "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
@@ -1780,7 +1780,7 @@ retained. A directory returns `path_conflict`, an unknown inode returns
 ### 6.8 `POST /commits`
 
 This is the binding for the commit model in section 5.1: one `commit_id`, one
-required `actor`, an optional `message`, optional `assertions`, and `operations` — an ordered,
+required `actor_id`, an optional `message`, optional `assertions`, and `operations` — an ordered,
 non-empty array of path operations. An empty array is `invalid_request`.
 
 The root path `/` is readable but never a mutation target. An operation that
@@ -1796,7 +1796,7 @@ Representative request:
 ```json
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "actor": "usr_8f3c",
+  "actor_id": "usr_8f3c",
   "assertions": [
     { "kind": "namespace_head", "expected_head_seq": 42 },
     { "kind": "file_revision", "inode_id": "ino_7", "expected_revision_no": 3 }
@@ -1825,7 +1825,7 @@ create a directory and write into it:
 ```json
 {
   "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",
-  "actor": "usr_8f3c",
+  "actor_id": "usr_8f3c",
   "message": "import the January report",
   "content_tokens": [
     {
@@ -1904,7 +1904,7 @@ Five operations use inode IDs instead of paths. They let clients act on an entry
 ```json
 {
   "commit_id": "c_1b2c3d4e5f60718293a4b5c6d7e8f901",
-  "actor": "usr_8f3c",
+  "actor_id": "usr_8f3c",
   "operations": [
     {
       "kind": "create_directory_by_inode",
@@ -1955,7 +1955,7 @@ The same endpoint also accepts path directory creation:
 ```json
 {
   "commit_id": "c_8b7d4ef098ec4c1fbde15edbe02f9a64",
-  "actor": "usr_8f3c",
+  "actor_id": "usr_8f3c",
   "operations": [{ "kind": "create_directory", "path": "/docs" }]
 }
 ```
@@ -1965,7 +1965,7 @@ and path revision restore:
 ```json
 {
   "commit_id": "c_8f9a1b2c3d4e4f50a6b7c8d9e0f12345",
-  "actor": "usr_8f3c",
+  "actor_id": "usr_8f3c",
   "operations": [
     {
       "kind": "restore_revision",
@@ -1985,7 +1985,7 @@ deletion's committed sequence.
 ```json
 {
   "commit_id": "c_5d6e7f8091a2b3c4d5e6f70812345678",
-  "actor": "usr_8f3c",
+  "actor_id": "usr_8f3c",
   "operations": [
     {
       "kind": "undelete",
@@ -2014,7 +2014,7 @@ path resolves to:
 ```json
 {
   "commit_id": "c_6e7f8091a2b3c4d5e6f7081234567890",
-  "actor": "usr_8f3c",
+  "actor_id": "usr_8f3c",
   "operations": [
     {
       "kind": "update_attributes",

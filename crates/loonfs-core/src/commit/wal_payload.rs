@@ -10,7 +10,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
     WalCommitPayload {
         seq: prepared.assigned_seq,
         commit_id: prepared.commit_id.clone(),
-        committed_by: prepared.actor.clone(),
+        committed_by: prepared.actor_id.clone(),
         semantic_commit_fingerprint: prepared.semantic_identity.clone(),
         committed_at_ms: commit.committed_at_ms,
         message: prepared.message.clone(),
@@ -41,7 +41,7 @@ mod tests {
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             writer_epoch: WriterEpoch(1),
             message: Some("create docs".to_owned()),
             semantic_identity: test_fingerprint(),

@@ -4,7 +4,7 @@
   "request": {
     "namespace_id": "conf-inode-mutations",
     "directory": "/tree",
-    "actor": "conformance-inode-mutations",
+    "actor_id": "conformance-inode-mutations",
     "path_directory_name": "by-path-dir",
     "path_file_name": "by-path-file",
     "inode_directory_name": "by-inode-dir",

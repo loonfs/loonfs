@@ -418,7 +418,7 @@ fn canonical_commit_bytes(
     struct CanonicalCommit<'a> {
         domain: &'static str,
         namespace_id: &'a str,
-        actor: &'a str,
+        actor_id: &'a str,
         operations: Vec<OperationFingerprintInput<'a>>,
         message: Option<&'a str>,
         assertions: Vec<AssertionFingerprintInput<'a>>,
@@ -427,7 +427,7 @@ fn canonical_commit_bytes(
     Ok(serde_json::to_vec(&CanonicalCommit {
         domain: COMMIT_FINGERPRINT_DOMAIN,
         namespace_id: namespace_id.as_str(),
-        actor: actor.as_str(),
+        actor_id: actor.as_str(),
         operations: operations.iter().map(operation_fingerprint_input).collect(),
         message,
         assertions: assertions.iter().map(assertion_fingerprint_input).collect(),
@@ -808,7 +808,7 @@ mod tests {
                 )
                 .expect("retry fingerprint")
                 .as_str(),
-                "v3:sha256:475f18a814dbc52a03433b5cd34149544b94f3f74721a945734cb4e92797a59f"
+                "v3:sha256:ea77a1d7bf958e6905e42e31da42be2318327f168f8920f50a9b8eb9cc1e5402"
             );
         }
     }
@@ -930,7 +930,7 @@ mod tests {
             |namespace_id: &NamespaceId, path: &AbsolutePath, options: &PutFileOptions| {
                 semantic_commit_fingerprint(
                     namespace_id,
-                    &options.commit.actor,
+                    &options.commit.actor_id,
                     options.commit.message.as_deref(),
                     &[FilesystemOperation::PutFile {
                         path: path.clone(),

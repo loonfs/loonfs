@@ -31,7 +31,7 @@ fn options(commit_id: &CommitId) -> PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
             assertions: Vec::new(),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: None,
         },
@@ -370,7 +370,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
             CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id.clone(),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     FilesystemOperation::PutFile {
@@ -543,7 +543,7 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
     let options = |message: &str| CreateDirectoryOptions {
         commit: loonfs_api::options::CommitOptions {
             assertions: Vec::new(),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),
         },

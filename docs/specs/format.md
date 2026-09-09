@@ -497,7 +497,7 @@ Suppose request A creates `/reports` and request B also tries to create `/report
 
 ### 6.5 Commit identity and retries
 
-Every WAL commit and commit receipt stores a `semantic_commit_fingerprint`. It represents the logical request: namespace, actor, ordered operations, caller guards, assertions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
+Every WAL commit and commit receipt stores a `semantic_commit_fingerprint`. It represents the logical request: `namespace_id`, `actor_id`, ordered operations, caller guards, assertions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
 
 While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
 
@@ -1301,7 +1301,7 @@ The fingerprint is the SHA-256 of compact UTF-8 JSON with the following top-leve
 {
   "domain": "loonfs.commit.semantic.v3",
   "namespace_id": <namespace string>,
-  "actor": <actor ID string>,
+  "actor_id": <actor ID string>,
   "operations": <ordered canonical operations>,
   "message": <string or null>,
   "assertions": <ordered canonical assertions>
@@ -1310,7 +1310,7 @@ The fingerprint is the SHA-256 of compact UTF-8 JSON with the following top-leve
 
 The layout above is a schema illustration. Actual preimage bytes contain no formatting whitespace. The `assertions` member is always present and is `[]` for an empty list; `message` is always present and is `null` when absent.
 
-The namespace, actor, message, operation order, and caller race guards are significant. A changed actor is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The commit ID itself, writer epoch, and committed timestamp are excluded.
+The `namespace_id`, `actor_id`, message, operation order, and caller race guards are significant. A changed `actor_id` is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The commit ID itself, writer epoch, and committed timestamp are excluded.
 
 ### B.1 Operation fields
 
@@ -1370,13 +1370,13 @@ Non-ASCII characters are encoded directly as UTF-8. JSON quotes, backslashes, an
 For example, the following is the complete canonical preimage for one directory-creation request. There is no trailing newline in the bytes being hashed:
 
 ```json
-{"domain":"loonfs.commit.semantic.v3","namespace_id":"demo","actor":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"assertions":[]}
+{"domain":"loonfs.commit.semantic.v3","namespace_id":"demo","actor_id":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"assertions":[]}
 ```
 
 Its fingerprint is:
 
 ```text
-v3:sha256:82ddc95392674c38fb10f42536f1847c65b3f57af6d1f054ca90a2fcd8e32a99
+v3:sha256:729b9bd9613b3f59488da7bff97168419dd6e346df44b649815ef814ef87ee42
 ```
 
 A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can omit defaults that the canonical operation writes explicitly; its raw request JSON is not the fingerprint preimage.

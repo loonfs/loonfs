@@ -176,7 +176,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
             assertions: Vec::new(),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             commit_id: None,
             message: None,
         },

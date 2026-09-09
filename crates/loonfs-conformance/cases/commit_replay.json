@@ -4,7 +4,7 @@
   "request": {
     "namespace_id": "conf-commit-replay",
     "commit_id": "conf-commit-replay-001",
-    "actor": "conformance-commit",
+    "actor_id": "conformance-commit",
     "message": "create replay directory",
     "path": "/replayed",
     "assertions": [{ "kind": "namespace_head", "expected_head_seq": 0 }]

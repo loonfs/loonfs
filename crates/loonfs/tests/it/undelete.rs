@@ -47,7 +47,7 @@ fn delete_options_select_recursive_behavior() {
             behavior: loonfs::DeleteDirectoryBehavior::Recursive,
             commit: loonfs_api::options::CommitOptions {
                 assertions: Vec::new(),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
             },
@@ -86,7 +86,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
                 assertions: Vec::new(),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
             },
@@ -233,7 +233,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
                 commit: loonfs_api::options::CommitOptions {
                     assertions: Vec::new(),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -315,7 +315,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
                 commit: loonfs_api::options::CommitOptions {
                     assertions: Vec::new(),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -603,7 +603,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
             CommitRequest {
                 assertions: Vec::new(),
                 commit_id: CommitId::parse("same-commit-cycle").expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     FilesystemOperation::DeletePath {
@@ -664,7 +664,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
                 behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
                 commit: loonfs_api::options::CommitOptions {
                     assertions: Vec::new(),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -691,7 +691,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
             behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
             commit: loonfs_api::options::CommitOptions {
                 assertions: Vec::new(),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
             },

@@ -1578,7 +1578,7 @@ async fn runtime_created_state_is_readable_through_http() {
             behavior: DestinationBehavior::NoReplace,
             commit: loonfs_api::options::CommitOptions {
                 assertions: Vec::new(),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
                 message: None,
             },
@@ -1679,7 +1679,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
                         assertions: Vec::new(),
-                        actor: loonfs_test_support::test_actor(),
+                        actor_id: loonfs_test_support::test_actor(),
                         commit_id: None,
                         message: None,
                     },
@@ -1795,7 +1795,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
                         assertions: Vec::new(),
-                        actor: loonfs_test_support::test_actor(),
+                        actor_id: loonfs_test_support::test_actor(),
                         commit_id: None,
                         message: None,
                     },
@@ -1996,7 +1996,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     assertions: Vec::new(),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -2399,7 +2399,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let commits_url = format!("http://{addr}/v0/namespaces/demo/commits");
     let invalid_operation = r#"{
         "commit_id":"invalid-path",
-        "actor":"test-service",
+        "actor_id":"test-service",
         "operations":[{"kind":"create_directory","path":"relative"}]
     }"#;
     let body = expect_enveloped(
@@ -2433,7 +2433,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             "missing actor",
         ),
         (
-            r#"{"commit_id":"malformed-actor","actor":{"kind":"robot","id":"x"},"operations":[{"kind":"create_directory","path":"/docs"}]}"#,
+            r#"{"commit_id":"malformed-actor","actor_id":{"kind":"robot","id":"x"},"operations":[{"kind":"create_directory","path":"/docs"}]}"#,
             "malformed actor",
         ),
     ] {
@@ -2752,7 +2752,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
                 .body(axum::body::Body::from(
                     r#"{
                         "commit_id":"hidden-maintenance-commit",
-                        "actor":"test-service",
+                        "actor_id":"test-service",
                         "operations":[{"kind":"create_directory","path":"/docs"}]
                     }"#,
                 ))
@@ -3659,7 +3659,7 @@ async fn write_file_bytes(
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
                 assertions: Vec::new(),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                 message: None,
             },
@@ -3684,7 +3684,7 @@ async fn delete_path_recursive(
             behavior: DeleteDirectoryBehavior::Recursive,
             commit: loonfs_api::options::CommitOptions {
                 assertions: Vec::new(),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                 message: None,
             },
@@ -4583,7 +4583,7 @@ async fn stale_commit_assertion_returns_409_with_its_index() {
                 .body(axum::body::Body::from(
                     serde_json::json!({
                         "commit_id": "stale-assertion",
-                        "actor": "test-actor",
+                        "actor_id": "test-actor",
                         "assertions": [{"kind": "namespace_head", "expected_head_seq": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })
@@ -4636,7 +4636,7 @@ async fn scoped_commit_assertion_returns_409_with_its_index() {
                 .body(axum::body::Body::from(
                     serde_json::json!({
                         "commit_id": "stale-assertion",
-                        "actor": "test-actor",
+                        "actor_id": "test-actor",
                         "assertions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_99", "expected_revision_no": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })

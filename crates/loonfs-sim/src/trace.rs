@@ -3,6 +3,7 @@
 use crate::fault::ObjectStoreFault;
 use crate::object_operation::ObjectOperation;
 use crate::rng::SimSeed;
+use loonfs_api::ActorId;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -29,7 +30,7 @@ impl SimTrace {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimTraceEvent {
     pub step: u64,
-    pub actor: Option<String>,
+    pub actor_id: Option<ActorId>,
     pub operation: String,
     pub object_op: Option<ObjectOperation>,
     pub injected_fault: Option<ObjectStoreFault>,

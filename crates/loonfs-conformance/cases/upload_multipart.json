@@ -5,7 +5,7 @@
     "namespace_id": "conf-upload-multipart",
     "path": "/multipart.bin",
     "commit_id": "conf-upload-multipart-001",
-    "actor": "conformance-upload",
+    "actor_id": "conformance-upload",
     "part_size_bytes": 5242880,
     "content_pattern": {
       "length": 5243904,

@@ -321,7 +321,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         let options = PutFileOptions {
             commit: loonfs_api::options::CommitOptions {
                 assertions: Vec::new(),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(commit_id.clone()),
                 message: None,
             },

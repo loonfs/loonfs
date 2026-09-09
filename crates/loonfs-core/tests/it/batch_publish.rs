@@ -717,7 +717,7 @@ async fn empty_request_is_rejected_before_commit_id_reuse() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: CommitId::parse("empty-reuse").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: Vec::new(),
         },
@@ -791,7 +791,7 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
     let candidate = CommitCandidate::new(CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         operations: (0..=loonfs_core::limits::MAX_COMMIT_OPERATIONS)
             .map(|index| FilesystemOperation::CreateDirectory {

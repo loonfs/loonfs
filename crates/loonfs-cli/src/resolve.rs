@@ -73,7 +73,7 @@ pub(crate) fn resolve_actor(
         return parse_actor_id(ACTOR_ID_ENV, &id);
     }
     Ok(profile
-        .actor()
+        .actor_id()
         .unwrap_or_else(|| ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid")))
 }
 

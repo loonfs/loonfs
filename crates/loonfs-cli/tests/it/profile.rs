@@ -28,9 +28,12 @@ fn profile_create_list_show_delete_work() {
         "http://127.0.0.1:9400",
         "--auth-token",
         "test-token",
+        "--actor-id",
+        "remote-user",
     ]);
     assert_success(&add_remote);
     assert_eq!(json_data(&add_remote)["mode"], "remote");
+    assert_eq!(json_data(&add_remote)["actor_id"], "remote-user");
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_success(&list);
@@ -44,6 +47,7 @@ fn profile_create_list_show_delete_work() {
     assert_success(&show);
     let stdout = stdout_string(&show);
     assert!(stdout.contains("mode = \"remote\""));
+    assert!(stdout.contains("actor_id = \"remote-user\""));
     assert!(stdout.contains("<redacted>"));
     assert!(!stdout.contains("test-token"));
 
@@ -79,6 +83,9 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
         "--actor-id",
         "profile-user",
     ]));
+    let profile = harness.run(&["--json", "profile", "show", "default"]);
+    assert_success(&profile);
+    assert_eq!(json_data(&profile)["actor_id"], "profile-user");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
     let payload = harness.temp_dir.path().join("actor.txt");

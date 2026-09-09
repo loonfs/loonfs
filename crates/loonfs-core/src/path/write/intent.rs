@@ -33,7 +33,7 @@ pub struct CommitRequest {
     /// Client idempotency key for the whole request.
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
-    pub actor: ActorId,
+    pub actor_id: ActorId,
     /// Caller annotation recorded on the commit. Part of the request's
     /// identity: reusing a commit id with a different message conflicts.
     pub message: Option<String>,
@@ -59,7 +59,7 @@ impl CommitRequest {
     ) -> Self {
         Self {
             commit_id,
-            actor,
+            actor_id: actor,
             message,
             operations: vec![operation],
             assertions: Vec::new(),

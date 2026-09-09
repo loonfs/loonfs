@@ -16,7 +16,7 @@ pub(crate) struct CommandContext {
     pub(crate) profile_name: String,
     pub(crate) mode: String,
     pub(crate) namespace: Option<NamespaceId>,
-    pub(crate) actor: Option<ActorId>,
+    pub(crate) actor_id: Option<ActorId>,
     pub(crate) target: ResolvedTarget,
 }
 
@@ -91,7 +91,7 @@ impl CommandContext {
     }
 
     pub(crate) fn actor(&self) -> &ActorId {
-        self.actor
+        self.actor_id
             .as_ref()
             .expect("mutation command context should carry an actor")
     }
@@ -148,7 +148,7 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
             profile_name: profile_name.to_owned(),
             mode,
             namespace: None,
-            actor: None,
+            actor_id: None,
             target,
         },
         profile,
@@ -200,7 +200,7 @@ async fn resolve_command_context_with_actor(
         profile_name,
         mode,
         namespace: Some(namespace),
-        actor: Some(actor),
+        actor_id: Some(actor),
         target: resolved_target,
     })
 }

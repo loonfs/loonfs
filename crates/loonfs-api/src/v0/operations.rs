@@ -632,7 +632,7 @@ pub struct CommitRequest {
     /// Caller-supplied idempotency key for the whole request.
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
-    pub actor: crate::ActorId,
+    pub actor_id: crate::ActorId,
     /// The caller annotation that forms part of the commit identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -662,7 +662,7 @@ impl CommitRequest {
     ) -> Self {
         Self {
             commit_id,
-            actor,
+            actor_id: actor,
             message,
             content_tokens: Vec::new(),
             assertions: Vec::new(),
@@ -1357,7 +1357,7 @@ mod tests {
     fn commit_actor_requires_a_string() {
         let request = serde_json::json!({
             "commit_id": "actor-shape",
-            "actor": "usr_8f3c",
+            "actor_id": "usr_8f3c",
             "operations": [{ "kind": "create_directory", "path": "/docs" }],
         });
         serde_json::from_value::<CommitRequest>(request.clone()).expect("string actor");
@@ -1367,14 +1367,14 @@ mod tests {
             serde_json::json!(42),
         ] {
             let mut invalid = request.clone();
-            invalid["actor"] = actor;
+            invalid["actor_id"] = actor;
             assert!(serde_json::from_value::<CommitRequest>(invalid).is_err());
         }
         let mut missing = request;
         missing
             .as_object_mut()
             .expect("request object")
-            .remove("actor");
+            .remove("actor_id");
         assert!(serde_json::from_value::<CommitRequest>(missing).is_err());
     }
 
@@ -1912,7 +1912,7 @@ mod tests {
             operation[guard] = serde_json::json!(3);
             serde_json::json!({
                 "commit_id": "guarded-put",
-                "actor": crate::ActorId::loonfs(),
+                "actor_id": crate::ActorId::loonfs(),
                 "operations": [operation]
             })
         };
@@ -1940,7 +1940,7 @@ mod tests {
         let body = |expected_revision_no: u64| {
             serde_json::json!({
                 "commit_id": "bounded-revision-guard",
-                "actor": crate::ActorId::loonfs(),
+                "actor_id": crate::ActorId::loonfs(),
                 "operations": [{
                     "kind": "put_file",
                     "path": "/docs/a.txt",
@@ -1977,7 +1977,7 @@ mod tests {
         let valid = || {
             serde_json::json!({
                 "commit_id": "strict-commit",
-                "actor": crate::ActorId::loonfs(),
+                "actor_id": crate::ActorId::loonfs(),
                 "content_tokens": [{
                     "content_ref": sample_content_ref(),
                     "token": "opaque-proof"

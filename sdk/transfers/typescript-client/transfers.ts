@@ -24,7 +24,7 @@ export interface FileUploadInput {
     namespace_alias: string;
     path: LoonFS.AbsolutePath;
     content: Uint8Array;
-    actor: LoonFS.ActorId;
+    actor_id: LoonFS.ActorId;
     commit_id: LoonFS.CommitId;
     message?: string | null;
     behavior?: LoonFS.DestinationBehavior;
@@ -175,7 +175,7 @@ export class FilesClient extends GeneratedFilesClient {
     ): Promise<FileUploadResult> {
         const request: LoonFS.CommitRequest = {
             namespace_alias: input.namespace_alias,
-            actor: input.actor,
+            actor_id: input.actor_id,
             commit_id: input.commit_id,
             content_tokens: input.prepared.contentToken === undefined ? [] : [input.prepared.contentToken],
             operations: [

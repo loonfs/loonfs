@@ -628,7 +628,7 @@ mod tests {
         let error = decode_json::<loonfs_api::CommitRequest>(
             br#"{
                 "commit_id": "invalid-path",
-                "actor": "test-service",
+                "actor_id": "test-service",
                 "operations": [{ "kind": "create_directory", "path": "relative" }]
             }"#,
         )
@@ -637,11 +637,31 @@ mod tests {
     }
 
     #[test]
+    fn api_commit_decode_names_an_invalid_actor_id() {
+        for actor_id in [
+            serde_json::Value::Null,
+            serde_json::json!(42),
+            serde_json::json!(" bad"),
+        ] {
+            let request = serde_json::json!({
+                "commit_id": "invalid-actor",
+                "actor_id": actor_id,
+                "operations": [{ "kind": "create_directory", "path": "/docs" }],
+            });
+            let error = decode_json::<loonfs_api::CommitRequest>(
+                &serde_json::to_vec(&request).expect("request JSON"),
+            )
+            .expect_err("actor_id must be a valid string");
+            assert_eq!(error.param(), Some("/actor_id"));
+        }
+    }
+
+    #[test]
     fn ambiguous_operation_fields_do_not_report_a_param() {
         let error = decode_json::<loonfs_api::CommitRequest>(
             br#"{
                 "commit_id": "invalid-paths",
-                "actor": "test-service",
+                "actor_id": "test-service",
                 "operations": [{
                     "kind": "move_path",
                     "from_path": "relative",

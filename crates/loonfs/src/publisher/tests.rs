@@ -1597,9 +1597,9 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let actor_a = ActorId::parse("user-a").expect("actor id");
     let actor_b = ActorId::parse("service-b").expect("actor id");
     let mut request_a = create_directory_request("req-a", "alpha");
-    request_a.actor = actor_a.clone();
+    request_a.actor_id = actor_a.clone();
     let mut request_b = create_directory_request("req-b", "beta");
-    request_b.actor = actor_b.clone();
+    request_b.actor_id = actor_b.clone();
     let response_a = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();

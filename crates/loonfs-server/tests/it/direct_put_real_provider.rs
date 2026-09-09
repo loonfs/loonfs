@@ -205,7 +205,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         &CommitRequest {
             assertions: Vec::new(),
             commit_id: CommitId::parse("direct-put-e2e").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
@@ -1121,7 +1121,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         &CommitRequest {
             assertions: Vec::new(),
             commit_id: CommitId::parse("direct-multipart-e2e").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
@@ -1177,7 +1177,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     assertions: Vec::new(),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
                     message: None,
                 },
@@ -1196,7 +1196,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     assertions: Vec::new(),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
                     message: None,
                 },
@@ -1285,7 +1285,7 @@ fn put_options(commit_id: &str) -> loonfs_client::PutFileOptions {
         behavior: DestinationBehavior::NoReplace,
         commit: loonfs_api::options::CommitOptions {
             assertions: Vec::new(),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(CommitId::parse(commit_id).expect("valid commit id")),
             message: None,
         },

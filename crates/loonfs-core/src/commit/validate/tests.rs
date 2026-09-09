@@ -265,7 +265,7 @@ async fn build_commit_plan(
     Ok(ValidatedCommitPlan {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id,
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         writer_epoch: context.head.writer_epoch,
         message: None,
         semantic_identity: test_fingerprint(),

@@ -43,7 +43,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                     vec![crate::commit_engine::CommitCandidate::new(
                         crate::path::write::CommitRequest {
                             commit_id: loonfs_api::CommitId::generate(),
-                            actor: loonfs_test_support::ids::test_actor(),
+                            actor_id: loonfs_test_support::ids::test_actor(),
                             message: None,
                             assertions: Vec::new(),
                             operations: vec![

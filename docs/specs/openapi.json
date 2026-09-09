@@ -719,7 +719,7 @@
         "additionalProperties": false,
         "description": "A request to commit one or more filesystem operations atomically in order.\n\nUnknown fields are rejected.",
         "properties": {
-          "actor": {
+          "actor_id": {
             "$ref": "#/components/schemas/ActorId",
             "description": "Actor responsible for the commit, as supplied by the application."
           },
@@ -758,7 +758,7 @@
         },
         "required": [
           "commit_id",
-          "actor",
+          "actor_id",
           "operations"
         ],
         "type": "object"

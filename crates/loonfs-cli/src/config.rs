@@ -64,8 +64,8 @@ pub(crate) struct CliConfig {
 pub(crate) enum ProfileConfig {
     Embedded {
         store: StoreConfig,
-        #[serde(flatten)]
-        actor: ProfileActorConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_id: Option<ActorId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,8 +73,8 @@ pub(crate) enum ProfileConfig {
     },
     Remote {
         server_url: String,
-        #[serde(flatten)]
-        actor: ProfileActorConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor_id: Option<ActorId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,13 +84,6 @@ pub(crate) enum ProfileConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ca_cert_path: Option<String>,
     },
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProfileActorConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) actor_id: Option<ActorId>,
 }
 
 impl CliConfig {
@@ -144,9 +137,9 @@ impl Default for CliConfig {
 }
 
 impl ProfileConfig {
-    pub(crate) fn actor(&self) -> Option<ActorId> {
+    pub(crate) fn actor_id(&self) -> Option<ActorId> {
         match self {
-            Self::Embedded { actor, .. } | Self::Remote { actor, .. } => actor.actor_id.clone(),
+            Self::Embedded { actor_id, .. } | Self::Remote { actor_id, .. } => actor_id.clone(),
         }
     }
 
@@ -178,7 +171,7 @@ impl ProfileConfig {
             }
             ProfileConfig::Remote {
                 server_url,
-                actor: _,
+                actor_id: _,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
@@ -199,24 +192,24 @@ impl ProfileConfig {
         match self {
             ProfileConfig::Embedded {
                 store,
-                actor,
+                actor_id,
                 default_namespace,
                 writer_id,
             } => ProfileConfig::Embedded {
                 store: store.redacted(),
-                actor: actor.clone(),
+                actor_id: actor_id.clone(),
                 default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
             },
             ProfileConfig::Remote {
                 server_url,
-                actor,
+                actor_id,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
             } => ProfileConfig::Remote {
                 server_url: server_url.clone(),
-                actor: actor.clone(),
+                actor_id: actor_id.clone(),
                 default_namespace: default_namespace.clone(),
                 auth_token: auth_token.as_ref().map(SecretString::masked),
                 ca_cert_path: ca_cert_path.clone(),
@@ -1035,7 +1028,7 @@ secret_access_key = "secret"
                                     server_url: format!(
                                         "https://agent-{thread_index}-{mutation_index}.example.com"
                                     ),
-                                    actor: super::ProfileActorConfig::default(),
+                                    actor_id: None,
                                     default_namespace: Some(namespace),
                                     auth_token: None,
                                     ca_cert_path: None,
