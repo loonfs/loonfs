@@ -1475,6 +1475,12 @@ impl NamespacePublisher {
         match result {
             Ok(_) => {
                 self.read_core.instruments().publisher_wal_fold();
+                // The fold moved the folded number. The next batch counts its
+                // tail from the new manifest instead of starting another fold
+                // over a stale count.
+                if let Some(engine) = self.engine.lock().await.engine.as_mut() {
+                    engine.invalidate_projection();
+                }
             }
             Err(error) => {
                 let error = RuntimeError::Core(error);
