@@ -615,7 +615,6 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
         revisions,
         subtree_tombstones,
         attribute_revisions,
-        content_publications: _,
         ..
     } = state;
     (
