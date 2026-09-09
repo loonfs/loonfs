@@ -51,13 +51,16 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     let namespace = namespace_id("warm");
     let listing = NamespacePath::parse("warm", "/docs").expect("parse path");
 
-    let first = start_graceful_server(test_config_with_local_cache(
+    // The writing server serves its own reads from the state its batches
+    // seeded, so a server that starts after the writes is what fills the
+    // local cache.
+    let writer = start_graceful_server(test_config_with_local_cache(
         &store_dir.path().join("store"),
         cache_dir.path(),
-        "local-cache-first",
+        "local-cache-writer",
     ))
     .await;
-    first
+    writer
         .client
         .create_namespace(&namespace)
         .await
@@ -65,13 +68,13 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     for index in 0..4 {
         let path = format!("/docs/file-{index}.txt");
         let target = NamespacePath::parse("warm", &path).expect("parse path");
-        first
+        writer
             .client
             .put_file_bytes(&target, b"file", &replace_file_options())
             .await
             .expect("put file");
     }
-    first
+    writer
         .client
         .create_checkpoint(
             &namespace,
@@ -85,12 +88,19 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     // One write after the checkpoint moves the head, so reads resolve
     // against the published manifest and touch its segments.
     let extra = NamespacePath::parse("warm", "/docs/after.txt").expect("parse path");
-    first
+    writer
         .client
         .put_file_bytes(&extra, b"after", &replace_file_options())
         .await
         .expect("put file after the checkpoint");
 
+    writer.shut_down().await;
+    let first = start_graceful_server(test_config_with_local_cache(
+        &store_dir.path().join("store"),
+        cache_dir.path(),
+        "local-cache-first",
+    ))
+    .await;
     let warmed = collect_path_entries(&first.client, &listing, &Default::default())
         .await
         .expect("warm the cache");

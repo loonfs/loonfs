@@ -1,8 +1,5 @@
 //! Runtime caches for control-object reads and WAL-tail projections.
-//! This module also defines the cache-management methods on [`ReadCore`].
-//!
-//! Every cache revalidates against durable state before its contents are
-//! used; nothing here weakens read-after-write consistency.
+//! WAL probes observe commits; interval checks observe manifest changes.
 
 use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::metrics::RuntimeInstruments;
@@ -17,7 +14,7 @@ use loonfs_core::control::{
     VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
-use loonfs_objectstore::keys::hint;
+use loonfs_objectstore::keys::metadata_manifest_object;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -43,6 +40,8 @@ pub(crate) struct CachedNamespaceAnchor {
     pub(crate) head: CachedControl<NamespaceReadState>,
     pub(crate) basis: MetadataBasis,
     locally_published: bool,
+    last_control_check_ms: u64,
+    validation: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Snapshot of runtime cache counters.
@@ -224,55 +223,67 @@ impl ReadCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
-        let cache_config = &self.inner.config.runtime_cache;
-        if !self.control_cache_enabled() {
-            return load_namespace_read_anchor(self.store(), namespace_id)
-                .await
-                .map(cached_anchor);
+        let validation = self
+            .inner
+            .control_cache()
+            .namespaces
+            .get(namespace_id)
+            .map(|(head, _)| Arc::clone(&head.validation))
+            .unwrap_or_default();
+        // Concurrent readers share the interval check and the resulting head.
+        let _validation = validation.lock().await;
+        let result = self
+            .refresh_namespace_head(namespace_id)
+            .await
+            .map(|mut head| {
+                head.validation = Arc::clone(&validation);
+                head
+            });
+        match &result {
+            Ok(head) => self.inner.control_cache().insert_namespace_head(
+                namespace_id,
+                head.clone(),
+                self.runtime_cache_config().max_cached_namespaces,
+            ),
+            Err(_) => self
+                .inner
+                .control_cache()
+                .invalidate_namespace(namespace_id),
         }
+        result
+    }
 
+    async fn refresh_namespace_head(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
+        let now_ms = self.inner.timer.monotonic_now_ms();
         let cached = self
             .inner
             .control_cache()
             .cached_namespace_head(namespace_id);
-        if let Some(head) = cached {
+        if let Some(mut head) = cached {
             if head.locally_published {
+                head.locally_published = false;
                 return Ok(head);
             }
-            match self
-                .cached_control_identity_matches(&hint(namespace_id), &head.head.etag)
-                .await
-            {
-                Ok(true) => return Ok(head),
-                Ok(false) => self
-                    .inner
-                    .control_cache()
-                    .invalidate_namespace(namespace_id),
-                Err(error) => {
-                    self.inner
-                        .control_cache()
-                        .invalidate_namespace(namespace_id);
-                    return Err(error);
+            let check_due = now_ms.saturating_sub(head.last_control_check_ms)
+                >= self.runtime_cache_config().control_revalidation_interval_ms;
+            let matches = !check_due || self.manifest_is_current(namespace_id, &head.basis).await?;
+            if matches {
+                if check_due {
+                    head.last_control_check_ms = now_ms;
+                }
+                let mut context = self.runtime_read_context(&head);
+                if loonfs_core::control::probe_namespace_wal(self.store(), &mut context).await? {
+                    head.head.state = context.head;
+                    return Ok(head);
                 }
             }
         }
-
-        let loaded = match load_namespace_read_anchor(self.store(), namespace_id).await {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                self.inner
-                    .control_cache()
-                    .invalidate_namespace(namespace_id);
-                return Err(error);
-            }
-        };
-        let head = cached_anchor(loaded);
-        self.inner.control_cache().insert_namespace_head(
-            namespace_id,
-            head.clone(),
-            cache_config.max_cached_namespaces,
-        );
-        Ok(head)
+        load_namespace_read_anchor(self.store(), namespace_id)
+            .await
+            .map(|loaded| cached_anchor(loaded, now_ms))
     }
 
     /// Loads the read anchor, mapping an absent head to the one answer it
@@ -290,31 +301,27 @@ impl ReadCore {
             })
     }
 
-    async fn cached_control_identity_matches(
+    /// The interval check. A deletion, a floor advance, a flush, or a
+    /// compaction each publish a successor to the cached manifest, so its
+    /// absence is what makes the cached anchor still current. Commits are
+    /// observed through the WAL probe instead; the hint is never consulted.
+    async fn manifest_is_current(
         &self,
-        object_key: &str,
-        expected_etag: &str,
+        namespace_id: &NamespaceId,
+        basis: &MetadataBasis,
     ) -> std::result::Result<bool, ControlObjectLoadError> {
-        let metadata = self
-            .store()
-            .head(object_key)
-            .await
-            .map_err(|error| ControlObjectLoadError::Store {
-                object_key: object_key.to_owned(),
+        let Ok(next) = basis.manifest_no().successor() else {
+            return Ok(true);
+        };
+        let object_key = metadata_manifest_object(namespace_id, &next);
+        let successor = self.store().head(&object_key).await.map_err(|error| {
+            ControlObjectLoadError::Store {
+                object_key: object_key.clone(),
                 message: error.public_message().into_owned(),
                 class: StoreFailureClass::of(&error),
-            })?
-            .ok_or_else(|| ControlObjectLoadError::MissingObject {
-                object_key: object_key.to_owned(),
-            })?;
-        let Some(etag) = metadata.etag else {
-            return Err(ControlObjectLoadError::Store {
-                object_key: object_key.to_owned(),
-                message: "missing control object etag".to_owned(),
-                class: StoreFailureClass::Other,
-            });
-        };
-        Ok(etag == expected_etag)
+            }
+        })?;
+        Ok(successor.is_none())
     }
 
     pub(crate) fn control_cache_enabled(&self) -> bool {
@@ -414,6 +421,8 @@ impl ReadCore {
             },
             basis: pinned.basis,
             locally_published: false,
+            last_control_check_ms: 0,
+            validation: Arc::default(),
         });
         (self.reader_engine(namespace_id), read_context)
     }
@@ -453,10 +462,6 @@ impl ReadCore {
             .invalidate_namespace(namespace_id);
     }
 
-    /// Seeds the read caches with the state one landed publish produced:
-    /// the head anchor and the projected WAL tail. Safe by construction —
-    /// the anchor is etag-revalidated against the store on every read, so a
-    /// wrong seed degrades to today's reload instead of a wrong read.
     pub(crate) fn seed_namespace_read_cache(
         &self,
         namespace_id: &NamespaceId,
@@ -468,7 +473,13 @@ impl ReadCore {
         let max_cached_namespaces = self.inner.config.runtime_cache.max_cached_namespaces;
         let head_seq = state.head.seq;
         let manifest_no = state.basis.manifest_no();
-        self.inner.control_cache().insert_namespace_head(
+        let mut cache = self.inner.control_cache();
+        let (last_control_check_ms, validation) = cache
+            .namespaces
+            .get(namespace_id)
+            .map(|(head, _)| (head.last_control_check_ms, Arc::clone(&head.validation)))
+            .unwrap_or_default();
+        cache.insert_namespace_head(
             namespace_id,
             CachedNamespaceAnchor {
                 head: CachedControl {
@@ -477,9 +488,12 @@ impl ReadCore {
                 },
                 basis: state.basis,
                 locally_published: true,
+                last_control_check_ms,
+                validation,
             },
             max_cached_namespaces,
         );
+        drop(cache);
         self.inner.wal_tail_projection_cache.insert(
             loonfs_core::cache::WalTailProjectionCacheKey {
                 namespace_id: namespace_id.clone(),
@@ -523,6 +537,7 @@ impl ReadCore {
 
 fn cached_anchor(
     (head, basis): (LoadedControl<NamespaceReadState>, MetadataBasis),
+    last_control_check_ms: u64,
 ) -> CachedNamespaceAnchor {
     CachedNamespaceAnchor {
         head: CachedControl {
@@ -531,5 +546,7 @@ fn cached_anchor(
         },
         basis,
         locally_published: false,
+        last_control_check_ms,
+        validation: Arc::default(),
     }
 }

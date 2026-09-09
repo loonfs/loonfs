@@ -11,6 +11,7 @@ pub(crate) mod control;
 pub(crate) mod control_snapshot;
 pub(crate) mod delete;
 pub(crate) mod fork;
+pub(crate) mod freshness;
 pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod writer_epoch;

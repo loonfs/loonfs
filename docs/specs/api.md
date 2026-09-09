@@ -1447,10 +1447,20 @@ The `Namespace` object has exactly these fields:
 
 Namespace status derives the live sequence from the manifest and numbered
 WAL tip. A cold read follows a lagging hint by probing forward. A missing
-hint reads as an absent namespace. Runtime freshness polls HEAD
-`hint.json`, which every acknowledged batch has already raised; the
-acknowledging runtime supplies read-your-writes state without a store
-request.
+hint reads as an absent namespace. A cached runtime probes the next WAL
+number with GET, applies any new segments, and continues until 404. Commits
+are visible on the next read even when the hint has not been raised. The
+acknowledging runtime supplies read-your-writes state without a store request.
+
+`RuntimeCacheConfig::control_revalidation_interval_ms` sets the minimum
+monotonic interval between checks for a successor to the cached manifest.
+It defaults to 1000 milliseconds; `0` checks on every read. A read after the
+interval probes the successor manifest with HEAD as well as the next WAL
+number, so an unchanged warm head costs two requests; within the interval
+it costs one. A present successor reloads the namespace. Warm readers
+observe deletion, retention floor advances, and new manifests on this
+interval. Handle builders accept an injected monotonic timer for
+deterministic runtime timing.
 
 The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` returns the
 namespace state plus storage details used by maintenance:

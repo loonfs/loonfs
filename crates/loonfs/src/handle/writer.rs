@@ -326,6 +326,12 @@ impl FsWriterBuilder {
         self
     }
 
+    /// Supplies monotonic time for runtime scheduling and deterministic tests.
+    pub fn monotonic_timer(mut self, timer: Arc<dyn loonfs_api::MonotonicTimer>) -> Self {
+        self.core.timer = timer;
+        self
+    }
+
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;

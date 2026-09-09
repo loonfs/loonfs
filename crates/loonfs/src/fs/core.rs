@@ -38,6 +38,7 @@ pub(crate) struct ReadCore {
 pub(crate) struct ReadCoreInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: ReadConfig,
+    pub(crate) timer: Arc<dyn loonfs_api::MonotonicTimer>,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
@@ -164,6 +165,7 @@ impl ReadCore {
         shared_metadata_segment_cache: Option<Arc<MetadataSegmentCache>>,
         stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
         instruments: Arc<RuntimeInstruments>,
+        timer: Arc<dyn loonfs_api::MonotonicTimer>,
     ) -> Self {
         let metadata_segment_cache = shared_metadata_segment_cache.unwrap_or_else(|| {
             Arc::new(MetadataSegmentCache::with_stored_block_cache_and_observer(
@@ -186,6 +188,7 @@ impl ReadCore {
             inner: Arc::new(ReadCoreInner {
                 store,
                 config,
+                timer,
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_segment_cache,
                 wal_tail_projection_cache,
