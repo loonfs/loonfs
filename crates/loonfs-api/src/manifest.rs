@@ -19,7 +19,7 @@ pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
 /// Identifies the durable payload family carried by a namespace-manifest envelope.
 ///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+/// See [durable object families](../../../docs/specs/format.md#a8-object-keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceManifestKind {
@@ -38,7 +38,7 @@ impl NamespaceManifestKind {
 
 /// Selects a metadata row family and its durable lookup ordering.
 ///
-/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+/// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataRowFamily {
@@ -148,7 +148,7 @@ pub enum RunTier {
 
 /// Reference to one immutable metadata run in a namespace manifest.
 ///
-/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataRunRef {
@@ -164,7 +164,7 @@ pub struct MetadataRunRef {
 
 /// Reference to one immutable metadata segment in a namespace manifest.
 ///
-/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataSegmentRef {
@@ -203,7 +203,7 @@ pub struct MetadataSegmentRef {
 
 /// One materialized metadata row stored in a segment.
 ///
-/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+/// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MetadataRow {
@@ -520,7 +520,7 @@ impl MetadataRowFamily {
 impl MetadataRow {
     /// Builds this row's canonical durable key in its primary row family.
     ///
-    /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+    /// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
     pub fn row_key(&self) -> String {
         self.row_key_for_family(match self {
             Self::Inode(_) => MetadataRowFamily::Inodes,
@@ -537,7 +537,7 @@ impl MetadataRow {
 
     /// Builds this row's durable key using the selected primary or secondary ordering.
     ///
-    /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+    /// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
     pub fn row_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
             Self::Inode(record) => lookup_keys::inode_key(record.inode_id),
@@ -647,14 +647,14 @@ impl MetadataRow {
 
 /// Encodes an arbitrary string so it can occupy one component of a durable row key.
 ///
-/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+/// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
 pub fn hex_encode_row_key_component(value: &str) -> String {
     crate::hex::hex_encode_bytes(value.as_bytes())
 }
 
 /// Builders for metadata row keys, lookup prefixes, and Bloom filter probes.
 ///
-/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+/// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
 pub mod lookup_keys {
     use super::{hex_encode_row_key_component, TombstoneGeneration};
     use crate::{AttributeRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo};
@@ -958,7 +958,7 @@ pub mod lookup_keys {
 
 /// Carries one complete namespace file-set description inside a manifest envelope.
 ///
-/// See [manifest publication](../../../docs/specs/format.md#61-manifest-publication-and-checkpoint-verification).
+/// See [manifest publication](../../../docs/specs/format.md#72-publishing-a-materialized-file-set).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NamespaceManifestPayload {
@@ -980,17 +980,17 @@ pub struct NamespaceManifestPayload {
     pub last_folded_wal_no: WalNo,
     /// WAL number covered by the manifest whose head established the floor.
     pub retention_floor_wal_no: WalNo,
-    /// Monotonic logical manifest position selected by the namespace root.
+    /// Positive publication number matching the manifest object key.
     pub manifest_no: ManifestNo,
     /// Fences compaction publications from earlier claims.
     pub compactor_epoch: u64,
-    /// Greatest namespace sequence materialized by the referenced file set.
+    /// Materialized head sequence, or the final namespace sequence on deletion.
     pub head_seq: ChangeSeq,
     /// Commit identity used when no newer data segment exists.
     pub head_commit_id: CommitId,
     /// Oldest run sequence still represented by `runs`.
     pub base_seq: ChangeSeq,
-    /// Fencing epoch of the writer that produced this candidate.
+    /// Current writer fencing epoch.
     pub writer_epoch: WriterEpoch,
     /// First inode identity available after replaying the manifest snapshot.
     pub next_inode_id: InodeId,
@@ -1104,7 +1104,7 @@ pub fn encode_namespace_manifest_json(
 ///
 /// Decoding fails for invalid JSON, the wrong kind or version, a checksum
 /// mismatch, or an invalid payload. See
-/// [manifest publication](../../../docs/specs/format.md#61-manifest-publication-and-checkpoint-verification).
+/// [manifest publication](../../../docs/specs/format.md#72-publishing-a-materialized-file-set).
 pub fn decode_namespace_manifest_json(
     bytes: &[u8],
 ) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {

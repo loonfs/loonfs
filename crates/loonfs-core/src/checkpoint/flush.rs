@@ -333,7 +333,7 @@ pub fn next_run_no_after(current: RunNo) -> Result<RunNo> {
 }
 
 /// Refuses to initiate a manifest put-if-absent once the publication budget
-/// is spent (format spec, "Garbage collection", rule 1).
+/// is spent (format spec, Appendix C).
 pub fn ensure_metadata_publication_budget(
     timer: &dyn MonotonicTimer,
     publication_started_ms: u64,

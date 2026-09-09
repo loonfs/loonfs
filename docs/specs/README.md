@@ -1,103 +1,29 @@
-# LoonFS Core Specification
+# LoonFS specification
 
-## 1. What LoonFS is
+LoonFS is a filesystem built on object storage. Each namespace has a directory tree, file revision history, and an ordered log of metadata changes. Files retain their inode identities when renamed or moved. Forks start from an existing namespace's state and share its stored objects while maintaining independent subsequent history.
 
-LoonFS is a filesystem built on top of object storage.
+A file write has two steps: store and verify the bytes, then commit the metadata that references them. Creating the next numbered write-ahead log (WAL) object commits its records. Readers discover the current manifest and WAL tip, then combine materialized metadata with later commits.
 
-The durable state consists of:
+Object storage contains all required recovery state, including control records, retained metadata, and file content. Some of a fork's dependencies can be stored under an ancestor's prefix. Local caches and derived search indexes can be rebuilt, but required manifests, metadata segments, and checkpoint records must be retained according to the format rules.
 
-- immutable content objects referenced by `content_ref`
-- immutable metadata commits recorded in a write-ahead log (WAL)
-- immutable namespace manifests and checkpoint records
-- small mutable control objects such as the namespace head and leases
+## Reading guide
 
-Everything else — caches, queues, coordination state — can be rebuilt from those objects.
-
-LoonFS can be exposed as:
-
-- an embedded/direct filesystem runtime with commands such as `ls`, `get`, `put`, `mv`, and `cp`
-- a lower-level writer surface: staged uploads, multi-operation commits, and an ordered change feed
-- a foundation for sync clients, batch writers, and operator tooling
-
-This spec standardizes the durable model and the rules for interoperable implementations. It does not standardize implementation internals such as client databases, queues, or schedulers.
-
-The specification lives in this folder:
-
-| Document | Force | Contents |
-| --- | --- | --- |
-| `format.md` | Normative, mandatory | The durable format: object-store contract, storage model, write/read protocol, encodings and versioning, extension ownership, maintenance invariants. |
-| `api.md` | Normative where implemented | API groups, capability discovery, the standard error contract, operation statefulness, and the representative HTTP binding. |
-| `glossary.md` | Orientation | Shared vocabulary for every other document. |
-| `architecture.md` | Orientation | How the durable pieces and the runtime fit together. |
-| `object-storage-providers.md` | Non-normative reference | Provider limits and performance data points that inform the design. |
-| `openapi.json` | Generated reference | Static OpenAPI document for the current v0 HTTP API. |
-| `openapi-proxy.json` | Generated reference | OpenAPI document for browser clients that access namespaces by alias. |
-
-When something new needs a home: if other implementations must understand it to read or write a store correctly, it belongs in `format.md`. If it is an operation clients call, it belongs in `api.md`. How an implementation organizes its internal work — queues, schedulers, caches — is not specified at all.
-
-## 2. Design goals
-
-| Goal | Meaning |
+| Document | What it covers |
 | --- | --- |
-| **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content refs, logical commits, WAL segments, manifests, and checkpoints. |
-| **Portable** | The only required durable dependency is object storage with a small set of well-defined guarantees. |
-| **Safe** | Writes are never partially visible. Metadata never points to content that is not already durable. |
-| **Readable** | A reader should be able to understand the system from a small public spec without reading client architecture or rollout plans. |
-| **Extensible** | The core model should support direct filesystem operations, sync engines, and future clients without changing identity or visibility rules. |
+| [Glossary](glossary.md) | The terms used throughout the specification. |
+| [Architecture](architecture.md) | How reads, writes, forks, and maintenance fit together. |
+| [Storage format](format.md) | Required object keys, stored records, encodings, publication protocols, and collection rules. |
+| [API](api.md) | API groups, capability discovery, errors, operations, and the HTTP binding. |
+| [Object-storage providers](object-storage-providers.md) | Reference information about provider constraints and supported transfer behavior. |
+| [OpenAPI](openapi.json) | Generated schemas for the v0 HTTP API. |
+| [Browser-proxy OpenAPI](openapi-proxy.json) | Generated schemas for clients that address namespaces by alias. |
 
-## 3. Core decisions
+The storage format is mandatory for a conforming implementation. API requirements apply to the groups and features that an implementation exposes. The glossary and architecture overview explain the model; the format and API documents define its requirements.
 
-| Topic | Decision |
-| --- | --- |
-| Durable dependency | Object storage is the only required durable dependency. |
-| Unit of history | Each namespace has its own ordered metadata history. |
-| Identity | The canonical identity of an item is `(namespace_id, inode_id)`. |
-| Names | Paths are lookup views built from directory bindings. They are not the identity model. |
-| Content publication | File content becomes visible only after the object named by its `content_ref` is already durable. |
-| Commit visibility | A logical commit becomes visible only when the namespace head advances successfully to a `seq` at or beyond that commit. |
-| Delete | Delete is logical first and creates tombstones. Physical reclamation is background garbage collection. |
-| Recovery | Readers reconstruct state from a verified manifest, pinned by a checkpoint when available, plus the visible WAL segment chain after that boundary. |
-| Writes | A path-oriented filesystem API and an explicit upload/commit/change-feed API are both part of the core model. |
-| Access control | ACLs and shares are a separate control plane keyed by namespace or subtree identity, not by path text. |
-| Long-running operations | Resumable uploads may use control-plane objects. |
+For a first read, start with the architecture overview and sections 1–6 of the format. Sections 7–11 describe maintenance and lifecycle protocols. The appendices contain the exact fields, row keys, byte encodings, fingerprints, and timing relationships needed to implement the format.
 
-## 4. System sketch
+## Scope
 
-```text
-            user-facing filesystem commands
-      ls / stat / get / put / mkdir / mv / cp / rm
-                         |
-                         v
-                authoritative LoonFS runtime
-          path resolution, validation, commit, reads
-             /                    |                 \
-            /                     |                  \
-           v                      v                   v
-  object-storage content   metadata history      control objects,
-  content ref objects      WAL segments, head,    shares, leases
-                           manifests,
-                           checkpoints
-```
+The format specifies behavior that another implementation must preserve to read, write, or collect the same store safely. The API specifies operations that clients can call. Process boundaries, queues, cache policies, schedulers, and client-side databases are implementation choices.
 
-## 5. What this spec leaves to implementations
-
-The following are intentionally outside the core spec:
-
-- local client database schemas
-- job schedulers, queues, and worker topologies
-- platform-specific file-watcher integrations
-- how recursive operations are coordinated
-- whether an implementation is one process or several services
-
-Those choices are implementation-specific and do not change the filesystem model.
-
-## 6. Reading guide
-
-Readers should start with:
-
-1. the glossary (`glossary.md`)
-2. the architecture overview (`architecture.md`)
-3. the format specification (`format.md`)
-4. the API specification (`api.md`)
-
-`object-storage-providers.md` is reference material for deeper design work.
+Implementations may expose direct filesystem commands, an embedded runtime, or an upload/commit/change-feed interface. All use the same namespace identities, commit boundary, and retention rules. Sharing a storage format does not require sharing a runtime architecture.

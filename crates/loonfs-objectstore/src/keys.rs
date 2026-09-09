@@ -1,6 +1,6 @@
 //! Key construction for every [durable object family].
 //!
-//! [durable object family]: ../../../docs/specs/format.md#12-durable-object-families
+//! [durable object family]: ../../../docs/specs/format.md#a8-object-keys
 
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
@@ -158,11 +158,11 @@ mod tests {
         ))
         .expect("read docs/specs/format.md");
         let section = spec
-            .split_once("### 1.2 Durable object families")
-            .expect("format.md section 1.2 exists")
+            .split_once("### A.8 Object keys")
+            .expect("format.md object-key appendix exists")
             .1
-            .split_once("\n### ")
-            .expect("a section follows 1.2")
+            .split_once("\n## ")
+            .expect("an appendix follows the object-key table")
             .0;
 
         let mut patterns = std::collections::BTreeMap::new();

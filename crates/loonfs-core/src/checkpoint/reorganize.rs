@@ -338,7 +338,7 @@ pub(super) enum MergePlacement {
     /// The window includes the group's oldest run. The output is the base run,
     /// and retention may remove related row pairs because both the older row
     /// and its newer cancellation row are included (format spec,
-    /// "Compaction").
+    /// "Retention and compaction").
     Base { output_seq: ChangeSeq },
     /// The window started above the group's oldest run. The output is a delta
     /// run at the newest input's sequence, and nothing is dropped.

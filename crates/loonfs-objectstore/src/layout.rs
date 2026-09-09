@@ -4,7 +4,7 @@ use loonfs_api::{ManifestNo, UploadId};
 
 /// One family in the [durable object key grammar].
 ///
-/// [durable object key grammar]: ../../../docs/specs/format.md#12-durable-object-families
+/// [durable object key grammar]: ../../../docs/specs/format.md#a8-object-keys
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableObjectFamily {
     /// Classifies an immutable segment in a namespace's WAL chain.
@@ -53,7 +53,7 @@ impl<'a> ParsedObjectKey<'a> {
 /// Classifies a current or reserved durable object key without validating identifier text.
 ///
 /// Returns `None` for private, foreign, or unrecognized paths. See
-/// [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+/// [durable object families](../../../docs/specs/format.md#a8-object-keys).
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
