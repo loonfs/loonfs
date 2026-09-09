@@ -917,7 +917,7 @@ pub struct GcRequest {
     /// server's advertised safety floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Maximum candidates that need a store request after the listing (an age
+    /// Maximum candidates per family that need a store request after the listing (an age
     /// check, a record read, or a deletion); the default is 1024.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,

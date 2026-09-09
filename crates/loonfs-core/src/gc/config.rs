@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
-    /// Maximum candidates inspected after roots have been loaded.
+    /// Maximum candidates per family inspected after roots have been loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
 }

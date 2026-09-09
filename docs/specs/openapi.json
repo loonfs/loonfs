@@ -3496,7 +3496,7 @@
             "type": "string"
           },
           "max_steps": {
-            "description": "Maximum candidates that need a store request after the listing (an age\ncheck, a record read, or a deletion); the default is 1024.",
+            "description": "Maximum candidates per family that need a store request after the listing (an age\ncheck, a record read, or a deletion); the default is 1024.",
             "format": "int64",
             "minimum": 0,
             "type": [

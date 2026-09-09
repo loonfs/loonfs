@@ -47,6 +47,8 @@ use loonfs_test_support::stores::{
 };
 use tempfile::tempdir;
 
+mod many_pins;
+
 const GRACE_MS: u64 = 60 * 60 * 1000;
 
 fn config() -> GcConfig {
@@ -428,22 +430,17 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let deadline = retired.reclaim_after_ms.expect("clone retired");
 
     let aged = context(deadline);
-    let report = gc_namespace(&store, &source, &config(), &aged)
+    gc_namespace(&store, &clone, &config(), &aged)
         .await
-        .expect("gc pass after clone delete");
-    assert_eq!(report.released_checkpoints.fork, 1);
-    assert_eq!(report.deleted.manifests, 0);
-    assert!(
-        store.head(&basis_key).await.expect("head basis").is_some(),
-        "the active record protects its basis during the call that releases it"
-    );
+        .expect("clone releases source pin");
+    assert!(!checkpoint_exists(&store, &source, &fork_record.pin_id).await);
 
     let again = context(deadline + GRACE_MS);
     let report = gc_namespace(&store, &source, &config(), &again)
         .await
         .expect("idempotent pass");
     assert_eq!(report.released_checkpoints.fork, 0);
-    assert_eq!(report.deleted.manifests, 2);
+    assert_eq!(report.deleted.manifests, 1);
     assert!(store
         .head(&basis_key)
         .await
@@ -1696,7 +1693,7 @@ async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> Checkpo
 }
 
 #[tokio::test]
-async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passes() {
+async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");
@@ -1746,24 +1743,46 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
         .await
         .expect("wait for grace");
     assert_eq!(waiting.released_checkpoints.fork, 0);
+    assert!(checkpoint_exists(&store, &source, &fork_record.pin_id).await);
     let aged = context(deadline);
 
-    let first_pass = gc_namespace(&store, &source, &config(), &aged)
+    let pin_key = loonfs_objectstore::keys::checkpoint_record(&source, &fork_record.pin_id);
+    let store = RecordingStore::new(
+        FailStore::new(
+            store,
+            KeyPredicate::exact(&pin_key),
+            OperationClass::Delete,
+            InjectedError::Transport("source pin delete failed".to_owned()),
+        ),
+        KeyPredicate::exact(&pin_key),
+    );
+    store.inner().fail_next(1);
+    assert!(gc_namespace(&store, &clone, &config(), &aged)
         .await
-        .expect("collect fork pin");
-    assert_eq!(first_pass.released_checkpoints.fork, 1);
-    assert_eq!(first_pass.deleted.checkpoint_records, 1);
+        .is_err());
+    assert!(checkpoint_exists(&store, &source, &fork_record.pin_id).await);
+    let released = gc_namespace(&store, &clone, &config(), &aged)
+        .await
+        .expect("retry source pin delete");
+    assert_eq!(released.released_checkpoints.fork, 1);
+    assert_eq!(released.deleted.checkpoint_records, 1);
     assert!(!checkpoint_exists(&store, &source, &fork_record.pin_id).await);
+    let repeated = gc_namespace(&store, &clone, &config(), &aged)
+        .await
+        .expect("repeat source pin delete");
+    assert_eq!(repeated.released_checkpoints.fork, 0);
+    assert_eq!(store.counts().deletes, 3);
     assert!(store
         .head(&metadata_manifest_object(&source, &fork_record.manifest_no))
         .await
         .expect("manifest")
         .is_some());
-    let next_pass = gc_namespace(&store, &source, &config(), &aged)
+    let store = store.inner().inner();
+    let next_pass = gc_namespace(store, &source, &config(), &aged)
         .await
         .expect("collect basis");
-    assert_basis_reaped(&store, &source, &next_pass, &fork_record.manifest_no).await;
-    stat_root(&store, &source).await;
+    assert_basis_reaped(store, &source, &next_pass, &fork_record.manifest_no).await;
+    stat_root(store, &source).await;
 }
 
 #[tokio::test]
@@ -1787,8 +1806,9 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .expect("fork");
     let fork_record = read_fork_record(store.inner(), &source).await;
 
+    let aged = context(setup.now_ms + GRACE_MS);
     store.fail_all();
-    let report = gc_namespace(&store, &source, &config(), &setup)
+    let report = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect("an unreadable target is retained conservatively");
     assert_eq!(report.released_checkpoints.fork, 0);
@@ -1809,7 +1829,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .put_overwrite(&head_key, Bytes::from(bytes))
         .await
         .expect("write drifted manifest");
-    let error = gc_namespace(&store, &source, &config(), &setup)
+    let error = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect_err("a target naming this record with another manifest is corruption");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -1820,7 +1840,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .await
         .expect("corrupt target head");
     let before = namespace_keys(store.inner(), &source).await;
-    let error = gc_namespace(&store, &source, &config(), &setup)
+    let error = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect_err("a corrupt target head must fail the source pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -1886,7 +1906,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
 }
 
 #[tokio::test]
-async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
+async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");
@@ -1925,8 +1945,27 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
     let report = gc_namespace(&store, &source, &config(), &before_creation_grace)
         .await
         .expect("gc pass with a target that reads through another record");
+    assert_eq!(report.released_checkpoints.fork, 0);
+    assert!(checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await);
+    let report = gc_namespace(
+        &store,
+        &source,
+        &config(),
+        &context(setup.now_ms + GRACE_MS),
+    )
+    .await
+    .expect("an aged pin the target does not name is the abandoned attempt's");
     assert_eq!(report.released_checkpoints.fork, 1);
     assert!(!checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await);
+    assert_eq!(
+        store
+            .list_prefix(&checkpoint_prefix(&source))
+            .await
+            .expect("list checkpoints")
+            .len(),
+        1,
+        "the retry's own pin stays"
+    );
     load_current_metadata_view(&store, &clone)
         .await
         .expect("target readable after retry and collection")
@@ -2817,6 +2856,9 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     assert!(checkpoint_exists(&store, &namespace_id, &pins[0].checkpoint_id).await);
     assert!(!checkpoint_exists(&store, &namespace_id, &pins[1].checkpoint_id).await);
     assert!(!checkpoint_exists(&store, &namespace_id, &pins[2].checkpoint_id).await);
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("second permanent pin");
     let deleted_at = 3_000 + GRACE_MS;
     delete_namespace(
         &store,

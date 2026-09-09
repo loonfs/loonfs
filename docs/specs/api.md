@@ -866,13 +866,13 @@ byte, and segment counts. `cancelled` means the caller cancelled the job.
 or all publication attempts lost. `fenced` means another process advanced
 the manifest's compactor epoch. These last three outcomes publish no manifest.
 
-For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window and `max_steps` limits one call. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace (format spec, section 6.4, rule 11).
+For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window and `max_steps` limits candidates per family in one call. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace (format spec, section 6.4, rule 11).
 
 Responses contain counts for that call. Concurrent calls can overlap deletion
 attempts, so these counts are operational summaries. No collection state is
 saved between calls.
 
-GC defaults `max_steps` to 1024. Each request runs one stateless call.
+GC defaults `max_steps` to 1024 per family. Each request runs one stateless call.
 `GcRequest` accepts `grace_window_ms` and `max_steps`. It has no cursor.
 Nothing sweeps unless `gc` is present.
 
@@ -1007,9 +1007,14 @@ the deadline reports it through `next_reclamation_at_ms`. Retirement itself
 deletes no content.
 
 Every call reads current durable roots and uses one fixed clock. It keeps
-its live set in memory and writes no collection progress. Candidate listings
-start at the beginning. `budget_exhausted` means the call reached `max_steps`
-with candidates remaining; a scheduler calls again without a continuation.
+its live set in memory and writes no collection progress. Pin, metadata
+segment, and upload session sweeps
+start at a key derived from the call clock and wrap to the beginning.
+Numbered families and the complete pin listing for root discovery start at
+the beginning. Each family has its own `max_steps` budget. Exhausting one
+family continues with the next; `budget_exhausted` means at least one family
+stopped with candidates remaining. A scheduler calls again with a new clock
+and no continuation. A stopped pin family prevents namespace retirement.
 The budget counts candidates that need a store request after the listing:
 an age check, a record read, or a deletion. A candidate the live set
 retains costs nothing, so referenced objects never exhaust the budget.
@@ -1019,8 +1024,11 @@ the call before sweeping.
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`,
 `content_objects`, and `retired_content_objects`. `released_checkpoints`
-contains `fork`, `expired`, and `snapshot` counts for pins deleted in the pass. Every count field is
-present, including zero values.
+contains `fork`, `expired`, and `snapshot` counts for pins deleted in the
+pass. A target's release of its source pin contributes to `fork` and
+`checkpoint_records` when the pin was present before deletion. Repeating
+that deletion on an absent pin adds no count. Every count field is present,
+including zero values.
 
 `content_objects` counts reclamation through completed upload sessions.
 `retired_content_objects` counts successful deletion attempts under a retired

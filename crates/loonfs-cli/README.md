@@ -343,10 +343,13 @@ Maintenance
 
   loonfs maintenance gc [--grace-window-ms <ms>] [--max-steps <n>]
     Collect aged, unreferenced objects. Each call reads current roots and
-    lists candidates from the start. --max-steps bounds the candidates that
-    need a store request (an age check, a record read, or a deletion) and
-    returns after one call. Without it, the command repeats while calls
-    reclaim objects or release checkpoints and candidates remain.
+    rotates the listing start for pins, metadata segments, and uploads using
+    the call clock. Numbered families list from the start. --max-steps bounds
+    candidates per family that need a store request (an age check, a record
+    read, or a deletion) and returns after one call. When one family exhausts
+    its budget, collection continues with the next. Without --max-steps, the
+    command repeats while calls reclaim objects or release checkpoints and
+    candidates remain.
     --grace-window-ms protects objects younger than the window.
     Repeated calls report progress on standard error; --json includes every
     retention reason and budget_exhausted when work remains.

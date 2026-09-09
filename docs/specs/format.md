@@ -815,25 +815,34 @@ New content and metadata segments use the target's own prefix.
 
 `fork_basis` is immutable provenance in the target manifest. It holds the
 source manifest reference and source checkpoint id. Readers never follow it.
-GC compares it with the source checkpoint using the fixed call clock:
+The source collector uses the fixed call clock to apply these rules:
 
-| Target manifest | Source checkpoint action |
+| Fork pin and target | Source pin action |
 | --- | --- |
-| Active, exact source, checkpoint id, and manifest | Retain (`referenced_by_live_target`). |
-| Active or deleted, absent fork basis or another source or checkpoint id | Reclaimable. |
-| Active, same source and checkpoint id, different manifest | Corruption. |
-| Deleted, same source and checkpoint id, absent deadline | Retain (`target_not_retired`). |
-| Deleted, same source and checkpoint id, deadline after the call clock | Retain (`target_retirement_grace`). |
-| Deleted, same source and checkpoint id, deadline at or before the call clock | Reclaimable. |
+| Pin younger than `grace_window_ms` | Retain without reading the target. |
+| Aged pin, absent target hint | Delete. |
+| Aged pin, target manifest names the exact source, pin id, and manifest reference | Retain, regardless of target status. |
+| Aged pin, target manifest has no fork basis or names another pin | Reclaimable: the pin belongs to an abandoned attempt that a later install superseded. |
+| Aged pin, target manifest names this pin with another source or manifest reference | Corruption. |
+| Aged pin, unreadable target | Retain. |
+| Aged pin, invalid target | Corruption. |
 
-An absent target retains the pin until `created_at_ms + grace_window_ms`.
-An unreadable target retains it; an invalid target is corruption. An absent
-target gets no tombstone. The grace is the installation margin.
+The source reads the target through current-manifest discovery, which reads
+its hint and numbered manifests. It never reads the target's WAL. The grace
+is the installation margin. An absent target gets no tombstone.
 
-For `A -> B -> C`, C's record prevents deleted B from retiring. A retains B's
-record until B retires and its deadline passes. After C retires and its
-deadline passes, B deletes C's pin and can retire in the same complete pass.
-Release proceeds from descendants to ancestors. Compaction does not change this rule.
+A retired target deletes the source pin named by its current manifest's
+`fork_basis` once its retirement deadline passes, in the same step that
+sweeps its owned content. Every later pass repeats the deletion. The
+permanent tombstone retains the pin id, so a failed delete is retried.
+A deleted target without retirement leaves its source pin in place.
+
+For `A -> B -> C`, C's pin prevents deleted B from retiring. A retains B's
+pin until B's collector releases it. After C retires and its deadline
+passes, C deletes its pin on B. B can then retire after a complete pin
+sweep. Release proceeds from descendants to ancestors. Metadata compaction
+preserves content references to their original owners, so rewriting metadata
+runs alone does not release a source pin.
 
 An unflushed fork can itself be forked. Its manifest already lists its
 inherited files. Target reads never access source hints or source manifests
@@ -2203,14 +2212,23 @@ have a current manifest, which remains their permanent tombstone.
 
 The collector writes no run object, reference table, phase, or cursor. It
 builds its live set in memory from the current manifest and pin keys alone.
-It lists `manifests/`, `wal/`, `segments/`, `pins/`, and `uploads/`
-from the start each call. The pin listing used to identify roots also
-supplies that call's checkpoint candidates. `max_steps` bounds the
-candidates that need a store request after the listing: an age check, a
-record read, or a deletion. A candidate the live set retains costs nothing.
-A stopped call reports `budget_exhausted` when candidates remain. A later
-call reads new roots and starts again. Root reads and their listings are not
-charged as sweep steps.
+Each family has a fresh `max_steps` budget for candidates that need a store
+request after listing: an age check, a record read, or a deletion. A
+candidate the live set retains costs nothing. Exhausting one family's budget
+stops that family and continues with the next. `budget_exhausted` is true
+when any family stops with candidates remaining. Root reads and their
+listings are not charged as sweep steps.
+
+Manifests and WAL list from the start. Pins, metadata segments, and upload
+sessions start after a key derived from `context.now_ms`. Its shape is the
+lowest valid key in the family with the random part replaced by lowercase
+hex from a hash of the clock. The pin's manifest number is
+`1 + hash mod current_manifest_no`. Each sweep lists from that key to the
+end, then from the beginning up to that key, excluding keys at or after it
+on the second listing. Different clocks change the starting position, so
+repeated bounded calls can reach every key without saved progress. The
+complete pin listing used to identify roots always starts at the beginning;
+only sweep order rotates. Retired content lists from the start.
 
 Core GC never recognizes or deletes objects under `extensions/`. Grep owns
 its own collector. Concurrent namespace collectors independently read roots
@@ -2330,14 +2348,23 @@ concurrent publications under these rules:
    budget, so they cannot reuse a number reclaimed after that budget. The only listed content prefix is the owner prefix of a retired namespace
    whose deadline has passed (rule 14). Every other owner prefix is reached
    only through upload sessions (rule 11).
-10. **Fork checkpoints require an exact reference.** Apply the target-manifest
-    table in section 2.6. A deleted target naming this record retains it until
-    retirement is established and its deadline is at or before the fixed call
-    clock. GC reads the target's current manifest to classify a fork record.
-    An unreadable manifest retains; an invalid manifest fails as corruption.
-    An active target naming the same source and checkpoint id but a different
-    manifest is corruption. An absent target retains until creation plus grace; GC deletes the pin
-    after that deadline and writes no target tombstone.
+10. **Fork checkpoints require an exact reference.** A pin younger than
+    the grace window is retained without reading its target. After that
+    window, the source reads the target's hint and current manifest through
+    manifest discovery, never the target's WAL. An absent target hint makes
+    the pin reclaimable. An existing target that names another pin in
+    `fork_basis`, or no basis, was installed by a later attempt or a plain
+    create, so the pin belongs to an abandoned attempt and is reclaimable.
+    A target that names this pin with another source or manifest reference
+    is corruption. An unreadable target retains the pin; an invalid target
+    is corruption. A matching target retains the pin regardless of deletion
+    or retirement status.
+
+    Once the target's retirement deadline passes, its collector deletes the
+    source pin named in its current manifest's `fork_basis` in the same step
+    as the retired-owner content sweep. This deletion is idempotent and
+    repeats every pass. A failed delete is retried using the permanent
+    tombstone. A deleted target that has not retired leaves the source pin.
 
     Checkpoint creation writes its record and then verifies it against the
     manifest. `verify_checkpoint_basis` refuses a deleted namespace. A record that
@@ -2443,7 +2470,8 @@ concurrent publications under these rules:
     call must observe a deleted manifest without `reclaim_after_ms`. Retirement
     waits until no encountered pin remains. A retained pin, an unrecognized
     key, or an uncertain pin load prevents retirement.
-    A call stopped before finishing checkpoint cleanup cannot retire.
+    A pin family stopped before finishing cleanup prevents retirement.
+    Exhausting another family's budget does not prevent retirement.
 
     At the end of the checkpoints family, GC re-reads the manifest and
     publishes the next manifest, preserving deleted status and adding this deadline:

@@ -965,21 +965,27 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .expect("wait for descendant grace");
     assert_eq!(waiting.released_checkpoints.fork, 0);
     aged.now_ms = descendant_deadline;
+    loonfs_core::gc_namespace(&store, &descendant, &config, &aged)
+        .await
+        .expect("descendant releases its source pin");
     let released = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
         .await
         .expect("release descendant record");
-    assert_eq!(released.released_checkpoints.fork, 1);
-    assert_eq!(released.deleted.checkpoint_records, 1);
+    assert_eq!(released.released_checkpoints.fork, 0);
+    assert_eq!(released.deleted.checkpoint_records, 0);
     let parent_deadline = released.reclaim_after_ms.expect("parent retired");
     let waiting = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
         .await
         .expect("wait for parent grace");
     assert_eq!(waiting.released_checkpoints.fork, 0);
     aged.now_ms = parent_deadline;
+    loonfs_core::gc_namespace(&store, &parent, &config, &aged)
+        .await
+        .expect("parent releases its source pin");
     let released = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
         .await
         .expect("release parent record");
-    assert_eq!(released.released_checkpoints.fork, 1);
+    assert_eq!(released.released_checkpoints.fork, 0);
     assert!(released.reclaim_after_ms.is_some());
 }
 
