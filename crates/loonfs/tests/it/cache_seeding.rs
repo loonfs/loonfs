@@ -781,8 +781,15 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let stored_blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+    // Every read probes for a successor manifest, so the read after each
+    // fold reloads and reaches the cache whatever the wall clock did.
     let fs = open_runtime_with(store(temp_dir.path()), "maintenance-cold", |builder| {
-        builder.stored_metadata_block_cache(stored_blocks.clone())
+        builder
+            .stored_metadata_block_cache(stored_blocks.clone())
+            .runtime_cache(RuntimeCacheConfig {
+                control_revalidation_interval_ms: 0,
+                ..Default::default()
+            })
     });
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
