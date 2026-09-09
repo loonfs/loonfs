@@ -84,7 +84,7 @@ pub fn metadata_compaction_segment(
     metadata_segment_id: &MetadataSegmentId,
 ) -> String {
     format!(
-        "namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/segments/{metadata_segment_id}.sst.zst"
+        "namespaces/{namespace_id}/metadata/compactions/jobs/{metadata_compaction_id}/segments/{metadata_segment_id}.sst.zst"
     )
 }
 
@@ -106,7 +106,7 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
 /// Builds the mutable lease key for one metadata family group.
 pub fn metadata_compaction_lease(namespace_id: &NamespaceId, group: MetadataFamilyGroup) -> String {
     let group = group.as_str();
-    format!("namespaces/{namespace_id}/metadata/compaction_leases/{group}.json")
+    format!("namespaces/{namespace_id}/metadata/compactions/groups/{group}.json")
 }
 
 /// Builds the publication-protection key beside one job's sealed output.
@@ -114,7 +114,7 @@ pub fn metadata_compaction_output_protection(
     namespace_id: &NamespaceId,
     job_id: &MetadataCompactionId,
 ) -> String {
-    format!("namespaces/{namespace_id}/metadata/compactions/{job_id}/protection.json")
+    format!("namespaces/{namespace_id}/metadata/compactions/jobs/{job_id}/protection.json")
 }
 
 /// Extracts the family group from a current-format compaction lease key.
@@ -125,7 +125,7 @@ pub fn metadata_compaction_lease_group_from_key(key: &str) -> Option<MetadataFam
 /// Builds the listing prefix containing every streaming compaction job's
 /// objects for one namespace.
 pub fn metadata_compaction_prefix(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/metadata/compactions/")
+    format!("namespaces/{namespace_id}/metadata/compactions/jobs/")
 }
 
 /// Extracts the job id from a key under one namespace's compaction prefix.
@@ -425,7 +425,7 @@ mod tests {
         );
         assert_eq!(
             metadata_compaction_prefix(&namespace_id()),
-            "namespaces/ns-1/metadata/compactions/"
+            "namespaces/ns-1/metadata/compactions/jobs/"
         );
     }
 

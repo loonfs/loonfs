@@ -64,7 +64,7 @@ The complete operation has five stages:
 
 1. Capture an immutable compaction specification containing a generated job ID, the family group, selected input runs, output identity, and retention floor.
 2. Acquire the family-group lease, open sorted iterators over the selected runs, and merge their rows in key order.
-3. Apply the retention rules and write completed output segments under `metadata/compactions/{job_id}/segments/`.
+3. Apply the retention rules and write completed output segments under `metadata/compactions/jobs/{job_id}/segments/`.
 4. Reload the current manifest and confirm that every selected input is still present and unchanged.
 5. Publish one manifest update that removes the selected inputs and adds the completed output.
 
@@ -159,7 +159,7 @@ Step budgets therefore price the selected logical input, and a step-contained me
 
 ## Job leases and garbage collection
 
-Each family group has one lease at `metadata/compaction_leases/{group}.json`, and its payload names the job whose output under `metadata/compactions/{job_id}/segments/` it protects. An `active` unexpired group lease excludes every other job for that group.
+Each family group has one lease at `metadata/compactions/groups/{group}.json`, and its payload names the job whose output under `metadata/compactions/jobs/{job_id}/segments/` it protects. An `active` unexpired group lease excludes every other job for that group.
 
 The lease records the job ID, namespace ID, writer ID, status, start time, and absolute expiry. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
 
@@ -169,7 +169,7 @@ Garbage collection reads the seven group lease keys once per namespace per pass 
 
 A missing lease or a lease naming another job provides no ownership claim. An invalid lease fails the pass. Unreferenced objects in that prefix become eligible after a staging grace period derived from the lease expiry and the normal publication grace. Unrecognized keys under the compaction prefix are retained because ownership cannot be established safely.
 
-Before each publication attempt, the job confirms its refreshed lease deadline in `metadata/compactions/{job_id}/protection.json`. This is a separate control record containing namespace, job ID, and expiry; it is created only after output writing ends and updated by CAS. Confirming it before root publication covers a crash immediately after publication. After the final attempt, the job changes its group slot to `completed`, allowing the next job immediately. GC checks the protection deadline before group ownership, and removes that record only after its deadline and after the output prefix is empty. Group slots remain in place and are only replaced by CAS, so a paused collector cannot delete a newer job's claim. A failed completion write may leave the group held until expiry.
+Before each publication attempt, the job confirms its refreshed lease deadline in `metadata/compactions/jobs/{job_id}/protection.json`. This is a separate control record containing namespace, job ID, and expiry; it is created only after output writing ends and updated by CAS. Confirming it before root publication covers a crash immediately after publication. After the final attempt, the job changes its group slot to `completed`, allowing the next job immediately. GC checks the protection deadline before group ownership, and removes that record only after its deadline and after the output prefix is empty. Group slots remain in place and are only replaced by CAS, so a paused collector cannot delete a newer job's claim. A failed completion write may leave the group held until expiry.
 
 ## Finalization
 

@@ -96,9 +96,9 @@ The required durable object families and standard key patterns are:
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user, fork target, or snapshot). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
-| **Compaction staging** | Immutable | Holds segments written by a streaming compaction before publication. The descriptor stores the job id used to derive this key. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
-| **Compaction leases** | Mutable group slot | An `active` lease owns a running job's output. `completed` and `reaping` jobs release the group. Slots are replaced by CAS and never deleted. | `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json` |
-| **Compaction output protection** | Mutable deadline | Before each publication attempt, a job records its lease deadline beside the sealed output. This record remains until the output prefix is empty. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/protection.json` |
+| **Compaction staging** | Immutable | Holds segments written by a streaming compaction before publication. The descriptor stores the job id used to derive this key. | `namespaces/{owner_namespace_id}/metadata/compactions/jobs/{job_id}/segments/{segment_id}.sst.zst` |
+| **Compaction leases** | Mutable group slot | An `active` lease owns a running job's output. `completed` and `reaping` jobs release the group. Slots are replaced by CAS and never deleted. | `namespaces/{owner_namespace_id}/metadata/compactions/groups/{group}.json` |
+| **Compaction output protection** | Mutable deadline | Before each publication attempt, a job records its lease deadline beside the sealed output. This record remains until the output prefix is empty. | `namespaces/{owner_namespace_id}/metadata/compactions/jobs/{job_id}/protection.json` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **GC run** | Mutable CAS | Coordinates marking and sweeping across calls and hosts; one active run per namespace. | `namespaces/{namespace_id}/gc/run.json` |
@@ -124,6 +124,21 @@ For example, segment `wal_00000000000000000002-fedcba9876543210` in namespace
 `namespaces/demo/wal/segments/wal_00000000000000000002-fedcba9876543210.wal.zst`.
 Pointers never store this key; every store boundary derives it from the
 namespace and `segment_id`.
+
+Compaction keeps reusable family-group slots separate from per-job output
+under one subsystem prefix:
+
+```text
+namespaces/{namespace_id}/metadata/compactions/
+├── groups/{group}.json
+└── jobs/{job_id}/
+    ├── protection.json
+    └── segments/{segment_id}.sst.zst
+```
+
+The seven group slots are read directly and never swept. GC enumerates only
+`metadata/compactions/jobs/`; a job's protection record stays beside its
+output even after the group slot is reused.
 
 These key shapes are part of the interoperable storage contract.
 Implementations may keep additional private control-plane objects — queues,
@@ -2421,9 +2436,9 @@ an undelete give back the map the inode had. A rewrite refuses to compact
 when two rows for one inode share a revision number at or below the floor,
 because that makes "the newest at the floor" arbitrary and the drop unsafe.
 
-A rebuild that cannot fit within one bounded maintenance pass runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
+A rebuild that cannot fit within one bounded maintenance pass runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/jobs/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
 
-Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json`. An unexpired `active` lease excludes another job for that group. An expired, `completed`, or `reaping` slot can be replaced with one compare-and-swap; the old job's refresh then fails. Before each publication attempt, the job confirms its current lease deadline at `metadata/compactions/{job_id}/protection.json`. No output is written after this record is created. After the final publication attempt, the group slot becomes `completed`. The protection record remains until the job's output prefix is empty. An older collector therefore retains its protection even after a newer job takes over the group. A published manifest references the segments in place. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
+Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compactions/groups/{group}.json`. An unexpired `active` lease excludes another job for that group. An expired, `completed`, or `reaping` slot can be replaced with one compare-and-swap; the old job's refresh then fails. Before each publication attempt, the job confirms its current lease deadline at `metadata/compactions/jobs/{job_id}/protection.json`. No output is written after this record is created. After the final publication attempt, the group slot becomes `completed`. The protection record remains until the job's output prefix is empty. An older collector therefore retains its protection even after a newer job takes over the group. A published manifest references the segments in place. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
 
 The rules a rebuild applies are the same however it runs them. A bounded
 merge holds every row of its window and decides them together. A streaming
@@ -2485,7 +2500,7 @@ There is no mixed-protocol collection or compatibility fallback.
 GC uses resumable listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, the seven point-read compaction lease
 keys, and the `metadata/manifests/`, `metadata/segments/`,
-`metadata/compactions/`, `checkpoints/`, and `wal/segments/` collections. A live manifest roots every object key its
+`metadata/compactions/jobs/`, `checkpoints/`, and `wal/segments/` collections. A live manifest roots every object key its
 `runs` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
 halves are split at the completed line and described in rule 11.
@@ -2749,14 +2764,14 @@ publishing CAS) — under these rules:
    compaction ("Compaction") publishes nothing until it finishes and is paced
    by no budget, so its output is unreferenced for as long as the job runs.
    `T` only has to cover a publication in flight, so a sweep applying it to
-   `metadata/compactions/` would delete the output of a job still writing it,
+   `metadata/compactions/jobs/` would delete the output of a job still writing it,
    and no fixed window can replace it: any such window is a guess at how long
    a job may run, which is exactly what the design refuses to bound.
 
    The lease says so instead. Every job owns the prefix
-   `namespaces/{namespace_id}/metadata/compactions/{job_id}/` and writes its
+   `namespaces/{namespace_id}/metadata/compactions/jobs/{job_id}/` and writes its
    output under `segments/` inside it, while its family group has one lease at
-   `namespaces/{namespace_id}/metadata/compaction_leases/{group}.json`. The
+   `namespaces/{namespace_id}/metadata/compactions/groups/{group}.json`. The
    lease carries ownership only — job, namespace, group, `writer_id`, the tagged
    `status`, `started_at_ms`, `expires_at_ms` — and never a cursor, an output
    descriptor, an offset, or resumable progress. The job creates a missing
@@ -2785,7 +2800,7 @@ publishing CAS) — under these rules:
 
    Before each root publication attempt, after refreshing the group lease,
    the job confirms an output-protection record at
-   `metadata/compactions/{job_id}/protection.json`. It contains `namespace_id`,
+   `metadata/compactions/jobs/{job_id}/protection.json`. It contains `namespace_id`,
    `job_id`, and `expires_at_ms`, and its deadline only advances by CAS. No
    output writes follow the first protection record. Confirming protection
    before the root CAS also covers a crash immediately after publication.

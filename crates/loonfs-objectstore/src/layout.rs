@@ -131,7 +131,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
-        ["namespaces", namespace, "metadata", "compactions", job_id, "segments", segment]
+        ["namespaces", namespace, "metadata", "compactions", "jobs", job_id, "segments", segment]
             if segment.ends_with(".sst.zst") =>
         {
             Some(parsed(
@@ -140,14 +140,14 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 Some(job_id),
             ))
         }
-        ["namespaces", namespace, "metadata", "compactions", job_id, "protection.json"] => {
+        ["namespaces", namespace, "metadata", "compactions", "jobs", job_id, "protection.json"] => {
             Some(parsed(
                 DurableObjectFamily::CompactionOutputProtection,
                 Some(namespace),
                 Some(job_id),
             ))
         }
-        ["namespaces", namespace, "metadata", "compaction_leases", lease] => {
+        ["namespaces", namespace, "metadata", "compactions", "groups", lease] => {
             lease.strip_suffix(".json").and_then(|group| {
                 parse_metadata_family_group(group).map(|_| {
                     parsed(
@@ -240,7 +240,8 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
         checkpoint_record, content_blob, content_owner_prefix, content_store,
-        metadata_compaction_lease, metadata_compaction_segment, metadata_manifest_object,
+        metadata_compaction_lease, metadata_compaction_output_protection,
+        metadata_compaction_prefix, metadata_compaction_segment, metadata_manifest_object,
         metadata_root, metadata_segment, metadata_segment_prefix, upload_session, wal_floor,
         wal_head, wal_segment, wal_segment_prefix,
     };
@@ -311,6 +312,11 @@ mod tests {
                 Some("bindings"),
             ),
             (
+                metadata_compaction_output_protection(&namespace_id, &compaction_id),
+                DurableObjectFamily::CompactionOutputProtection,
+                Some(compaction_id.as_str()),
+            ),
+            (
                 checkpoint_record(&namespace_id, &checkpoint_id),
                 DurableObjectFamily::CheckpointRecord,
                 Some(checkpoint_id.as_str()),
@@ -377,6 +383,12 @@ mod tests {
             .starts_with(&format!("content-stores/{content_store_id}/objects/")));
         let staged = metadata_compaction_segment(&namespace_id, &job, &segment_id);
 
+        let jobs = metadata_compaction_prefix(&namespace_id);
+        assert!(staged.starts_with(&jobs));
+        assert!(metadata_compaction_output_protection(&namespace_id, &job).starts_with(&jobs));
+        for group in MetadataFamilyGroup::ALL {
+            assert!(!metadata_compaction_lease(&namespace_id, group).starts_with(&jobs));
+        }
         assert!(!staged.starts_with(&metadata_segment_prefix(&namespace_id)));
         let wal_segments = wal_segment_prefix(&namespace_id);
         assert!(!wal_head(&namespace_id).starts_with(&wal_segments));
@@ -390,9 +402,13 @@ mod tests {
             "namespaces/ns-1/control/head.json",
             "namespaces/ns-1/wal/wal_00000000000000000001-0123456789abcdef.wal.zst",
             "namespaces/ns-1/wal/segments/random.tmp",
-            "namespaces/ns-1/metadata/compactions/cmp_1/segments/seg_1.tmp",
-            "namespaces/ns-1/metadata/compactions/cmp_1/lease.json",
-            "namespaces/ns-1/metadata/compaction_leases/unknown.json",
+            "namespaces/ns-1/metadata/compactions/jobs/cmp_1/segments/seg_1.tmp",
+            "namespaces/ns-1/metadata/compactions/jobs/cmp_1/lease.json",
+            "namespaces/ns-1/metadata/compactions/groups/unknown.json",
+            "namespaces/ns-1/metadata/compactions/groups/bindings/lease.json",
+            "namespaces/ns-1/metadata/compaction_leases/bindings.json",
+            "namespaces/ns-1/metadata/compactions/cmp_1/protection.json",
+            "namespaces/ns-1/metadata/compactions/cmp_1/segments/seg_1.sst.zst",
             "content-stores/cs-1/objects/ab/deadbeef",
         ] {
             assert!(
