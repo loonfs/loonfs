@@ -2746,8 +2746,7 @@
             "cancelled": "#/components/schemas/MetadataCompactionOutcomeCancelled",
             "fenced": "#/components/schemas/MetadataCompactionOutcomeFenced",
             "not_needed": "#/components/schemas/MetadataCompactionOutcomeNotNeeded",
-            "published": "#/components/schemas/MetadataCompactionOutcomePublished",
-            "superseded": "#/components/schemas/MetadataCompactionOutcomeSuperseded"
+            "published": "#/components/schemas/MetadataCompactionOutcomePublished"
           },
           "propertyName": "outcome"
         },
@@ -2769,14 +2768,11 @@
           },
           {
             "$ref": "#/components/schemas/MetadataCompactionOutcomeFenced"
-          },
-          {
-            "$ref": "#/components/schemas/MetadataCompactionOutcomeSuperseded"
           }
         ]
       },
       "MetadataCompactionOutcomeAbandoned": {
-        "description": "A run the job read changed under it; nothing was published.",
+        "description": "Inputs changed, time ran out, or publication retries were exhausted.",
         "properties": {
           "outcome": {
             "enum": [
@@ -2821,7 +2817,7 @@
         "type": "object"
       },
       "MetadataCompactionOutcomeFenced": {
-        "description": "The job lost its lease; nothing was published.",
+        "description": "Another process claimed the namespace compactor role; nothing was published.",
         "properties": {
           "outcome": {
             "enum": [
@@ -2901,21 +2897,6 @@
           "input_bytes",
           "output_bytes",
           "output_segments",
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "MetadataCompactionOutcomeSuperseded": {
-        "description": "Every publication attempt lost the root race; nothing was published.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "superseded"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
           "outcome"
         ],
         "type": "object"

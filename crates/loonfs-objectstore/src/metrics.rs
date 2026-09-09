@@ -747,12 +747,8 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
             KeyClass::NamespaceManifest
         }
-        DurableObjectFamily::MetadataSegment | DurableObjectFamily::MetadataCompactionStaging => {
-            KeyClass::MetadataSegment
-        }
+        DurableObjectFamily::MetadataSegment => KeyClass::MetadataSegment,
         DurableObjectFamily::CheckpointRecord
-        | DurableObjectFamily::MetadataCompactionLease
-        | DurableObjectFamily::CompactionOutputProtection
         | DurableObjectFamily::GcRun
         | DurableObjectFamily::GcMarkPage => KeyClass::GcControl,
         DurableObjectFamily::UploadSession | DurableObjectFamily::ContentStore => {

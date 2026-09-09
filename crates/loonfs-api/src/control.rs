@@ -5,8 +5,7 @@
 use crate::envelope::EnvelopeCodecError;
 use crate::{
     wal_segment_id_start_seq, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId,
-    ContentRef, ContentStoreId, InodeId, ManifestNo, MetadataCompactionId, MetadataFamilyGroup,
-    NamespaceId, UploadId, WalSegmentId,
+    ContentRef, ContentStoreId, InodeId, ManifestNo, NamespaceId, UploadId, WalSegmentId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -28,11 +27,6 @@ pub enum ControlObjectKind {
     CheckpointRecord,
     /// Tracks staged content through upload completion or cleanup.
     UploadSession,
-    /// Marks one streaming metadata compaction's output as owned by a job
-    /// that is still running.
-    CompactionLease,
-    /// Protects sealed compaction output across publication and later group owners.
-    CompactionOutputProtection,
     /// Coordinates bounded, resumable marking and sweeping.
     GcRun,
     /// Identifies the content domain held by a backend.
@@ -41,13 +35,11 @@ pub enum ControlObjectKind {
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 6] = [
         Self::WalHead,
         Self::Hint,
         Self::CheckpointRecord,
         Self::UploadSession,
-        Self::CompactionLease,
-        Self::CompactionOutputProtection,
         Self::GcRun,
         Self::ContentStore,
     ];
@@ -64,8 +56,6 @@ impl ControlObjectKind {
             Self::Hint => 1,
             Self::CheckpointRecord => 1,
             Self::UploadSession => 1,
-            Self::CompactionLease => 3,
-            Self::CompactionOutputProtection => 1,
             Self::GcRun => 1,
             Self::ContentStore => 1,
         }
@@ -78,8 +68,6 @@ impl ControlObjectKind {
             Self::Hint => "hint",
             Self::CheckpointRecord => "checkpoint_record",
             Self::UploadSession => "upload_session",
-            Self::CompactionLease => "compaction_lease",
-            Self::CompactionOutputProtection => "compaction_output_protection",
             Self::GcRun => "gc_run",
             Self::ContentStore => "content_store",
         }
@@ -128,83 +116,6 @@ pub struct ManifestRef {
     pub manifest_head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub manifest_payload_checksum: String,
-}
-
-/// Status of a compaction lease.
-///
-/// A job creates an `active` lease. Garbage collection may change an expired
-/// lease to `reaping` by compare-and-swap. That update fences the job and is
-/// permanent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CompactionLeaseStatus {
-    /// The job owns its output prefix. `expires_at_ms` determines whether the
-    /// lease has expired.
-    ///
-    /// The braces make serde reject a stray field; a unit variant would
-    /// silently accept and discard one.
-    Active {},
-    /// The job has finished every output write and publication attempt. The
-    /// group is available; the output protection record retains its deadline.
-    Completed {},
-    /// Garbage collection owns the prefix and the job is fenced.
-    Reaping {},
-}
-
-impl fmt::Display for CompactionLeaseStatus {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Active {} => "active",
-            Self::Completed {} => "completed",
-            Self::Reaping {} => "reaping",
-        })
-    }
-}
-
-/// Records ownership of a streaming compaction's output prefix.
-///
-/// The lease contains no cursor, output descriptor, or progress. The job
-/// refreshes it while running. Garbage collection claims an expired lease by
-/// compare-and-swap before reclaiming the prefix (format spec, "Garbage
-/// collection", rule 12).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MetadataCompactionLeaseState {
-    /// Job this lease belongs to, which is also the prefix its output sits
-    /// under.
-    pub job_id: MetadataCompactionId,
-    /// Namespace whose family group the job is rebuilding.
-    pub namespace_id: NamespaceId,
-    /// Family group the job is rebuilding.
-    pub group: MetadataFamilyGroup,
-    /// Writer id of the process running the job (`MutationContext::writer_id`):
-    /// the server's in an embedded deployment, the maintenance node's in a
-    /// standalone one.
-    pub writer_id: WriterId,
-    /// Who owns the prefix: the job that wrote the lease, or the collector
-    /// that claimed it.
-    pub status: CompactionLeaseStatus,
-    /// Unix-millisecond stamp of the job's first lease write.
-    pub started_at_ms: u64,
-    /// Unix-millisecond expiry written when the job creates or refreshes the
-    /// lease, and the only input to whether an `active` lease has expired.
-    pub expires_at_ms: u64,
-}
-
-/// Protects a job's sealed output from collectors predating publication.
-///
-/// The job extends this deadline before each root publication attempt. It
-/// writes no further output after creating this record. GC removes the record
-/// only after its deadline and after the output prefix is empty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompactionOutputProtectionState {
-    /// Namespace that owns the output.
-    pub namespace_id: NamespaceId,
-    /// Job whose sealed output is protected.
-    pub job_id: MetadataCompactionId,
-    /// Last publication lease deadline; collectors use their fixed pass clock.
-    pub expires_at_ms: u64,
 }
 
 /// Monotonic status of a durable checkpoint record.
@@ -987,9 +898,6 @@ pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 pub type HintEnvelope = ControlObjectEnvelope<HintState>;
 /// Specializes a control envelope for a durable manifest pin.
 pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>;
-/// Specializes a control envelope for a running compaction's ownership of
-/// its staged output.
-pub type MetadataCompactionLeaseEnvelope = ControlObjectEnvelope<MetadataCompactionLeaseState>;
 
 /// Encodes control state once, deriving its checksum and family version.
 pub fn encode_control_state<T: Serialize>(

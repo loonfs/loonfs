@@ -8,9 +8,9 @@ mod block_fetch;
 mod block_load;
 mod build;
 pub(crate) mod cache;
-mod compaction_lease;
 mod compaction_merge;
 mod compaction_retention;
+mod compactor;
 mod create;
 mod data_block_load;
 mod error;
@@ -65,11 +65,8 @@ pub use self::streaming_compaction::{
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 
-pub(crate) use self::compaction_lease::{
-    claim_loaded_group_lease, load_group_lease, load_output_protection, CompactionPrefixOwner,
-    LoadedCompactionLease,
-};
 pub(crate) use self::compaction_merge::revision_content_block;
+pub(crate) use self::compactor::claim_compactor;
 pub(crate) use self::create::{create_checkpoint, create_checkpoint_at_basis};
 pub(crate) use self::data_block_load::DecodedRowWeight;
 pub(crate) use self::files::list_checkpoint_files_page;

@@ -11,7 +11,7 @@ use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegment
 #[cfg(test)]
 pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_api::wire::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
-use loonfs_api::{sha256_digest, ChangeSeq, MetadataCompactionId, MetadataSegmentId, NamespaceId};
+use loonfs_api::{sha256_digest, ChangeSeq, MetadataSegmentId, NamespaceId};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::future::Future;
@@ -111,10 +111,9 @@ where
     S: ObjectStore + ?Sized,
     RowsForFamily: FnMut(MetadataRowFamily) -> Vec<MetadataRow>,
 {
-    let destination = MetadataSegmentDestination::Published { namespace_id };
     let mut segments_by_family = Vec::with_capacity(CHECKPOINT_ROW_FAMILIES.len());
     for family in CHECKPOINT_ROW_FAMILIES {
-        let mut writer = MetadataSegmentWriter::new(family, destination);
+        let mut writer = MetadataSegmentWriter::new(family, namespace_id);
         for row in rows_for_family(family) {
             writer.push(row, &mut |_| {})?;
             writer.roll_full_segments(store, policy).await?;
@@ -127,40 +126,10 @@ where
     Ok(segments_by_family)
 }
 
-/// Selects the published or compaction-staging location for a segment.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum MetadataSegmentDestination<'a> {
-    Published {
-        namespace_id: &'a NamespaceId,
-    },
-    CompactionStaging {
-        namespace_id: &'a NamespaceId,
-        job_id: &'a MetadataCompactionId,
-    },
-}
-
-impl<'a> MetadataSegmentDestination<'a> {
-    fn namespace_id(self) -> &'a NamespaceId {
-        match self {
-            Self::Published { namespace_id } | Self::CompactionStaging { namespace_id, .. } => {
-                namespace_id
-            }
-        }
-    }
-
-    /// Returns the job id used to derive a compaction segment's key.
-    fn compaction_job_id(self) -> Option<MetadataCompactionId> {
-        match self {
-            Self::Published { .. } => None,
-            Self::CompactionStaging { job_id, .. } => Some(job_id.clone()),
-        }
-    }
-}
-
 /// Writes the encoded segment and returns the descriptor that binds its bytes.
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
-    destination: MetadataSegmentDestination<'_>,
+    namespace_id: &NamespaceId,
     family: MetadataRowFamily,
     segment_index: u32,
     built: BuiltSegmentBlocks,
@@ -168,9 +137,8 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     let segment_id = MetadataSegmentId::generate();
     let filter_inline = built.inline_filter_hex();
     let descriptor = MetadataSegmentRef {
-        owner_namespace_id: destination.namespace_id().clone(),
+        owner_namespace_id: namespace_id.clone(),
         segment_id,
-        compaction_job_id: destination.compaction_job_id(),
         family,
         segment_index,
         row_count: built.row_count,
@@ -194,19 +162,16 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
 /// One final row may cross the byte target; decoded rows are never buffered.
 pub(super) struct MetadataSegmentWriter<'a> {
     family: MetadataRowFamily,
-    destination: MetadataSegmentDestination<'a>,
+    namespace_id: &'a NamespaceId,
     builder: SegmentBlocksBuilder,
     segments: Vec<MetadataSegmentRef>,
 }
 
 impl<'a> MetadataSegmentWriter<'a> {
-    pub(super) fn new(
-        family: MetadataRowFamily,
-        destination: MetadataSegmentDestination<'a>,
-    ) -> Self {
+    pub(super) fn new(family: MetadataRowFamily, namespace_id: &'a NamespaceId) -> Self {
         Self {
             family,
-            destination,
+            namespace_id,
             builder: SegmentBlocksBuilder::default(),
             segments: Vec::new(),
         }
@@ -263,7 +228,7 @@ impl<'a> MetadataSegmentWriter<'a> {
                 CoreError::Internal(format!("failed to encode metadata segment: {error}"))
             })?;
         self.segments.push(
-            write_manifest_segment(store, self.destination, self.family, segment_index, built)
+            write_manifest_segment(store, self.namespace_id, self.family, segment_index, built)
                 .await?,
         );
         Ok(())

@@ -28,6 +28,7 @@ mod tests;
 
 /// What one reorganization unit left for its caller.
 enum ReorganizationStep {
+    Fenced,
     /// The unit is finished, and this is what it did.
     Concluded(ReorganizeStepOutcome),
     /// A family group has outgrown a bounded step. The caller starts the job
@@ -65,9 +66,6 @@ fn metadata_compaction_response(
             MetadataCompactionOutcome::Abandoned
         }
         loonfs_core::MetadataCompactionJobOutcome::Fenced => MetadataCompactionOutcome::Fenced,
-        loonfs_core::MetadataCompactionJobOutcome::Superseded => {
-            MetadataCompactionOutcome::Superseded
-        }
     };
     MetadataCompactionResponse {
         namespace_id: namespace_id.clone(),
@@ -383,6 +381,7 @@ impl FsMaintenance {
                 .await?
             {
                 ReorganizationStep::Concluded(outcome) => outcome,
+                ReorganizationStep::Fenced => ReorganizeStepOutcome::RootAdvanced,
                 ReorganizationStep::CompactionPlanned(_) => {
                     ReorganizeStepOutcome::CompactionRequired
                 }
@@ -390,20 +389,50 @@ impl FsMaintenance {
         )
     }
 
-    /// The one reorganization unit both paths run, and what it left for its
-    /// caller.
-    ///
-    /// A bounded step reports a planned job; [`Self::compact_metadata`] runs it.
-    ///
-    /// Explicit compaction bypasses automatic size thresholds.
+    async fn compactor_epoch(&self, namespace_id: &NamespaceId) -> Result<u64> {
+        // Hold the claim lock across publication so concurrent groups share one epoch.
+        let mut epochs = self.compactor_epochs.lock().await;
+        if let Some(epoch) = epochs.get(namespace_id) {
+            return Ok(*epoch);
+        }
+        let epoch = self
+            .engine(namespace_id)
+            .claim_compactor()
+            .await
+            .map_err(RuntimeError::Core)?;
+        epochs.insert(namespace_id.clone(), epoch);
+        Ok(epoch)
+    }
+
     async fn reorganize_once(
         &self,
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<ReorganizationStep> {
+        let claimed = self
+            .compactor_epochs
+            .lock()
+            .await
+            .contains_key(namespace_id);
+        if !claimed
+            && !loonfs_core::cache::metadata_maintenance_due(
+                self.core.store(),
+                Some(self.core.metadata_segment_cache().as_ref()),
+                namespace_id,
+                u64::MAX,
+                compaction_policy,
+            )
+            .await
+            .map_err(RuntimeError::Core)?
+        {
+            return Ok(ReorganizationStep::Concluded(
+                ReorganizeStepOutcome::NotNeeded,
+            ));
+        }
+        let compactor_epoch = self.compactor_epoch(namespace_id).await?;
         let report = self
             .engine(namespace_id)
-            .reorganize_metadata(compaction_policy)
+            .reorganize_metadata(compaction_policy, compactor_epoch)
             .await
             .map_err(RuntimeError::Core)?;
         Ok(ReorganizationStep::Concluded(match report.outcome {
@@ -433,6 +462,9 @@ impl FsMaintenance {
             }
             loonfs_core::MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => {
                 return Ok(ReorganizationStep::CompactionPlanned(spec))
+            }
+            loonfs_core::MetadataReorganizeOutcome::Fenced => {
+                return Ok(ReorganizationStep::Fenced)
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
                 tracing::info!(
@@ -480,6 +512,12 @@ impl FsMaintenance {
             )
             .await?
         {
+            ReorganizationStep::Fenced => {
+                return Ok(MetadataCompactionResponse {
+                    namespace_id: namespace_id.clone(),
+                    compaction: MetadataCompactionOutcome::Fenced,
+                });
+            }
             ReorganizationStep::CompactionPlanned(spec) => spec,
             ReorganizationStep::Concluded(ReorganizeStepOutcome::UnitPublished) => {
                 return Ok(MetadataCompactionResponse {
@@ -500,15 +538,7 @@ impl FsMaintenance {
         outcome.map(|outcome| metadata_compaction_response(namespace_id, outcome))
     }
 
-    /// Runs one streaming compaction to its end and says what that end was.
-    ///
-    /// Both paths reach this: the background task the maintenance runner
-    /// spawns, which awaits nothing and reads the ending from the log, and
-    /// [`Self::compact_metadata`], which hands the ending to its caller.
-    /// Every ending short of a publication leaves the manifest where it was
-    /// and the segments the job wrote unreferenced, so there is nothing to
-    /// undo here — the caller gives its claim back and a later step plans the
-    /// group again.
+    /// Runs a planned compaction under this runtime's remembered epoch.
     #[allow(clippy::disallowed_methods)]
     // Monotonic time is used only to record compaction duration.
     pub(crate) async fn run_streaming_compaction(
@@ -517,10 +547,11 @@ impl FsMaintenance {
         spec: &loonfs_core::MetadataCompactionSpec,
         cancellation: &loonfs_core::MetadataCompactionCancellation,
     ) -> Result<loonfs_core::MetadataCompactionJobOutcome> {
+        let compactor_epoch = self.compactor_epoch(namespace_id).await?;
         let started = Instant::now();
         let outcome = self
             .engine(namespace_id)
-            .run_metadata_compaction(spec, cancellation)
+            .run_metadata_compaction(spec, compactor_epoch, cancellation)
             .await
             .map_err(RuntimeError::Core);
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);

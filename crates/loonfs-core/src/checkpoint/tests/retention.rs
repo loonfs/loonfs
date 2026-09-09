@@ -248,7 +248,7 @@ fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunSh
 async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    _context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> (ManifestNo, usize) {
     let mut published = 0usize;
@@ -256,7 +256,7 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
         let report = super::reorganize_metadata_step(
             store,
             namespace_id,
-            context,
+            0,
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -264,7 +264,8 @@ async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
         .expect("reorganization step");
         match report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
-            super::MetadataReorganizeOutcome::Superseded => {
+            super::MetadataReorganizeOutcome::Superseded
+            | super::MetadataReorganizeOutcome::Fenced => {
                 panic!("single-writer test must not be superseded")
             }
             super::MetadataReorganizeOutcome::CompactionPlanned { .. } => {
@@ -1394,7 +1395,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         let report = super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            &context,
+            0,
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1408,7 +1409,8 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
                 }
                 last_manifest_no = Some(manifest_no);
             }
-            super::MetadataReorganizeOutcome::Superseded => {
+            super::MetadataReorganizeOutcome::Superseded
+            | super::MetadataReorganizeOutcome::Fenced => {
                 panic!("no concurrent publisher exists in this test")
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
@@ -1477,7 +1479,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     let blocked = super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        &context,
+        0,
         tiny_byte_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1508,7 +1510,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     let published = super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        &context,
+        0,
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1579,7 +1581,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     let first = super::reorganize_metadata_step(
         &bounded_store,
         &namespace_id,
-        &context,
+        0,
         bounded_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1660,7 +1662,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     let below_trigger = super::reorganize_metadata_step(
         &bounded_store,
         &namespace_id,
-        &context,
+        0,
         bounded_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1749,10 +1751,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .await
         .expect("materialization");
     let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
-    let compacted_run_prefix = format!(
-        "namespaces/{}/metadata/segments/seg_",
-        namespace_id.as_str()
-    );
+    let compacted_run_prefix = format!("namespaces/{}/segments/seg_", namespace_id.as_str());
 
     assert_eq!(
         compacted_materialized.manifest.payload().base_seq,
@@ -1893,7 +1892,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     let first_report = super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        &context,
+        0,
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1916,7 +1915,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
         let report = super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            &context,
+            0,
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1926,7 +1925,8 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
             super::MetadataReorganizeOutcome::UnitPublished { group, .. } => {
                 folded_groups.push(group);
             }
-            super::MetadataReorganizeOutcome::Superseded => {
+            super::MetadataReorganizeOutcome::Superseded
+            | super::MetadataReorganizeOutcome::Fenced => {
                 panic!("no concurrent publisher exists in this test")
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
@@ -2069,7 +2069,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let error = super::reorganize::reorganize_metadata_step_with_timer(
         &store,
         &namespace_id,
-        &context,
+        0,
         fold_everything,
         MetadataCompactionPolicy::default(),
         &overrun,
@@ -2090,7 +2090,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let report = super::reorganize::reorganize_metadata_step(
         &store,
         &namespace_id,
-        &context,
+        0,
         fold_everything,
         MetadataCompactionPolicy::default(),
     )
@@ -2118,15 +2118,10 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
             .await
             .expect("load manifest segments");
     let group = super::reorganize::select_family_group(
-        store,
-        namespace_id,
         segments.manifest().payload(),
-        0,
         MetadataCompactionPolicy::default(),
         policy,
     )
-    .await
-    .expect("read family-group leases")
     .expect("a family group with delta rows to fold");
     let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
     let selection = super::reorganize::select_reorganization_input(
@@ -2539,7 +2534,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     let report = super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        &context,
+        0,
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -2620,7 +2615,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
             let report = super::reorganize_metadata_step(
                 &store,
                 &namespace_id,
-                &context,
+                0,
                 policy,
                 MetadataCompactionPolicy::default(),
             )
@@ -2660,7 +2655,8 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                         .await;
                     compacted_groups += 1;
                 }
-                super::MetadataReorganizeOutcome::Superseded => {
+                super::MetadataReorganizeOutcome::Superseded
+                | super::MetadataReorganizeOutcome::Fenced => {
                     panic!("no concurrent publisher exists in this test")
                 }
                 super::MetadataReorganizeOutcome::UnitPublished { .. } => {}

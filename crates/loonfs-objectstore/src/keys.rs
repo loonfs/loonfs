@@ -2,15 +2,11 @@
 //!
 //! [durable object family]: ../../../docs/specs/format.md#12-durable-object-families
 
-use crate::layout::{
-    metadata_compaction_job_id_from_key as parse_metadata_compaction_job_id,
-    metadata_compaction_lease_group_from_key as parse_metadata_compaction_lease_group,
-    wal_segment_id_from_key as parse_wal_segment_id,
-};
+use crate::layout::wal_segment_id_from_key as parse_wal_segment_id;
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
-    CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataCompactionId, MetadataFamilyGroup,
-    MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
+    CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceId, UploadId,
+    WalSegmentId,
 };
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
@@ -52,7 +48,7 @@ pub fn metadata_manifest_prefix(namespace_id: &NamespaceId) -> String {
 
 /// Builds the listing prefix containing metadata segment objects owned by one namespace.
 pub fn metadata_segment_prefix(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/metadata/segments/")
+    format!("namespaces/{namespace_id}/segments/")
 }
 
 /// Builds the immutable manifest key for one namespace manifest number.
@@ -68,66 +64,12 @@ pub fn metadata_segment(
     namespace_id: &NamespaceId,
     metadata_segment_id: &MetadataSegmentId,
 ) -> String {
-    format!("namespaces/{namespace_id}/metadata/segments/{metadata_segment_id}.sst.zst")
+    format!("namespaces/{namespace_id}/segments/{metadata_segment_id}.sst.zst")
 }
 
-/// Builds the immutable staging key one streaming compaction job writes a
-/// metadata segment to before any manifest references it.
-pub fn metadata_compaction_segment(
-    namespace_id: &NamespaceId,
-    metadata_compaction_id: &MetadataCompactionId,
-    metadata_segment_id: &MetadataSegmentId,
-) -> String {
-    format!(
-        "namespaces/{namespace_id}/metadata/compactions/{metadata_compaction_id}/segments/{metadata_segment_id}.sst.zst"
-    )
-}
-
-/// Derives a metadata segment's object key from its manifest descriptor.
-///
-/// `compaction_job_id` selects the compaction prefix. Descriptors without a
-/// job id use the namespace's `metadata/segments/` prefix.
+/// Derives a segment key from its owner and generated identity.
 pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
-    match &descriptor.compaction_job_id {
-        Some(compaction_job_id) => metadata_compaction_segment(
-            &descriptor.owner_namespace_id,
-            compaction_job_id,
-            &descriptor.segment_id,
-        ),
-        None => metadata_segment(&descriptor.owner_namespace_id, &descriptor.segment_id),
-    }
-}
-
-/// Builds the mutable lease key for one metadata family group.
-pub fn metadata_compaction_lease(namespace_id: &NamespaceId, group: MetadataFamilyGroup) -> String {
-    let group = group.as_str();
-    format!("namespaces/{namespace_id}/metadata/compaction_leases/{group}.json")
-}
-
-/// Builds the publication-protection key beside one job's sealed output.
-pub fn metadata_compaction_output_protection(
-    namespace_id: &NamespaceId,
-    job_id: &MetadataCompactionId,
-) -> String {
-    format!("namespaces/{namespace_id}/metadata/compactions/{job_id}/protection.json")
-}
-
-/// Extracts the family group from a current-format compaction lease key.
-pub fn metadata_compaction_lease_group_from_key(key: &str) -> Option<MetadataFamilyGroup> {
-    parse_metadata_compaction_lease_group(key)
-}
-
-/// Builds the listing prefix containing every streaming compaction job's
-/// objects for one namespace.
-pub fn metadata_compaction_prefix(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/metadata/compactions/")
-}
-
-/// Extracts the job id from a key under one namespace's compaction prefix.
-///
-/// Returns `None` for a key under the prefix that is not a staged segment.
-pub fn metadata_compaction_job_id_from_key(key: &str) -> Option<&str> {
-    parse_metadata_compaction_job_id(key)
+    metadata_segment(&descriptor.owner_namespace_id, &descriptor.segment_id)
 }
 
 /// Builds the mutable lifecycle key for one checkpoint record.
@@ -201,17 +143,15 @@ pub fn gc_mark_page(
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, content_store, hint, metadata_compaction_lease,
-        metadata_compaction_output_protection, metadata_compaction_prefix,
-        metadata_compaction_segment, metadata_manifest_object, metadata_segment,
-        metadata_segment_object_key, upload_session, wal_head, wal_segment,
+        checkpoint_record, content_blob, content_store, hint, metadata_manifest_object,
+        metadata_segment, metadata_segment_object_key, upload_session, wal_head, wal_segment,
         wal_segment_id_from_key, wal_segment_prefix,
     };
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
-        CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataCompactionId,
-        MetadataFamilyGroup, MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
+        CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceId,
+        UploadId, WalSegmentId,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -231,11 +171,6 @@ mod tests {
 
     fn checkpoint_id() -> CheckpointId {
         CheckpointId::parse("chk_00000000000000000000000000000001").expect("valid checkpoint id")
-    }
-
-    fn metadata_compaction_id() -> MetadataCompactionId {
-        MetadataCompactionId::parse("cmp_00000000000000000000000000000001")
-            .expect("valid metadata compaction id")
     }
 
     fn metadata_segment_id() -> MetadataSegmentId {
@@ -333,22 +268,6 @@ mod tests {
                 metadata_segment(&namespace_id(), &metadata_segment_id()),
             ),
             (
-                "Compaction staging",
-                metadata_compaction_segment(
-                    &namespace_id(),
-                    &metadata_compaction_id(),
-                    &metadata_segment_id(),
-                ),
-            ),
-            (
-                "Compaction leases",
-                metadata_compaction_lease(&namespace_id(), MetadataFamilyGroup::Bindings),
-            ),
-            (
-                "Compaction output protection",
-                metadata_compaction_output_protection(&namespace_id(), &metadata_compaction_id()),
-            ),
-            (
                 "Upload sessions",
                 upload_session(&namespace_id(), &upload_id()),
             ),
@@ -409,17 +328,12 @@ mod tests {
             wal_segment_id_from_key("namespaces/ns-1/wal/segments/random.tmp"),
             None
         );
-        assert_eq!(
-            metadata_compaction_prefix(&namespace_id()),
-            "namespaces/ns-1/metadata/compactions/"
-        );
     }
 
-    fn segment_descriptor(compaction_job_id: Option<MetadataCompactionId>) -> MetadataSegmentRef {
+    fn segment_descriptor() -> MetadataSegmentRef {
         MetadataSegmentRef {
             owner_namespace_id: namespace_id(),
             segment_id: metadata_segment_id(),
-            compaction_job_id,
             family: MetadataRowFamily::Inodes,
             segment_index: 0,
             row_count: 0,
@@ -443,18 +357,10 @@ mod tests {
     }
 
     #[test]
-    fn segment_descriptors_derive_published_and_staging_keys() {
+    fn segment_descriptors_derive_owner_keys() {
         assert_eq!(
-            metadata_segment_object_key(&segment_descriptor(None)),
+            metadata_segment_object_key(&segment_descriptor()),
             metadata_segment(&namespace_id(), &metadata_segment_id())
-        );
-        assert_eq!(
-            metadata_segment_object_key(&segment_descriptor(Some(metadata_compaction_id()))),
-            metadata_compaction_segment(
-                &namespace_id(),
-                &metadata_compaction_id(),
-                &metadata_segment_id()
-            )
         );
     }
 }

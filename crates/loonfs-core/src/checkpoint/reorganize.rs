@@ -9,7 +9,6 @@
 //! [`MetadataCompactionPolicy`] decides when input sizes warrant a merge.
 
 use super::block_fetch::{load_segment_index_for_reorganization, segment_object_len};
-use super::compaction_lease::{group_lease_state, GroupLeaseState};
 use super::error::ManifestLoadError;
 use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after, next_run_no_after};
 use super::load::load_manifest_segments;
@@ -20,7 +19,6 @@ use super::runs::{
 };
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
-use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::load_control_snapshot;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
@@ -82,6 +80,8 @@ pub enum MetadataReorganizeOutcome {
     /// output is unreferenced (garbage collection reclaims it) and the next
     /// step retries against the fresh manifest.
     Superseded,
+    /// Another process claimed the namespace compactor role.
+    Fenced,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +113,7 @@ fn report(
 pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    compactor_epoch: u64,
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Result<MetadataReorganizeReport> {
@@ -121,7 +121,7 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     reorganize_metadata_step_with_timer(
         store,
         namespace_id,
-        context,
+        compactor_epoch,
         policy,
         compaction_policy,
         &timer,
@@ -132,7 +132,7 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
 pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    compactor_epoch: u64,
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
     timer: &dyn MonotonicTimer,
@@ -154,6 +154,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { delta_runs: 0 },
         ));
     };
+    if root.compactor_epoch != compactor_epoch {
+        return Ok(report(namespace_id, MetadataReorganizeOutcome::Fenced));
+    }
     let segments = load_manifest_segments(store, None, &root.manifest).await?;
     let previous = segments.manifest();
 
@@ -169,18 +172,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             MetadataReorganizeOutcome::NotNeeded { delta_runs },
         ));
     }
-    let Some(group) = select_family_group(
-        store,
-        namespace_id,
-        previous.payload(),
-        context.now_ms,
-        compaction_policy,
-        policy,
-    )
-    .await?
-    else {
-        // Delta runs exist but hold no rows (empty families), or the only group
-        // with rows is the one a job is rebuilding; nothing to fold here.
+    let Some(group) = select_family_group(previous.payload(), compaction_policy, policy) else {
         return Ok(report(
             namespace_id,
             MetadataReorganizeOutcome::NotNeeded { delta_runs },
@@ -278,6 +270,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
                 bottom_anchored_merge_blocked,
             },
         )),
+        ManifestPublicationOutcome::CoveredByCurrent(current)
+        | ManifestPublicationOutcome::PredecessorChanged(current)
+            if current.compactor_epoch != compactor_epoch =>
+        {
+            Ok(report(namespace_id, MetadataReorganizeOutcome::Fenced))
+        }
         ManifestPublicationOutcome::CoveredByCurrent(_)
         | ManifestPublicationOutcome::PredecessorChanged(_)
         | ManifestPublicationOutcome::Installable => {
@@ -330,7 +328,6 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     ))
 }
 
-/// One selected window, executed inside the step or by a leased background job.
 pub(super) enum ReorganizationPlan {
     /// The group has no runs.
     Nothing,
@@ -767,25 +764,11 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
     Ok(decoded_bytes)
 }
 
-/// The available family group with the most delta rows to fold; ties resolve
-/// in group order. `None` when no available group has delta rows.
-///
-/// Groups under unexpired active or reaping leases are skipped. A job's
-/// snapshot contains its selected runs, while merges of other groups leave
-/// those descriptors unchanged.
-///
-/// Without it the excluded group would win every step for as long as the job
-/// ran — its delta rows are frozen in the job's snapshot, so its count never
-/// falls, while every other group's falls the moment it folds — and the step
-/// would spend itself re-planning a job that is already running.
-pub(super) async fn select_family_group<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
+pub(super) fn select_family_group(
     payload: &NamespaceManifestPayload,
-    now_ms: u64,
     compaction_policy: MetadataCompactionPolicy,
     policy: MetadataLsmPolicy,
-) -> Result<Option<MetadataFamilyGroup>> {
+) -> Option<MetadataFamilyGroup> {
     let runs = super::runs::runs_in_reorganization_order(payload);
     for group in ranked_family_groups(payload) {
         let candidates = group_candidates(&runs, group);
@@ -799,11 +782,9 @@ pub(super) async fn select_family_group<S: ObjectStore + ?Sized>(
         {
             continue;
         }
-        if group_lease_state(store, namespace_id, group, now_ms).await? != GroupLeaseState::Held {
-            return Ok(Some(group));
-        }
+        return Some(group);
     }
-    Ok(None)
+    None
 }
 
 pub(super) fn ranked_family_groups(payload: &NamespaceManifestPayload) -> Vec<MetadataFamilyGroup> {
@@ -864,6 +845,7 @@ pub(super) fn build_replacement_manifest(
     let retention_floor_seq = previous.payload().retention_floor_seq.max(floor_seq);
     let manifest_no = next_manifest_no_after(previous.payload().manifest_no)?;
     encode_manifest(NamespaceManifestPayload {
+        compactor_epoch: previous.payload().compactor_epoch,
         namespace_id: namespace_id.clone(),
         manifest_no,
         head_seq: previous.payload().head_seq,
@@ -887,7 +869,7 @@ mod planning_tests {
     // stored lengths to exercise GiB-scale layouts without allocating their data.
     fn runs(sizes: &[u64]) -> Vec<MetadataRunManifest> {
         let manifest = decode_namespace_manifest_json(include_bytes!(
-            "../../../loonfs-api/tests/golden/namespace_manifest.v4.json"
+            "../../../loonfs-api/tests/golden/namespace_manifest.v1.json"
         ))
         .expect("manifest fixture");
         let mut template = runs_in_reorganization_order(manifest.payload()).remove(0);

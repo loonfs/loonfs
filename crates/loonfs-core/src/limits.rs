@@ -122,50 +122,6 @@ pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 /// Default work budget for one garbage-collection invocation.
 pub const DEFAULT_GC_MAX_STEPS: u64 = 1024;
 
-/// Interval between streaming-compaction lease refreshes.
-///
-/// The interval must exceed one provider operation bound so a healthy job can
-/// refresh its lease before the next refresh is due.
-pub const METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS: u64 = 5 * 60 * 1000;
-
-/// Refreshes a lease may miss before its job is considered inactive.
-pub const METADATA_COMPACTION_LEASE_MISSED_REFRESHES: u64 = 5;
-
-/// Lifetime written into a compaction lease whenever the job refreshes it.
-///
-/// This covers the refresh write, final publication, and clock-error margin
-/// so collection cannot claim the output during the root compare-and-swap.
-pub const METADATA_COMPACTION_LEASE_EXPIRY_MS: u64 =
-    METADATA_COMPACTION_LEASE_MISSED_REFRESHES * METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS;
-
-/// Minimum age of staged compaction output before it may be collected after
-/// its lease expires.
-pub const METADATA_COMPACTION_STAGING_GRACE_MS: u64 =
-    METADATA_COMPACTION_LEASE_EXPIRY_MS + GC_MIN_GRACE_WINDOW_MS;
-
-/// Returns whether a refresh can complete before the next is due.
-const fn refreshes_land_before_the_next_one_is_due(interval_ms: u64) -> bool {
-    interval_ms > PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS
-}
-
-// Keep the refresh interval above the maximum provider operation time.
-const _: () = assert!(
-    refreshes_land_before_the_next_one_is_due(METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS),
-    "a refresh that spends its whole provider budget must still land before the next is due"
-);
-
-/// Includes the refresh write before the publication budget starts.
-const fn outlasts_one_publication(expiry_ms: u64) -> bool {
-    expiry_ms
-        >= PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_MIN_GRACE_WINDOW_MS
-}
-
-// The lease must remain valid through a final publication attempt.
-const _: () = assert!(
-    outlasts_one_publication(METADATA_COMPACTION_LEASE_EXPIRY_MS),
-    "a compaction lease must outlast the publication that ends the job holding it"
-);
-
 const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right {
         left
@@ -183,6 +139,22 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
 ) + PROVIDER_OPERATION_DEADLINE_MS
     + PROVIDER_ATTEMPT_TIMEOUT_MS
     + GC_SAFETY_MARGIN_MS;
+
+/// Minimum provider age of a metadata segment no root manifest lists before
+/// garbage collection may delete it. A streaming compaction writes its
+/// output under `segments/` as it goes and publishes at the end, so its
+/// earliest segment is unreferenced for the whole run. One day is the bound
+/// on a run; the difference between this age and the grace window below is
+/// how long a job may keep merging before it gives up.
+pub const UNREFERENCED_SEGMENT_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Elapsed monotonic time after which a streaming compaction abandons
+/// instead of publishing. A job that starts its last publication attempt at
+/// this bound finishes within one grace window, which the minimum age above
+/// reserves after the budget. The subtraction fails to compile if the grace
+/// window ever exceeds the minimum age.
+pub const METADATA_COMPACTION_BUDGET_MS: u64 =
+    UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS;
 
 /// Lifetime of a direct download or upload capability.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
@@ -358,44 +330,9 @@ mod tests {
     }
 
     #[test]
-    fn the_compaction_staging_grace_is_the_lease_plus_one_publication() {
-        // 25 minutes of lease + 20.5 minutes of publication.
-        assert_eq!(METADATA_COMPACTION_LEASE_EXPIRY_MS, 25 * 60 * 1000);
-        assert_eq!(METADATA_COMPACTION_STAGING_GRACE_MS, 1_500_000 + 1_230_000);
-        assert_eq!(
-            METADATA_COMPACTION_STAGING_GRACE_MS,
-            METADATA_COMPACTION_LEASE_EXPIRY_MS + GC_MIN_GRACE_WINDOW_MS
-        );
-        // Same bargain as every other derived floor here: the compile-time
-        // assertion is only worth having if its predicate can fail.
-        assert!(outlasts_one_publication(
-            METADATA_COMPACTION_LEASE_EXPIRY_MS
-        ));
-        let minimum =
-            GC_MIN_GRACE_WINDOW_MS + PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS;
-        assert!(outlasts_one_publication(minimum));
-        assert!(!outlasts_one_publication(minimum - 1));
-    }
-
-    #[test]
     fn the_fork_installation_margin_reserves_clock_error_after_the_provider_write() {
         assert_eq!(FORK_INSTALL_MARGIN_MS, 330_000);
         assert!(covers_fork_installation(FORK_INSTALL_MARGIN_MS));
         assert!(!covers_fork_installation(FORK_INSTALL_MARGIN_MS - 1));
-    }
-
-    #[test]
-    fn the_refresh_interval_floor_rejects_an_interval_one_provider_bound_short() {
-        assert!(refreshes_land_before_the_next_one_is_due(
-            METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS
-        ));
-        assert!(!refreshes_land_before_the_next_one_is_due(
-            PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS
-        ));
-        assert_eq!(
-            METADATA_COMPACTION_LEASE_EXPIRY_MS,
-            METADATA_COMPACTION_LEASE_MISSED_REFRESHES
-                * METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS
-        );
     }
 }

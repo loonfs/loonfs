@@ -1335,12 +1335,10 @@ pub enum MetadataCompactionOutcome {
     },
     /// The run was cancelled; the manifest did not move.
     Cancelled,
-    /// A run the job read changed under it; nothing was published.
+    /// Inputs changed, time ran out, or publication retries were exhausted.
     Abandoned,
-    /// The job lost its lease; nothing was published.
+    /// Another process claimed the namespace compactor role; nothing was published.
     Fenced,
-    /// Every publication attempt lost the root race; nothing was published.
-    Superseded,
 }
 
 /// An empty request for one store contract probe.

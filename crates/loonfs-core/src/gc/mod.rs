@@ -6,7 +6,6 @@
 //! when explicitly requested or scheduled.
 
 mod budget;
-mod compaction_staging;
 mod config;
 mod cursor;
 mod fork_checkpoints;

@@ -857,14 +857,13 @@ due. `unit_published` means this run published one bounded merge.
 metadata root first. A manifest this run wrote remains unreferenced, and a
 later GC pass can delete it.
 
-`compaction.outcome` has seven values. `not_needed` means no family group has
-outgrown a bounded reorganization pass. `bounded_merge_published` means the
-planner selected and published a bounded merge instead of a full compaction.
-`published` means the rebuilt family group replaced its snapshot in a published
-manifest. `cancelled` means cancellation stopped the run before publication.
-`abandoned` means an input run changed before publication. `fenced` means the
-run lost its compaction lease. `superseded` means every publication attempt lost
-the metadata-root race.
+`compaction.outcome` has six values. `not_needed` means no family group has
+eligible input. `bounded_merge_published` means the planner selected and
+published a bounded merge. `published` reports the manifest number and row,
+byte, and segment counts. `cancelled` means the caller cancelled the job.
+`abandoned` means an input run changed, the elapsed-time bound was exceeded,
+or all publication attempts lost. `fenced` means another process advanced
+the manifest's compactor epoch. These last three outcomes publish no manifest.
 
 For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the run uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window, `max_steps` limits one pass, and `cursor` resumes a previous pass. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions and staged content have additional protections beyond `grace_window_ms`: each session has a lease, and the protection period for completed-session content is derived rather than configured (format spec, "Garbage collection", rule 11).
 `max_steps` limits durable work steps in one invocation: one source object

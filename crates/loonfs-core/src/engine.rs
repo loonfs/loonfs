@@ -940,51 +940,38 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .await
     }
 
-    /// Performs at most one metadata reorganization step for one row family.
-    /// It merges delta rows into new base segments and publishes a manifest
-    /// that replaces the old references.
-    ///
-    /// Run this repeatedly until it returns `NotNeeded`. Each call reloads durable
-    /// state, so work can resume safely after interruption.
-    ///
-    /// A group whose oldest run no longer fits one unit is reported as
-    /// [`crate::checkpoint::MetadataReorganizeOutcome::CompactionPlanned`]
-    /// instead. The caller runs that plan with
-    /// [`Self::run_metadata_compaction`] as a background job and includes its
-    /// specification. The job's lease prevents a bounded step from merging
-    /// the same group concurrently.
+    /// Claims the namespace compactor epoch for a maintenance runtime.
+    pub async fn claim_compactor(&self) -> Result<u64> {
+        crate::checkpoint::claim_compactor(&self.store, &self.namespace_id).await
+    }
+
+    /// Merges one bounded run window under the claimed compactor epoch.
     pub async fn reorganize_metadata(
         &self,
         compaction_policy: crate::checkpoint::MetadataCompactionPolicy,
+        compactor_epoch: u64,
     ) -> Result<crate::checkpoint::MetadataReorganizeReport> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context()?,
+            compactor_epoch,
             self.metadata_lsm_policy(),
             compaction_policy,
         )
         .await
     }
 
-    /// Rebuilds one family group in a single streaming pass and publishes the
-    /// swap, from a plan [`Self::reorganize_metadata`] produced.
-    ///
-    /// Long-running by design and paced by no budget: it is the caller's
-    /// background work, not a bounded step. `cancellation` stops it between
-    /// block fetches, which is what a graceful shutdown sets. Every ending
-    /// short of a publication costs only the work done — the manifest never
-    /// moved, the segments it wrote are staged and referenced by nothing, and
-    /// a later step plans the group again.
+    /// Publishes a streaming merge while its epoch and elapsed time remain valid.
     pub async fn run_metadata_compaction(
         &self,
         spec: &crate::checkpoint::MetadataCompactionSpec,
+        compactor_epoch: u64,
         cancellation: &crate::checkpoint::MetadataCompactionCancellation,
     ) -> Result<crate::checkpoint::MetadataCompactionJobOutcome> {
         crate::checkpoint::run_metadata_compaction_job(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context()?,
+            compactor_epoch,
             spec,
             self.metadata_lsm_policy(),
             cancellation,

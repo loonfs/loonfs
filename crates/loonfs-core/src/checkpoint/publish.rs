@@ -53,6 +53,7 @@ pub(super) async fn publish_manifest<S: ObjectStore + ?Sized>(
     let candidate = CurrentManifest {
         manifest: manifest_ref_for(namespace_id, manifest),
         retention_floor_seq: manifest.payload().retention_floor_seq,
+        compactor_epoch: manifest.payload().compactor_epoch,
     };
     let current = load_current_manifest_if_present(store, namespace_id)
         .await
@@ -130,6 +131,8 @@ fn classify_current(
 ) -> ManifestPublicationOutcome {
     if current.manifest == candidate.manifest {
         ManifestPublicationOutcome::Published(current.clone())
+    } else if current.compactor_epoch > candidate.compactor_epoch {
+        ManifestPublicationOutcome::PredecessorChanged(current.clone())
     } else if current.manifest.manifest_head_seq > candidate.manifest.manifest_head_seq
         || (current.manifest.manifest_head_seq == candidate.manifest.manifest_head_seq
             && current.manifest.manifest_no >= candidate.manifest.manifest_no)
