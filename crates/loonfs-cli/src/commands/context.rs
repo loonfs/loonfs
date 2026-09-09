@@ -6,7 +6,7 @@ use crate::config::{CliConfig, ConfigLocation, ConfigSource};
 use crate::error::CliError;
 use crate::resolve::{load_cli_config, resolve_actor, resolve_namespace, ResolvedTarget};
 use loonfs_api::{
-    AbsolutePath, ActorRef, ChangeSeq, CommitResponse, ErrorCode, InodeId, InodeKind, NamespaceId,
+    AbsolutePath, ActorId, ChangeSeq, CommitResponse, ErrorCode, InodeId, InodeKind, NamespaceId,
     PublicOrdinalRangeError,
 };
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
@@ -16,7 +16,7 @@ pub(crate) struct CommandContext {
     pub(crate) profile_name: String,
     pub(crate) mode: String,
     pub(crate) namespace: Option<NamespaceId>,
-    pub(crate) actor: Option<ActorRef>,
+    pub(crate) actor: Option<ActorId>,
     pub(crate) target: ResolvedTarget,
 }
 
@@ -90,7 +90,7 @@ impl CommandContext {
             .expect("namespace command context should carry a namespace")
     }
 
-    pub(crate) fn actor(&self) -> &ActorRef {
+    pub(crate) fn actor(&self) -> &ActorId {
         self.actor
             .as_ref()
             .expect("mutation command context should carry an actor")
@@ -190,12 +190,8 @@ async fn resolve_command_context_with_actor(
         .map_err(|error| fail(kind, Some(profile_name.clone()), None, error))?;
     let mode = resolved_target.mode_str().to_owned();
     let attribute = |error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error);
-    let actor = resolve_actor(
-        profile,
-        actor.and_then(|actor| actor.actor_kind).map(Into::into),
-        actor.and_then(|actor| actor.actor_id.as_deref()),
-    )
-    .map_err(&attribute)?;
+    let actor = resolve_actor(profile, actor.and_then(|actor| actor.actor_id.as_deref()))
+        .map_err(&attribute)?;
     let namespace = resolve_namespace(&profile_name, profile, target.namespace.as_deref())
         .map_err(attribute)?
         .namespace;

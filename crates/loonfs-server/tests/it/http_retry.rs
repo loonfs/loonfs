@@ -8,7 +8,7 @@ use loonfs_api::v0::{
     AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
 use loonfs_api::{
-    AbsolutePath, ActorId, ActorRef, ChangeSeq, CommitId, CommitRequest, DestinationBehavior,
+    AbsolutePath, ActorId, ChangeSeq, CommitId, CommitRequest, DestinationBehavior,
     FilesystemOperation, RevisionNo,
 };
 use loonfs_client::{
@@ -196,7 +196,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     assert_eq!(bytes, b"stable bytes\n");
 
     // A different actor must still conflict.
-    let different_actor = ActorRef::service(ActorId::parse("retry-worker").expect("actor id"));
+    let different_actor = ActorId::parse("retry-worker").expect("actor id");
     match harness
         .client
         .put_file_bytes(
@@ -403,7 +403,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
             let fingerprint = details
                 .committed_fingerprint
                 .expect("the receipt's semantic identity");
-            assert!(fingerprint.starts_with("v2:sha256:"), "got `{fingerprint}`");
+            assert!(fingerprint.starts_with("v3:sha256:"), "got `{fingerprint}`");
         }
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
@@ -1111,7 +1111,7 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
         candidate.commit.message = Some("different".to_owned());
         changed.push(candidate);
         let mut candidate = options.clone();
-        candidate.commit.actor = ActorRef::system(ActorId::parse("another-actor").expect("actor"));
+        candidate.commit.actor = ActorId::parse("another-actor").expect("actor");
         changed.push(candidate);
         let mut candidate = options.clone();
         candidate.behavior = DestinationBehavior::Replace;

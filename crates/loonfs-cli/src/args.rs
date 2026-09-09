@@ -361,11 +361,7 @@ pub(crate) enum ProfileCreateCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileCreateActorArgs {
-    /// Actor kind to save in the profile. Must be used with --actor-id.
-    /// Defaults to service/loonfs-cli when no actor is configured.
-    #[arg(long, value_enum)]
-    pub actor_kind: Option<ActorKindArg>,
-    /// Actor ID to save in the profile. Must be used with --actor-kind.
+    /// Actor ID to save in the profile. Defaults to loonfs-cli when unset.
     #[arg(long, value_hint = ValueHint::Other)]
     pub actor_id: Option<String>,
 }
@@ -523,10 +519,7 @@ pub(crate) enum ProfileUpdateCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileUpdateActorArgs {
-    /// Sets the profile's actor kind. Must be used with --actor-id.
-    #[arg(long, value_enum)]
-    pub actor_kind: Option<ActorKindArg>,
-    /// Sets the profile's actor ID. Must be used with --actor-kind.
+    /// Sets the profile's actor ID.
     #[arg(long)]
     pub actor_id: Option<String>,
 }
@@ -670,31 +663,10 @@ pub(crate) struct TargetSelectorArgs {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ActorSelectorArgs {
-    /// Actor kind for this mutation. Must be used with `--actor-id`.
-    /// Overrides actor values from the environment or profile.
-    #[arg(long, value_enum)]
-    pub actor_kind: Option<ActorKindArg>,
-    /// Actor ID for this mutation. Must be used with `--actor-kind`.
-    /// If no actor is configured, the CLI uses service/loonfs-cli.
+    /// Actor ID for this mutation.
+    /// Overrides the environment and profile. Defaults to loonfs-cli.
     #[arg(long)]
     pub actor_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum ActorKindArg {
-    User,
-    Service,
-    System,
-}
-
-impl From<ActorKindArg> for loonfs_api::ActorKind {
-    fn from(value: ActorKindArg) -> Self {
-        match value {
-            ActorKindArg::User => Self::User,
-            ActorKindArg::Service => Self::Service,
-            ActorKindArg::System => Self::System,
-        }
-    }
 }
 
 #[derive(Debug, Args)]

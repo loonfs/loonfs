@@ -70,7 +70,7 @@ pub mod wire {
     }
 }
 
-pub use actor::{ActorId, ActorIdValidationError, ActorKind, ActorRef};
+pub use actor::{ActorId, ActorIdValidationError};
 pub use attributes::{
     AttributeKey, AttributeKeyValidationError, AttributeRevisionNo, AttributeValue,
     AttributeValueValidationError, Attributes, AttributesError, MAX_ATTRIBUTES_TOTAL_BYTES,

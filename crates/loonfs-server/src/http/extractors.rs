@@ -628,7 +628,7 @@ mod tests {
         let error = decode_json::<loonfs_api::CommitRequest>(
             br#"{
                 "commit_id": "invalid-path",
-                "actor": { "kind": "service", "id": "test-service" },
+                "actor": "test-service",
                 "operations": [{ "kind": "create_directory", "path": "relative" }]
             }"#,
         )
@@ -641,7 +641,7 @@ mod tests {
         let error = decode_json::<loonfs_api::CommitRequest>(
             br#"{
                 "commit_id": "invalid-paths",
-                "actor": { "kind": "service", "id": "test-service" },
+                "actor": "test-service",
                 "operations": [{
                     "kind": "move_path",
                     "from_path": "relative",

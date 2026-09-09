@@ -8,11 +8,11 @@
 //! Inodes, file revisions, tombstones, and stored attribute revisions copy
 //! the commit ID, actor, and timestamp from the WAL. Directory bindings do
 //! not store attribution. The initial root inode uses
-//! `ActorRef::loonfs_system()`, and the initial empty attribute state has no
+//! `ActorId::loonfs()`, and the initial empty attribute state has no
 //! actor or timestamp because it is not stored as a revision.
 
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{ActorRef, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
+use loonfs_api::{ActorId, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataState {
@@ -31,7 +31,7 @@ pub struct InodeRecord {
     pub inode_kind: InodeKind,
     pub created_seq: ChangeSeq,
     pub commit_id: CommitId,
-    pub created_by: ActorRef,
+    pub created_by: ActorId,
     pub created_at_ms: u64,
 }
 
@@ -73,7 +73,7 @@ pub struct RevisionRecord {
     pub committed_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub committed_at_ms: u64,
-    pub committed_by: ActorRef,
+    pub committed_by: ActorId,
     pub revision_delta_index: u32,
     pub content_ref: ContentRef,
 }
@@ -85,7 +85,7 @@ pub struct SubtreeTombstoneRecord {
     pub tombstone_delta_index: u32,
     pub commit_id: CommitId,
     pub deleted_at_ms: u64,
-    pub deleted_by: ActorRef,
+    pub deleted_by: ActorId,
     /// Action recorded by this event. The newest event for each root determines
     /// state; a newest `Revoke` means no tombstone is active.
     pub action: SubtreeTombstoneAction,
@@ -100,7 +100,7 @@ pub struct AttributeRevisionRecord {
     pub committed_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub delta_index: u32,
-    pub updated_by: ActorRef,
+    pub updated_by: ActorId,
     pub updated_at_ms: u64,
     /// The map after the update, in key order. An empty list is the cleared
     /// state, not a missing record.
@@ -145,7 +145,7 @@ impl MetadataState {
         &self,
         committed_seq: ChangeSeq,
         commit_id: &CommitId,
-        actor: &ActorRef,
+        actor: &ActorId,
         committed_at_ms: u64,
         deltas: &[WalDelta],
     ) -> MetadataState {
@@ -324,7 +324,7 @@ mod tests {
         let applied = MetadataState::default().apply_committed_wal_deltas(
             ChangeSeq(1),
             &commit_id(),
-            &ActorRef::loonfs_system(),
+            &ActorId::loonfs(),
             4_200,
             &[WalDelta::BindDirentry {
                 delta_index: 7,
@@ -345,7 +345,7 @@ mod tests {
         let applied = MetadataState::default().apply_committed_wal_deltas(
             ChangeSeq(9),
             &commit_id(),
-            &ActorRef::loonfs_system(),
+            &ActorId::loonfs(),
             4_200,
             &[
                 WalDelta::TombstoneSubtree {

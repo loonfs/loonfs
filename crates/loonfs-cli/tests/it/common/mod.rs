@@ -171,7 +171,6 @@ impl Harness {
             .env_remove("LOONFS_CONFIG")
             .env_remove("LOONFS_PROFILE")
             .env_remove("LOONFS_NAMESPACE")
-            .env_remove("LOONFS_ACTOR_KIND")
             .env_remove("LOONFS_ACTOR_ID")
             .env_remove("LOONFS_AUTH_TOKEN");
         command
@@ -196,7 +195,6 @@ impl Harness {
             .env_remove("LOONFS_CONFIG")
             .env_remove("LOONFS_PROFILE")
             .env_remove("LOONFS_NAMESPACE")
-            .env_remove("LOONFS_ACTOR_KIND")
             .env_remove("LOONFS_ACTOR_ID")
             .env_remove("LOONFS_AUTH_TOKEN")
             .output()

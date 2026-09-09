@@ -219,21 +219,20 @@ Reading
     tail that is too large to scan
 
 Writing
-  Every writing command accepts --actor-kind <user|service|system> together
-  with --actor-id <stable-id>. Flags override LOONFS_ACTOR_KIND and
-  LOONFS_ACTOR_ID, then the profile actor. Without any of them,
-  service/loonfs-cli identifies the tool, not the human running it.
+  Every writing command accepts --actor-id <stable-id>. The flag overrides
+  LOONFS_ACTOR_ID, then the profile actor_id. Without any of them,
+  loonfs-cli identifies the tool, not the human running it.
 
   loonfs put <local-path|-> [remote-path] [-r] [--force]
              [--expected-inode-id <id>] [--expected-revision <n>]
-             [--actor-kind <kind> --actor-id <id>]
+             [--actor-id <id>]
     Upload a local file, standard input when the local path is `-`, or with
     -r the directory tree rooted at the local path. --force replaces an
     existing destination. The expected value flags replace only if the file
     still has the inode and optional revision that you read. A revision guard
     requires the inode guard, and neither can be used with -r
 
-  loonfs mkdir <path> [-p] [--actor-kind <kind> --actor-id <id>]
+  loonfs mkdir <path> [-p] [--actor-id <id>]
     Create a directory; -p creates missing parents as well and succeeds when
     the directory is already there
 
@@ -241,7 +240,7 @@ Writing
                          [--attributes-json '<update>']
                          [--expected-inode-id <n>]
                          [--expected-attributes-revision <n>]
-                         [--actor-kind <kind> --actor-id <id>]
+                         [--actor-id <id>]
     Write and remove attributes on a file or directory. --set takes
     key=value and splits on the first `=`, --remove takes a key, and both can
     be repeated. Attribute values must be strings. --attributes-json accepts
@@ -256,14 +255,14 @@ Writing
     --attributes-json cannot be combined with --set or --remove. The expected
     value flags reject the update if the inode or attributes changed
 
-  loonfs rm <path> [-r] [--actor-kind <kind> --actor-id <id>]
+  loonfs rm <path> [-r] [--actor-id <id>]
     Delete a file, or with -r a directory and everything under it as one
     commit; the output carries the handle `loonfs undelete` needs
 
   loonfs mv <source> <dest> [--force]
             [--expected-destination-inode-id <id>]
             [--expected-destination-revision <n>]
-            [--actor-kind <kind> --actor-id <id>]
+            [--actor-id <id>]
     Move or rename a path, a directory included, in one commit; --force
     replaces an existing destination. The expected value flags replace only
     if the destination still has the inode and optional revision that you read
@@ -271,7 +270,7 @@ Writing
   loonfs cp <source> <dest> [-r] [--force]
             [--expected-destination-inode-id <id>]
             [--expected-destination-revision <n>]
-            [--actor-kind <kind> --actor-id <id>]
+            [--actor-id <id>]
     Copy a file, or with -r the directory tree rooted at the source;
     --force replaces an existing destination. The expected value flags use
     the same checks as mv and cannot be used with -r
@@ -282,7 +281,7 @@ History and recovery
     List a file's revision history, newest first
 
   loonfs restore <path> --revision <n>
-                 [--actor-kind <kind> --actor-id <id>]
+                 [--actor-id <id>]
     Write a prior revision's content as the file's next revision
 
   loonfs trash [--limit <n>] [--page-size <n>] [--cursor <cursor>]
@@ -291,7 +290,7 @@ History and recovery
     exact `loonfs undelete` command that restores it
 
   loonfs undelete [<path>] --inode <id> --deletion-seq <seq>
-                  [--actor-kind <kind> --actor-id <id>]
+                  [--actor-id <id>]
     Recover a deleted file or directory; --inode and --deletion-seq come from
     `loonfs trash` or the `rm` output and name one exact deletion, so a
     stale command cannot cancel a later delete. Omit <path> to restore in
@@ -437,9 +436,8 @@ Profile create options
                                        an https server url
 
   Mutation actor:
-    --actor-kind <user|service|system> optional, requires --actor-id
-    --actor-id <stable-id>             optional, requires --actor-kind
-    The default service/loonfs-cli identifies the tool, not the human.
+    --actor-id <stable-id>             optional
+    The default loonfs-cli identifies the tool, not the human.
 
 Update options
   Used by:
@@ -488,8 +486,7 @@ Update options
     --ca-cert-path <path>
 
   Mutation actor updates:
-    --actor-kind <user|service|system> requires --actor-id
-    --actor-id <stable-id>             requires --actor-kind
+    --actor-id <stable-id>
 
 Interrupted transfers
   A transfer killed part way is picked up by rerunning the same command.

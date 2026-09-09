@@ -43,12 +43,6 @@ const EXPECTED_CASES = [
 ] as const;
 const CRC64_NVME_TABLE = makeCrc64NvmeTable();
 type JsonObject = Record<string, unknown>;
-type ActorKind = "user" | "service" | "system";
-
-interface ActorValue {
-    id: string;
-    kind: ActorKind;
-}
 
 interface ConformanceCase {
     name: string;
@@ -73,7 +67,7 @@ interface CommitReplayRequest {
     assertions: LoonFS.CommitAssertion[];
     namespace_id: string;
     commit_id: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     message: string;
     path: string;
 }
@@ -85,7 +79,7 @@ interface CommitReplayExpected {
 interface PaginationRequest {
     namespace_id: string;
     directory: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     entry_names: string[];
     page_size: number;
     resume_after_page: number;
@@ -102,7 +96,7 @@ interface ChildrenByInodeRequest {
     directory: string;
     renamed_directory: string;
     rename_commit_id: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     entry_names: string[];
     page_size: number;
     rename_after_page: number;
@@ -119,7 +113,7 @@ interface ChildrenByInodeExpected {
 interface InodeMutationsRequest {
     namespace_id: string;
     directory: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     path_directory_name: string;
     path_file_name: string;
     inode_directory_name: string;
@@ -143,7 +137,7 @@ interface InodeMutationsExpected {
 interface SnapshotsRequest {
     namespace_id: string;
     directory: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     snapshot_name: string;
     replaced_file_name: string;
     deleted_file_name: string;
@@ -173,7 +167,7 @@ interface ChangesRequest {
     namespace_id: string;
     path: string;
     commit_id: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     after_seq: number;
 }
 
@@ -186,7 +180,7 @@ interface DirectPutRequest {
     namespace_id: string;
     path: string;
     commit_id: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     content_utf8: string;
 }
 
@@ -206,7 +200,7 @@ interface MultipartRequest {
     namespace_id: string;
     path: string;
     commit_id: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     part_size_bytes: number;
     content_pattern: BytePattern;
 }
@@ -232,7 +226,7 @@ interface DownloadRequest {
     namespace_id: string;
     path: string;
     commit_id: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     content_utf8: string;
 }
 
@@ -254,7 +248,7 @@ interface EndToEndRequest {
     directory: string;
     upload_path: string;
     moved_path: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     content_utf8: string;
     commit_ids: EndToEndCommitIds;
 }
@@ -279,7 +273,7 @@ interface ProxyRequest {
     namespace_alias: string;
     namespace_id: string;
     unknown_namespace_alias: string;
-    actor: ActorValue;
+    actor: LoonFS.ActorId;
     directory: string;
     proxied_path: string;
     direct_path: string;
@@ -702,7 +696,7 @@ function caseNamed(cases: Map<string, ConformanceCase>, name: string): Conforman
 function directoryCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actor: LoonFS.ActorId,
     path: string,
     message?: string,
 ): LoonFS.CommitRequest {
@@ -721,7 +715,7 @@ function directoryCommit(
 function fileCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actor: LoonFS.ActorId,
     path: string,
     contentRef: LoonFS.ContentRef,
     contentToken?: LoonFS.ContentToken,
@@ -747,7 +741,7 @@ function fileCommit(
 
 function namespaceAliasDirectoryCommit(
     commitId: string,
-    actor: ActorValue,
+    actor: LoonFS.ActorId,
     path: string,
 ): Omit<LoonFS.CommitRequest, "namespace_id"> {
     return {
@@ -759,7 +753,7 @@ function namespaceAliasDirectoryCommit(
 
 function namespaceAliasFileCommit(
     commitId: string,
-    actor: ActorValue,
+    actor: LoonFS.ActorId,
     path: string,
     completed: CompletedUpload,
 ): Omit<LoonFS.CommitRequest, "namespace_id"> {
@@ -784,7 +778,7 @@ function namespaceAliasFileCommit(
 function moveCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actor: LoonFS.ActorId,
     fromPath: string,
     toPath: string,
 ): LoonFS.CommitRequest {
@@ -806,7 +800,7 @@ function moveCommit(
 function deleteCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actor: LoonFS.ActorId,
     path: string,
 ): LoonFS.CommitRequest {
     return {
@@ -868,7 +862,7 @@ async function assertBrowserTransfer(
     namespaceAlias: string,
     path: string,
     bytes: Uint8Array,
-    actor: ActorValue,
+    actor: LoonFS.ActorId,
     commitId: string,
     label: string,
 ): Promise<void> {
@@ -915,7 +909,7 @@ async function stageContent(
 function stagedCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actor: LoonFS.ActorId,
     operation: LoonFS.FilesystemOperation,
     staged: CompletedUpload,
 ): LoonFS.CommitRequest {

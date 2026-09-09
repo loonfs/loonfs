@@ -69,7 +69,7 @@ def stream_client(fixture, direct, body):
                 },
             }
         elif path.endswith("/entry"):
-            actor = {"kind": "system", "id": "test"}
+            actor = "test"
             value = {
                 "inode_kind": "file",
                 "namespace_id": "demo",

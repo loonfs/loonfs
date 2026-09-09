@@ -33,7 +33,7 @@ fn attributes_record(
         committed_seq: ChangeSeq(seq),
         commit_id: CommitId::parse(format!("c_attributes_{seq}")).expect("commit id"),
         delta_index: 0,
-        updated_by: loonfs_api::ActorRef::loonfs_system(),
+        updated_by: loonfs_api::ActorId::loonfs(),
         updated_at_ms: 1_000 + seq,
         attributes: attributes(entries),
     }
@@ -121,7 +121,7 @@ fn the_fold_keeps_a_latest_empty_revision() {
             committed_seq: ChangeSeq(4),
             commit_id: CommitId::parse("c_attributes_4").expect("commit id"),
             delta_index: 0,
-            updated_by: loonfs_api::ActorRef::loonfs_system(),
+            updated_by: loonfs_api::ActorId::loonfs(),
             updated_at_ms: 1_004,
             attributes: Attributes::default(),
         },

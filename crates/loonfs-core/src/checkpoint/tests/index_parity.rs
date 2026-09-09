@@ -10,7 +10,7 @@ enum PreCommitIdMetadataRow {
         inode_id: InodeId,
         inode_kind: loonfs_api::InodeKind,
         created_seq: ChangeSeq,
-        created_by: loonfs_api::ActorRef,
+        created_by: loonfs_api::ActorId,
         created_at_ms: u64,
     },
 }
@@ -657,7 +657,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
                 inode_id: loonfs_api::ROOT_INODE_ID,
                 inode_kind: loonfs_api::InodeKind::Directory,
                 created_seq: ChangeSeq(0),
-                created_by: loonfs_api::ActorRef::loonfs_system(),
+                created_by: loonfs_api::ActorId::loonfs(),
                 created_at_ms: context.now_ms,
             },
         )

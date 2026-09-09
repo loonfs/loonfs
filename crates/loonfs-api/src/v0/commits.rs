@@ -17,7 +17,7 @@ pub struct CommitResponse {
     /// Sequence number where the commit became visible.
     pub committed_seq: ChangeSeq,
     /// Actor responsible for the commit, as supplied by the application.
-    pub committed_by: crate::ActorRef,
+    pub committed_by: crate::ActorId,
     /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
     pub committed_at_ms: u64,
     /// The optional caller annotation for the commit.
@@ -180,7 +180,7 @@ pub struct CommittedChange {
     /// Client idempotency key for this logical commit.
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
-    pub committed_by: crate::ActorRef,
+    pub committed_by: crate::ActorId,
     /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
     pub committed_at_ms: u64,
     /// Caller annotation, omitted when absent and carrying no filesystem semantics.
@@ -223,7 +223,7 @@ mod tests {
         let change = CommittedChange {
             committed_seq: crate::ChangeSeq(7),
             commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
-            committed_by: crate::ActorRef::loonfs_system(),
+            committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: None,
             events: Vec::new(),
@@ -234,7 +234,7 @@ mod tests {
             serde_json::json!({
                 "committed_seq": 7,
                 "commit_id": "example-commit",
-                "committed_by": { "kind": "system", "id": "loonfs" },
+                "committed_by": "loonfs",
                 "committed_at_ms": 1_752_624_000_000_u64,
                 "events": [],
             })
@@ -248,7 +248,7 @@ mod tests {
             CommittedChange {
                 committed_seq: crate::ChangeSeq(419),
                 commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
-                committed_by: crate::ActorRef::loonfs_system(),
+                committed_by: crate::ActorId::loonfs(),
                 committed_at_ms: 1_752_624_000_000,
                 message: Some("import the reports".to_owned()),
                 events: vec![FilesystemChange::DirectoryCreated {
@@ -266,7 +266,7 @@ mod tests {
                 "namespace_id": "demo",
                 "commit_id": "example-commit",
                 "committed_seq": 419,
-                "committed_by": { "kind": "system", "id": "loonfs" },
+                "committed_by": "loonfs",
                 "committed_at_ms": 1_752_624_000_000_u64,
                 "message": "import the reports",
                 "events": [{
@@ -286,7 +286,7 @@ mod tests {
             namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
             committed_seq: crate::ChangeSeq(419),
-            committed_by: crate::ActorRef::loonfs_system(),
+            committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: None,
             events: None,
@@ -298,7 +298,7 @@ mod tests {
                 "namespace_id": "demo",
                 "commit_id": "example-commit",
                 "committed_seq": 419,
-                "committed_by": { "kind": "system", "id": "loonfs" },
+                "committed_by": "loonfs",
                 "committed_at_ms": 1_752_624_000_000_u64,
             })
         );

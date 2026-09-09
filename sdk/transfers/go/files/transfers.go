@@ -46,7 +46,7 @@ type UploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
 	Content            []byte
-	Actor              *loonfs.ActorRef
+	Actor              loonfs.ActorID
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
@@ -67,7 +67,7 @@ type PreparedUploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
 	Prepared           *PreparedFileContent
-	Actor              *loonfs.ActorRef
+	Actor              loonfs.ActorID
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
@@ -124,7 +124,7 @@ func (c *Client) PutFilePrepared(ctx context.Context, in PreparedUploadInput) (*
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
-	if in.Actor == nil {
+	if in.Actor == "" {
 		return nil, fmt.Errorf("transfers: actor is required")
 	}
 	if in.CommitID == "" {

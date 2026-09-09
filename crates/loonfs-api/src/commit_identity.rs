@@ -11,7 +11,7 @@
 //! receipt.
 
 use crate::{
-    AbsolutePath, ActorKind, ActorRef, AttributeRevisionNo, ChangeSeq, ContentRef,
+    AbsolutePath, ActorId, AttributeRevisionNo, ChangeSeq, CommitAssertion, ContentRef,
     DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
     RevisionNo,
 };
@@ -21,13 +21,13 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Domain separator included in every mutation fingerprint input.
-const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v2";
+const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v3";
 
 /// Format version and hash algorithm stored with each fingerprint.
 ///
 /// Storing both values lets a later format use different encoding rules or a
 /// different hash without changing existing fingerprints.
-const FINGERPRINT_SCHEME: &str = "v2:sha256";
+const FINGERPRINT_SCHEME: &str = "v3:sha256";
 
 /// The semantic identity of one mutation request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
@@ -155,11 +155,60 @@ enum OperationFingerprintInput<'a> {
     },
 }
 
-/// Canonical actor shape, matching the request and durable actor vocabulary.
 #[derive(Serialize)]
-struct ActorFingerprintInput<'a> {
-    kind: ActorKind,
-    id: &'a str,
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AssertionFingerprintInput<'a> {
+    NamespaceHead {
+        expected_head_seq: ChangeSeq,
+    },
+    FileRevision {
+        inode_id: InodeId,
+        expected_revision_no: RevisionNo,
+    },
+    Binding {
+        path: &'a str,
+        expected_inode_id: Option<InodeId>,
+        expected_binding_generation: Option<&'a str>,
+    },
+    Attributes {
+        inode_id: InodeId,
+        expected_attributes_revision_no: AttributeRevisionNo,
+    },
+}
+
+fn assertion_fingerprint_input(assertion: &CommitAssertion) -> AssertionFingerprintInput<'_> {
+    match assertion {
+        CommitAssertion::NamespaceHead { expected_head_seq } => {
+            AssertionFingerprintInput::NamespaceHead {
+                expected_head_seq: *expected_head_seq,
+            }
+        }
+        CommitAssertion::FileRevision {
+            inode_id,
+            expected_revision_no,
+        } => AssertionFingerprintInput::FileRevision {
+            inode_id: *inode_id,
+            expected_revision_no: *expected_revision_no,
+        },
+        CommitAssertion::Binding {
+            path,
+            expected_inode_id,
+            expected_binding_generation,
+        } => AssertionFingerprintInput::Binding {
+            path: path.as_str(),
+            expected_inode_id: *expected_inode_id,
+            expected_binding_generation: expected_binding_generation
+                .as_ref()
+                .map(|value| value.as_str()),
+        },
+        CommitAssertion::Attributes {
+            inode_id,
+            expected_attributes_revision_no,
+        } => AssertionFingerprintInput::Attributes {
+            inode_id: *inode_id,
+            expected_attributes_revision_no: *expected_attributes_revision_no,
+        },
+    }
 }
 
 /// Canonical preimage for the content a put attaches.
@@ -344,10 +393,10 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
 /// therefore the same fingerprint.
 pub fn semantic_commit_fingerprint(
     namespace_id: &NamespaceId,
-    actor: &ActorRef,
+    actor: &ActorId,
     message: Option<&str>,
     operations: &[FilesystemOperation],
-    assertions: &[crate::CommitAssertion],
+    assertions: &[CommitAssertion],
 ) -> Result<CommitFingerprint, SemanticFingerprintError> {
     Ok(fingerprint_bytes(&canonical_commit_bytes(
         namespace_id,
@@ -360,32 +409,28 @@ pub fn semantic_commit_fingerprint(
 
 fn canonical_commit_bytes(
     namespace_id: &NamespaceId,
-    actor: &ActorRef,
+    actor: &ActorId,
     message: Option<&str>,
     operations: &[FilesystemOperation],
-    assertions: &[crate::CommitAssertion],
+    assertions: &[CommitAssertion],
 ) -> Result<Vec<u8>, SemanticFingerprintError> {
     #[derive(Serialize)]
     struct CanonicalCommit<'a> {
         domain: &'static str,
         namespace_id: &'a str,
-        actor: ActorFingerprintInput<'a>,
+        actor: &'a str,
         operations: Vec<OperationFingerprintInput<'a>>,
         message: Option<&'a str>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        assertions: Vec<&'a crate::CommitAssertion>,
+        assertions: Vec<AssertionFingerprintInput<'a>>,
     }
 
     Ok(serde_json::to_vec(&CanonicalCommit {
         domain: COMMIT_FINGERPRINT_DOMAIN,
         namespace_id: namespace_id.as_str(),
-        actor: ActorFingerprintInput {
-            kind: actor.kind,
-            id: actor.id.as_str(),
-        },
+        actor: actor.as_str(),
         operations: operations.iter().map(operation_fingerprint_input).collect(),
         message,
-        assertions: assertions.iter().collect(),
+        assertions: assertions.iter().map(assertion_fingerprint_input).collect(),
     })?)
 }
 
@@ -399,7 +444,7 @@ mod tests {
 
     #[test]
     fn canonical_bytes_and_digests_match_shared_vectors() {
-        #[derive(serde::Deserialize)]
+        #[derive(Serialize, serde::Deserialize)]
         struct Vector {
             name: String,
             operation: FilesystemOperation,
@@ -408,12 +453,16 @@ mod tests {
             canonical_json: String,
             fingerprint: String,
         }
-        let vectors: Vec<Vector> =
-            serde_json::from_str(include_str!("../tests/golden/commit_fingerprints_v2.json"))
-                .expect("fingerprint vectors");
-        for vector in vectors {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden/commit_fingerprints_v3.json");
+        let mut vectors: Vec<Vector> = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path).expect("read fingerprint vectors"),
+        )
+        .expect("fingerprint vectors");
+        let update = std::env::var_os("UPDATE_GOLDEN").is_some();
+        for vector in &mut vectors {
             let namespace = NamespaceId::parse("demo").expect("namespace");
-            let operations = [vector.operation];
+            let operations = [vector.operation.clone()];
             let bytes = canonical_commit_bytes(
                 &namespace,
                 &test_actor(),
@@ -422,6 +471,10 @@ mod tests {
                 &vector.assertions,
             )
             .expect("canonical bytes");
+            if update {
+                vector.canonical_json = String::from_utf8(bytes.clone()).expect("canonical UTF-8");
+                vector.fingerprint = fingerprint_bytes(&bytes).as_str().to_owned();
+            }
             assert_eq!(
                 bytes,
                 vector.canonical_json.as_bytes(),
@@ -443,10 +496,15 @@ mod tests {
                 vector.name
             );
         }
+        if update {
+            let json =
+                serde_json::to_string_pretty(&vectors).expect("serialize fingerprint vectors");
+            std::fs::write(fixture_path, format!("{json}\n")).expect("write fingerprint vectors");
+        }
     }
 
-    fn test_actor() -> ActorRef {
-        ActorRef::user(ActorId::parse("test-actor").expect("valid test actor id"))
+    fn test_actor() -> ActorId {
+        ActorId::parse("test-actor").expect("valid test actor id")
     }
 
     fn attribute_key(value: &str) -> AttributeKey {
@@ -619,14 +677,13 @@ mod tests {
     }
 
     #[test]
-    fn actor_kind_and_id_are_distinct_canonical_identity_fields() {
+    fn changed_actor_id_changes_the_fingerprint() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let operation = create_dir("/docs");
-        let user_x = ActorRef::user(ActorId::parse("x").expect("actor id"));
-        let user_y = ActorRef::user(ActorId::parse("y").expect("actor id"));
-        let service_x = ActorRef::service(ActorId::parse("x").expect("actor id"));
+        let actor_x = ActorId::parse("x").expect("actor id");
+        let actor_y = ActorId::parse("y").expect("actor id");
 
-        let fingerprint = |actor: &ActorRef| {
+        let fingerprint = |actor: &ActorId| {
             semantic_commit_fingerprint(
                 &namespace_id,
                 actor,
@@ -636,8 +693,7 @@ mod tests {
             )
             .expect("fingerprint")
         };
-        assert_ne!(fingerprint(&user_x), fingerprint(&user_y));
-        assert_ne!(fingerprint(&user_x), fingerprint(&service_x));
+        assert_ne!(fingerprint(&actor_x), fingerprint(&actor_y));
     }
 
     #[test]
@@ -752,7 +808,7 @@ mod tests {
                 )
                 .expect("retry fingerprint")
                 .as_str(),
-                "v2:sha256:f83a2787fca6165732d4c92faef300ed2f1527ac2804ecb0b4d2ccf6b0a6da83"
+                "v3:sha256:475f18a814dbc52a03433b5cd34149544b94f3f74721a945734cb4e92797a59f"
             );
         }
     }

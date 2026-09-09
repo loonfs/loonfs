@@ -1,18 +1,18 @@
 //! Builds provider-specific profile configurations and applies validated updates.
 
 use crate::args::{
-    ActorKindArg, ProfileCreateActorArgs, ProfileCreateAzureArgs, ProfileCreateCommand,
-    ProfileCreateGcsArgs, ProfileCreateLocalArgs, ProfileCreateR2Args, ProfileCreateRemoteArgs,
-    ProfileCreateS3Args, ProfileUpdateActorArgs, ProfileUpdateAzureArgs, ProfileUpdateCommand,
-    ProfileUpdateGcsArgs, ProfileUpdateLocalArgs, ProfileUpdateR2Args, ProfileUpdateRemoteArgs,
-    ProfileUpdateS3Args, RuntimeBehavior,
+    ProfileCreateActorArgs, ProfileCreateAzureArgs, ProfileCreateCommand, ProfileCreateGcsArgs,
+    ProfileCreateLocalArgs, ProfileCreateR2Args, ProfileCreateRemoteArgs, ProfileCreateS3Args,
+    ProfileUpdateActorArgs, ProfileUpdateAzureArgs, ProfileUpdateCommand, ProfileUpdateGcsArgs,
+    ProfileUpdateLocalArgs, ProfileUpdateR2Args, ProfileUpdateRemoteArgs, ProfileUpdateS3Args,
+    RuntimeBehavior,
 };
 use crate::config::{
     validate_remote_client_config, ProfileActorConfig, ProfileConfig, StoreConfig,
 };
 use crate::error::CliError;
 use crate::prompt;
-use loonfs_api::{ActorId, ActorKind, SecretString};
+use loonfs_api::{ActorId, SecretString};
 use loonfs_objectstore::{
     AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials,
 };
@@ -165,15 +165,11 @@ fn update_remote_spec(args: ProfileUpdateRemoteArgs) -> ProfileUpdateSpec {
 }
 
 fn update_actor_spec(actor: ProfileUpdateActorArgs) -> CreateActorSpec {
-    CreateActorSpec {
-        kind: actor.actor_kind,
-        id: actor.actor_id,
-    }
+    CreateActorSpec { id: actor.actor_id }
 }
 
 pub(super) fn has_update_flags(spec: &ProfileUpdateSpec) -> bool {
-    spec.actor.kind.is_some()
-        || spec.actor.id.is_some()
+    spec.actor.id.is_some()
         || match &spec.provider {
             CreateProviderSpec::S3(args) => {
                 args.bucket.is_some()
@@ -225,16 +221,12 @@ pub(super) struct CreateProfileSpec {
 
 #[derive(Debug, Clone)]
 struct CreateActorSpec {
-    kind: Option<ActorKindArg>,
     id: Option<String>,
 }
 
 impl From<ProfileCreateActorArgs> for CreateActorSpec {
     fn from(value: ProfileCreateActorArgs) -> Self {
-        Self {
-            kind: value.actor_kind,
-            id: value.actor_id,
-        }
+        Self { id: value.actor_id }
     }
 }
 
@@ -468,10 +460,7 @@ pub(super) fn build_profile_interactive(
         name,
         CreateProfileSpec {
             provider,
-            actor: CreateActorSpec {
-                kind: None,
-                id: None,
-            },
+            actor: CreateActorSpec { id: None },
         },
         runtime,
     )
@@ -482,7 +471,7 @@ pub(super) fn build_profile_from_create_spec(
     spec: CreateProfileSpec,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
-    let actor = profile_actor_config(spec.actor.kind, spec.actor.id.as_deref())?;
+    let actor = profile_actor_config(spec.actor.id.as_deref())?;
     let source = FieldSource::from_runtime(runtime);
     match spec.provider {
         CreateProviderSpec::Local(spec) => {
@@ -981,37 +970,26 @@ fn remote_profile(
     })
 }
 
-fn profile_actor_config(
-    kind: Option<ActorKindArg>,
-    id: Option<&str>,
-) -> Result<ProfileActorConfig, CliError> {
-    match (kind, id) {
-        (None, None) => Ok(ProfileActorConfig::default()),
-        (Some(kind), Some(id)) => Ok(ProfileActorConfig {
-            actor_kind: Some(ActorKind::from(kind)),
-            actor_id: Some(ActorId::parse(id).map_err(|error| {
+fn profile_actor_config(id: Option<&str>) -> Result<ProfileActorConfig, CliError> {
+    let actor_id = id
+        .map(|id| {
+            ActorId::parse(id).map_err(|error| {
                 CliError::invalid_request(format!("invalid --actor-id: {error}"))
                     .with_param("--actor-id")
-            })?),
-        }),
-        (None, Some(_)) => Err(
-            CliError::invalid_request("--actor-id requires --actor-kind").with_param("--actor-id"),
-        ),
-        (Some(_), None) => Err(
-            CliError::invalid_request("--actor-kind requires --actor-id")
-                .with_param("--actor-kind"),
-        ),
-    }
+            })
+        })
+        .transpose()?;
+    Ok(ProfileActorConfig { actor_id })
 }
 
 fn updated_actor(
     current: ProfileActorConfig,
     args: &CreateActorSpec,
 ) -> Result<ProfileActorConfig, CliError> {
-    if args.kind.is_none() && args.id.is_none() {
+    if args.id.is_none() {
         Ok(current)
     } else {
-        profile_actor_config(args.kind, args.id.as_deref())
+        profile_actor_config(args.id.as_deref())
     }
 }
 
@@ -1622,10 +1600,7 @@ mod tests {
     }
 
     fn empty_actor() -> CreateActorSpec {
-        CreateActorSpec {
-            kind: None,
-            id: None,
-        }
+        CreateActorSpec { id: None }
     }
 
     fn update_spec(provider: CreateProviderSpec) -> ProfileUpdateSpec {

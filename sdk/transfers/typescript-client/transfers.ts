@@ -24,7 +24,7 @@ export interface FileUploadInput {
     namespace_alias: string;
     path: LoonFS.AbsolutePath;
     content: Uint8Array;
-    actor: LoonFS.ActorRef;
+    actor: LoonFS.ActorId;
     commit_id: LoonFS.CommitId;
     message?: string | null;
     behavior?: LoonFS.DestinationBehavior;

@@ -34,9 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             b"hello from embedded LoonFS\n",
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit: loonfs::CommitOptions::new(loonfs::ActorRef::service(
+                commit: loonfs::CommitOptions::new(
                     loonfs::ActorId::parse("embedded-example").expect("valid actor id"),
-                )),
+                ),
                 expected_inode_id: None,
                 expected_revision_no: None,
             },

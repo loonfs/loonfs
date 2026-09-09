@@ -293,7 +293,7 @@ fn human_output_shows_dates_and_event_names() {
     let stat_file = harness.run(&["stat", "/doc.txt"]);
     assert_success(&stat_file);
     assert!(
-        stdout_string(&stat_file).contains("revision_committed_by: service:loonfs-cli"),
+        stdout_string(&stat_file).contains("revision_committed_by: loonfs-cli"),
         "{}",
         stdout_string(&stat_file)
     );
@@ -305,13 +305,10 @@ fn human_output_shows_dates_and_event_names() {
     let json_stat = harness.run(&["--json", "stat", "/doc.txt"]);
     assert_success(&json_stat);
     let entry = json_data(&json_stat);
-    assert_eq!(
-        entry["created_by"],
-        serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
-    );
+    assert_eq!(entry["created_by"], serde_json::json!("loonfs-cli"));
     assert_eq!(
         entry["revision_committed_by"],
-        serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
+        serde_json::json!("loonfs-cli")
     );
     assert!(
         entry["revision_committed_at_ms"]

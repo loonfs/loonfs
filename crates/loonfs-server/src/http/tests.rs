@@ -2399,7 +2399,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let commits_url = format!("http://{addr}/v0/namespaces/demo/commits");
     let invalid_operation = r#"{
         "commit_id":"invalid-path",
-        "actor":{"kind":"service","id":"test-service"},
+        "actor":"test-service",
         "operations":[{"kind":"create_directory","path":"relative"}]
     }"#;
     let body = expect_enveloped(
@@ -2752,7 +2752,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
                 .body(axum::body::Body::from(
                     r#"{
                         "commit_id":"hidden-maintenance-commit",
-                        "actor":{"kind":"service","id":"test-service"},
+                        "actor":"test-service",
                         "operations":[{"kind":"create_directory","path":"/docs"}]
                     }"#,
                 ))
@@ -4583,7 +4583,7 @@ async fn stale_commit_assertion_returns_409_with_its_index() {
                 .body(axum::body::Body::from(
                     serde_json::json!({
                         "commit_id": "stale-assertion",
-                        "actor": {"kind": "user", "id": "test-actor"},
+                        "actor": "test-actor",
                         "assertions": [{"kind": "namespace_head", "expected_head_seq": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })
@@ -4636,7 +4636,7 @@ async fn scoped_commit_assertion_returns_409_with_its_index() {
                 .body(axum::body::Body::from(
                     serde_json::json!({
                         "commit_id": "stale-assertion",
-                        "actor": {"kind": "user", "id": "test-actor"},
+                        "actor": "test-actor",
                         "assertions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_99", "expected_revision_no": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })

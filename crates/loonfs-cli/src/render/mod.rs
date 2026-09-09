@@ -326,7 +326,7 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if display_name.is_some() { 2 } else { 1 }),
-            created_by: loonfs_api::ActorRef::loonfs_system(),
+            created_by: loonfs_api::ActorId::loonfs(),
             created_at_ms: 1_752_624_000_000,
             kind: PathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
@@ -354,7 +354,7 @@ mod tests {
             "inode: ino_1",
             "kind: dir",
             "seq: 3",
-            "created_by: system:loonfs",
+            "created_by: loonfs",
             "created: 2025-07-16 00:00:00Z",
         ] {
             assert!(root.contains(line), "{root}");
@@ -375,7 +375,7 @@ mod tests {
         let mut entry = path_entry("/docs", Some("docs"));
         entry.attributes = Some(AttributesProjection {
             attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
-            attributes_updated_by: Some(loonfs_api::ActorRef::loonfs_system()),
+            attributes_updated_by: Some(loonfs_api::ActorId::loonfs()),
             attributes_updated_at_ms: Some(1_752_624_000_000),
             attributes: loonfs_api::Attributes::new(std::collections::BTreeMap::from([(
                 loonfs_api::AttributeKey::parse("note").expect("attribute key"),

@@ -2,7 +2,7 @@
 
 use super::DirectoryBinding;
 use crate::{
-    AbsolutePath, ActorRef, AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq,
+    AbsolutePath, ActorId, AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq,
     ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub struct PathEntry {
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
     /// Actor that created this inode, as supplied by the application.
-    pub created_by: ActorRef,
+    pub created_by: ActorId,
     /// The inode creation time in Unix milliseconds.
     pub created_at_ms: u64,
     /// File-or-directory classification and its kind-specific payload.
@@ -112,7 +112,7 @@ pub enum PathEntryKind {
         /// Current content reference.
         content_ref: ContentRef,
         /// Actor responsible for the current revision.
-        revision_committed_by: ActorRef,
+        revision_committed_by: ActorId,
         /// The current revision time in Unix milliseconds.
         revision_committed_at_ms: u64,
     },
@@ -129,7 +129,7 @@ impl PathEntryKind {
 
     /// Returns the actor responsible for the current file revision.
     /// Directories return `None`.
-    pub const fn revision_committed_by(&self) -> Option<&ActorRef> {
+    pub const fn revision_committed_by(&self) -> Option<&ActorId> {
         match self {
             Self::Directory {} => None,
             Self::File {
@@ -151,7 +151,7 @@ pub struct AttributesProjection {
     /// initial empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub attributes_updated_by: Option<ActorRef>,
+    pub attributes_updated_by: Option<ActorId>,
     /// The latest attribute update time in Unix milliseconds, or `None` for the
     /// initial empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,7 +222,7 @@ pub struct TrashEntry {
     /// Time of the deletion, in Unix milliseconds.
     pub deleted_at_ms: u64,
     /// Actor responsible for the deletion.
-    pub deleted_by: ActorRef,
+    pub deleted_by: ActorId,
     /// Directory binding removed by the deletion.
     pub deleted_binding: DirectoryBinding,
 }
@@ -261,7 +261,7 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if parent_inode_id.is_some() { 2 } else { 1 }),
-            created_by: ActorRef::loonfs_system(),
+            created_by: ActorId::loonfs(),
             created_at_ms: 1_752_624_000_000,
             kind: PathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
@@ -281,7 +281,7 @@ mod tests {
                 "namespace_id": "demo",
                 "path": "/docs",
                 "inode_id": "ino_2",
-                "created_by": { "kind": "system", "id": "loonfs" },
+                "created_by": "loonfs",
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "dir",
                 "head_seq": 3,
@@ -308,7 +308,7 @@ mod tests {
                     "namespace_id": "demo",
                     "path": "/docs",
                     "inode_id": "ino_2",
-                    "created_by": { "kind": "system", "id": "loonfs" },
+                    "created_by": "loonfs",
                     "created_at_ms": 1_752_624_000_000_u64,
                     "inode_kind": "dir",
                     "head_seq": 3,
@@ -332,7 +332,7 @@ mod tests {
             revision_no: RevisionNo(7),
             size_bytes: 5,
             content_ref: content_ref.clone(),
-            revision_committed_by: ActorRef::loonfs_system(),
+            revision_committed_by: ActorId::loonfs(),
             revision_committed_at_ms: 1_752_624_000_000,
         };
 
@@ -342,13 +342,13 @@ mod tests {
                 "namespace_id": "demo",
                 "path": "/report.txt",
                 "inode_id": "ino_2",
-                "created_by": { "kind": "system", "id": "loonfs" },
+                "created_by": "loonfs",
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "file",
                 "revision_no": 7,
                 "size_bytes": 5,
                 "content_ref": content_ref,
-                "revision_committed_by": { "kind": "system", "id": "loonfs" },
+                "revision_committed_by": "loonfs",
                 "revision_committed_at_ms": 1_752_624_000_000_u64,
                 "head_seq": 3,
                 "parent_inode_id": "ino_1",
@@ -398,7 +398,7 @@ mod tests {
             revision_no: RevisionNo(1),
             size_bytes: 5,
             content_ref,
-            revision_committed_by: ActorRef::loonfs_system(),
+            revision_committed_by: ActorId::loonfs(),
             revision_committed_at_ms: 1,
         };
         assert_eq!(
@@ -412,7 +412,7 @@ mod tests {
         let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
         projected.attributes = Some(AttributesProjection {
             attributes_revision_no: crate::AttributeRevisionNo(7),
-            attributes_updated_by: Some(ActorRef::loonfs_system()),
+            attributes_updated_by: Some(ActorId::loonfs()),
             attributes_updated_at_ms: Some(1_752_624_000_000),
             attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
                 crate::AttributeKey::parse("owner").expect("attribute key"),
@@ -429,7 +429,7 @@ mod tests {
         );
         assert_eq!(
             projected_json["attributes_updated_by"],
-            serde_json::json!({ "kind": "system", "id": "loonfs" })
+            serde_json::json!("loonfs")
         );
         assert_eq!(
             projected_json["attributes_updated_at_ms"],
@@ -480,7 +480,7 @@ mod tests {
             inode_id: InodeId(42),
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1,
-            deleted_by: ActorRef::loonfs_system(),
+            deleted_by: ActorId::loonfs(),
             deleted_binding: DirectoryBinding {
                 parent_inode_id: InodeId(7),
                 name_key: NameKey::parse("report.txt").expect("name key"),
@@ -493,7 +493,7 @@ mod tests {
                 "inode_id": "ino_42",
                 "deletion_seq": 417,
                 "deleted_at_ms": 1,
-                "deleted_by": { "kind": "system", "id": "loonfs" },
+                "deleted_by": "loonfs",
                 "deleted_binding": {
                     "parent_inode_id": "ino_7",
                     "name_key": "report.txt",
@@ -509,7 +509,7 @@ mod tests {
             inode_id: InodeId(42),
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1_752_625_000_000,
-            deleted_by: ActorRef::loonfs_system(),
+            deleted_by: ActorId::loonfs(),
             deleted_binding: DirectoryBinding {
                 parent_inode_id: InodeId(7),
                 name_key: NameKey::parse("report.txt").expect("name key"),

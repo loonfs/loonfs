@@ -13,7 +13,7 @@ from .client import LoonFS as _GeneratedLoonFS
 from .files.client import FilesClient as _GeneratedFilesClient
 from .core.request_options import RequestOptions
 from .types import (
-    ActorRef,
+    ActorId,
     BeginUploadRequest_DirectMultipart,
     BeginUploadRequest_DirectPut,
     BeginUploadRequest_ServiceProxied,
@@ -214,7 +214,7 @@ class FilesClient(_GeneratedFilesClient):
         *,
         path: str,
         content: bytes,
-        actor: ActorRef,
+        actor: ActorId,
         commit_id: str,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -246,7 +246,7 @@ class FilesClient(_GeneratedFilesClient):
         path: str,
         content: typing.BinaryIO,
         size_bytes: int | None = None,
-        actor: ActorRef,
+        actor: ActorId,
         commit_id: str,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -369,7 +369,7 @@ class FilesClient(_GeneratedFilesClient):
         *,
         path: str,
         prepared: PreparedFileContent,
-        actor: ActorRef,
+        actor: ActorId,
         commit_id: str,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,

@@ -10,8 +10,8 @@ use loonfs::{
     DestinationBehavior, ListChangesOptions, MetadataMaintenanceOptions, NamespaceId,
     PutFileOptions, ReorganizeStepOutcome, RevisionNo,
 };
+use loonfs_api::ActorId;
 use loonfs_api::ErrorCode;
-use loonfs_api::{ActorId, ActorRef};
 use tempfile::tempdir;
 
 const PATH: &str = "/docs/retry.txt";
@@ -138,7 +138,7 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
-    let actor = ActorRef::system(ActorId::parse("replay-worker").expect("actor id"));
+    let actor = ActorId::parse("replay-worker").expect("actor id");
     let committed = runtime
         .writer
         .create_directory(

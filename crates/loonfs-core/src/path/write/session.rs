@@ -213,7 +213,7 @@ mod tests {
     }
 
     fn test_fingerprint() -> CommitFingerprint {
-        serde_json::from_str(r#""v2:sha256:test""#).expect("fingerprint")
+        serde_json::from_str(r#""v3:sha256:test""#).expect("fingerprint")
     }
 
     #[tokio::test]

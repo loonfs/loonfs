@@ -4,7 +4,7 @@
 
 use crate::common::*;
 use loonfs::{
-    ActorId, ActorRef, CopyOptions, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
+    ActorId, CopyOptions, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
     DestinationBehavior, MoveOptions, PageRequest, PutFileOptions, RestoreRevisionOptions,
     RevisionNo, UpdateAttributesOptions,
 };
@@ -12,8 +12,8 @@ use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
-fn actor(id: &str) -> ActorRef {
-    ActorRef::user(ActorId::parse(id).expect("actor id"))
+fn actor(id: &str) -> ActorId {
+    ActorId::parse(id).expect("actor id")
 }
 
 #[test]
@@ -155,7 +155,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     fs.create_namespace_blocking(&source_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let root = fs.stat_path_blocking(&source_id, "/").expect("stat root");
-    assert_eq!(root.created_by, ActorRef::loonfs_system());
+    assert_eq!(root.created_by, ActorId::loonfs());
     let root_attributes = root.attributes.expect("root attributes projection");
     assert_eq!(root_attributes.attributes_updated_by, None);
     assert_eq!(root_attributes.attributes_updated_at_ms, None);

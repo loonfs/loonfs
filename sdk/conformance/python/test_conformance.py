@@ -21,7 +21,7 @@ import pydantic
 import pytest
 import uvicorn
 from loonfs.server import (
-    ActorRef,
+    ActorId,
     BadRequestError,
     BeginUploadRequest_DirectMultipart,
     BeginUploadRequest_DirectPut,
@@ -116,7 +116,7 @@ class CommitReplayRequest:
     assertions: list[CommitAssertion]
     namespace_id: str
     commit_id: str
-    actor: ActorRef
+    actor: ActorId
     message: str
     path: str
 
@@ -131,7 +131,7 @@ class DirectPutRequest:
     namespace_id: str
     path: str
     commit_id: str
-    actor: ActorRef
+    actor: ActorId
     content_utf8: str
 
 
@@ -154,7 +154,7 @@ class MultipartRequest:
     namespace_id: str
     path: str
     commit_id: str
-    actor: ActorRef
+    actor: ActorId
     part_size_bytes: int
     content_pattern: BytePattern
 
@@ -184,7 +184,7 @@ class DownloadRequest:
     namespace_id: str
     path: str
     commit_id: str
-    actor: ActorRef
+    actor: ActorId
     content_utf8: str
 
 
@@ -209,7 +209,7 @@ class EndToEndRequest:
     directory: str
     upload_path: str
     moved_path: str
-    actor: ActorRef
+    actor: ActorId
     content_utf8: str
     commit_ids: EndToEndCommitIds
 
@@ -229,7 +229,7 @@ class EndToEndExpected:
 class PaginationRequest:
     namespace_id: str
     directory: str
-    actor: ActorRef
+    actor: ActorId
     entry_names: list[str]
     page_size: int
     resume_after_page: int
@@ -248,7 +248,7 @@ class ChildrenByInodeRequest:
     directory: str
     renamed_directory: str
     rename_commit_id: str
-    actor: ActorRef
+    actor: ActorId
     entry_names: list[str]
     page_size: int
     rename_after_page: int
@@ -267,7 +267,7 @@ class ChildrenByInodeExpected:
 class InodeMutationsRequest:
     namespace_id: str
     directory: str
-    actor: ActorRef
+    actor: ActorId
     path_directory_name: str
     path_file_name: str
     inode_directory_name: str
@@ -293,7 +293,7 @@ class InodeMutationsExpected:
 class SnapshotsRequest:
     namespace_id: str
     directory: str
-    actor: ActorRef
+    actor: ActorId
     snapshot_name: str
     replaced_file_name: str
     deleted_file_name: str
@@ -332,7 +332,7 @@ class ProxyRequest:
     namespace_alias: str
     namespace_id: str
     unknown_namespace_alias: str
-    actor: ActorRef
+    actor: ActorId
     directory: str
     proxied_path: str
     direct_path: str
@@ -356,7 +356,7 @@ class ChangesRequest:
     namespace_id: str
     path: str
     commit_id: str
-    actor: ActorRef
+    actor: ActorId
     after_seq: int
 
 
@@ -509,7 +509,7 @@ def _apply(
     client: LoonFS,
     namespace_id: str,
     commit_id: str,
-    actor: ActorRef,
+    actor: ActorId,
     operation: Any,
     *,
     message: str | None = None,
@@ -629,7 +629,7 @@ def _proxy_create_commit(
     content_token: JsonObject | None = None,
 ) -> CommitResponse:
     body: JsonObject = {
-        "actor": {"id": request.actor.id, "kind": request.actor.kind},
+        "actor": request.actor,
         "commit_id": commit_id,
         "operations": [operation],
     }
@@ -1487,8 +1487,7 @@ def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert feed.changes, "change feed is empty"
     change = feed.changes[0]
     assert change.commit_id == request.commit_id
-    assert change.committed_by.id == request.actor.id
-    assert change.committed_by.kind == request.actor.kind
+    assert change.committed_by == request.actor
     assert len(change.events) == 1
     assert change.events[0].kind == "directory_created"
 
@@ -1726,7 +1725,7 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
     prepared = client.files.prepare_file_stream(namespace_id, content=io.BytesIO(b"original bytes"))
     assert isinstance(prepared, PreparedFileContent)
     inputs = dict(path="/original", prepared=prepared,
-                  actor=ActorRef(kind="user", id="prepared-user"), commit_id="prepared-put")
+                  actor="prepared-user", commit_id="prepared-put")
     with pytest.raises(NotFoundError):
         client.files.retrieve(namespace_id, path="/original")
     first = client.files.put_file_prepared(namespace_id, **inputs)
@@ -1839,8 +1838,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         request.commit_ids.remove,
     ]
     assert all(
-        change.committed_by.id == request.actor.id
-        and change.committed_by.kind == request.actor.kind
+        change.committed_by == request.actor
         for change in changes.changes
     )
 

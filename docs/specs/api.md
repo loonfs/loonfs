@@ -452,16 +452,15 @@ not the input ref.
 
 A commit is one request: a `commit_id` — a client-generated stable
 idempotency key that must be reused verbatim for safe retries — a required
-application-asserted `actor` with a `kind` (`user`, `service`, or `system`)
-and opaque `id`, an optional `message` (a human-readable annotation that is part of the commit's
+application-supplied opaque `actor` identifier, an optional `message` (a human-readable annotation that is part of the commit's
 identity), an optional ordered `assertions` array, and an ordered, non-empty list of path operations. A request with
 one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same commit and fingerprint alike.
 A `message` is at most 4096 bytes; a longer one is rejected with
 `invalid_request` before planning, on every transport.
 The semantic fingerprint includes assertions in request order. Changing an
-assertion or its position changes identity. An empty assertion list is omitted
-from the fingerprint input, preserving assertion-free retry identity.
+assertion or its position changes identity. The fingerprint input always
+includes the assertion list, including an empty list.
 
 The operations of one request commit together, in order, as one logical
 commit. Operation `k` is planned against authoritative namespace state plus
@@ -552,14 +551,15 @@ Assertions are admission conditions, stored only through the fingerprint in WAL 
 
 ### Actor attribution
 
-Every commit includes an actor with a `kind` and `id`. The application chooses
-this value, and LoonFS stores it on the commit and the metadata created by that
-commit. LoonFS does not authenticate the actor. The application must
+Every commit includes a required actor as a JSON string. The application supplies
+a stable opaque identifier with the identity scope it needs. LoonFS preserves
+it on the commit and the metadata created by that commit. LoonFS does not
+authenticate the actor or resolve profile information. The application must
 authenticate the user and authorize the operation before sending the request.
 Use a stable internal ID, not an email address or display name.
 
-Actor kind and actor id are part of the semantic commit fingerprint. Reusing a
-`commit_id` with a different actor id or kind fails with
+The actor id is part of the semantic commit fingerprint. Reusing a
+`commit_id` with a different actor id fails with
 `commit_id_reuse_conflict`. The commit timestamp is not part of the
 fingerprint.
 
@@ -727,10 +727,10 @@ misspelled guard would decode to its default and the server would carry out
 a different request than the caller asked for. Response bodies are the other
 way round, because a client must keep working against a server newer than
 itself and so must tolerate fields it does not know (section 7.2).
-`ContentRef`, `Checksum`, and `ActorRef` are closed shapes on both sides: a
+`ContentRef` and `Checksum` are closed shapes on both sides: a
 response never adds a field to one of them, and new content strategies or
 checksum algorithms arrive as new `kind` and `algorithm` values, which is why
-those three schemas are `additionalProperties: false` in responses too.
+those two schemas are `additionalProperties: false` in responses too.
 Unknown content kinds fail to decode, just like unknown checksum algorithms.
 The encoding conventions in `format.md` state the same rules and extend them to
 durable shapes.
@@ -1359,7 +1359,7 @@ tokens naming other refs are ignored.
 ```json
 {
   "commit_id": "commit-a",
-  "actor": { "kind": "service", "id": "document-importer" },
+  "actor": "document-importer",
   "content_tokens": [
     {
       "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
@@ -1552,7 +1552,7 @@ the durable naming rules ([format: field conventions](format.md#121-field-conven
   "namespace_id": "demo",
   "path": "/docs/report.txt",
   "inode_id": "ino_42",
-  "created_by": { "kind": "user", "id": "usr_8f3c" },
+  "created_by": "usr_8f3c",
   "created_at_ms": 1752623000000,
   "inode_kind": "file",
   "head_seq": 418,
@@ -1560,7 +1560,7 @@ the durable naming rules ([format: field conventions](format.md#121-field-conven
   "display_name": "report.txt",
   "binding_generation": "opaque-token",
   "revision_no": 7,
-  "revision_committed_by": { "kind": "service", "id": "render-worker" },
+  "revision_committed_by": "render-worker",
   "size_bytes": 19482,
   "content_ref": {
     "kind": "blob_v1",
@@ -1571,7 +1571,7 @@ the durable naming rules ([format: field conventions](format.md#121-field-conven
   },
   "revision_committed_at_ms": 1752624000000,
   "attributes_revision_no": 3,
-  "attributes_updated_by": { "kind": "user", "id": "metadata-editor" },
+  "attributes_updated_by": "metadata-editor",
   "attributes_updated_at_ms": 1752623500000,
   "attributes": { "owner": "platform" }
 }
@@ -1661,14 +1661,14 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "namespace_id": "demo",
       "path": "/docs/report.txt",
       "inode_id": "ino_42",
-      "created_by": { "kind": "user", "id": "usr_8f3c" },
+      "created_by": "usr_8f3c",
       "created_at_ms": 1752623000000,
       "inode_kind": "file",
       "head_seq": 418,
       "parent_inode_id": "ino_7",
       "display_name": "report.txt",
       "revision_no": 7,
-      "revision_committed_by": { "kind": "service", "id": "render-worker" },
+      "revision_committed_by": "render-worker",
       "revision_committed_at_ms": 1752624000000,
       "size_bytes": 19482,
       "content_ref": {
@@ -1683,7 +1683,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "namespace_id": "demo",
       "path": "/docs/slides",
       "inode_id": "ino_43",
-      "created_by": { "kind": "user", "id": "usr_8f3c" },
+      "created_by": "usr_8f3c",
       "created_at_ms": 1752623000000,
       "inode_kind": "dir",
       "head_seq": 418,
@@ -1712,7 +1712,7 @@ Those rows represent current state and are not removed when the retention floor 
       "inode_id": "ino_42",
       "deletion_seq": 417,
       "deleted_at_ms": 1752625000000,
-      "deleted_by": { "kind": "user", "id": "usr_8f3c" },
+      "deleted_by": "usr_8f3c",
       "deleted_binding": {
         "parent_inode_id": "ino_7",
         "name_key": "report.txt",
@@ -1763,7 +1763,7 @@ retained. A directory returns `path_conflict`, an unknown inode returns
       "revision_no": 7,
       "committed_seq": 418,
       "committed_at_ms": 1752624000000,
-      "committed_by": { "kind": "service", "id": "render-worker" },
+      "committed_by": "render-worker",
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
@@ -1796,7 +1796,7 @@ Representative request:
 ```json
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "actor": { "kind": "user", "id": "usr_8f3c" },
+  "actor": "usr_8f3c",
   "assertions": [
     { "kind": "namespace_head", "expected_head_seq": 42 },
     { "kind": "file_revision", "inode_id": "ino_7", "expected_revision_no": 3 }
@@ -1825,7 +1825,7 @@ create a directory and write into it:
 ```json
 {
   "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",
-  "actor": { "kind": "user", "id": "usr_8f3c" },
+  "actor": "usr_8f3c",
   "message": "import the January report",
   "content_tokens": [
     {
@@ -1904,7 +1904,7 @@ Five operations use inode IDs instead of paths. They let clients act on an entry
 ```json
 {
   "commit_id": "c_1b2c3d4e5f60718293a4b5c6d7e8f901",
-  "actor": { "kind": "user", "id": "usr_8f3c" },
+  "actor": "usr_8f3c",
   "operations": [
     {
       "kind": "create_directory_by_inode",
@@ -1934,7 +1934,7 @@ Representative response:
   "namespace_id": "demo",
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "committed_seq": 419,
-  "committed_by": { "kind": "user", "id": "usr_8f3c" },
+  "committed_by": "usr_8f3c",
   "committed_at_ms": 1752624000000,
   "message": "import the January report",
   "events": [
@@ -1955,7 +1955,7 @@ The same endpoint also accepts path directory creation:
 ```json
 {
   "commit_id": "c_8b7d4ef098ec4c1fbde15edbe02f9a64",
-  "actor": { "kind": "user", "id": "usr_8f3c" },
+  "actor": "usr_8f3c",
   "operations": [{ "kind": "create_directory", "path": "/docs" }]
 }
 ```
@@ -1965,7 +1965,7 @@ and path revision restore:
 ```json
 {
   "commit_id": "c_8f9a1b2c3d4e4f50a6b7c8d9e0f12345",
-  "actor": { "kind": "user", "id": "usr_8f3c" },
+  "actor": "usr_8f3c",
   "operations": [
     {
       "kind": "restore_revision",
@@ -1985,7 +1985,7 @@ deletion's committed sequence.
 ```json
 {
   "commit_id": "c_5d6e7f8091a2b3c4d5e6f70812345678",
-  "actor": { "kind": "user", "id": "usr_8f3c" },
+  "actor": "usr_8f3c",
   "operations": [
     {
       "kind": "undelete",
@@ -2014,7 +2014,7 @@ path resolves to:
 ```json
 {
   "commit_id": "c_6e7f8091a2b3c4d5e6f7081234567890",
-  "actor": { "kind": "user", "id": "usr_8f3c" },
+  "actor": "usr_8f3c",
   "operations": [
     {
       "kind": "update_attributes",
@@ -2416,7 +2416,7 @@ more than three events. The events stay in request order.
     {
       "committed_seq": 419,
       "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-      "committed_by": { "kind": "user", "id": "usr_8f3c" },
+      "committed_by": "usr_8f3c",
       "committed_at_ms": 1752624000000,
       "message": "replace report bytes",
       "events": [

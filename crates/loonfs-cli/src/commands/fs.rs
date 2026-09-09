@@ -31,7 +31,7 @@ use crate::resolve::ResolvedTarget;
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
-    AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq,
+    AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq,
     CheckpointId, CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior,
     InodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
@@ -69,7 +69,7 @@ fn parse_snapshot_id_arg(snapshot_id: Option<&str>) -> Result<Option<CheckpointI
         .transpose()
 }
 
-fn commit_options(actor: &ActorRef, args: &CommitArgs) -> Result<CommitOptions, CliError> {
+fn commit_options(actor: &ActorId, args: &CommitArgs) -> Result<CommitOptions, CliError> {
     Ok(CommitOptions {
         assertions: Vec::new(),
         actor: actor.clone(),
@@ -268,7 +268,7 @@ struct AttributeUpdateJson {
 
 fn update_attributes_options(
     args: &FilesystemAnnotateArgs,
-    actor: &ActorRef,
+    actor: &ActorId,
 ) -> Result<UpdateAttributesOptions, CliError> {
     let (set, remove) = match args.attributes_json.as_deref() {
         Some(document) => {
@@ -1154,10 +1154,7 @@ fn acknowledge_committed_upload(
     })
 }
 
-fn put_file_options(
-    args: &FilesystemPutArgs,
-    actor: &ActorRef,
-) -> Result<PutFileOptions, CliError> {
+fn put_file_options(args: &FilesystemPutArgs, actor: &ActorId) -> Result<PutFileOptions, CliError> {
     let expected_revision_no = args
         .expected_revision
         .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))

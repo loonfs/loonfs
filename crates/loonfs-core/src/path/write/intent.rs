@@ -1,6 +1,6 @@
 //! [`CommitRequest`]: the one filesystem commit language, before planning.
 
-use loonfs_api::{ActorRef, CommitAssertion, CommitId};
+use loonfs_api::{ActorId, CommitAssertion, CommitId};
 
 /// The operation language a commit is written in, owned by `loonfs-api` and
 /// used here unchanged.
@@ -33,7 +33,7 @@ pub struct CommitRequest {
     /// Client idempotency key for the whole request.
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
-    pub actor: ActorRef,
+    pub actor: ActorId,
     /// Caller annotation recorded on the commit. Part of the request's
     /// identity: reusing a commit id with a different message conflicts.
     pub message: Option<String>,
@@ -53,7 +53,7 @@ impl CommitRequest {
     /// A request carrying exactly one operation.
     pub fn single(
         commit_id: CommitId,
-        actor: ActorRef,
+        actor: ActorId,
         message: Option<String>,
         operation: FilesystemOperation,
     ) -> Self {

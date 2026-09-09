@@ -54,34 +54,6 @@
         "example": "usr_8f3c",
         "type": "string"
       },
-      "ActorKind": {
-        "description": "The type of actor responsible for a commit.",
-        "enum": [
-          "user",
-          "service",
-          "system"
-        ],
-        "type": "string"
-      },
-      "ActorRef": {
-        "additionalProperties": false,
-        "description": "Identifies the user, service, or system responsible for a commit.\n\nLoonFS stores this value as provided. It does not authenticate the actor or\nlook up profile information.",
-        "properties": {
-          "id": {
-            "$ref": "#/components/schemas/ActorId",
-            "description": "A stable identifier supplied by the application."
-          },
-          "kind": {
-            "$ref": "#/components/schemas/ActorKind",
-            "description": "The type of actor."
-          }
-        },
-        "required": [
-          "kind",
-          "id"
-        ],
-        "type": "object"
-      },
       "AttributeKey": {
         "description": "A validated inode attribute name from 1 to 128 UTF-8 bytes without control characters.\n\nNames are byte-exact; writes reject the reserved `loonfs.` prefix even though\nthe type accepts it.",
         "example": "owner",
@@ -748,7 +720,7 @@
         "description": "A request to commit one or more filesystem operations atomically in order.\n\nUnknown fields are rejected.",
         "properties": {
           "actor": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "Actor responsible for the commit, as supplied by the application."
           },
           "assertions": {
@@ -805,7 +777,7 @@
             "type": "integer"
           },
           "committed_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "Actor responsible for the commit, as supplied by the application."
           },
           "committed_seq": {
@@ -851,7 +823,7 @@
             "type": "integer"
           },
           "committed_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "Actor responsible for the commit, as supplied by the application."
           },
           "committed_seq": {
@@ -1382,7 +1354,7 @@
             "type": "integer"
           },
           "committed_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "Actor responsible for this revision, as supplied by the application."
           },
           "committed_seq": {
@@ -3048,7 +3020,7 @@
             "type": "integer"
           },
           "attributes_updated_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
           },
           "binding_generation": {
@@ -3062,7 +3034,7 @@
             "type": "integer"
           },
           "created_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "Actor that created this inode, as supplied by the application."
           },
           "display_name": {
@@ -3125,7 +3097,7 @@
             "type": "integer"
           },
           "attributes_updated_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
           },
           "binding_generation": {
@@ -3143,7 +3115,7 @@
             "type": "integer"
           },
           "created_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "Actor that created this inode, as supplied by the application."
           },
           "display_name": {
@@ -3183,7 +3155,7 @@
             "type": "integer"
           },
           "revision_committed_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "Actor responsible for the current revision."
           },
           "revision_no": {
@@ -3871,7 +3843,7 @@
             "description": "Directory binding removed by the deletion."
           },
           "deleted_by": {
-            "$ref": "#/components/schemas/ActorRef",
+            "$ref": "#/components/schemas/ActorId",
             "description": "Actor responsible for the deletion."
           },
           "deletion_seq": {

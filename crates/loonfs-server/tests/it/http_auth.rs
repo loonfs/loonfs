@@ -424,7 +424,7 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
         .expect("create namespace");
     let body = json!({
         "commit_id": "bare-commit-mkdir",
-        "actor": {"kind": "service", "id": "bare-test"},
+        "actor": "bare-test",
         "operations": [{
             "kind": "create_directory",
             "path": "/docs"

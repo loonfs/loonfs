@@ -9,8 +9,8 @@ use bytes::Bytes;
 use loonfs_api::{
     v0::FilesystemChange,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AbsolutePath, ActorId, ActorRef, ChangeSeq, CommitId, DeleteDirectoryBehavior,
-    DestinationBehavior, InodeId, NamespaceId,
+    AbsolutePath, ActorId, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    InodeId, NamespaceId,
 };
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
@@ -856,8 +856,8 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
         .await
         .expect("bootstrap");
 
-    let actor = ActorRef::user(ActorId::parse("shared-id").expect("actor id"));
-    let request = |actor: ActorRef| {
+    let actor = ActorId::parse("shared-id").expect("actor id");
+    let request = |actor: ActorId| {
         CommitRequest::single(
             CommitId::parse("attributed-receipt").expect("commit id"),
             actor,
@@ -923,29 +923,24 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
     assert_eq!(replay.events, None);
     assert!(first.events.is_some());
 
-    for conflicting_actor in [
-        ActorRef::user(ActorId::parse("different-id").expect("actor id")),
-        ActorRef::service(ActorId::parse("shared-id").expect("actor id")),
-    ] {
-        let error = submit_commit(
-            &store,
-            &namespace_id,
-            request(conflicting_actor),
-            &later_context,
-        )
-        .await
-        .expect_err("a different actor cannot reuse the commit id");
-        assert!(matches!(
-            error,
-            CoreError::CommitIdReuseConflict {
-                commit_id,
-                committed_seq: Some(committed_seq),
-                committed_fingerprint: Some(fingerprint),
-            } if commit_id == "attributed-receipt"
-                && committed_seq == first.committed_seq
-                && fingerprint.starts_with("v2:sha256:")
-        ));
-    }
+    let error = submit_commit(
+        &store,
+        &namespace_id,
+        request(ActorId::parse("different-id").expect("actor id")),
+        &later_context,
+    )
+    .await
+    .expect_err("a different actor cannot reuse the commit id");
+    assert!(matches!(
+        error,
+        CoreError::CommitIdReuseConflict {
+            commit_id,
+            committed_seq: Some(committed_seq),
+            committed_fingerprint: Some(fingerprint),
+        } if commit_id == "attributed-receipt"
+            && committed_seq == first.committed_seq
+            && fingerprint.starts_with("v3:sha256:")
+    ));
 }
 
 #[tokio::test]
@@ -1072,7 +1067,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             committed_fingerprint: Some(fingerprint),
         } if commit_id == "same-path-request"
             && committed_seq == Some(first.committed_seq)
-            && fingerprint.starts_with("v2:sha256:")
+            && fingerprint.starts_with("v3:sha256:")
     ));
 
     let wal_keys = data_wal_keys(&store).await;

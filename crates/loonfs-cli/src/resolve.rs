@@ -5,7 +5,7 @@ use crate::backend::EmbeddedBackend;
 use crate::backend_error::map_runtime_error;
 use crate::config::{
     load_config, non_empty_env, remote_client_config, CliConfig, ProfileConfig, StoreConfig,
-    ACTOR_ID_ENV, ACTOR_KIND_ENV, NAMESPACE_ENV,
+    ACTOR_ID_ENV, NAMESPACE_ENV,
 };
 use crate::error::CliError;
 use crate::profiles::default_namespace;
@@ -14,7 +14,7 @@ use loonfs::{
     MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
     SharedObjectStore, TraceStoreKind,
 };
-use loonfs_api::{ActorId, ActorKind, ActorRef, NamespaceId, SecretString};
+use loonfs_api::{ActorId, NamespaceId, SecretString};
 use loonfs_client::Client;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
@@ -64,64 +64,22 @@ pub(crate) fn resolve_namespace(
 
 pub(crate) fn resolve_actor(
     profile: &ProfileConfig,
-    explicit_kind: Option<ActorKind>,
     explicit_id: Option<&str>,
-) -> Result<ActorRef, CliError> {
-    if explicit_kind.is_some() || explicit_id.is_some() {
-        return actor_from_pair("--actor-kind", explicit_kind, "--actor-id", explicit_id);
+) -> Result<ActorId, CliError> {
+    if let Some(id) = explicit_id {
+        return parse_actor_id("--actor-id", id);
     }
-
-    let environment_kind = non_empty_env(ACTOR_KIND_ENV)
-        .map(|value| parse_actor_kind(ACTOR_KIND_ENV, &value))
-        .transpose()?;
-    let environment_id = non_empty_env(ACTOR_ID_ENV);
-    if environment_kind.is_some() || environment_id.is_some() {
-        return actor_from_pair(
-            ACTOR_KIND_ENV,
-            environment_kind,
-            ACTOR_ID_ENV,
-            environment_id.as_deref(),
-        );
+    if let Some(id) = non_empty_env(ACTOR_ID_ENV) {
+        return parse_actor_id(ACTOR_ID_ENV, &id);
     }
-
-    Ok(profile.actor().unwrap_or_else(|| {
-        ActorRef::service(ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid"))
-    }))
+    Ok(profile
+        .actor()
+        .unwrap_or_else(|| ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid")))
 }
 
-fn actor_from_pair(
-    kind_name: &str,
-    kind: Option<ActorKind>,
-    id_name: &str,
-    id: Option<&str>,
-) -> Result<ActorRef, CliError> {
-    let kind = kind.ok_or_else(|| {
-        named_cli_input_error(
-            kind_name,
-            format!("{kind_name} and {id_name} must be supplied together"),
-        )
-    })?;
-    let id = id.ok_or_else(|| {
-        named_cli_input_error(
-            id_name,
-            format!("{kind_name} and {id_name} must be supplied together"),
-        )
-    })?;
-    let id = ActorId::parse(id)
-        .map_err(|error| named_cli_input_error(id_name, format!("invalid {id_name}: {error}")))?;
-    Ok(ActorRef { kind, id })
-}
-
-fn parse_actor_kind(name: &str, value: &str) -> Result<ActorKind, CliError> {
-    match value {
-        "user" => Ok(ActorKind::User),
-        "service" => Ok(ActorKind::Service),
-        "system" => Ok(ActorKind::System),
-        _ => Err(named_cli_input_error(
-            name,
-            format!("invalid {name}: expected user, service, or system"),
-        )),
-    }
+fn parse_actor_id(name: &str, value: &str) -> Result<ActorId, CliError> {
+    ActorId::parse(value)
+        .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))
 }
 
 fn named_cli_input_error(name: &str, message: String) -> CliError {

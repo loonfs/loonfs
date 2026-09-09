@@ -21,7 +21,7 @@ use loonfs_api::wire::manifest::{
     TombstoneRowAction,
 };
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
-use loonfs_api::ActorRef;
+use loonfs_api::ActorId;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -280,8 +280,8 @@ pub(crate) trait DecodedRowWeight {
 const FIXED_ROW_OVERHEAD: usize = 32;
 const ALLOCATED_ROW_OVERHEAD: usize = 96;
 
-fn actor_bytes(actor: &ActorRef) -> usize {
-    actor.kind.as_str().len() + actor.id.as_str().len()
+fn actor_bytes(actor: &ActorId) -> usize {
+    actor.as_str().len()
 }
 
 fn direntry_bytes(direntry: &DeletedDirentry) -> usize {

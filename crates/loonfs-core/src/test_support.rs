@@ -32,7 +32,7 @@ pub async fn append_wal_segments<S: loonfs_objectstore::ObjectStore + ?Sized>(
             })?;
         let request = crate::publish::CommitRequest::single(
             commit_id,
-            loonfs_api::ActorRef::loonfs_system(),
+            loonfs_api::ActorId::loonfs(),
             None,
             crate::publish::FilesystemOperation::CreateDirectory {
                 path,

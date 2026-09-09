@@ -11,9 +11,9 @@ use loonfs_api::v0::{
     UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
-    ActorRef, ApiError, BindingGeneration, ChangeSeq, Checksum, CommitId, CommitRequest,
-    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation,
-    NamespaceId, PathEntry,
+    ActorId, ApiError, BindingGeneration, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
+    PathEntry,
 };
 use loonfs_client::{
     Client, ClientConfig, ClientError, CommitOptions, CreateDirectoryOptions, DeleteOptions,
@@ -116,13 +116,13 @@ fn display_name(value: &str) -> DisplayName {
     DisplayName::parse(value).expect("valid fixture display name")
 }
 
-fn commit_options(actor: &ActorRef, id: &str) -> CommitOptions {
+fn commit_options(actor: &ActorId, id: &str) -> CommitOptions {
     let mut options = CommitOptions::new(actor.clone());
     options.commit_id = Some(commit_id(id));
     options
 }
 
-fn put_options(actor: &ActorRef, id: &str) -> PutFileOptions {
+fn put_options(actor: &ActorId, id: &str) -> PutFileOptions {
     let mut options = PutFileOptions::new(actor.clone());
     options.commit = commit_options(actor, id);
     options
@@ -185,10 +185,7 @@ async fn run_error_contract(harness: &Harness, case: &Case) {
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
             "commit_id": "conf-error-malformed-body",
-            "actor": {
-                "kind": "service",
-                "id": "conformance-error",
-            },
+            "actor": "conformance-error",
             "operations": [{
                 "kind": "create_directory",
                 "path": "relative",
@@ -242,7 +239,7 @@ struct CommitReplayRequest {
     assertions: Vec<loonfs_api::CommitAssertion>,
     namespace_id: String,
     commit_id: String,
-    actor: ActorRef,
+    actor: ActorId,
     message: String,
     path: String,
 }
@@ -294,7 +291,7 @@ struct DirectPutRequest {
     namespace_id: String,
     path: String,
     commit_id: String,
-    actor: ActorRef,
+    actor: ActorId,
     content_utf8: String,
 }
 
@@ -397,7 +394,7 @@ struct MultipartRequest {
     namespace_id: String,
     path: String,
     commit_id: String,
-    actor: ActorRef,
+    actor: ActorId,
     part_size_bytes: u64,
     content_pattern: BytePattern,
 }
@@ -621,7 +618,7 @@ struct DownloadRequest {
     namespace_id: String,
     path: String,
     commit_id: String,
-    actor: ActorRef,
+    actor: ActorId,
     content_utf8: String,
 }
 
@@ -692,7 +689,7 @@ async fn stream_grant(client: &Client, grant: &loonfs_api::v0::BeginDownloadResp
 struct PaginationRequest {
     namespace_id: String,
     directory: String,
-    actor: ActorRef,
+    actor: ActorId,
     entry_names: Vec<String>,
     page_size: u32,
     resume_after_page: usize,
@@ -713,7 +710,7 @@ struct ChildrenByInodeRequest {
     directory: String,
     renamed_directory: String,
     rename_commit_id: String,
-    actor: ActorRef,
+    actor: ActorId,
     entry_names: Vec<String>,
     page_size: u32,
     rename_after_page: usize,
@@ -860,7 +857,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
 struct InodeMutationsRequest {
     namespace_id: String,
     directory: String,
-    actor: ActorRef,
+    actor: ActorId,
     path_directory_name: String,
     path_file_name: String,
     inode_directory_name: String,
@@ -1211,7 +1208,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
 struct SnapshotsRequest {
     namespace_id: String,
     directory: String,
-    actor: ActorRef,
+    actor: ActorId,
     snapshot_name: String,
     replaced_file_name: String,
     deleted_file_name: String,
@@ -1787,7 +1784,7 @@ struct ChangesRequest {
     namespace_id: String,
     path: String,
     commit_id: String,
-    actor: ActorRef,
+    actor: ActorId,
     after_seq: u64,
 }
 
@@ -1847,7 +1844,7 @@ struct EndToEndRequest {
     directory: String,
     upload_path: String,
     moved_path: String,
-    actor: ActorRef,
+    actor: ActorId,
     content_utf8: String,
     commit_ids: EndToEndCommitIds,
 }

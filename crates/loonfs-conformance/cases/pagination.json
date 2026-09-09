@@ -4,10 +4,7 @@
   "request": {
     "namespace_id": "conf-pagination",
     "directory": "/entries",
-    "actor": {
-      "kind": "service",
-      "id": "conformance-pagination"
-    },
+    "actor": "conformance-pagination",
     "entry_names": [
       "entry-00",
       "entry-01",
