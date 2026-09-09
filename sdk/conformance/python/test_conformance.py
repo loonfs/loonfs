@@ -691,6 +691,13 @@ def _list_inode_children(
     )
 
 
+def error_code(body: object) -> str:
+    """Reads the error code from a raw or parsed error body."""
+    if isinstance(body, dict):
+        return str(body["code"])
+    return str(getattr(body, "code"))
+
+
 def test_error_contract(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(
         cases["error_contract"], ErrorContractRequest, ErrorContractExpected
@@ -1248,7 +1255,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     with pytest.raises(ApiError) as second_release:
         client.snapshots.release(namespace_id, snapshot.snapshot_id)
     assert second_release.value.status_code == expected.snapshot_not_found.status
-    assert second_release.value.body["code"] == expected.snapshot_not_found.code
+    assert error_code(second_release.value.body) == expected.snapshot_not_found.code
 
     with pytest.raises(NotFoundError) as released_read:
         client.files.retrieve(
@@ -1265,7 +1272,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
             ttl_ms=request.extend_ttl_ms,
         )
     assert released_extend.value.status_code == expected.snapshot_not_found.status
-    assert released_extend.value.body["code"] == expected.snapshot_not_found.code
+    assert error_code(released_extend.value.body) == expected.snapshot_not_found.code
 
     with pytest.raises(NotFoundError) as unknown_read:
         client.files.retrieve(
