@@ -300,7 +300,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, released during the operation, or referenced material is missing. Retry after maintenance. |
-| `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
+| `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. The WAL write-stop threshold refuses new commits. A commit id the namespace already knows is still answered from its receipt. |
 | `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
 | `storage_permission_denied` | 503 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; an unchanged retry will not succeed. |
 | `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it; core filesystem state remains available. |
@@ -652,6 +652,12 @@ Identical resubmission is the reconciliation mechanism. There is no separate
 commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
 read the definitive answer from the response.
+
+The WAL write-stop threshold refuses new commits with `maintenance_required`.
+A commit id the namespace already knows is still answered from its receipt, so
+reconciliation after `commit_outcome_unknown` or `deadline_exceeded` remains
+available under this backpressure. Writer-session, availability, and corruption
+checks still apply.
 
 The blocking Rust client retries operations labeled `idempotent` or `replayable`. It makes one attempt for operations labeled `not_idempotent`: namespace create, fork, and delete; upload-session begin; checkpoint create; maintenance; grep index collection; and store probe. Presigned direct PUT also receives one attempt.
 

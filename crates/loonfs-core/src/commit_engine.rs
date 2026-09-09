@@ -5,7 +5,7 @@
 use crate::checkpoint::MetadataSegmentCache;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
-use crate::error::{CoreError, MetadataViewError, Result, WriterFence};
+use crate::error::{CoreError, Result, WriterFence};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
@@ -495,25 +495,6 @@ impl NamespaceCommitEngine {
                 };
             }
         };
-
-        let reject_writes_at_segments = crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
-        // `wal_tail_segments` is the tail this publish would extend, so
-        // rejecting at the bound is what keeps the landed tail inside it.
-        if projection.wal_tail_segments >= reject_writes_at_segments {
-            let wal_tail_segments = projection.wal_tail_segments;
-            self.publish_tail_projection = Some(projection);
-            let error = MetadataViewError::MaintenanceRequired {
-                namespace_id: self.namespace_id.clone(),
-                reason: format!(
-                    "WAL tail has {wal_tail_segments} segments; publishes resume once maintenance brings it back under {reject_writes_at_segments}"
-                ),
-            };
-            return NamespaceCommitEnginePublishResult {
-                results: repeated_error(candidate_count, CoreError::from(error)),
-                wal_tail_segments,
-                resulting_read_state: None,
-            };
-        }
 
         let published = crate::protocol::publish_namespace_commits_batch_against_publish_view(
             store,

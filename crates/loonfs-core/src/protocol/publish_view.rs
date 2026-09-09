@@ -7,6 +7,7 @@ use crate::checkpoint::{load_basis_metadata_segments, LoadedMetadataBasis, Metad
 use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result, StoreFailureClass};
+use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -30,6 +31,11 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) acquired_writer: AcquiredWriter,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
     tail_state: Arc<MetadataState>,
+    /// The WAL tail length when it has reached the write-stop bound, so the
+    /// tail this publish would extend stays inside it. New commits are refused
+    /// with that count; a commit id the namespace already knows is still
+    /// answered from its receipt.
+    write_stop: Option<u64>,
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
@@ -39,6 +45,10 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 
     pub(crate) fn content_store_id(&self) -> &ContentStoreId {
         &self.content_store_id
+    }
+
+    pub(super) fn write_stop(&self) -> Option<u64> {
+        self.write_stop
     }
 
     pub(super) async fn find_commit_receipt(
@@ -209,6 +219,8 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             acquired_writer,
             manifest_segments,
             tail_state,
+            write_stop: (projection.wal_tail_segments >= MAX_UNFLUSHED_WAL_SEGMENTS)
+                .then_some(projection.wal_tail_segments),
         },
         projection,
     ))

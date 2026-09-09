@@ -1156,7 +1156,7 @@ async fn checkpoint_checksum_disagreement_is_terminal_corruption_and_releases_re
     );
 }
 
-async fn wal_segment_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
+async fn wal_segment_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> usize {
     store
         .list_prefix(&wal_segment_prefix(namespace_id))
         .await
@@ -1191,33 +1191,125 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     }
     assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary - 1);
 
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/at-the-boundary.txt",
-        b"body\n",
-        &context,
+    let head_key = wal_head(&namespace_id);
+    let segment_prefix = wal_segment_prefix(&namespace_id);
+    let store = RecordingStore::new(
+        store,
+        KeyPredicate::new(move |key| key == head_key || key.starts_with(&segment_prefix)),
+    );
+    let request = CommitRequest::single(
+        CommitId::parse("at-the-boundary").expect("commit id"),
+        loonfs_test_support::test_actor(),
         None,
-    )
-    .await
-    .expect("the publish that lands exactly at the bound is still admitted");
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/at-the-boundary").expect("path"),
+            parents: false,
+        },
+    );
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let tail_options = PublishTailOptions::default();
+    let original = engine
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::new(request.clone())],
+            &context,
+            &tail_options,
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("the publish that lands exactly at the bound is still admitted");
     assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary);
+    store.reset();
 
-    let error = write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/one-too-many.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect_err("a publish against a tail at the bound must be rejected");
-    assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
+    let replay = engine
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::new(request.clone())],
+            &context,
+            &tail_options,
+        )
+        .await;
+    assert_eq!(replay.results.len(), 1);
     assert_eq!(
-        wal_segment_count(&store, &namespace_id).await,
-        boundary,
-        "the rejection lands before the segment PUT, so nothing new is written"
+        replay.results[0].as_ref().expect("replay at the bound"),
+        &original
+    );
+    assert_eq!(
+        replay.wal_tail_segments,
+        crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS
+    );
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().compare_and_swaps, 0);
+
+    let mut conflict = request.clone();
+    conflict.operations = vec![FilesystemOperation::CreateDirectory {
+        path: AbsolutePath::parse("/different").expect("path"),
+        parents: false,
+    }];
+    let mut new_request = conflict.clone();
+    new_request.commit_id = CommitId::parse("one-too-many").expect("commit id");
+    for (candidate, expected_code) in [
+        (conflict, ErrorCode::CommitIdReuseConflict),
+        (new_request.clone(), ErrorCode::MaintenanceRequired),
+    ] {
+        let result = engine
+            .publish_batch(
+                &store,
+                vec![CommitCandidate::new(candidate)],
+                &context,
+                &tail_options,
+            )
+            .await;
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(
+            result.results[0]
+                .as_ref()
+                .expect_err("refused request")
+                .code(),
+            expected_code
+        );
+    }
+    let mixed = engine
+        .publish_batch(
+            &store,
+            vec![
+                CommitCandidate::new(request),
+                CommitCandidate::new(new_request.clone()),
+                CommitCandidate::new(new_request),
+            ],
+            &context,
+            &tail_options,
+        )
+        .await;
+    assert_eq!(mixed.results.len(), 3);
+    assert_eq!(
+        mixed.results[0].as_ref().expect("mixed batch replay"),
+        &original
+    );
+    for result in &mixed.results[1..] {
+        assert_eq!(
+            result
+                .as_ref()
+                .expect_err("new primary and alias refused")
+                .code(),
+            ErrorCode::MaintenanceRequired
+        );
+    }
+    assert_eq!(
+        mixed.wal_tail_segments,
+        crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS
+    );
+    assert_eq!(
+        store.counts().puts,
+        0,
+        "no WAL put or head write at the bound"
+    );
+    assert_eq!(
+        store.counts().compare_and_swaps,
+        0,
+        "no head swap at the bound"
     );
 
     // The whole legal tail is named by the tip plus its predecessor hints,
