@@ -10,25 +10,21 @@ use crate::cache::{GrepBlockCache, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
 use crate::codec::{
     extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
 };
-use crate::gc_budget::{GcBudget, DEFAULT_GC_MAX_STEPS};
-use crate::gc_cursor::{GcCursorKeyspace, NamespaceGcCursor};
 use crate::index_read::{load_data_block, load_index_block};
-use crate::keyspace::{grep_prefix, manifest_key, parse_key, root_key, segment_key, GrepKeyKind};
+use crate::keyspace::{hint_key, segment_key};
 use crate::reads::{published_revision, NamespaceReads};
 use crate::root::{
-    advance_grep_root, load_grep_root, seed_grep_root, ChangeFeedResume, GrepIndexState,
-    GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepRootError, GrepSegmentRef,
-    LoadedGrepRoot,
+    load_current_grep_manifest, publish_grep_manifest, ChangeFeedResume, GrepIndexState,
+    GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef, LoadedGrepManifest,
 };
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
-use futures::StreamExt as _;
 use loonfs::{
-    delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
-    select_next_iterator, write_segments_in_waves, CheckpointFilesPageCursor, CoreError,
-    CreateCheckpointOptions, FsMaintenance, FsReader, GraceAge, RuntimeError, SegmentBlockLoader,
-    SegmentRowIterator, StoreFailureClass, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    ensure_metadata_publication_budget, next_run_no_after, refill_iterators, select_next_iterator,
+    write_segments_in_waves, CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions,
+    FsMaintenance, FsReader, RuntimeError, SegmentBlockLoader, SegmentRowIterator,
+    StoreFailureClass,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
@@ -37,11 +33,10 @@ use loonfs_api::wire::sst_blocks::{
 };
 use loonfs_api::{
     sha256_digest, ChangeSeq, CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId,
-    NamespaceId, RevisionNo, RunNo,
+    ManifestNo, NamespaceId, RevisionNo, RunNo,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -52,25 +47,6 @@ use std::sync::Arc;
 /// eventually releases it and the worker restarts from a fresh checkpoint.
 /// The worker does not extend an old pin.
 pub const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
-
-/// Grace period before grep garbage collection may delete an unreferenced
-/// object.
-///
-/// The period must exceed the maximum publication window so an in-progress
-/// root update cannot lose an object it has written but not yet referenced.
-pub const GREP_GC_GRACE_WINDOW_MS: u64 = GC_DEFAULT_GRACE_WINDOW_MS;
-
-const GREP_REVERIFY_CHUNK: usize = 1024;
-
-// The floor is derived from publication budgets and provider bounds rather
-// than chosen, so a window that stopped clearing it is a compile error here
-// instead of an unreproducible delete of an object a publication was about
-// to reference.
-const _: () = assert!(
-    GREP_GC_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS,
-    "grep's grace window must outlast the longest publication that could still \
-     reference an object it has written"
-);
 
 const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
 /// Content bytes one backfill step ingests before it checkpoints its cursor.
@@ -176,29 +152,6 @@ pub enum GrepReorganizeOutcome {
     Superseded,
 }
 
-/// Budgets and resume position for one grep garbage-collection pass.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GrepGcOptions {
-    /// Reads this pass may spend before returning a resume cursor. Absent
-    /// resolves to the runtime's own per-pass default, so no caller can ask
-    /// for an unbounded walk by leaving the field out.
-    pub max_objects: Option<u64>,
-    /// Opaque token an earlier pass over the same namespace returned.
-    pub cursor: Option<String>,
-}
-
-/// Counts from one namespace's grep garbage-collection pass.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GrepGcReport {
-    pub deleted_segments: u64,
-    pub deleted_other_objects: u64,
-    pub namespace_reaped: bool,
-    pub retained_candidates: u64,
-    pub namespace_degraded: bool,
-    /// Present when the budget stopped the pass with keys left to examine.
-    pub next_cursor: Option<String>,
-}
-
 /// Bounded writer for grep-owned durable state.
 ///
 /// The worker writes only grep keys. It reads namespace state through
@@ -266,11 +219,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self.store
     }
 
-    /// Enables grep by pinning a checkpoint and CAS-publishing a fresh
-    /// backfilling root. Enabling an active root is idempotent.
+    /// Enables grep by pinning a checkpoint and publishing a numbered
+    /// backfilling manifest. Enabling an active manifest is idempotent.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         ensure_live_namespace(&self.reads(namespace_id)).await?;
-        let current = load_grep_root(&self.store, namespace_id).await?;
+        let current = load_current_grep_manifest(&self.store, namespace_id).await?;
         if let Some(current) = &current {
             if !matches!(
                 current.manifest_state().status(),
@@ -281,12 +234,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 });
             }
         }
+        let manifest_no = next_manifest_no(current.as_ref())?;
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let next_run_no = current
             .as_ref()
             .map_or(RunNo(0), |root| root.manifest_state().index().next_run_no);
-        let next = match backfilling_root(
+        let next = match backfilling_manifest(
             namespace_id,
+            manifest_no,
             checkpoint.checkpoint_seq,
             checkpoint.checkpoint_id.clone(),
             next_run_no,
@@ -298,31 +253,31 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 return Err(error);
             }
         };
-        let published = match current {
-            Some(current) => self.advance_root(&current, &next).await,
-            None => self.seed_root(&next).await,
-        };
+        let timer = StdMonotonicTimer::default();
+        let started_ms = timer.monotonic_now_ms();
+        let published =
+            publish_grep_manifest(&self.store, current.as_ref(), &next, &timer, started_ms).await;
         match published {
             Ok(published) => Ok(GrepEnableOutcome::Enabled {
                 state: published.manifest_state().status().clone(),
             }),
-            Err(GrepRootError::Conflict { .. }) => {
+            Err(GrepError::PublicationConflict { .. }) => {
                 self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 Ok(GrepEnableOutcome::Superseded)
             }
             // A non-conflict failure may be an acknowledgement failure after
-            // the root update landed. Keep the checkpoint because the root
+            // the manifest landed. Keep the checkpoint because it
             // may already reference it.
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         }
     }
 
-    /// Disables grep with one root CAS. Existing segments become grep-GC
+    /// Disables grep by publishing the next manifest. Existing segments become grep-GC
     /// candidates and are never deleted synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         ensure_live_namespace(&self.reads(namespace_id)).await?;
-        let Some(current) = load_grep_root(&self.store, namespace_id).await? else {
+        let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
         if matches!(
@@ -337,6 +292,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
+            next_manifest_no(Some(&current))?,
             GrepIndexStatus::Disabled {},
             GrepIndexState {
                 reorganize: None,
@@ -345,7 +301,17 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Vec::new(),
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        match self.advance_root(&current, &next).await {
+        let timer = StdMonotonicTimer::default();
+        let publication_started_ms = timer.monotonic_now_ms();
+        match publish_grep_manifest(
+            &self.store,
+            Some(&current),
+            &next,
+            &timer,
+            publication_started_ms,
+        )
+        .await
+        {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
                     self.release_checkpoint_if_present(namespace_id, &checkpoint_id)
@@ -353,8 +319,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 }
                 Ok(GrepDisableOutcome::Disabled)
             }
-            Err(GrepRootError::Conflict { .. }) => Ok(GrepDisableOutcome::Superseded),
-            Err(error) => Err(error.into()),
+            Err(GrepError::PublicationConflict { .. }) => Ok(GrepDisableOutcome::Superseded),
+            Err(error) => Err(error),
         }
     }
 
@@ -364,7 +330,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildOutcome> {
-        let Some(current) = load_grep_root(&self.store, namespace_id).await? else {
+        let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
             return Ok(GrepBuildOutcome::NotEnabled);
         };
         let reads = self.reads(namespace_id);
@@ -417,35 +383,33 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// Reads this namespace's durable grep lifecycle, or `Disabled` where no
-    /// root has ever been published.
+    /// manifest has ever been published.
     pub async fn lifecycle(&self, namespace_id: &NamespaceId) -> Result<GrepIndexStatus> {
         Ok(self
-            .root_state(namespace_id)
+            .manifest_state(namespace_id)
             .await?
             .map_or(GrepIndexStatus::Disabled {}, |state| state.status().clone()))
     }
 
-    /// Reads the whole durable root, for a caller that wants the index
-    /// bookkeeping beside the lifecycle. `None` where no root exists.
-    pub async fn root_state(
+    /// Loads current index bookkeeping, or `None` when grep is not enabled.
+    pub async fn manifest_state(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<Option<GrepManifestState>> {
-        Ok(load_grep_root(&self.store, namespace_id)
+        Ok(load_current_grep_manifest(&self.store, namespace_id)
             .await?
             .map(|root| root.manifest_state().clone()))
     }
 
     /// Returns the grep index's state and maintenance progress.
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
-        let root = self.root_state(namespace_id).await?;
+        let root = self.manifest_state(namespace_id).await?;
         let (lifecycle, next_run_no, reorganize_pending) = match &root {
             Some(root) => (
                 GrepIndexLifecycle::from(root.status()),
                 root.index().next_run_no,
                 root.index().reorganize.is_some(),
             ),
-            // A missing root means indexing has not been enabled.
             None => (GrepIndexLifecycle::Disabled, RunNo(0), false),
         };
         Ok(GrepIndex {
@@ -454,21 +418,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             next_run_no,
             reorganize_pending,
         })
-    }
-
-    async fn seed_root(
-        &self,
-        state: &GrepManifestState,
-    ) -> std::result::Result<LoadedGrepRoot, GrepRootError> {
-        seed_grep_root(&self.store, state).await
-    }
-
-    async fn advance_root(
-        &self,
-        current: &LoadedGrepRoot,
-        next: &GrepManifestState,
-    ) -> std::result::Result<LoadedGrepRoot, GrepRootError> {
-        advance_grep_root(&self.store, current, next).await
     }
 
     async fn create_backfill_checkpoint(
@@ -506,15 +455,17 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     async fn restart_backfill(
         &self,
         namespace_id: &NamespaceId,
-        current: &LoadedGrepRoot,
+        current: &LoadedGrepManifest,
     ) -> Result<GrepBuildOutcome> {
         let previous_checkpoint_id = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
             GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
         };
+        let manifest_no = next_manifest_no(Some(current))?;
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let next = match backfilling_root(
+        let next = match backfilling_manifest(
             namespace_id,
+            manifest_no,
             checkpoint.checkpoint_seq,
             checkpoint.checkpoint_id.clone(),
             current.manifest_state().index().next_run_no,
@@ -526,7 +477,17 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 return Err(error);
             }
         };
-        match self.advance_root(current, &next).await {
+        let timer = StdMonotonicTimer::default();
+        let publication_started_ms = timer.monotonic_now_ms();
+        match publish_grep_manifest(
+            &self.store,
+            Some(current),
+            &next,
+            &timer,
+            publication_started_ms,
+        )
+        .await
+        {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
                     self.release_checkpoint_if_present(namespace_id, &previous_checkpoint_id)
@@ -536,22 +497,22 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     target_seq: checkpoint.checkpoint_seq,
                 })
             }
-            Err(GrepRootError::Conflict { .. }) => {
+            Err(GrepError::PublicationConflict { .. }) => {
                 self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 Ok(GrepBuildOutcome::Superseded)
             }
             // A non-conflict failure may be an acknowledgement failure after
-            // the root update landed. Keep the checkpoint because the root
+            // the manifest landed. Keep the checkpoint because it
             // may already reference it.
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         }
     }
 
     async fn publish_build_unit(
         &self,
         namespace_id: &NamespaceId,
-        current: LoadedGrepRoot,
+        current: LoadedGrepManifest,
         unit: CollectedIndexUnit,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildOutcome> {
@@ -568,6 +529,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         } else {
             next_run_no_after(current_run_no)?
         };
+        let manifest_no = next_manifest_no(Some(&current))?;
         let timer = StdMonotonicTimer::default();
         let publication_started_ms = timer.monotonic_now_ms();
         let new_segments = write_index_segments(
@@ -624,6 +586,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
+            manifest_no,
             status,
             GrepIndexState {
                 reorganize: current.manifest_state().index().reorganize.clone(),
@@ -633,7 +596,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
         ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
-        match self.advance_root(&current, &next).await {
+        match publish_grep_manifest(
+            &self.store,
+            Some(&current),
+            &next,
+            &timer,
+            publication_started_ms,
+        )
+        .await
+        {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
                     self.release_checkpoint_if_present(namespace_id, &checkpoint_id)
@@ -646,20 +617,22 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     segments_written,
                 })
             }
-            Err(GrepRootError::Conflict { .. }) => Ok(GrepBuildOutcome::Superseded),
-            Err(error) => Err(error.into()),
+            Err(GrepError::PublicationConflict { .. }) => Ok(GrepBuildOutcome::Superseded),
+            Err(error) => Err(error),
         }
     }
 }
 
-fn backfilling_root(
+fn backfilling_manifest(
     namespace_id: &NamespaceId,
+    manifest_no: ManifestNo,
     target_seq: ChangeSeq,
     checkpoint_id: CheckpointId,
     next_run_no: RunNo,
 ) -> Result<GrepManifestState> {
     GrepManifestState::new(
         namespace_id.clone(),
+        manifest_no,
         GrepIndexStatus::Backfilling {
             target_seq,
             cursor_inode_id: None,
@@ -803,7 +776,7 @@ async fn collect_backfill_unit(
             // The root and its checkpoint disagree about which state is
             // being walked; the walk cannot be resumed against either.
             return Err(CoreError::CheckpointUnavailable(format!(
-                "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep root is \
+                "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep manifest is \
                  backfilling sequence `{target_seq}`",
                 page.checkpoint_seq
             ))
@@ -1086,7 +1059,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepReorganizeOutcome> {
-        let Some(current) = load_grep_root(&self.store, namespace_id).await? else {
+        let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
             return Ok(GrepReorganizeOutcome::NotEnabled);
         };
         if matches!(
@@ -1159,7 +1132,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     .find(|segment| &segment.segment_id == segment_id)
                     .ok_or_else(|| GrepError::CorruptIndex {
                         message: format!(
-                            "grep reorganization snapshot segment `{segment_id}` is missing from the root"
+                            "grep reorganization snapshot segment `{segment_id}` is missing from the manifest"
                         ),
                     })
             })
@@ -1182,6 +1155,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .map(|segment| segment.run_seq)
             .max()
             .unwrap_or(ChangeSeq(0));
+        let manifest_no = next_manifest_no(Some(&current))?;
         let timer = StdMonotonicTimer::default();
         let publication_started_ms = timer.monotonic_now_ms();
         let new_segments = write_index_segments(
@@ -1215,6 +1189,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
+            manifest_no,
             current.manifest_state().status().clone(),
             GrepIndexState {
                 reorganize,
@@ -1224,182 +1199,23 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
         ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
-        match self.advance_root(&current, &next).await {
+        match publish_grep_manifest(
+            &self.store,
+            Some(&current),
+            &next,
+            &timer,
+            publication_started_ms,
+        )
+        .await
+        {
             Ok(_) => Ok(GrepReorganizeOutcome::UnitPublished {
                 merged_rows: merged.rows,
                 segments_written,
                 completed,
             }),
-            Err(GrepRootError::Conflict { .. }) => Ok(GrepReorganizeOutcome::Superseded),
-            Err(error) => Err(error.into()),
+            Err(GrepError::PublicationConflict { .. }) => Ok(GrepReorganizeOutcome::Superseded),
+            Err(error) => Err(error),
         }
-    }
-
-    /// Collects one namespace's grep keyspace under a read budget. A live
-    /// namespace retains its verified root and every segment it names; a
-    /// deleted or absent namespace has its entire grep prefix reaped after
-    /// the grace window.
-    ///
-    /// The pass enumerates the prefix as a stream and stops when
-    /// `max_objects` reads are spent, answering the position it stopped at
-    /// so the next call resumes there. Like core garbage collection, that
-    /// cursor is an enumeration shortcut and nothing else: every resumed
-    /// pass re-reads the required liveness or grep root state before it
-    /// deletes anything, so losing the cursor costs a repeated walk and
-    /// never a wrong delete.
-    ///
-    /// A pass always examines at least one key, whatever the budget. The
-    /// budget bounds how much work one call does; it may not stop a caller
-    /// looping the cursor from ever finishing.
-    pub async fn garbage_collect_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        now_ms: u64,
-        request: &GrepGcOptions,
-    ) -> Result<GrepGcReport> {
-        let resume: NamespaceGcCursor<GrepGcKeyspace> = match request.cursor.as_deref() {
-            Some(token) => NamespaceGcCursor::decode(token, namespace_id)?,
-            None => NamespaceGcCursor::initial(namespace_id, GrepGcKeyspace {}),
-        };
-        let mut report = GrepGcReport::default();
-        let mut budget = GcBudget::new(request.max_objects.unwrap_or(DEFAULT_GC_MAX_STEPS));
-        let reads = self.reads(namespace_id);
-        // Liveness is decided once per pass and refreshed in bounded chunks
-        // below. This first read is charged like any other.
-        budget.charge();
-        let liveness = namespace_liveness(&reads).await;
-        if liveness == NamespaceLiveness::Unknown {
-            report.namespace_degraded = true;
-        }
-
-        let prefix = grep_prefix(namespace_id);
-        let mut keys = self
-            .store
-            .list_prefix_from_stream(&prefix, resume.last_key());
-        let mut position = resume.clone();
-        let mut live_set = GrepLiveSet::new();
-        let mut deleted_any = false;
-        let mut examined = 0_u64;
-        while let Some(key) = keys.next().await {
-            let key = key.map_err(|error| core_store_error(&prefix, &error))?;
-            // The first key of a pass is examined whatever the budget: the
-            // cursor must advance, or a caller looping it never finishes.
-            if examined > 0 && budget.exhausted() {
-                // Proof that work remains, at the cost of one listed key and
-                // no reads. The key is reconsidered from the exclusive
-                // last-examined position on resume.
-                report.next_cursor = Some(position.encode()?);
-                break;
-            }
-            budget.charge();
-            let deleted = self
-                .collect_one_key(
-                    namespace_id,
-                    &reads,
-                    liveness,
-                    &mut live_set,
-                    &key,
-                    now_ms,
-                    &mut budget,
-                    &mut report,
-                )
-                .await?;
-            deleted_any |= deleted;
-            examined += 1;
-            position = NamespaceGcCursor::after(namespace_id, GrepGcKeyspace {}, key);
-        }
-        if deleted_any && liveness == NamespaceLiveness::Gone {
-            report.namespace_reaped = true;
-        }
-        report.namespace_degraded |= live_set.degraded;
-        Ok(report)
-    }
-
-    /// Decides one candidate key against chunk-refreshed state.
-    ///
-    /// Answers whether the key was deleted. Selection may be stale because
-    /// the listing is a snapshot. The grace window covers the bounded state
-    /// refresh interval.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one collection decision needs liveness, budget, and report state together"
-    )]
-    async fn collect_one_key(
-        &self,
-        namespace_id: &NamespaceId,
-        reads: &NamespaceReads<'_>,
-        liveness: NamespaceLiveness,
-        live_set: &mut GrepLiveSet,
-        key: &str,
-        now_ms: u64,
-        budget: &mut GcBudget,
-        report: &mut GrepGcReport,
-    ) -> Result<bool> {
-        if !live_set
-            .refresh_if_due(&self.store, namespace_id, reads, liveness, budget)
-            .await
-        {
-            report.retained_candidates += 1;
-            return Ok(false);
-        }
-        match liveness {
-            // A verified deleted namespace head is already the absorbing
-            // gate for this pointer: `enable` refuses that tombstone, so no
-            // legal writer can re-reference grep state after this liveness
-            // check. Pointer deletion needs no second state.
-            NamespaceLiveness::Gone => {
-                budget.charge();
-                Ok(self.delete_if_unreferenced(key, now_ms, report).await?)
-            }
-            // Grep segments and manifests are immutable and are written
-            // under freshly minted ids, so an unreferenced one is the
-            // leftover of a publication that already ended — no live
-            // publication can be about to point at this key. The grace
-            // window covers the one that has not ended yet, which is why
-            // aged unreachable objects need no condemned state before
-            // deletion.
-            NamespaceLiveness::Live => {
-                if live_set.live.contains(key) {
-                    return Ok(false);
-                }
-                budget.charge();
-                Ok(self.delete_if_unreferenced(key, now_ms, report).await?)
-            }
-            NamespaceLiveness::Unknown => {
-                report.retained_candidates += 1;
-                Ok(false)
-            }
-        }
-    }
-
-    async fn delete_if_unreferenced(
-        &self,
-        key: &str,
-        now_ms: u64,
-        report: &mut GrepGcReport,
-    ) -> Result<bool> {
-        let outcome = delete_if_aged(&self.store, key, GREP_GC_GRACE_WINDOW_MS, now_ms)
-            .await
-            .map_err(|error| core_store_error(key, &error))?;
-        if outcome.retained_reason().is_some() {
-            report.retained_candidates += 1;
-        }
-        if outcome == GraceAge::Aged {
-            count_deleted_key(key, report);
-            return Ok(true);
-        }
-        Ok(false)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct GrepGcKeyspace {}
-
-impl GcCursorKeyspace for GrepGcKeyspace {
-    const CURSOR_KIND: &'static str = "grep_gc";
-
-    fn prefix(&self, namespace_id: &NamespaceId) -> String {
-        grep_prefix(namespace_id)
     }
 }
 
@@ -1555,88 +1371,6 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
     }
 }
 
-struct GrepLiveSet {
-    live: BTreeSet<String>,
-    decided_since_load: usize,
-    verified: bool,
-    degraded: bool,
-}
-
-impl GrepLiveSet {
-    fn new() -> Self {
-        Self {
-            live: BTreeSet::new(),
-            decided_since_load: GREP_REVERIFY_CHUNK,
-            verified: false,
-            degraded: false,
-        }
-    }
-
-    async fn refresh_if_due<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        namespace_id: &NamespaceId,
-        reads: &NamespaceReads<'_>,
-        liveness: NamespaceLiveness,
-        budget: &mut GcBudget,
-    ) -> bool {
-        if self.decided_since_load >= GREP_REVERIFY_CHUNK {
-            self.live.clear();
-            self.verified = match liveness {
-                NamespaceLiveness::Gone => {
-                    budget.charge();
-                    namespace_liveness(reads).await == NamespaceLiveness::Gone
-                }
-                NamespaceLiveness::Live => {
-                    budget.charge();
-                    match load_grep_root(store, namespace_id).await {
-                        Ok(Some(root)) => {
-                            self.live = live_grep_keys(&root);
-                            true
-                        }
-                        Ok(None) => {
-                            self.live.insert(root_key(namespace_id));
-                            true
-                        }
-                        Err(_) => {
-                            self.degraded = true;
-                            false
-                        }
-                    }
-                }
-                NamespaceLiveness::Unknown => false,
-            };
-            self.decided_since_load = 0;
-        }
-        self.decided_since_load += 1;
-        self.verified
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NamespaceLiveness {
-    Live,
-    Gone,
-    Unknown,
-}
-
-/// Whether the namespace grep holds state for still exists.
-///
-/// The feed is the oracle: it refuses a deleted namespace with
-/// `namespace_deleted` and an absent one with `namespace_not_found`, so
-/// asking it for changes after the last possible sequence answers liveness
-/// with one head read and no history. Anything else is an unknown answer,
-/// and unknown never authorizes a delete.
-async fn namespace_liveness(reads: &NamespaceReads<'_>) -> NamespaceLiveness {
-    match live_namespace_probe(reads).await {
-        Ok(()) => NamespaceLiveness::Live,
-        Err(error) => match error.code() {
-            ErrorCode::NamespaceDeleted | ErrorCode::NamespaceNotFound => NamespaceLiveness::Gone,
-            _ => NamespaceLiveness::Unknown,
-        },
-    }
-}
-
 async fn ensure_live_namespace(reads: &NamespaceReads<'_>) -> Result<()> {
     live_namespace_probe(reads).await
 }
@@ -1646,44 +1380,12 @@ async fn live_namespace_probe(reads: &NamespaceReads<'_>) -> Result<()> {
     Ok(())
 }
 
-fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {
-    let namespace_id = root.manifest_state().namespace_id();
-    let mut live = BTreeSet::from([
-        root_key(namespace_id),
-        manifest_key(namespace_id, root.manifest_object_id()),
-    ]);
-    live.extend(
-        root.manifest_state()
-            .segments()
-            .iter()
-            .map(|segment| segment_key(namespace_id, &segment.segment_id)),
-    );
-    if let Some(reorganize) = &root.manifest_state().index().reorganize {
-        live.extend(
-            reorganize
-                .snapshot_segment_ids
-                .iter()
-                .chain(&reorganize.output_segment_ids)
-                .map(|segment_id| segment_key(namespace_id, segment_id)),
-        );
-    }
-    live
-}
-
-fn count_deleted_key(key: &str, report: &mut GrepGcReport) {
-    if parse_key(key).is_some_and(|parsed| matches!(parsed.kind, GrepKeyKind::Segment { .. })) {
-        report.deleted_segments += 1;
-    } else {
-        report.deleted_other_objects += 1;
-    }
-}
-
 fn core_state_error(
     namespace_id: &NamespaceId,
     error: crate::root::GrepManifestStateError,
 ) -> GrepError {
     CoreError::Codec {
-        object_key: root_key(namespace_id),
+        object_key: hint_key(namespace_id),
         message: error.to_string(),
     }
     .into()
@@ -1712,4 +1414,13 @@ fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
             class: StoreFailureClass::Other,
         },
     }
+}
+
+fn next_manifest_no(current: Option<&LoadedGrepManifest>) -> Result<ManifestNo> {
+    current.map_or(Ok(ManifestNo(1)), |current| {
+        current
+            .manifest_no()
+            .successor()
+            .map_err(|error| CoreError::Internal(error.to_string()).into())
+    })
 }

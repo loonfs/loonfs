@@ -5,11 +5,8 @@
 //! a scheduling conclusion. The shared runner provides admission, permits,
 //! backoff, and shutdown; grep does not create another scheduler.
 
-use crate::root::{load_grep_root, GrepIndexStatus};
-use crate::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcOptions, GrepGcReport,
-    GrepReorganizeOutcome, GrepWorker,
-};
+use crate::root::{load_current_grep_manifest, GrepIndexStatus};
+use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker};
 use loonfs::{
     current_time_ms, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
     MaintenanceJobId, MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication,
@@ -89,7 +86,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
     /// grep root and, for an active index at a commit boundary, at most one
     /// page of the change feed.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        let Some(root) = load_grep_root(self.worker.store(), namespace_id)
+        let Some(root) = load_current_grep_manifest(self.worker.store(), namespace_id)
             .await
             .map_err(|error| probe_failure(namespace_id, GrepError::from(error)))?
         else {
@@ -135,17 +132,12 @@ fn not_enabled_step() -> MaintenanceRunReport {
     MaintenanceRunReport::concluded(MaintenanceConclusion::NotEnabled)
 }
 
-/// Runs one bounded grep garbage-collection pass.
-///
-/// The continuation stores the enumeration cursor. Each pass reloads live
-/// references from durable state, so a missing cursor can only repeat work.
 #[derive(Debug, Clone)]
 pub struct GrepGcJob<S> {
     worker: GrepWorker<S>,
 }
 
 impl<S: ObjectStore + Clone> GrepGcJob<S> {
-    /// Creates a grep garbage-collection maintenance job.
     pub fn new(worker: GrepWorker<S>) -> Self {
         Self { worker }
     }
@@ -160,80 +152,18 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        continuation: Option<&str>,
+        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
-        let request = GrepGcOptions {
-            // Use the default per-step object limit.
-            max_objects: None,
-            cursor: continuation.map(str::to_owned),
-        };
-        let now_ms = current_time_ms()?;
-        let report = match self
-            .worker
-            .garbage_collect_namespace(namespace_id, now_ms, &request)
+        self.worker
+            .garbage_collect_namespace(namespace_id, current_time_ms()?)
             .await
-        {
-            Ok(report) => report,
-            Err(error) if continuation.is_some() && error.code() == ErrorCode::InvalidRequest => {
-                // With every other option fixed, the one thing this pass can
-                // be asked to reject is the cursor it was resumed with.
-                // Concluding without one hands the runner an empty
-                // continuation and takes the key again, which restarts
-                // enumeration — always sound, because every pass rebuilds
-                // its own safety proof from durable state.
-                tracing::info!(
-                    namespace_id = %namespace_id,
-                    error = %error.public_message(),
-                    "grep collection rejected its resume position; restarting the pass"
-                );
-                return Ok(MaintenanceRunReport::concluded(
-                    MaintenanceConclusion::Superseded,
-                ));
-            }
-            Err(error) => return Err(step_failure(namespace_id, "grep_gc", error)),
-        };
-        Ok(grep_gc_step_result(report, continuation))
+            .map_err(|error| step_failure(namespace_id, "grep_gc", error))?;
+        Ok(MaintenanceRunReport::concluded(MaintenanceConclusion::Idle))
     }
 
     async fn probe(&self, _namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        // Collection has no cheap question: whether anything is reclaimable
-        // is what a pass finds out, and a pass is not a probe. Grep's
-        // reclamation is explicit and per namespace, so what brings this job
-        // back is somebody asking for it.
         Ok(MaintenanceProbe::Idle)
-    }
-}
-
-/// Converts a grep GC report into a scheduling conclusion.
-///
-/// A changed cursor means enumeration advanced and should continue. An
-/// unchanged cursor means the pass made no progress and should park. A
-/// completed pass runs again only after deleting objects. Incomplete
-/// liveness information is reported as blocked rather than idle.
-fn grep_gc_step_result(
-    report: GrepGcReport,
-    submitted_cursor: Option<&str>,
-) -> MaintenanceRunReport {
-    let conclusion = match report.next_cursor.as_deref() {
-        Some(next_cursor) if Some(next_cursor) == submitted_cursor => {
-            MaintenanceConclusion::Blocked
-        }
-        Some(_) => MaintenanceConclusion::Progressed,
-        None if report.deleted_segments > 0 || report.deleted_other_objects > 0 => {
-            MaintenanceConclusion::Progressed
-        }
-        None if report.namespace_degraded => MaintenanceConclusion::Blocked,
-        None => MaintenanceConclusion::Idle,
-    };
-    MaintenanceRunReport {
-        conclusion,
-        continuation: report.next_cursor,
-        // Grep objects age against one fixed grace window rather than
-        // against leases a write path plants, so a pass observes no deadline
-        // to hand back. What brings the job round again is a nudge.
-        not_before_ms: None,
-        follow_up: None,
     }
 }
 
@@ -350,62 +280,6 @@ mod tests {
         assert_eq!(
             reorganize_conclusion(&GrepReorganizeOutcome::Superseded),
             MaintenanceConclusion::Superseded
-        );
-    }
-
-    #[test]
-    fn a_collection_pass_concludes_on_where_its_enumeration_reached() {
-        let stopped = grep_gc_step_result(
-            GrepGcReport {
-                next_cursor: Some("second-page".to_owned()),
-                ..GrepGcReport::default()
-            },
-            Some("first-page"),
-        );
-        assert_eq!(stopped.conclusion, MaintenanceConclusion::Progressed);
-        assert_eq!(stopped.continuation.as_deref(), Some("second-page"));
-
-        assert_eq!(
-            grep_gc_step_result(
-                GrepGcReport {
-                    next_cursor: Some("first-page".to_owned()),
-                    ..GrepGcReport::default()
-                },
-                Some("first-page"),
-            )
-            .conclusion,
-            MaintenanceConclusion::Blocked
-        );
-    }
-
-    #[test]
-    fn a_finished_pass_separates_reclamation_from_an_unreadable_namespace() {
-        assert_eq!(
-            grep_gc_step_result(GrepGcReport::default(), None).conclusion,
-            MaintenanceConclusion::Idle
-        );
-        assert_eq!(
-            grep_gc_step_result(
-                GrepGcReport {
-                    deleted_segments: 2,
-                    ..GrepGcReport::default()
-                },
-                None,
-            )
-            .conclusion,
-            MaintenanceConclusion::Progressed
-        );
-        assert_eq!(
-            grep_gc_step_result(
-                GrepGcReport {
-                    namespace_degraded: true,
-                    retained_candidates: 3,
-                    ..GrepGcReport::default()
-                },
-                None,
-            )
-            .conclusion,
-            MaintenanceConclusion::Blocked
         );
     }
 

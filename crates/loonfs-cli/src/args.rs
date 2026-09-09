@@ -1351,13 +1351,6 @@ pub(crate) struct MaintenanceIndexEnableArgs {
 pub(crate) struct MaintenanceIndexGcArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Spend at most this many reads and return after one bounded pass.
-    /// Omit to loop bounded passes through completion.
-    #[arg(long)]
-    pub max_objects: Option<u64>,
-    /// Resume from `next_cursor` returned by a previous pass.
-    #[arg(long, value_name = "TOKEN", value_hint = ValueHint::Other)]
-    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1892,35 +1885,12 @@ mod tests {
     }
 
     #[test]
-    fn index_gc_accepts_a_continuation_cursor() {
-        let cli = Cli::try_parse_from([
-            "loonfs",
-            "maintenance",
-            "index",
-            "gc",
-            "--max-objects",
-            "7",
-            "--cursor",
-            "resume",
-        ])
-        .expect("index gc arguments");
-        assert!(matches!(
-            &cli.command,
-            Command::Maintenance {
-                command: MaintenanceCommand::Index {
-                    command: MaintenanceIndexCommand::Gc(_),
-                },
-            }
-        ));
-        if let Command::Maintenance {
-            command:
-                MaintenanceCommand::Index {
-                    command: MaintenanceIndexCommand::Gc(args),
-                },
-        } = &cli.command
-        {
-            assert_eq!(args.max_objects, Some(7));
-            assert_eq!(args.cursor.as_deref(), Some("resume"));
+    fn index_gc_rejects_continuation_and_budget_options() {
+        Cli::try_parse_from(["loonfs", "maintenance", "index", "gc"]).expect("complete pass");
+        for option in ["--max-objects", "--max-steps", "--cursor"] {
+            assert!(
+                Cli::try_parse_from(["loonfs", "maintenance", "index", "gc", option, "1"]).is_err()
+            );
         }
     }
 

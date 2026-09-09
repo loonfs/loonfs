@@ -449,7 +449,7 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
 }
 
 #[test]
-fn index_gc_loops_its_cursor_and_accumulates() {
+fn index_gc_completes_one_pass() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -459,44 +459,12 @@ fn index_gc_loops_its_cursor_and_accumulates() {
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
     assert_success(&harness.run(&["maintenance", "index", "enable"]));
 
-    // Nothing here is past its grace window, so a full loop retains what it
-    // examines and, having walked to the end, carries no resume cursor.
     let collected = harness.run(&["--json", "maintenance", "index", "gc"]);
     assert_success(&collected);
     let data = json_data(&collected);
     assert_eq!(data["deleted_segments"], 0);
     assert_eq!(data["namespace_reaped"], false);
     assert!(data.get("next_cursor").is_none(), "{data}");
-
-    // One bounded pass stops early and returns a resume cursor.
-    let single = harness.run(&["--json", "maintenance", "index", "gc", "--max-objects", "1"]);
-    assert_success(&single);
-    assert!(
-        json_data(&single)["next_cursor"].is_string(),
-        "{}",
-        json_data(&single)
-    );
-    let cursor = json_data(&single)["next_cursor"]
-        .as_str()
-        .expect("bounded index collection returns a cursor")
-        .to_owned();
-    let resumed = harness.run(&[
-        "--json",
-        "maintenance",
-        "index",
-        "gc",
-        "--max-objects",
-        "1",
-        "--cursor",
-        &cursor,
-    ]);
-    assert_success(&resumed);
-    assert_ne!(
-        json_data(&resumed)
-            .get("next_cursor")
-            .and_then(Value::as_str),
-        Some(cursor.as_str())
-    );
 }
 
 #[test]

@@ -352,7 +352,7 @@ A fork basis stores this reference under `manifest`:
 
 A pin references a manifest under its own namespace. A fork basis references a different namespace. Violations return `namespace_corrupt`.
 
-Grep manifests have no logical position or head sequence, so grep root pointers use the smaller shape defined in section 4.2.2.
+Grep discovery uses the hint defined in section 4.2.2.
 
 Readers of small mutable control objects must use a full-object read that
 returns bytes and the object identity metadata for those same bytes. This does
@@ -1701,7 +1701,7 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via namespace manifest) |
-| Grep root pointer | `grep_root` | JSON, uncompressed | 1 |
+| Grep hint | `grep_hint` | JSON, uncompressed | 1 |
 | Grep manifest | `grep_manifest` | JSON, uncompressed | 1 |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the grep manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
@@ -1829,48 +1829,47 @@ The `inodes` and `active_deletions` families store the full row key in the filte
 
 The active-deletion rank is `0000000000` for a removal marker and `0000000001` for a listed deletion. This order lets a scan process the removal first. Components written as `MAX - x` are inverted so ascending scans return the largest values first.
 
-#### 4.2.2 Grep roots, manifests, and gram-index segments
+#### 4.2.2 Grep hints, manifests, and gram-index segments
 
 `loonfs-grep` owns all grep durability under the namespace extension prefix:
 
 ```text
 namespaces/{namespace_id}/extensions/grep/
-├── root.json
-├── manifests/{manifest_object_id}.manifest.json
+├── hint.json
+├── manifests/{manifest_no:020}.json
 └── segments/{segment_id}.sst.zst
 ```
 
-`manifest_object_id` is `gmf_` followed by 32 lowercase hex characters, drawn
-fresh for every candidate. It names *which object* holds the manifest and says
-nothing about its contents: a content-derived id would make an identical
-rebuild reuse the object an earlier publication left behind, and that reuse
-is what would let collection race a publication for a manifest the winner is
-about to point at. The bytes are bound to the pointer instead, through
-`manifest_payload_checksum`. Namespace manifests carry no
-grep pointer, watermark, status, or segment references. A fork therefore
-starts without grep state until grep is enabled for the target.
+Namespace manifests carry no grep hint, watermark, status, or segment
+references. A fork starts without grep state until grep is enabled for the
+target.
 
-`root.json` is a small mutable pointer envelope with these fields, in order:
+`hint.json` follows the namespace hint rule in section 1.7. Its envelope has
+`kind: "grep_hint"`, `format_version: 1`, `payload_checksum`, and `payload`.
+Its payload is `{namespace_id, manifest_no}`. It starts discovery and is
+never authority. Enabling writes the hint naming number 1 with
+put-if-absent, then manifest 1. A hint collision is allowed. Manifest 1's
+put-if-absent decides whether grep is enabled, as namespace manifest 1
+decides namespace existence. Disabling publishes the next manifest with
+`status: {kind: "disabled"}`.
 
-- envelope: `kind = "grep_root"`, `format_version = 1`,
-  `payload_checksum`, and raw JSON `payload`;
-- payload: `namespace_id`, `manifest_object_id`, and
-  `manifest_payload_checksum`, which must equal the named manifest envelope's
-  own `payload_checksum`.
+Manifest numbers are contiguous from 1 and use the namespace manifest
+publication rule in section 6.1. Each immutable envelope has
+`kind: "grep_manifest"` and `format_version: 1`. Its payload is
+`namespace_id`, `manifest_no`, `status`, nested `index` bookkeeping, and
+`segments`. The payload's number must equal the number in its key. A number
+names exactly one immutable object. There is no separate checksum binding
+in the hint. Both decoders verify the exact stored payload checksum and
+reject unknown versions, kinds, and fields, including nested state and
+descriptors.
 
-This is not the namespace manifest reference from section 1.7. A grep manifest has no logical position or head sequence, so the pointer names its manifest without them.
-
-Each immutable manifest has the same envelope grammar with
-`kind = "grep_manifest"` and `format_version = 1`. Its payload is the full
-grep state: `namespace_id`, `status`, nested `index` bookkeeping, and the
-`segments` descriptors. Both decoders verify the checksum over the exact
-stored payload fragment before decoding, reject unknown versions and kind
-mismatches without fallback, and validate namespace, status, fold,
-run-allocation, and segment invariants at every boundary. A manifest
-load additionally requires the loaded envelope's `payload_checksum` to equal
-what the pointer promised. Checkpoint and fork references bind namespace
-manifests by the same checksum rule. Both root pointers and immutable manifests reject
-unknown envelope and payload fields, including nested state and descriptors.
+Readers follow section 1.7's discovery rule: load the hint, load its
+manifest, and probe successive numbers until a 404. A missing hint or
+missing manifest 1 means grep is not enabled. A missing hinted manifest
+above 1 is corruption. A query service retains its last loaded manifest and
+validates it on every query with one HEAD of its successor. A present
+successor reloads discovery. Decoded manifests may be cached by namespace
+and number.
 
 The nested `index` object holds what every phase has — the in-progress
 `reorganize` state and the `next_run_no` allocator — while each phase's own
@@ -1927,31 +1926,48 @@ and always permits rebuilding this derived work (section 6.6).
 - Several rows may carry the same gram (within a segment and across
   segments); readers union their batches.
 
-Publication writes segments first, writes the manifest under a freshly minted
-id with create-if-absent semantics, and finally installs `root.json` with one
-etag compare-and-swap (or create-if-absent for the first pointer). A
-pointer-CAS loser's manifest and segments remain unreachable derived garbage;
-grep GC reclaims them after its grace window. Because every candidate is
-written under an id no earlier publication used, an unreferenced manifest is
-always the leftover of a publication that has already ended, and the grace
-window covers the one that has not: it is at least the derived minimum grace
-window ("Garbage collection", rule 1), and grep enforces the same publication
-budget the runtime's own publications do. Query readers load the pointer
-afresh, then load the immutable manifest it names and check its
-`payload_checksum` against the pointer; decoded manifests may be cached by
-that checksum.
+A step writes segments before publishing the next manifest with
+put-if-absent. A precondition failure means another publication landed. The
+worker reloads durable state and plans the next step from its current
+inputs. After a successful publication, the publisher raises the hint by
+compare-and-swap of the greater number within its publication budget, as in
+section 1.7. A failed raise does not undo publication.
+
+Grep has no compactor epoch. Unlike core streaming compaction in section
+6.2, a grep step writes output and publishes inside one bounded maintenance
+pass. Put-if-absent and input revalidation after a lost publication provide
+its fencing. Before publishing, the step checks elapsed monotonic time
+from before its first output against `METADATA_PUBLICATION_BUDGET_MS`.
+This also satisfies section 6.4, rule 12's bound:
+`elapsed_ms + GC_MIN_GRACE_WINDOW_MS <= UNREFERENCED_SEGMENT_MIN_AGE_MS`.
+A step past its publication budget writes no manifest. The same provider,
+clock, and scheduling bounds in section 6.4 apply to a step that publishes
+late.
+
+Grep GC follows section 6.4's stateless collection rule. Each call reads its
+own durable roots, uses its supplied `now_ms` for every age decision, and
+lists `manifests/` and `segments/` from the beginning to completion. Roots
+are the current manifest discovered through the hint and every manifest
+number at or above the hint observed at the start of the call. The current
+manifest protects all segments in its runs, including pending reorganize
+inputs and outputs. Intermediate manifests protect no additional segments.
+An unreadable or invalid root fails the call before anything is deleted.
+
+A manifest below the observed hint is deleted only when its provider age
+and its immediate successor's provider age meet the grace window, following
+section 6.4, rule 1. An absent successor does not prevent deletion. An
+unlisted segment is deleted only when its provider age exceeds
+`UNREFERENCED_SEGMENT_MIN_AGE_MS`, following rule 12. Unknown timestamps and
+unrecognized keys are retained on live namespaces. A call pointed at a
+tombstoned or absent namespace reaps the whole `extensions/grep/` prefix
+after the grace window.
 
 The namespace-scoped layout is maintained only when that namespace is named
-by an enable, publish, query, detached assignment, or explicit GC operation;
-grep never enumerates namespaces. Every host schedules the index through the
-runtime's maintenance runner, which is nudged by those events and otherwise
-reconciles only the keys it has admitted. Grep GC is explicit and per
-namespace: it retains the verified pointer, referenced manifest, and
-referenced segments,
-degrades to retention on corruption or ambiguity, and reaps the whole
-`extensions/grep/` prefix when explicitly pointed at a tombstoned or absent
-namespace. Core maintenance does not recognize or collect `extensions/` keys,
-and grep maintenance does not collect core-owned objects.
+by an enable, publish, query, detached assignment, or explicit GC operation.
+Grep never enumerates namespaces. Hosts schedule indexing through the
+runtime's maintenance runner. Grep GC is explicit and completes one pass
+per job call. Core maintenance does not collect `extensions/` keys, and
+grep maintenance does not collect core-owned objects.
 
 ### 4.3 Evolution rules
 
@@ -2001,8 +2017,8 @@ Derived subsystems own their durable state below
 `namespaces/{namespace_id}/extensions/{name}/`. A namespace manifest contains
 no extension registry or generic extension metadata. Each extension defines
 its own key grammar, versioning, readiness marker, and collection rules; for
-example, grep materialization is visible only through its verified
-`extensions/grep/root.json` pointer.
+example, grep materialization is visible through numbered manifests discovered from
+`extensions/grep/hint.json`.
 
 Core readers and maintenance ignore extension-owned keys. An extension must
 remain rebuildable from authoritative core state and must not require an

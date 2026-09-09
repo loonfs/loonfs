@@ -8,9 +8,9 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum GrepManifestStateError {
-    #[error("disabled grep root carries query-visible segments")]
+    #[error("disabled grep manifest carries query-visible segments")]
     DisabledHasSegments,
-    #[error("disabled grep root carries an in-progress reorganization")]
+    #[error("disabled grep manifest carries an in-progress reorganization")]
     DisabledHasReorganize,
     #[error("duplicate grep segment id `{segment_id}`")]
     DuplicateSegmentId { segment_id: IndexSegmentId },
@@ -42,7 +42,7 @@ pub enum GrepManifestStateError {
     ReorganizeOutputDescriptorMismatch { segment_id: IndexSegmentId },
 }
 
-/// Failure encoding or decoding one grep root pointer or manifest.
+/// Failure encoding or decoding one grep hint or manifest.
 ///
 /// Envelope-shaped failures are the shared vocabulary every durable family
 /// reports through; only grep's own payload invariants are named here.
@@ -59,35 +59,25 @@ pub enum GrepEnvelopeCodecError {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum GrepRootError {
-    #[error("object-store operation failed for grep root `{object_key}`: {message}")]
+    #[error("object-store operation failed for grep state `{object_key}`: {message}")]
     Store {
         object_key: String,
         message: String,
         class: StoreFailureClass,
     },
-    #[error("grep root `{object_key}` is corrupt: {message}")]
+    #[error("grep state `{object_key}` is corrupt: {message}")]
     Corrupt { object_key: String, message: String },
-    #[error("grep root `{root_key}` names missing manifest `{manifest_key}`")]
-    MissingManifest {
-        root_key: String,
-        manifest_key: String,
-    },
     #[error(
-        "grep root `{object_key}` names namespace `{actual}` instead of requested namespace \
-         `{expected}`"
+        "grep state `{object_key}` names namespace `{actual_namespace_id}` instead of requested namespace \
+         `{expected_namespace_id}`"
     )]
     IdentityMismatch {
         object_key: String,
-        expected: NamespaceId,
-        actual: NamespaceId,
+        expected_namespace_id: NamespaceId,
+        actual_namespace_id: NamespaceId,
     },
-    #[error("grep root publication conflict for `{object_key}`")]
+    #[error("grep manifest publication conflict for `{object_key}`")]
     Conflict { object_key: String },
-    #[error("grep root advance changes namespace from `{expected}` to `{actual}`")]
-    AdvanceIdentityMismatch {
-        expected: NamespaceId,
-        actual: NamespaceId,
-    },
 }
 
 pub(super) type Result<T> = std::result::Result<T, GrepRootError>;

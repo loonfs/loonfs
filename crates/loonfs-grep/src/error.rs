@@ -40,10 +40,10 @@ pub enum GrepError {
         /// Root, manifest, or segment validation failure.
         message: String,
     },
-    /// A grep root compare-and-swap lost to another publisher.
+    /// A grep manifest publication lost to another publisher.
     #[error("grep root publication conflict for `{object_key}`; retry")]
     PublicationConflict {
-        /// Mutable grep root whose publication raced.
+        /// Manifest number whose publication raced.
         object_key: String,
     },
     /// A genuine runtime failure encountered while grep read or wrote
@@ -107,12 +107,11 @@ impl From<GrepRootError> for GrepError {
                 class,
             },
             GrepRootError::Conflict { object_key } => Self::PublicationConflict { object_key },
-            error @ (GrepRootError::Corrupt { .. }
-            | GrepRootError::MissingManifest { .. }
-            | GrepRootError::IdentityMismatch { .. }
-            | GrepRootError::AdvanceIdentityMismatch { .. }) => Self::CorruptIndex {
-                message: error.to_string(),
-            },
+            error @ (GrepRootError::Corrupt { .. } | GrepRootError::IdentityMismatch { .. }) => {
+                Self::CorruptIndex {
+                    message: error.to_string(),
+                }
+            }
         }
     }
 }
@@ -135,7 +134,7 @@ mod tests {
             (StoreFailureClass::Other, ErrorCode::ServerError),
         ] {
             let error = GrepError::StoreUnavailable {
-                object_key: "namespaces/demo/extensions/grep/root.json".to_owned(),
+                object_key: "namespaces/demo/extensions/grep/hint.json".to_owned(),
                 message: "provider failure".to_owned(),
                 class,
             };

@@ -11,7 +11,7 @@ use loonfs::{
     MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
-use loonfs_grep::root::load_grep_root;
+use loonfs_grep::root::load_current_grep_manifest;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -223,7 +223,7 @@ async fn gram_segment_levels(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<u32> {
-    load_grep_root(&**store, namespace_id)
+    load_current_grep_manifest(&**store, namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists")

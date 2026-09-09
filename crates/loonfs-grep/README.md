@@ -21,9 +21,14 @@ assigned namespace up to date and exits. `--max-steps` and `--deadline-ms`
 limit that work. Omitting `--job` also runs metadata, metadata compaction,
 and core garbage collection.
 
-The `grep_gc` job resumes bounded collection passes where the previous pass
-stopped. `loonfs maintenance index gc` runs those passes directly for one namespace,
+The `grep_gc` job completes one collection pass per call.
+`loonfs maintenance index gc` runs a pass directly for one namespace,
 including an absent or deleted namespace whose old index data remains.
+Every pass reads durable roots before deletion. Manifests use contiguous
+numbers and put-if-absent publication. `hint.json` starts forward discovery
+and may lag. Queries validate a cached manifest with one HEAD of its
+successor. The durable layout and collection rules are in
+[format section 4.2.2](../../docs/specs/format.md#422-grep-hints-manifests-and-gram-index-segments).
 
 `GrepWorkerConfig` controls how much work one step may perform. A server reads
 these values from its `[grep]` table:

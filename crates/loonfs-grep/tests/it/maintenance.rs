@@ -10,8 +10,8 @@ use loonfs::{
     MaintenanceRunner, SharedObjectStore,
 };
 use loonfs_api::{ChangeSeq, IndexSegmentId, NamespaceId};
-use loonfs_grep::keyspace::{root_key, segment_key};
-use loonfs_grep::root::load_grep_root;
+use loonfs_grep::keyspace::{hint_key, segment_key};
+use loonfs_grep::root::load_current_grep_manifest;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepGcJob, GrepMaintenanceJob, GrepWorker, GREP_GC_JOB, GREP_INDEX_JOB,
 };
@@ -143,7 +143,7 @@ async fn a_nudge_indexes_a_namespace_while_a_poisoned_sibling_backs_off() {
         .await
         .expect("write orphan");
     store
-        .put_overwrite(&root_key(&poisoned), Bytes::from_static(b"poison"))
+        .put_overwrite(&hint_key(&poisoned), Bytes::from_static(b"poison"))
         .await
         .expect("poison root");
 
@@ -161,7 +161,7 @@ async fn a_nudge_indexes_a_namespace_while_a_poisoned_sibling_backs_off() {
     );
     assert_eq!(
         store
-            .get(&root_key(&poisoned), None)
+            .get(&hint_key(&poisoned), None)
             .await
             .expect("read poisoned root")
             .expect("poisoned root bytes"),
@@ -278,43 +278,13 @@ async fn a_nudge_collects_what_indexing_left_behind() {
     wait_for_deletion(&store, &orphan).await;
     assert!(
         store
-            .head(&root_key(&namespace_id))
+            .head(&hint_key(&namespace_id))
             .await
             .expect("head root")
             .is_some(),
         "the pointer a live namespace still names is never a candidate"
     );
     host.shutdown().await.expect("settle host maintenance");
-}
-
-#[tokio::test]
-async fn a_refused_resume_position_restarts_the_collection_pass() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let namespace_id = NamespaceId::parse("resume").expect("namespace id");
-    let writer = seed(store.clone(), &namespace_id).await;
-    put_file(&writer, &namespace_id, "resume-put").await;
-    let worker = worker(store.clone(), "resume-worker").await;
-    worker.enable(&namespace_id).await.expect("enable grep");
-    let job = GrepGcJob::new(worker);
-
-    assert_eq!(
-        job.run(
-            &namespace_id,
-            Some("not-a-cursor"),
-            &MaintenanceCancellation::new(),
-        )
-        .await
-        .expect("a refused cursor is not a step failure")
-        .conclusion,
-        MaintenanceConclusion::Superseded
-    );
-    let fresh = job
-        .run(&namespace_id, None, &MaintenanceCancellation::new())
-        .await
-        .expect("fresh pass");
-    assert_eq!(fresh.conclusion, MaintenanceConclusion::Idle);
-    assert_eq!(fresh.continuation, None);
 }
 
 fn host_runner(max_concurrent_maintenance: usize) -> (MaintenanceRegistry, MaintenanceRunner) {
@@ -386,7 +356,7 @@ async fn wait_for_watermark<S: ObjectStore + 'static>(
     // that durable state under a bounded timeout.
     tokio::time::timeout(WAIT, async {
         loop {
-            if let Some(root) = load_grep_root(&**store, namespace_id)
+            if let Some(root) = load_current_grep_manifest(&**store, namespace_id)
                 .await
                 .expect("load grep root")
             {

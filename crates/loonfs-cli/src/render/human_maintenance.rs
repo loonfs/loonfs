@@ -303,11 +303,6 @@ pub(super) fn human_grep_index_collected(response: &GrepGcResponse) -> String {
     if response.namespace_reaped {
         summary.push_str("; the namespace's grep state was reaped");
     }
-    if response.namespace_degraded {
-        summary.push_str("; unreadable state forced conservative retention");
-    }
-    if let Some(cursor) = &response.next_cursor {
-        summary.push_str(&format!("; more to examine (next_cursor: {cursor})"));
-    }
+
     summary
 }

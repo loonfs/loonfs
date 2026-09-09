@@ -266,7 +266,7 @@ impl EmbeddedBackend {
                 return Err(map_namespace_scoped_grep_error(
                     namespace_id,
                     GrepError::PublicationConflict {
-                        object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                        object_key: loonfs_grep::keyspace::hint_key(namespace_id),
                     },
                 ));
             }
@@ -284,18 +284,11 @@ impl EmbeddedBackend {
     pub(super) async fn gc_grep_index(
         &self,
         namespace_id: &NamespaceId,
-        request: &GrepGcRequest,
+        _request: &GrepGcRequest,
     ) -> Result<GrepGcResponse, CliError> {
         let report = self
             .grep_worker()
-            .garbage_collect_namespace(
-                namespace_id,
-                current_unix_ms()?,
-                &loonfs_grep::GrepGcOptions {
-                    max_objects: request.max_objects,
-                    cursor: request.cursor.clone(),
-                },
-            )
+            .garbage_collect_namespace(namespace_id, current_unix_ms()?)
             .await
             .scoped(namespace_id)?;
         Ok(GrepGcResponse {
@@ -304,8 +297,6 @@ impl EmbeddedBackend {
             deleted_other_objects: report.deleted_other_objects,
             namespace_reaped: report.namespace_reaped,
             retained_candidates: report.retained_candidates,
-            namespace_degraded: report.namespace_degraded,
-            next_cursor: report.next_cursor,
         })
     }
 
@@ -469,7 +460,7 @@ impl EmbeddedBackend {
             GrepDisableOutcome::Superseded => Err(map_namespace_scoped_grep_error(
                 namespace_id,
                 GrepError::PublicationConflict {
-                    object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                    object_key: loonfs_grep::keyspace::hint_key(namespace_id),
                 },
             )),
         }
@@ -1300,7 +1291,9 @@ mod tests {
             ),
             (
                 GrepError::PublicationConflict {
-                    object_key: "namespaces/demo/extensions/grep/root.json".to_owned(),
+                    object_key:
+                        "namespaces/demo/extensions/grep/manifests/00000000000000000002.json"
+                            .to_owned(),
                 },
                 ErrorCode::StaleHead,
             ),

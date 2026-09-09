@@ -15,7 +15,6 @@ use crate::args::{
     RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
-use crate::render::write_stderr_progress;
 use crate::resolve::parse_namespace_id;
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
@@ -26,7 +25,6 @@ use loonfs_api::{
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
-use std::future::Future;
 use std::path::Path;
 
 // --- maintenance API group ---
@@ -125,85 +123,6 @@ async fn run_maintenance_gc(
         kind,
         CommandData::MaintenanceRan(MaintenanceRan::new(response)),
     ))
-}
-
-/// Holds the passes of a cursor loop until there are at least two of them.
-///
-/// The first pass's line is written only once a second pass proves the run
-/// is a multi-pass one, so a single-pass run stays as quiet as it always
-/// was. Nothing is written when progress is off or uses structured events;
-/// these pass summaries are human-readable prose.
-struct PassProgress {
-    enabled: bool,
-    held_first_line: Option<String>,
-    passes: u64,
-}
-
-impl PassProgress {
-    fn new(runtime: RuntimeBehavior) -> Self {
-        Self {
-            enabled: runtime.progress.human_lines_enabled(),
-            held_first_line: None,
-            passes: 0,
-        }
-    }
-
-    fn pass_completed(&mut self, line: String) {
-        for line in self.lines_for_completed_pass(line) {
-            write_stderr_progress(line);
-        }
-    }
-
-    /// The lines this completed pass adds, in the order they are written.
-    /// Separate from the writing so the sequencing itself is testable.
-    fn lines_for_completed_pass(&mut self, line: String) -> Vec<String> {
-        self.passes += 1;
-        if !self.enabled {
-            return Vec::new();
-        }
-        if self.passes == 1 {
-            self.held_first_line = Some(line);
-            return Vec::new();
-        }
-        let mut lines = Vec::new();
-        if let Some(first) = self.held_first_line.take() {
-            lines.push(format!("pass 1: {first}"));
-        }
-        lines.push(format!("pass {}: {line}", self.passes));
-        lines
-    }
-}
-
-async fn run_cursor_passes<R, F, Fut, N, D, A>(
-    mut progress: PassProgress,
-    single_pass: bool,
-    initial_cursor: Option<String>,
-    mut run_pass: F,
-    next_cursor: N,
-    describe: D,
-    accumulate: A,
-) -> Result<R, crate::error::CliError>
-where
-    F: FnMut(Option<String>) -> Fut,
-    Fut: Future<Output = Result<R, crate::error::CliError>>,
-    N: Fn(&R) -> Option<String>,
-    D: Fn(&R) -> String,
-    A: Fn(&mut R, R),
-{
-    let mut cursor = initial_cursor;
-    let first = run_pass(cursor.clone()).await?;
-    progress.pass_completed(describe(&first));
-    let mut total = first;
-    loop {
-        let next = next_cursor(&total);
-        if single_pass || next.is_none() || next == cursor {
-            return Ok(total);
-        }
-        cursor = next;
-        let pass = run_pass(cursor.clone()).await?;
-        progress.pass_completed(describe(&pass));
-        accumulate(&mut total, pass);
-    }
 }
 
 async fn run_maintenance_checkpoint(
@@ -627,55 +546,15 @@ async fn run_maintenance_index_gc(
     kind: CommandKind,
     config_path: &Path,
     args: MaintenanceIndexGcArgs,
-    runtime: RuntimeBehavior,
+    _runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let single_pass = args.max_objects.is_some();
-    // An omitted budget is left omitted: grep resolves it to the same
-    // per-pass default the runtime uses, and one authority for that number
-    // is what keeps a remote pass and an embedded one the same size.
-    let response = run_cursor_passes(
-        PassProgress::new(runtime),
-        single_pass,
-        args.cursor,
-        |cursor| async {
-            context
-                .target
-                .gc_grep_index(
-                    context.namespace(),
-                    &GrepGcRequest {
-                        max_objects: args.max_objects,
-                        cursor,
-                    },
-                )
-                .await
-        },
-        |pass| pass.next_cursor.clone(),
-        |pass| {
-            format!(
-                "{} deleted, {} retained",
-                pass.deleted_segments + pass.deleted_other_objects,
-                pass.retained_candidates
-            )
-        },
-        accumulate_grep_gc_response,
-    )
-    .await
-    .map_err(|error| context.fail(kind, error))?;
-
+    let response = context
+        .target
+        .gc_grep_index(context.namespace(), &GrepGcRequest {})
+        .await
+        .map_err(|error| context.fail(kind, error))?;
     Ok(context.output(kind, CommandData::GrepIndexCollected(response)))
-}
-
-fn accumulate_grep_gc_response(
-    total: &mut loonfs_api::v0::GrepGcResponse,
-    pass: loonfs_api::v0::GrepGcResponse,
-) {
-    total.deleted_segments += pass.deleted_segments;
-    total.deleted_other_objects += pass.deleted_other_objects;
-    total.retained_candidates += pass.retained_candidates;
-    total.namespace_reaped |= pass.namespace_reaped;
-    total.namespace_degraded |= pass.namespace_degraded;
-    total.next_cursor = pass.next_cursor;
 }
 
 async fn run_maintenance_index_disable(
@@ -690,57 +569,4 @@ async fn run_maintenance_index_disable(
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(context.output(kind, CommandData::GrepIndexDisabled(response)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::progress::ProgressMode;
-
-    fn runtime(json: bool) -> RuntimeBehavior {
-        RuntimeBehavior {
-            json,
-            no_input: true,
-            interactive: false,
-            progress: if json {
-                ProgressMode::Events
-            } else {
-                ProgressMode::Human
-            },
-        }
-    }
-
-    #[test]
-    fn a_single_pass_run_reports_no_progress() {
-        let mut progress = PassProgress::new(runtime(false));
-        assert!(progress
-            .lines_for_completed_pass("first".to_owned())
-            .is_empty());
-    }
-
-    #[test]
-    fn a_multi_pass_run_reports_every_pass_in_order() {
-        let mut progress = PassProgress::new(runtime(false));
-        assert!(progress
-            .lines_for_completed_pass("first".to_owned())
-            .is_empty());
-        assert_eq!(
-            progress.lines_for_completed_pass("second".to_owned()),
-            vec!["pass 1: first".to_owned(), "pass 2: second".to_owned()]
-        );
-        assert_eq!(
-            progress.lines_for_completed_pass("third".to_owned()),
-            vec!["pass 3: third".to_owned()]
-        );
-    }
-
-    #[test]
-    fn json_output_stays_silent_across_passes() {
-        let mut progress = PassProgress::new(runtime(true));
-        for pass in ["first", "second", "third"] {
-            assert!(progress
-                .lines_for_completed_pass(pass.to_owned())
-                .is_empty());
-        }
-    }
 }

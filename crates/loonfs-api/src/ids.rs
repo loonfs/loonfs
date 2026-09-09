@@ -697,12 +697,6 @@ string_id! {
 }
 
 string_id! {
-    /// Durable object id for one stored grep manifest.
-    GrepManifestObjectId,
-    prefix = "gmf"
-}
-
-string_id! {
     /// Name-policy-derived directory entry key.
     ///
     /// Use this for exact name preconditions. Keep user-facing spelling in

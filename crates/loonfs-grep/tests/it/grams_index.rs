@@ -68,7 +68,7 @@ async fn grams_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    loonfs_grep::root::load_grep_root(&**store, namespace_id)
+    loonfs_grep::root::load_current_grep_manifest(&**store, namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists")
@@ -219,7 +219,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         )
         .await
         .expect("write delta");
-    let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+    let root = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists");
@@ -411,7 +411,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
          {max_content_bytes_per_step}-byte budget"
     );
 
-    let partial = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+    let partial = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load partial grep root")
         .expect("partial grep root");
@@ -487,7 +487,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     );
     assert_eq!(first_keys.len() + second_keys.len(), FILES);
 
-    let complete = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+    let complete = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load complete grep root")
         .expect("complete grep root");
@@ -608,7 +608,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
     }
 
     // The premise of the test: the rounds really did tier the layout.
-    let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+    let root = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists");
@@ -1079,7 +1079,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     );
 
     // Confirm that the observed reads produced a mid-level run.
-    let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+    let root = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists");

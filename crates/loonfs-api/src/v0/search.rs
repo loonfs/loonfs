@@ -167,14 +167,7 @@ pub struct GrepIndex {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct GrepGcRequest {
-    /// The maximum reads for this pass, or `None` for the server default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_objects: Option<u64>,
-    /// The opaque `next_cursor` returned by an earlier pass for the same namespace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
+pub struct GrepGcRequest {}
 
 /// Result of one explicit grep index garbage-collection pass (maintenance API group).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,20 +175,14 @@ pub struct GrepGcRequest {
 pub struct GrepGcResponse {
     /// Namespace whose grep-owned keyspace was inspected.
     pub namespace_id: NamespaceId,
-    /// Unreferenced grep segments deleted after the grace window.
+    /// Unreferenced grep segments older than the minimum segment age.
     pub deleted_segments: u64,
     /// Other unreferenced grep objects deleted after the grace window.
     pub deleted_other_objects: u64,
     /// Whether an absent or tombstoned namespace had extension state reaped.
     pub namespace_reaped: bool,
-    /// Young or concurrently revived candidates retained by the pass.
+    /// Referenced, young, or unrecognized candidates retained by the pass.
     pub retained_candidates: u64,
-    /// Whether unreadable namespace or grep state forced conservative retention.
-    pub namespace_degraded: bool,
-    /// Present when the budget stopped the pass with keys left to examine.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub next_cursor: Option<String>,
 }
 
 #[cfg(test)]
@@ -338,10 +325,10 @@ mod tests {
 
     #[test]
     fn grep_gc_request_bodies_reject_unknown_fields() {
-        serde_json::from_value::<GrepGcRequest>(serde_json::json!({"max_objects": 8}))
-            .expect("the same collection body without a typo decodes");
+        serde_json::from_value::<GrepGcRequest>(serde_json::json!({}))
+            .expect("an empty collection request decodes");
         assert!(
-            serde_json::from_value::<GrepGcRequest>(serde_json::json!({"maxObjects": 8})).is_err()
+            serde_json::from_value::<GrepGcRequest>(serde_json::json!({"max_objects": 8})).is_err()
         );
     }
 }
