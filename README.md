@@ -64,13 +64,13 @@ LoonFS is designed with a core set of foundational ideas.
 
 - **Object storage is the only required durable substrate.** LoonFS stores durable truth in object storage: file content, immutable metadata history, materialized manifests/checkpoints, and a small number of mutable control objects. Caches, queues, workers, and local state are safely rebuildable from the object store.
 
-- **A namespace is a self-contained filesystem.** Each namespace has it's own contents and history, and is managed independently of every other namespace.
+- **A namespace is an independently addressable filesystem with its own history.** Forks share content and metadata under durable pins, so a namespace's storage is not confined to its own prefix.
 
 - **Inodes are identity, paths are views.** The identity of a filesystem item is `(namespace_id, inode_id)`. Paths are "views" that point to inodes, and may change over time without changing the item’s identity.
 
 - **Commits are the unit of transactional change.** File bytes are written to object storage before metadata can reference them. Metadata changes are recorded as logical commits, and a commit becomes visible only when the namespace head durably records it.
 
-- **Materialization and background work are derived, not authoritative.** Manifests, checkpoints, indexes, compaction, retention advancement, and garbage collection make the system faster, cheaper, or easier to recover, but they should not create a second source of truth.
+- **The head decides visibility; retained metadata, the WAL, and checkpoint records are recovery state, not caches.** Local caches and rebuildable indexes are separate, and nothing creates a second commit history.
 
 ## Design philosophy
 
