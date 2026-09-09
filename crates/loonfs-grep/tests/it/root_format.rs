@@ -10,12 +10,12 @@
 use crate::golden_formats::{
     read_golden, sample_active_manifest, sample_backfilling_manifest, sample_disabled_manifest,
     segment_id, segment_ref, ACTIVE_MANIFEST_FIXTURE, BACKFILLING_MANIFEST_FIXTURE,
-    DISABLED_MANIFEST_FIXTURE, ROOT_POINTER_FIXTURE,
+    DISABLED_MANIFEST_FIXTURE, HINT_FIXTURE,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::{ChangeSeq, RunNo};
 use loonfs_grep::root::{
-    decode_grep_manifest, decode_grep_root, encode_grep_manifest, GrepEnvelopeCodecError,
+    decode_grep_hint, decode_grep_manifest, encode_grep_manifest, GrepEnvelopeCodecError,
     GrepIndexState, GrepIndexStatus, GrepManifestState, GrepManifestStateError,
     GrepReorganizeState,
 };
@@ -129,13 +129,13 @@ fn manifest_decoder_rejects_unknown_fields_at_every_level() {
 }
 
 #[test]
-fn mutable_pointer_payload_rejects_unknown_fields_as_corruption() {
-    let edited = edited_document(ROOT_POINTER_FIXTURE, "", |payload| {
+fn mutable_hint_payload_rejects_unknown_fields_as_corruption() {
+    let edited = edited_document(HINT_FIXTURE, "", |payload| {
         payload["field_from_the_future"] = serde_json::Value::from(true);
     });
 
     assert!(matches!(
-        decode_grep_root(&edited),
+        decode_grep_hint(&edited),
         Err(GrepEnvelopeCodecError::Envelope(
             EnvelopeCodecError::PayloadDecode(_)
         ))
@@ -143,11 +143,11 @@ fn mutable_pointer_payload_rejects_unknown_fields_as_corruption() {
 }
 
 #[test]
-fn mutable_pointer_envelope_rejects_unknown_fields_as_corruption() {
-    let edited = edited_document(ROOT_POINTER_FIXTURE, UNKNOWN_ENVELOPE_FIELD, |_| {});
+fn mutable_hint_envelope_rejects_unknown_fields_as_corruption() {
+    let edited = edited_document(HINT_FIXTURE, UNKNOWN_ENVELOPE_FIELD, |_| {});
 
     assert!(matches!(
-        decode_grep_root(&edited),
+        decode_grep_hint(&edited),
         Err(GrepEnvelopeCodecError::Envelope(
             EnvelopeCodecError::EnvelopeDecode(_)
         ))
@@ -167,9 +167,9 @@ fn decoder_rejects_the_string_format_version_without_a_shim() {
         ))
     ));
     assert!(matches!(
-        decode_grep_root(
+        decode_grep_hint(
             manifest
-                .replacen("grep_manifest", "grep_root", 1)
+                .replacen("grep_manifest", "grep_hint", 1)
                 .as_bytes()
         ),
         Err(GrepEnvelopeCodecError::Envelope(
@@ -252,6 +252,7 @@ fn constructor_rejects_reorganization_segment_mismatch() {
     assert!(matches!(
         GrepManifestState::new(
             namespace_id("docs"),
+            loonfs_api::ManifestNo(1),
             GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(7),
                 next_event_index: 0,
@@ -271,6 +272,7 @@ fn constructor_rejects_a_segment_with_no_rows() {
     assert!(matches!(
         GrepManifestState::new(
             namespace_id("docs"),
+            loonfs_api::ManifestNo(1),
             GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(7),
                 next_event_index: 0,

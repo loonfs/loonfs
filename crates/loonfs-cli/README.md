@@ -378,10 +378,10 @@ Maintenance
   loonfs maintenance index disable
     Disable the gram content index
 
-  loonfs maintenance index gc [--max-objects <n>] [--cursor <token>]
-    Remove unreferenced gram-index objects. Without --max-objects, continue
-    until collection is complete. --max-objects limits one pass to that many
-    reads, and --cursor resumes a previous pass.
+  loonfs maintenance index gc
+    Complete one collection pass over the namespace's gram-index objects.
+    Read durable roots before deletion. Reap aged index objects for an absent
+    or deleted namespace.
 
 Profile create options
   Used by:

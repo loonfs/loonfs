@@ -1,50 +1,18 @@
-//! Constructor-validated grep manifest payload and its root pointer.
+//! Constructor-validated grep manifest payload and its discovery hint.
 
 use super::error::GrepManifestStateError;
 use loonfs_api::wire::sst_blocks::BlockHandle;
-pub use loonfs_api::GrepManifestObjectId;
-use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, NamespaceId, RunNo};
+use loonfs_api::{
+    ChangeSeq, CheckpointId, IndexSegmentId, InodeId, ManifestNo, NamespaceId, RunNo,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Small mutable control payload installed at `extensions/grep/root.json`.
-///
-/// The pointer names the manifest and carries its digest, so the object the
-/// key resolves to is bound to the bytes the publisher installed even though
-/// nothing about the id derives from them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GrepRootPointer {
-    namespace_id: NamespaceId,
-    manifest_object_id: GrepManifestObjectId,
-    manifest_payload_checksum: String,
-}
-
-impl GrepRootPointer {
-    pub fn new(
-        namespace_id: NamespaceId,
-        manifest_object_id: GrepManifestObjectId,
-        manifest_payload_checksum: String,
-    ) -> Self {
-        Self {
-            namespace_id,
-            manifest_object_id,
-            manifest_payload_checksum,
-        }
-    }
-
-    pub fn namespace_id(&self) -> &NamespaceId {
-        &self.namespace_id
-    }
-
-    pub fn manifest_object_id(&self) -> &GrepManifestObjectId {
-        &self.manifest_object_id
-    }
-
-    /// Must equal `payload_checksum` in the referenced manifest envelope.
-    pub fn manifest_payload_checksum(&self) -> &str {
-        &self.manifest_payload_checksum
-    }
+pub struct GrepHint {
+    pub namespace_id: NamespaceId,
+    pub manifest_no: ManifestNo,
 }
 
 /// Durable status of grep indexing for one namespace.
@@ -133,9 +101,9 @@ impl From<&GrepIndexStatus> for loonfs_api::v0::GrepIndexLifecycle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepReorganizeState {
-    /// Fixed input snapshot retained until the completing root swap.
+    /// Fixed input snapshot retained until the completing manifest publication.
     pub snapshot_segment_ids: Vec<IndexSegmentId>,
-    /// Outputs written by completed reorganize steps and retained until the swap.
+    /// Outputs written by completed reorganize steps and retained until publication.
     pub output_segment_ids: Vec<IndexSegmentId>,
     /// Inclusive row key at which the next reorganize step resumes.
     pub row_key_cursor: String,
@@ -156,8 +124,8 @@ pub struct GrepIndexState {
     /// One in-progress partitioned reorganize, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reorganize: Option<GrepReorganizeState>,
-    /// Run number the next producer allocates, atomically with a root
-    /// update. Every segment's `run_no` is below it.
+    /// Run number the next producer allocates, atomically with a manifest
+    /// publication. Every segment's `run_no` is below it.
     pub next_run_no: RunNo,
 }
 
@@ -242,6 +210,7 @@ pub struct GrepSegmentRef {
 #[serde(deny_unknown_fields)]
 pub struct GrepManifestState {
     namespace_id: NamespaceId,
+    manifest_no: ManifestNo,
     status: GrepIndexStatus,
     index: GrepIndexState,
     segments: Vec<GrepSegmentRef>,
@@ -251,12 +220,14 @@ impl GrepManifestState {
     /// Creates a manifest payload after validating its cross-field invariants.
     pub fn new(
         namespace_id: NamespaceId,
+        manifest_no: ManifestNo,
         status: GrepIndexStatus,
         index: GrepIndexState,
         segments: Vec<GrepSegmentRef>,
     ) -> Result<Self, GrepManifestStateError> {
         let state = Self {
             namespace_id,
+            manifest_no,
             status,
             index,
             segments,
@@ -267,6 +238,10 @@ impl GrepManifestState {
 
     pub fn namespace_id(&self) -> &NamespaceId {
         &self.namespace_id
+    }
+
+    pub fn manifest_no(&self) -> ManifestNo {
+        self.manifest_no
     }
 
     pub fn status(&self) -> &GrepIndexStatus {

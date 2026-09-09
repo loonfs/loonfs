@@ -95,7 +95,7 @@ impl GrepHost {
             }
             GrepEnableOutcome::Superseded => {
                 return Err(GrepError::PublicationConflict {
-                    object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                    object_key: loonfs_grep::keyspace::hint_key(namespace_id),
                 })
             }
         };
@@ -150,7 +150,7 @@ impl GrepHost {
                 self.get_grep_index(namespace_id).await
             }
             GrepDisableOutcome::Superseded => Err(GrepError::PublicationConflict {
-                object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                object_key: loonfs_grep::keyspace::hint_key(namespace_id),
             }),
         }
     }
@@ -159,7 +159,7 @@ impl GrepHost {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndex, GrepError> {
-        let root = self.worker.root_state(namespace_id).await?;
+        let root = self.worker.manifest_state(namespace_id).await?;
         let (lifecycle, next_run_no, reorganize_pending) = match &root {
             Some(root) => (
                 GrepIndexLifecycle::from(root.status()),

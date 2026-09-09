@@ -7,7 +7,7 @@ use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost
 use bytes::Bytes;
 use loonfs::{
     CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsMaintenance, FsReader,
-    FsWriter, GcConfig, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
+    FsWriter, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
     SharedObjectStore,
 };
 use loonfs_api::wire::control::CheckpointOwner;
@@ -16,20 +16,17 @@ use loonfs_api::{
     IndexSegmentId, PageRequest, PaginationPolicy, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_grep::keyspace::{
-    grep_prefix, manifest_key, manifests_prefix, root_key, segment_key, segments_prefix,
+    grep_prefix, hint_key, manifest_key, manifests_prefix, segment_key, segments_prefix,
 };
 use loonfs_grep::root::{
-    advance_grep_root, encode_grep_root, load_grep_root, GrepIndexState, GrepIndexStatus,
-    GrepManifestObjectId, GrepManifestState, GrepRootPointer,
+    encode_grep_hint, load_current_grep_manifest, publish_grep_manifest, GrepHint, GrepIndexState,
+    GrepIndexStatus, GrepManifestState,
 };
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcOptions, GrepGcReport,
-    GrepReorganizeOutcome, GrepService, GrepWorker, GREP_GC_GRACE_WINDOW_MS,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
+    GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
-use loonfs_objectstore::keys::{
-    checkpoint_prefix, checkpoint_record, metadata_manifest_object, metadata_manifest_prefix,
-    metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
-};
+use loonfs_objectstore::keys::{checkpoint_record, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
@@ -39,7 +36,6 @@ use loonfs_test_support::stores::{
 };
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -163,7 +159,7 @@ async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query
 
     let blocking = Arc::new(BlockingStore::new(
         base.clone(),
-        KeyPredicate::exact(root_key(&namespace_id)),
+        KeyPredicate::exact(hint_key(&namespace_id)),
         OperationClass::GetWithMetadata,
     ));
     let query_store: SharedObjectStore = blocking.clone();
@@ -240,7 +236,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         again,
         loonfs_grep::GrepEnableOutcome::AlreadyEnabled { .. }
     ));
-    let root = load_grep_root(&*store, &namespace_id)
+    let root = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load root")
         .expect("root exists");
@@ -276,7 +272,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("materialized query");
     assert_eq!(response.matches.len(), 3);
-    let materialized_root = load_grep_root(&*store, &namespace_id)
+    let materialized_root = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load materialized root")
         .expect("root exists");
@@ -290,7 +286,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         loonfs_grep::GrepDisableOutcome::Disabled
     );
     worker
-        .garbage_collect_namespace(&namespace_id, u64::MAX, &GrepGcOptions::default())
+        .garbage_collect_namespace(&namespace_id, u64::MAX)
         .await
         .expect("collect disabled segments");
     assert!(
@@ -301,7 +297,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
             .is_none(),
         "disable must leave segments for grep-owned GC"
     );
-    let disabled_root = load_grep_root(&*store, &namespace_id)
+    let disabled_root = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load disabled root")
         .expect("disabled root remains");
@@ -321,7 +317,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         reenabled,
         loonfs_grep::GrepEnableOutcome::Enabled { .. }
     ));
-    let root = load_grep_root(&*store, &namespace_id)
+    let root = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load re-enabled root")
         .expect("root exists");
@@ -363,13 +359,14 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
     worker.enable(&namespace_id).await.expect("enable grep");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
-    let current = load_grep_root(&*store, &namespace_id)
+    let current = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load current root")
         .expect("current root");
     let current_state = current.manifest_state();
     let maximum_state = GrepManifestState::new(
         namespace_id.clone(),
+        current.manifest_no().successor().expect("next number"),
         current_state.status().clone(),
         GrepIndexState {
             reorganize: current_state.index().reorganize.clone(),
@@ -378,7 +375,8 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
         current_state.segments().to_vec(),
     )
     .expect("valid root at the public maximum");
-    let maximum = advance_grep_root(&*store, &current, &maximum_state)
+    let timer = loonfs_objectstore::timing::StdMonotonicTimer::default();
+    let maximum = publish_grep_manifest(&*store, Some(&current), &maximum_state, &timer, 0)
         .await
         .expect("install root at the public maximum");
 
@@ -391,11 +389,11 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
         )
         .await
         .expect("write incremental file");
-    let pointer_before = store
-        .get(&root_key(&namespace_id), None)
+    let hint_before = store
+        .get(&hint_key(&namespace_id), None)
         .await
-        .expect("read root pointer before failure")
-        .expect("root pointer exists");
+        .expect("read hint before failure")
+        .expect("hint exists");
     let manifests_before = store
         .list_prefix(&manifests_prefix(&namespace_id))
         .await
@@ -429,22 +427,22 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
         ));
     }
 
-    let after = load_grep_root(&*store, &namespace_id)
+    let after = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load root after failures")
         .expect("root remains");
-    assert_eq!(after.manifest_object_id(), maximum.manifest_object_id());
+    assert_eq!(after.manifest_no(), maximum.manifest_no());
     assert_eq!(
         after.manifest_state().index().next_run_no,
         RunNo(MAX_PUBLIC_INTEGER)
     );
     assert_eq!(
         store
-            .get(&root_key(&namespace_id), None)
+            .get(&hint_key(&namespace_id), None)
             .await
-            .expect("read root pointer after failure")
-            .expect("root pointer remains"),
-        pointer_before
+            .expect("read hint after failure")
+            .expect("hint remains"),
+        hint_before
     );
     assert_eq!(
         store
@@ -481,13 +479,13 @@ async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "enable-root-failure-maintenance").await;
-    let grep_root_key = root_key(&namespace_id);
+    let grep_hint_key = hint_key(&namespace_id);
     let root_loads = Arc::new(AtomicUsize::new(0));
     let observed_root_loads = Arc::clone(&root_loads);
     let failing_store = Arc::new(FailStore::matching(
         store.clone(),
         move |context: &OperationContext<'_>| {
-            context.key() == grep_root_key
+            context.key() == grep_hint_key
                 && matches!(context.kind(), OperationKind::GetWithMetadata)
                 && observed_root_loads.fetch_add(1, Ordering::SeqCst) == 0
         },
@@ -546,12 +544,12 @@ async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous()
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "ambiguous-enable-maintenance").await;
-    let grep_root_key = root_key(&namespace_id);
+    let grep_manifest_key = manifest_key(&namespace_id, &loonfs_api::ManifestNo(1));
     let failing_store = Arc::new(
         FailStore::matching(
             store.clone(),
             move |context: &OperationContext<'_>| {
-                context.key() == grep_root_key
+                context.key() == grep_manifest_key
                     && matches!(
                         context.kind(),
                         OperationKind::Put {
@@ -610,16 +608,16 @@ async fn restart_retains_its_checkpoint_when_the_root_write_result_is_ambiguous(
         .await
         .expect("make the current backfill restart");
 
-    let grep_root_key = root_key(&namespace_id);
+    let grep_manifest_key = manifest_key(&namespace_id, &loonfs_api::ManifestNo(2));
     let failing_store = Arc::new(
         FailStore::matching(
             store.clone(),
             move |context: &OperationContext<'_>| {
-                context.key() == grep_root_key
+                context.key() == grep_manifest_key
                     && matches!(
                         context.kind(),
                         OperationKind::Put {
-                            mode: PutMode::CompareAndSwap { .. },
+                            mode: PutMode::CreateIfAbsent,
                             ..
                         }
                     )
@@ -920,7 +918,7 @@ async fn assert_fresh_backfill_attempt(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> loonfs_api::CheckpointId {
-    let root = load_grep_root(&**store, namespace_id)
+    let root = load_current_grep_manifest(&**store, namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists");
@@ -957,7 +955,7 @@ async fn grep_segment_ids(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<IndexSegmentId> {
-    load_grep_root(&**store, namespace_id)
+    load_current_grep_manifest(&**store, namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists")
@@ -972,7 +970,7 @@ async fn grep_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    load_grep_root(&**store, namespace_id)
+    load_current_grep_manifest(&**store, namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists")
@@ -1387,8 +1385,8 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
 
     store
         .put_overwrite(
-            &root_key(&namespace_id),
-            Bytes::from_static(b"corrupt pointer"),
+            &hint_key(&namespace_id),
+            Bytes::from_static(b"corrupt hint"),
         )
         .await
         .expect("poison the grep root");
@@ -1445,38 +1443,22 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
-    let missing_manifest_object_id =
-        GrepManifestObjectId::parse("gmf_11111111111111111111111111111111")
-            .expect("valid manifest object id");
-    write_pointer(
-        &*store,
-        &namespace_id,
-        missing_manifest_object_id,
-        sha256_digest(b"whatever the absent manifest would have carried"),
-    )
-    .await;
+    let missing_manifest_no = loonfs_api::ManifestNo(20);
+    write_hint(&*store, &namespace_id, missing_manifest_no).await;
     assert_corrupt_index_error(
         "missing manifest",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
-    let corrupt_manifest_object_id =
-        GrepManifestObjectId::parse("gmf_22222222222222222222222222222222")
-            .expect("valid manifest object id");
+    let corrupt_manifest_no = loonfs_api::ManifestNo(21);
     store
         .put_overwrite(
-            &manifest_key(&namespace_id, &corrupt_manifest_object_id),
+            &manifest_key(&namespace_id, &corrupt_manifest_no),
             Bytes::from_static(b"corrupt manifest"),
         )
         .await
         .expect("write corrupt manifest");
-    write_pointer(
-        &*store,
-        &namespace_id,
-        corrupt_manifest_object_id,
-        sha256_digest(b"corrupt manifest"),
-    )
-    .await;
+    write_hint(&*store, &namespace_id, corrupt_manifest_no).await;
     assert_corrupt_index_error(
         "corrupt manifest",
         new_query(&store, &namespace_id, &request("needle")).await,
@@ -1484,13 +1466,13 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
 
     store
         .put_overwrite(
-            &root_key(&namespace_id),
-            Bytes::from_static(b"corrupt pointer"),
+            &hint_key(&namespace_id),
+            Bytes::from_static(b"corrupt hint"),
         )
         .await
-        .expect("write corrupt pointer");
+        .expect("write corrupt hint");
     assert_corrupt_index_error(
-        "corrupt pointer",
+        "corrupt hint",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
     writer.shutdown().await.expect("shutdown");
@@ -1513,27 +1495,18 @@ async fn backfilling_root_without_checkpoint_id_is_index_corrupt() {
         .expect("create namespace");
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    let root = load_grep_root(&*store, &namespace_id)
+    let root = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load backfilling root")
         .expect("backfilling root exists");
     let manifest_bytes = store
-        .get(
-            &manifest_key(&namespace_id, root.manifest_object_id()),
-            None,
-        )
+        .get(&manifest_key(&namespace_id, &root.manifest_no()), None)
         .await
         .expect("read backfilling manifest")
         .expect("backfilling manifest exists");
-    let (corrupt_manifest_object_id, corrupt_payload_checksum) =
+    let corrupt_manifest_no =
         write_manifest_without_checkpoint_id(&*store, &namespace_id, &manifest_bytes).await;
-    write_pointer(
-        &*store,
-        &namespace_id,
-        corrupt_manifest_object_id,
-        corrupt_payload_checksum,
-    )
-    .await;
+    write_hint(&*store, &namespace_id, corrupt_manifest_no).await;
 
     assert_corrupt_index_error(
         "backfilling manifest missing checkpoint id",
@@ -1546,7 +1519,7 @@ async fn write_manifest_without_checkpoint_id(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
     manifest_bytes: &[u8],
-) -> (GrepManifestObjectId, String) {
+) -> loonfs_api::ManifestNo {
     let mut document: serde_json::Value =
         serde_json::from_slice(manifest_bytes).expect("decode valid manifest document");
     document["payload"]["status"]
@@ -1558,41 +1531,42 @@ async fn write_manifest_without_checkpoint_id(
         serde_json::to_vec(&document["payload"]).expect("encode corrupt manifest payload");
     let payload_checksum = sha256_digest(&payload_bytes);
     document["payload_checksum"] = serde_json::Value::String(payload_checksum.clone());
-    let manifest_object_id = GrepManifestObjectId::generate();
+    let manifest_no = loonfs_api::ManifestNo(22);
+    document["payload"]["manifest_no"] = serde_json::json!(manifest_no);
+    let payload = serde_json::to_vec(&document["payload"]).expect("payload");
+    document["payload_checksum"] = serde_json::json!(sha256_digest(&payload));
     store
         .put_overwrite(
-            &manifest_key(namespace_id, &manifest_object_id),
+            &manifest_key(namespace_id, &manifest_no),
             Bytes::from(serde_json::to_vec(&document).expect("encode corrupt manifest document")),
         )
         .await
         .expect("write manifest missing checkpoint id");
-    (manifest_object_id, payload_checksum)
+    manifest_no
 }
 
-async fn write_pointer(
+async fn write_hint(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
-    manifest_object_id: GrepManifestObjectId,
-    manifest_payload_checksum: String,
+    manifest_no: loonfs_api::ManifestNo,
 ) {
-    let envelope = encode_grep_root(GrepRootPointer::new(
-        namespace_id.clone(),
-        manifest_object_id,
-        manifest_payload_checksum,
-    ))
-    .expect("build pointer")
+    let envelope = encode_grep_hint(GrepHint {
+        namespace_id: namespace_id.clone(),
+        manifest_no,
+    })
+    .expect("build hint")
     .into_envelope();
     store
         .put_overwrite(
-            &root_key(namespace_id),
+            &hint_key(namespace_id),
             Bytes::from(
-                encode_grep_root(envelope.payload().clone())
-                    .expect("encode pointer")
+                encode_grep_hint(envelope.payload().clone())
+                    .expect("encode hint")
                     .into_bytes(),
             ),
         )
         .await
-        .expect("write pointer");
+        .expect("write hint");
 }
 
 #[tokio::test]
@@ -1633,7 +1607,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         metadata_root.manifest.manifest_head_seq < head.seq,
         "the WAL-only revision must sit past metadata materialization"
     );
-    let grep_root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+    let grep_root = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load grep root")
         .expect("grep root exists");
@@ -1762,7 +1736,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .await
         .expect("write tail file");
 
-    let root = load_grep_root(&*store, &namespace_id)
+    let root = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load root")
         .expect("root exists");
@@ -1871,7 +1845,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     let worker = worker(&store).await;
     worker.enable(&source).await.expect("enable source");
     drive_worker_to_current(&worker, &source, GramIndexBuildPolicy::default()).await;
-    let source_root_before = load_grep_root(&*store, &source)
+    let source_root_before = load_current_grep_manifest(&*store, &source)
         .await
         .expect("load source root")
         .expect("source root exists")
@@ -1884,7 +1858,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .expect("fork source");
 
     assert!(
-        load_grep_root(&*store, &target)
+        load_current_grep_manifest(&*store, &target)
             .await
             .expect("load target root")
             .is_none(),
@@ -1916,7 +1890,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     assert!(!payload.contains_key("index_files"));
     assert!(!payload.contains_key("features"));
 
-    let source_root_after = load_grep_root(&*store, &source)
+    let source_root_after = load_current_grep_manifest(&*store, &source)
         .await
         .expect("reload source root")
         .expect("source root still exists")
@@ -2009,659 +1983,6 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
 }
 
 #[tokio::test]
-async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass() {
-    let temp_dir = tempdir().expect("tempdir");
-    let base: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("manifest-race").expect("namespace id");
-    let writer = FsWriter::builder_with_store(base.clone())
-        .writer_id("manifest-race-writer")
-        .min_publish_interval_ms(0)
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
-    writer
-        .put_file_bytes(
-            &namespace_id,
-            "/needle.txt",
-            b"publication race needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("write indexed file");
-    let initial_worker = worker(&base).await;
-    initial_worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(
-        &initial_worker,
-        &namespace_id,
-        GramIndexBuildPolicy::default(),
-    )
-    .await;
-    writer.shutdown().await.expect("shutdown writer");
-
-    let current = load_grep_root(&*base, &namespace_id)
-        .await
-        .expect("load current root")
-        .expect("root exists");
-    let current_state = current.manifest_state();
-    let next = GrepManifestState::new(
-        namespace_id.clone(),
-        current_state.status().clone(),
-        GrepIndexState {
-            reorganize: current_state.index().reorganize.clone(),
-            next_run_no: RunNo(current_state.index().next_run_no.0 + 1),
-        },
-        current_state.segments().to_vec(),
-    )
-    .expect("valid successor state");
-    let manifests_before = base
-        .list_prefix(&manifests_prefix(&namespace_id))
-        .await
-        .expect("list manifests before the advance");
-    // A clock in the store's own domain: the moment the state this
-    // publication builds on became durable. Everything the publication
-    // itself writes is stamped at or after it.
-    let published_at_ms = base
-        .head(&root_key(&namespace_id))
-        .await
-        .expect("head the installed pointer")
-        .expect("an enabled namespace has a pointer")
-        .last_modified_ms
-        .expect("the local store stamps its objects");
-
-    let blocking = Arc::new(BlockingStore::new(
-        base.clone(),
-        KeyPredicate::exact(root_key(&namespace_id)),
-        OperationClass::CompareAndSwap,
-    ));
-    blocking.block_next();
-    let store: SharedObjectStore = blocking.clone();
-    let advance = advance_grep_root(&*store, &current, &next);
-    let collect = async {
-        blocking.wait_until_blocked().await;
-        let report = worker(&store)
-            .await
-            .garbage_collect_namespace(&namespace_id, published_at_ms, &GrepGcOptions::default())
-            .await;
-        blocking.release();
-        report
-    };
-    let (advanced, report) = tokio::join!(advance, collect);
-
-    let report = report.expect("collection pass runs mid-publication");
-    assert_eq!(
-        report.deleted_other_objects, 0,
-        "nothing the publication wrote is old enough to collect"
-    );
-    assert!(
-        report.retained_candidates >= 1,
-        "the unreferenced candidate was examined and kept"
-    );
-    let advanced = advanced.expect("pointer advance completes");
-    let candidate_key = manifest_key(&namespace_id, advanced.manifest_object_id());
-    assert!(
-        !manifests_before.contains(&candidate_key),
-        "the candidate claimed an object no earlier publication wrote"
-    );
-    assert!(store
-        .head(&candidate_key)
-        .await
-        .expect("head published manifest")
-        .is_some());
-    let response = new_query(&store, &namespace_id, &request("publication race needle"))
-        .await
-        .expect("query follows the published pointer");
-    assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].path, "/needle.txt");
-
-    // And the retention above was the grace window, not an inert pass: past
-    // it, the superseded manifest goes and the published one stays.
-    let aged = worker(&store)
-        .await
-        .garbage_collect_namespace(
-            &namespace_id,
-            published_at_ms + GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions::default(),
-        )
-        .await
-        .expect("collection pass after the grace window");
-    assert!(aged.deleted_other_objects >= 1);
-    assert!(store
-        .head(&candidate_key)
-        .await
-        .expect("head published manifest")
-        .is_some());
-}
-
-#[tokio::test]
-async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_keyspaces() {
-    let temp_dir = tempdir().expect("tempdir");
-    let aged_store = Arc::new(RecordingStore::new(
-        MetadataMapStore::aged(
-            LocalFsStore::new(temp_dir.path()).expect("local store"),
-            KeyPredicate::any(),
-        ),
-        KeyPredicate::any(),
-    ));
-    let store: SharedObjectStore = aged_store.clone();
-    let live_namespace = NamespaceId::parse("gc-live").expect("namespace id");
-    let deleted_namespace = NamespaceId::parse("gc-deleted").expect("namespace id");
-    let corrupt_namespace = NamespaceId::parse("gc-corrupt").expect("namespace id");
-    let absent_namespace = NamespaceId::parse("gc-absent").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("gc-writer")
-        .min_publish_interval_ms(0)
-        .build()
-        .await
-        .expect("writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("gc-maintenance")
-        .build()
-        .await
-        .expect("maintenance");
-    for namespace_id in [&live_namespace, &deleted_namespace, &corrupt_namespace] {
-        writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-        writer
-            .put_file_bytes(
-                namespace_id,
-                "/needle.txt",
-                b"gc needle\n",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect("write file");
-    }
-    let worker = worker(&store).await;
-    for namespace_id in [&live_namespace, &deleted_namespace, &corrupt_namespace] {
-        worker.enable(namespace_id).await.expect("enable");
-        drive_worker_to_current(&worker, namespace_id, GramIndexBuildPolicy::default()).await;
-    }
-    let live_root = load_grep_root(&*store, &live_namespace)
-        .await
-        .expect("load live root")
-        .expect("root exists");
-    let live_segment_key = segment_key(
-        &live_namespace,
-        &live_root.manifest_state().segments()[0].segment_id,
-    );
-    let live_manifest_key = manifest_key(&live_namespace, live_root.manifest_object_id());
-    let orphan_key = segment_key(&live_namespace, &IndexSegmentId::generate());
-    store
-        .put(
-            &orphan_key,
-            Bytes::from_static(b"orphan"),
-            PutMode::CreateIfAbsent,
-        )
-        .await
-        .expect("write orphan");
-    let non_grep_key = format!("namespaces/{live_namespace}/segments/grep_gc_sentinel.sst.zst");
-    store
-        .put(
-            &non_grep_key,
-            Bytes::from_static(b"non-grep"),
-            PutMode::CreateIfAbsent,
-        )
-        .await
-        .expect("write non-grep sentinel");
-    let absent_grep_key = segment_key(&absent_namespace, &IndexSegmentId::generate());
-    store
-        .put(
-            &absent_grep_key,
-            Bytes::from_static(b"absent-namespace grep state"),
-            PutMode::CreateIfAbsent,
-        )
-        .await
-        .expect("write absent namespace grep state");
-    let corrupt_keys = store
-        .list_prefix(&grep_prefix(&corrupt_namespace))
-        .await
-        .expect("list corrupt namespace grep state");
-    store
-        .put_overwrite(
-            &root_key(&corrupt_namespace),
-            Bytes::from_static(b"corrupt root pointer"),
-        )
-        .await
-        .expect("corrupt root pointer");
-
-    writer
-        .delete_namespace(&deleted_namespace, DeleteNamespaceOptions::default())
-        .await
-        .expect("delete namespace");
-    let enable_error = worker
-        .enable(&deleted_namespace)
-        .await
-        .expect_err("a deleted namespace cannot enable grep");
-    assert_eq!(enable_error.code(), ErrorCode::NamespaceDeleted);
-    let live_report = worker
-        .garbage_collect_namespace(
-            &live_namespace,
-            GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions::default(),
-        )
-        .await
-        .expect("collect live namespace");
-    let deleted_report = worker
-        .garbage_collect_namespace(
-            &deleted_namespace,
-            GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions::default(),
-        )
-        .await
-        .expect("collect deleted namespace");
-    let corrupt_report = worker
-        .garbage_collect_namespace(
-            &corrupt_namespace,
-            GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions::default(),
-        )
-        .await
-        .expect("collect corrupt namespace");
-    let absent_report = worker
-        .garbage_collect_namespace(
-            &absent_namespace,
-            GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions::default(),
-        )
-        .await
-        .expect("collect absent namespace");
-    assert!(live_report.deleted_segments >= 1);
-    assert!(deleted_report.namespace_reaped);
-    assert!(absent_report.namespace_reaped);
-    assert!(corrupt_report.namespace_degraded);
-    assert!(store
-        .head(&live_segment_key)
-        .await
-        .expect("head live")
-        .is_some());
-    assert!(store
-        .head(&live_manifest_key)
-        .await
-        .expect("head live manifest")
-        .is_some());
-    assert_eq!(
-        store
-            .list_prefix(&manifests_prefix(&live_namespace))
-            .await
-            .expect("list retained live manifests"),
-        vec![live_manifest_key],
-        "only the root-referenced manifest remains live"
-    );
-    assert!(store
-        .head(&orphan_key)
-        .await
-        .expect("head orphan")
-        .is_none());
-    assert!(store
-        .list_prefix(&grep_prefix(&deleted_namespace))
-        .await
-        .expect("list deleted grep prefix")
-        .is_empty());
-    assert!(store
-        .list_prefix(&grep_prefix(&absent_namespace))
-        .await
-        .expect("list absent grep prefix")
-        .is_empty());
-    for key in corrupt_keys {
-        assert!(
-            store
-                .head(&key)
-                .await
-                .expect("head degraded-retained key")
-                .is_some(),
-            "corrupt live grep state must degrade to retention for `{key}`"
-        );
-    }
-    assert!(store
-        .head(&non_grep_key)
-        .await
-        .expect("head sentinel")
-        .is_some());
-
-    let core_only_grep_key = segment_key(&live_namespace, &IndexSegmentId::generate());
-    store
-        .put(
-            &core_only_grep_key,
-            Bytes::from_static(b"core-must-ignore"),
-            PutMode::CreateIfAbsent,
-        )
-        .await
-        .expect("write grep sentinel");
-    aged_store.reset();
-    maintenance
-        .gc_namespace(&live_namespace, &GcConfig::default())
-        .await
-        .expect("core gc");
-    let listed_prefixes: Vec<_> = aged_store
-        .take()
-        .into_iter()
-        .filter_map(|operation| match operation {
-            RecordedOperation::List { prefix } => Some(prefix),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        listed_prefixes,
-        vec![
-            checkpoint_prefix(&live_namespace),
-            metadata_manifest_prefix(&live_namespace),
-            wal_segment_prefix(&live_namespace),
-            metadata_segment_prefix(&live_namespace),
-            checkpoint_prefix(&live_namespace),
-            upload_session_prefix(&live_namespace),
-        ],
-        "core GC must list only its own core prefixes"
-    );
-    assert!(
-        store
-            .head(&core_only_grep_key)
-            .await
-            .expect("head grep sentinel")
-            .is_some(),
-        "core GC must not learn grep keys"
-    );
-    writer.shutdown().await.expect("shutdown");
-}
-
-/// Seeds one namespace with an index plus a fixed set of aged orphans, so
-/// two stores can be built identically and collected differently.
-async fn seed_collectable_namespace(root: &Path, namespace_id: &NamespaceId) -> SharedObjectStore {
-    let store: SharedObjectStore = Arc::new(MetadataMapStore::aged(
-        LocalFsStore::new(root).expect("local store"),
-        KeyPredicate::any(),
-    ));
-    let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("gc-budget-writer")
-        .min_publish_interval_ms(0)
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
-    for index in 0..4u32 {
-        writer
-            .put_file_bytes(
-                namespace_id,
-                &format!("/file-{index}.txt"),
-                format!("budget needle {index}\n").as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect("write file");
-    }
-    let worker = worker(&store).await;
-    worker.enable(namespace_id).await.expect("enable");
-    drive_worker_to_current(&worker, namespace_id, GramIndexBuildPolicy::default()).await;
-    for orphan_key in orphan_keys(namespace_id) {
-        store
-            .put(
-                &orphan_key,
-                Bytes::from_static(b"orphan"),
-                PutMode::CreateIfAbsent,
-            )
-            .await
-            .expect("write orphan");
-    }
-    writer.shutdown().await.expect("shutdown");
-    store
-}
-
-/// Aged, unreferenced segment keys with fixed ids, so two independently
-/// seeded stores hold the same collectable garbage under the same names —
-/// the live segment and manifest object ids are minted and cannot match.
-fn orphan_keys(namespace_id: &NamespaceId) -> Vec<String> {
-    (0..6u8)
-        .map(|index| {
-            let orphan =
-                IndexSegmentId::parse(format!("idx_{index:032x}")).expect("orphan segment id");
-            segment_key(namespace_id, &orphan)
-        })
-        .collect()
-}
-
-#[tokio::test]
-async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
-    let namespace_id = NamespaceId::parse("gc-budget").expect("namespace id");
-    let whole_dir = tempdir().expect("tempdir");
-    let paged_dir = tempdir().expect("tempdir");
-    let whole_store = seed_collectable_namespace(whole_dir.path(), &namespace_id).await;
-    let paged_store = seed_collectable_namespace(paged_dir.path(), &namespace_id).await;
-    let now_ms = GREP_GC_GRACE_WINDOW_MS + 1;
-    let orphans = orphan_keys(&namespace_id);
-    let whole_before = whole_store
-        .list_prefix(&grep_prefix(&namespace_id))
-        .await
-        .expect("list whole-store keys");
-    let paged_before = paged_store
-        .list_prefix(&grep_prefix(&namespace_id))
-        .await
-        .expect("list paged-store keys");
-    // The live segment and manifest object ids are minted and differ
-    // between the two stores; what must match is how many keys there are
-    // and which of them are collectable.
-    assert_eq!(
-        whole_before.len(),
-        paged_before.len(),
-        "the two stores must start alike for the comparison to mean anything"
-    );
-    for orphan in &orphans {
-        assert!(whole_before.contains(orphan) && paged_before.contains(orphan));
-    }
-
-    let whole = worker(&whole_store)
-        .await
-        .garbage_collect_namespace(&namespace_id, now_ms, &GrepGcOptions::default())
-        .await
-        .expect("collect the whole prefix");
-    assert_eq!(whole.next_cursor, None);
-    assert!(whole.deleted_segments >= 6, "{whole:?}");
-
-    let paged_worker = worker(&paged_store).await;
-    let mut paged = GrepGcReport::default();
-    let mut request = GrepGcOptions {
-        max_objects: Some(1),
-        cursor: None,
-    };
-    let mut passes = 0;
-    loop {
-        let pass = paged_worker
-            .garbage_collect_namespace(&namespace_id, now_ms, &request)
-            .await
-            .expect("collect one page");
-        passes += 1;
-        assert!(passes < 256, "the cursor loop must terminate");
-        paged.deleted_segments += pass.deleted_segments;
-        paged.deleted_other_objects += pass.deleted_other_objects;
-        paged.retained_candidates += pass.retained_candidates;
-        paged.namespace_reaped |= pass.namespace_reaped;
-        paged.namespace_degraded |= pass.namespace_degraded;
-        let Some(next_cursor) = pass.next_cursor else {
-            break;
-        };
-        request.cursor = Some(next_cursor);
-    }
-    assert!(
-        passes > 1,
-        "a one-read budget must stop the pass before the prefix ends"
-    );
-
-    assert_eq!(
-        (
-            paged.deleted_segments,
-            paged.deleted_other_objects,
-            paged.retained_candidates,
-            paged.namespace_reaped,
-            paged.namespace_degraded,
-        ),
-        (
-            whole.deleted_segments,
-            whole.deleted_other_objects,
-            whole.retained_candidates,
-            whole.namespace_reaped,
-            whole.namespace_degraded,
-        ),
-        "resuming under a budget must decide exactly what one pass decides"
-    );
-    let whole_after = whole_store
-        .list_prefix(&grep_prefix(&namespace_id))
-        .await
-        .expect("list surviving whole-store keys");
-    let paged_after = paged_store
-        .list_prefix(&grep_prefix(&namespace_id))
-        .await
-        .expect("list surviving paged-store keys");
-    assert_eq!(
-        whole_after.len(),
-        paged_after.len(),
-        "the two collections must leave the same amount behind"
-    );
-    for orphan in &orphans {
-        assert!(
-            !whole_after.contains(orphan) && !paged_after.contains(orphan),
-            "both collections must reach `{orphan}`"
-        );
-    }
-}
-
-#[tokio::test]
-async fn the_collection_budget_shares_reverification_across_a_candidate_chunk() {
-    let namespace_id = NamespaceId::parse("gc-charge").expect("namespace id");
-    let temp_dir = tempdir().expect("tempdir");
-    let store = seed_collectable_namespace(temp_dir.path(), &namespace_id).await;
-    let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("gc-charge-writer")
-        .min_publish_interval_ms(0)
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
-        .await
-        .expect("delete namespace");
-    writer.shutdown().await.expect("shutdown");
-    let keys_before = store
-        .list_prefix(&grep_prefix(&namespace_id))
-        .await
-        .expect("list keys");
-    assert!(keys_before.len() > 2, "{keys_before:?}");
-
-    // Stop the pass before it can reclaim every key.
-    const BUDGET: u64 = 7;
-    let pass = worker(&store)
-        .await
-        .garbage_collect_namespace(
-            &namespace_id,
-            GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions {
-                max_objects: Some(BUDGET),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("collect under a seven-read budget");
-    let reclaimed = pass.deleted_segments + pass.deleted_other_objects;
-    assert!(
-        reclaimed > BUDGET / 3,
-        "one liveness read must authorize a chunk of candidate decisions: {pass:?}"
-    );
-    assert!(pass.next_cursor.is_some(), "{pass:?}");
-    assert_eq!(
-        store
-            .list_prefix(&grep_prefix(&namespace_id))
-            .await
-            .expect("list keys after the bounded pass")
-            .len(),
-        keys_before.len() - usize::try_from(reclaimed).expect("a reclaimed count fits a usize"),
-        "the pass deleted exactly the keys it reported"
-    );
-}
-
-#[tokio::test]
-async fn a_budget_too_small_for_one_key_still_advances_the_cursor() {
-    let namespace_id = NamespaceId::parse("gc-progress").expect("namespace id");
-    let temp_dir = tempdir().expect("tempdir");
-    let store = seed_collectable_namespace(temp_dir.path(), &namespace_id).await;
-    let worker = worker(&store).await;
-    let first = worker
-        .garbage_collect_namespace(
-            &namespace_id,
-            GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions {
-                max_objects: Some(1),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("collect under a one-read budget");
-    let cursor = first.next_cursor.expect("a stopped pass resumes somewhere");
-    let second = worker
-        .garbage_collect_namespace(
-            &namespace_id,
-            GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions {
-                max_objects: Some(1),
-                cursor: Some(cursor.clone()),
-            },
-        )
-        .await
-        .expect("collect the next page");
-    assert_ne!(
-        second.next_cursor.as_ref(),
-        Some(&cursor),
-        "a resumed pass must not hand back the position it was given"
-    );
-}
-
-#[tokio::test]
-async fn a_collection_cursor_is_refused_outside_the_namespace_that_minted_it() {
-    let namespace_id = NamespaceId::parse("gc-cursor").expect("namespace id");
-    let other_namespace = NamespaceId::parse("gc-cursor-other").expect("namespace id");
-    let temp_dir = tempdir().expect("tempdir");
-    let store = seed_collectable_namespace(temp_dir.path(), &namespace_id).await;
-    let worker = worker(&store).await;
-    let cursor = worker
-        .garbage_collect_namespace(
-            &namespace_id,
-            GREP_GC_GRACE_WINDOW_MS + 1,
-            &GrepGcOptions {
-                max_objects: Some(1),
-                cursor: None,
-            },
-        )
-        .await
-        .expect("collect one page")
-        .next_cursor
-        .expect("a stopped pass carries a resume cursor");
-
-    for (namespace, token) in [
-        (&other_namespace, cursor.clone()),
-        (&namespace_id, "not-a-cursor".to_owned()),
-    ] {
-        let error = worker
-            .garbage_collect_namespace(
-                namespace,
-                GREP_GC_GRACE_WINDOW_MS + 1,
-                &GrepGcOptions {
-                    max_objects: None,
-                    cursor: Some(token),
-                },
-            )
-            .await
-            .expect_err("a foreign or malformed cursor is refused");
-        assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    }
-}
-
-#[tokio::test]
 async fn a_backfilling_root_never_reports_a_built_through_sequence() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
@@ -2749,5 +2070,289 @@ async fn a_backfilling_root_never_reports_a_built_through_sequence() {
     assert!(!serde_json::to_string(&active)
         .expect("serialize the active API lifecycle")
         .contains("target_seq"));
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn enable_disable_and_cached_queries_use_numbered_publication() {
+    use loonfs_api::ManifestNo;
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("numbered-query").expect("namespace");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(grep_prefix(&namespace_id)),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("numbered-grep-tests")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("namespace");
+    let host = GrepHost::new(&store, "numbered-query").await;
+    host.worker.enable(&namespace_id).await.expect("enable");
+    let writes: Vec<_> = recording
+        .take()
+        .into_iter()
+        .filter(|operation| matches!(operation, RecordedOperation::Put { .. }))
+        .collect();
+    assert_eq!(writes.len(), 2);
+    for (operation, expected_key) in writes.iter().zip([
+        hint_key(&namespace_id),
+        manifest_key(&namespace_id, &ManifestNo(1)),
+    ]) {
+        assert!(
+            matches!(operation, RecordedOperation::Put { key, mode: PutMode::CreateIfAbsent, .. } if key == &expected_key)
+        );
+    }
+    host.worker
+        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .await
+        .expect("empty backfill");
+    let grep_request = request("needle");
+    grep_with(
+        &host.service,
+        &host.reader,
+        &store,
+        &namespace_id,
+        &grep_request,
+        default_page_limit(),
+    )
+    .await
+    .expect("cold query");
+    recording.reset();
+    grep_with(
+        &host.service,
+        &host.reader,
+        &store,
+        &namespace_id,
+        &grep_request,
+        default_page_limit(),
+    )
+    .await
+    .expect("warm query");
+    assert_eq!(
+        recording.take(),
+        vec![RecordedOperation::Head {
+            key: manifest_key(&namespace_id, &ManifestNo(3))
+        }]
+    );
+    host.worker.disable(&namespace_id).await.expect("disable");
+    assert_eq!(
+        load_current_grep_manifest(&*store, &namespace_id)
+            .await
+            .expect("discover")
+            .expect("manifest")
+            .manifest_no(),
+        ManifestNo(3)
+    );
+    assert!(matches!(
+        grep_with(
+            &host.service,
+            &host.reader,
+            &store,
+            &namespace_id,
+            &grep_request,
+            default_page_limit()
+        )
+        .await,
+        Err(GrepError::NotEnabled)
+    ));
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn gc_preserves_discovery_and_applies_successor_and_segment_age_rules() {
+    use loonfs::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs_api::ManifestNo;
+    use loonfs_grep::root::encode_grep_manifest;
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("numbered-gc").expect("namespace");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let aged = MetadataMapStore::aged(
+        base.clone(),
+        KeyPredicate::prefix(grep_prefix(&namespace_id)),
+    );
+    let young_successor = MetadataMapStore::new(
+        aged,
+        KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(2))),
+        |mut metadata| {
+            metadata.last_modified_ms =
+                Some(UNREFERENCED_SEGMENT_MIN_AGE_MS - GREP_GC_GRACE_WINDOW_MS + 1);
+            metadata
+        },
+    );
+    let recording = Arc::new(RecordingStore::new(young_successor, KeyPredicate::any()));
+    let store: SharedObjectStore = recording.clone();
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("numbered-grep-tests")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("namespace");
+    let obsolete = crate::golden_formats::segment_ref(1, 1, 0, 0);
+    let live = crate::golden_formats::segment_ref(2, 2, 0, 0);
+    for segment in [&obsolete, &live] {
+        store
+            .put_if_absent(
+                &segment_key(&namespace_id, &segment.segment_id),
+                Bytes::from_static(b"segment"),
+            )
+            .await
+            .expect("segment");
+    }
+    for number in 1..=4 {
+        let segments = if number <= 2 {
+            vec![obsolete.clone()]
+        } else {
+            vec![live.clone()]
+        };
+        let state = GrepManifestState::new(
+            namespace_id.clone(),
+            ManifestNo(number),
+            GrepIndexStatus::Active {
+                built_through_seq: ChangeSeq(0),
+                next_event_index: 0,
+            },
+            GrepIndexState {
+                reorganize: None,
+                next_run_no: RunNo(3),
+            },
+            segments,
+        )
+        .expect("manifest state");
+        store
+            .put_if_absent(
+                &manifest_key(&namespace_id, &ManifestNo(number)),
+                Bytes::from(
+                    encode_grep_manifest(state)
+                        .expect("encode manifest")
+                        .into_bytes(),
+                ),
+            )
+            .await
+            .expect("manifest");
+    }
+    write_hint(&*store, &namespace_id, ManifestNo(2)).await;
+    let collector = worker(&store).await;
+    recording.reset();
+    let young = collector
+        .garbage_collect_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS)
+        .await
+        .expect("young pass");
+    assert_eq!(
+        (young.deleted_segments, young.deleted_other_objects),
+        (0, 0)
+    );
+    assert_eq!(recording.counts().deletes, 0);
+    let aged = collector
+        .garbage_collect_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1)
+        .await
+        .expect("aged pass");
+    assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 1));
+    assert!(store
+        .head(&manifest_key(&namespace_id, &ManifestNo(1)))
+        .await
+        .expect("head")
+        .is_none());
+    for number in 2..=4 {
+        assert!(store
+            .head(&manifest_key(&namespace_id, &ManifestNo(number)))
+            .await
+            .expect("head")
+            .is_some());
+    }
+    assert!(store
+        .head(&segment_key(&namespace_id, &live.segment_id))
+        .await
+        .expect("head")
+        .is_some());
+    let failing = Arc::new(FailStore::new(
+        store.clone(),
+        KeyPredicate::exact(hint_key(&namespace_id)),
+        OperationClass::Read,
+        InjectedError::Transport("unreadable hint".to_owned()),
+    ));
+    failing.fail_all();
+    let failing_store: SharedObjectStore = failing;
+    recording.reset();
+    assert!(matches!(
+        worker(&failing_store)
+            .await
+            .garbage_collect_namespace(&namespace_id, u64::MAX)
+            .await,
+        Err(GrepError::StoreUnavailable { .. })
+    ));
+    assert_eq!(recording.counts().deletes, 0);
+    let unknown = format!("{}unrecognized", segments_prefix(&namespace_id));
+    store
+        .put_if_absent(&unknown, Bytes::from_static(b"unknown"))
+        .await
+        .expect("unknown key");
+    store
+        .put_overwrite(
+            &hint_key(&namespace_id),
+            Bytes::from_static(b"invalid hint"),
+        )
+        .await
+        .expect("corrupt hint");
+    recording.reset();
+    assert!(matches!(
+        collector
+            .garbage_collect_namespace(&namespace_id, u64::MAX)
+            .await,
+        Err(GrepError::CorruptIndex { .. })
+    ));
+    assert_eq!(recording.counts().deletes, 0);
+    writer
+        .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
+        .await
+        .expect("tombstone");
+    let core_keys: Vec<_> = store
+        .list_prefix(&format!("namespaces/{namespace_id}/"))
+        .await
+        .expect("core keys")
+        .into_iter()
+        .filter(|key| !key.starts_with(&grep_prefix(&namespace_id)))
+        .collect();
+    let reaped = collector
+        .garbage_collect_namespace(&namespace_id, u64::MAX)
+        .await
+        .expect("reap tombstone");
+    assert!(reaped.namespace_reaped);
+    assert!(store
+        .list_prefix(&grep_prefix(&namespace_id))
+        .await
+        .expect("grep keys")
+        .is_empty());
+    assert_eq!(
+        store
+            .list_prefix(&format!("namespaces/{namespace_id}/"))
+            .await
+            .expect("core keys"),
+        core_keys
+    );
+    let absent = NamespaceId::parse("absent-gc").expect("namespace");
+    store
+        .put_if_absent(
+            &format!("{}leftover", grep_prefix(&absent)),
+            Bytes::from_static(b"leftover"),
+        )
+        .await
+        .expect("absent extension");
+    assert!(
+        worker(&store)
+            .await
+            .garbage_collect_namespace(&absent, u64::MAX)
+            .await
+            .expect("reap absent")
+            .namespace_reaped
+    );
     writer.shutdown().await.expect("shutdown");
 }

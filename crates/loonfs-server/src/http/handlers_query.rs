@@ -47,7 +47,7 @@ pub(super) struct GrepQuery {
         path = "/v0/namespaces/{namespace_id}/grep",
         tag = "query",
         summary = "Content search",
-        description = "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep root.",
+        description = "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep index.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("pattern" = String, Query, description = "Pattern in the Rust `regex` crate's dialect. Its UTF-8 encoding must be at most 1024 bytes."),
@@ -162,14 +162,14 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
         tag = "maintenance",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
+        description = "Enables the namespace's grep index and asks this deployment's maintenance runner for the backfill's first step. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Grep root enabled or already enabled", body = GrepIndex),
+            (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
+            (status = 409, description = "Lost a grep manifest publication race; retry", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
             crate::http::openapi::UnavailableResponses
@@ -189,7 +189,7 @@ pub(super) async fn enable_grep_index(
     match outcome {
         GrepEnableOutcome::Enabled { .. } | GrepEnableOutcome::AlreadyEnabled { .. } => {}
         GrepEnableOutcome::Superseded => {
-            return Err(grep_root_conflict(&namespace_id));
+            return Err(grep_publication_conflict());
         }
     }
     // Read after the transition so every index endpoint reports bookkeeping
@@ -251,14 +251,14 @@ async fn read_grep_index_status(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
         tag = "maintenance",
         summary = "Disable the grep index",
-        description = "Disables the namespace's grep root and clears its segment references with one durable compare-and-swap; index maintenance stops on its own once a step reads the disabled root. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
+        description = "Disables the namespace's grep index by publishing the next manifest number with no segment references. Index maintenance stops when a step reads the disabled manifest. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Grep root disabled or already disabled", body = GrepIndex),
+            (status = 200, description = "Grep index disabled or already disabled", body = GrepIndex),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
+            (status = 409, description = "Lost a grep manifest publication race; retry", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
             crate::http::openapi::UnavailableResponses
@@ -270,11 +270,6 @@ pub(super) async fn disable_grep_index(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    // Disabling is one durable compare-and-swap and nothing else. A step
-    // already running loses its own publication race to this one and
-    // retries; the retry reads a disabled root, concludes there is nothing
-    // to maintain, and the runner forgets the namespace. Nothing here waits
-    // on a background task to notice.
     let outcome = state
         .grep_worker()
         .disable(&namespace_id)
@@ -283,11 +278,9 @@ pub(super) async fn disable_grep_index(
     match outcome {
         GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {}
         GrepDisableOutcome::Superseded => {
-            return Err(grep_root_conflict(&namespace_id));
+            return Err(grep_publication_conflict());
         }
     }
-    // The disabled root retains genuine index bookkeeping, so read it after
-    // the transition instead of synthesizing counters here.
     Ok(Json(read_grep_index_status(&state, &namespace_id).await?))
 }
 
@@ -303,7 +296,7 @@ pub(super) async fn disable_grep_index(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
         tag = "maintenance",
         summary = "Collect grep index garbage",
-        description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. `max_objects` bounds the reads the pass spends and returns a `next_cursor` when keys remain; resuming re-reads liveness and the grep root, so a cursor only skips enumeration. Requires this deployment to maintain the grep index.",
+        description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped. Every call reads durable roots and completes one pass. Unreadable or invalid roots fail before deletion. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         // A reference body is optional in utoipa; its value is an object.
         request_body(content = ref("#/components/schemas/GrepGcRequest")),
@@ -321,19 +314,11 @@ pub(super) async fn gc_grep_index(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    OptionalAppJson(request): OptionalAppJson<GrepGcRequest>,
+    OptionalAppJson(_request): OptionalAppJson<GrepGcRequest>,
 ) -> Result<Json<GrepGcResponse>, ApiResponseError> {
-    let request = request.unwrap_or_default();
     let report = state
         .grep_worker()
-        .garbage_collect_namespace(
-            &namespace_id,
-            current_unix_ms()?,
-            &loonfs_grep::GrepGcOptions {
-                max_objects: request.max_objects,
-                cursor: request.cursor,
-            },
-        )
+        .garbage_collect_namespace(&namespace_id, current_unix_ms()?)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(GrepGcResponse {
@@ -342,8 +327,6 @@ pub(super) async fn gc_grep_index(
         deleted_other_objects: report.deleted_other_objects,
         namespace_reaped: report.namespace_reaped,
         retained_candidates: report.retained_candidates,
-        namespace_degraded: report.namespace_degraded,
-        next_cursor: report.next_cursor,
     }))
 }
 
@@ -370,11 +353,9 @@ fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> A
     }
 }
 
-fn grep_root_conflict(namespace_id: &NamespaceId) -> ApiResponseError {
-    map_grep_error(
-        namespace_id,
-        GrepError::PublicationConflict {
-            object_key: loonfs_grep::keyspace::root_key(namespace_id),
-        },
+fn grep_publication_conflict() -> ApiResponseError {
+    ApiResponseError::new(
+        loonfs_api::ErrorCode::StaleHead,
+        "grep index publication conflict; retry",
     )
 }

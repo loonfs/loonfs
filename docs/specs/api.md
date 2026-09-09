@@ -165,7 +165,7 @@ hoc.
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `filesystem.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
-| `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
+| `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep manifest, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `maintenance/v0`'s only feature key is `maintenance.grep.index`; the rest of that API group
 is required ops.
@@ -795,9 +795,17 @@ The table below lists the retry class for every v0 operation.
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable`; idempotent |
 | Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable`; idempotent |
-| Collect grep index garbage | `gc_grep_index` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/gc`; supports `max_objects` and `next_cursor` |
+| Collect grep index garbage | `gc_grep_index` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/gc`; completes one pass with body `{}` |
 | Test object storage | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe` with body `{}` |
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
+
+Grep index GC reads durable roots on each call and completes one pass over
+the namespace's grep manifests and segments. Its request body is `{}`.
+Its response carries `namespace_id`, `deleted_segments`,
+`deleted_other_objects`, `namespace_reaped`, and `retained_candidates`.
+Unreadable or invalid roots fail before deletion. A tombstoned or absent
+namespace has its aged grep prefix reaped. The retention and age rules are
+in format section 4.2.2.
 
 The status, enable, and disable routes all return one flat grep index object:
 `namespace_id`, lifecycle fields tagged by `status`, `next_run_no`, and
@@ -1028,7 +1036,7 @@ namespace's owner prefix, including a delete that finds the key already absent.
 A retry can repeat a count; these are attempt counts, not a count of distinct
 objects.
 
-Every GC response also carries `retained`, which is `retained_candidates`
+Every core GC response also carries `retained`, which is `retained_candidates`
 split by the decision that spared each candidate. The reasons are a closed
 set, so every field is always present and a zero means nothing was kept for
 that reason, and the fields sum to the total:

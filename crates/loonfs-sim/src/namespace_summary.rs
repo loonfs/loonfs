@@ -15,7 +15,7 @@ pub struct SimNamespaceObjectSummary {
     pub wal_objects: usize,
     pub manifest_objects: usize,
     pub compacted_metadata_objects: usize,
-    pub grep_root_objects: usize,
+    pub grep_hint_objects: usize,
     pub grep_manifest_objects: usize,
     pub grep_segment_objects: usize,
 }
@@ -33,7 +33,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
         wal_objects: 0,
         manifest_objects: 0,
         compacted_metadata_objects: 0,
-        grep_root_objects: 0,
+        grep_hint_objects: 0,
         grep_manifest_objects: 0,
         grep_segment_objects: 0,
     };
@@ -73,7 +73,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
         }
         summary.namespace_objects += 1;
         match parsed.kind {
-            GrepKeyKind::Root => summary.grep_root_objects += 1,
+            GrepKeyKind::Hint => summary.grep_hint_objects += 1,
             GrepKeyKind::Manifest { .. } => summary.grep_manifest_objects += 1,
             GrepKeyKind::Segment { .. } => summary.grep_segment_objects += 1,
         }
@@ -87,8 +87,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use loonfs_api::IndexSegmentId;
-    use loonfs_grep::keyspace::{manifest_key, root_key, segment_key};
-    use loonfs_grep::root::GrepManifestObjectId;
+    use loonfs_grep::keyspace::{hint_key, manifest_key, segment_key};
     use loonfs_objectstore::keys::{hint, wal_segment};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
 
@@ -110,15 +109,13 @@ mod tests {
             .await
             .expect("wal");
         store
-            .put_overwrite(&root_key(&namespace_id), Bytes::from_static(b"grep root"))
+            .put_overwrite(&hint_key(&namespace_id), Bytes::from_static(b"grep hint"))
             .await
-            .expect("grep root");
-        let grep_manifest_object_id =
-            GrepManifestObjectId::parse("gmf_0123456789abcdef0123456789abcdef")
-                .expect("valid grep manifest object id");
+            .expect("grep hint");
+        let grep_manifest_no = loonfs_api::ManifestNo(1);
         store
             .put_overwrite(
-                &manifest_key(&namespace_id, &grep_manifest_object_id),
+                &manifest_key(&namespace_id, &grep_manifest_no),
                 Bytes::from_static(b"grep manifest"),
             )
             .await
@@ -139,7 +136,7 @@ mod tests {
         assert_eq!(summary.namespace_objects, 5);
         assert_eq!(summary.control_objects, 1);
         assert_eq!(summary.wal_objects, 1);
-        assert_eq!(summary.grep_root_objects, 1);
+        assert_eq!(summary.grep_hint_objects, 1);
         assert_eq!(summary.grep_manifest_objects, 1);
         assert_eq!(summary.grep_segment_objects, 1);
     }

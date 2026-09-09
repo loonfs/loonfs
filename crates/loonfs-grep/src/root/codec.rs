@@ -1,44 +1,43 @@
 //! Grep's durable families share framing and checksum rules with the filesystem.
 
 use super::error::GrepEnvelopeCodecError;
-use super::state::{GrepManifestState, GrepRootPointer};
+use super::state::{GrepHint, GrepManifestState};
 use loonfs_api::wire::envelope::{
     decode_json_envelope, encode_json_envelope, verify_kind, EncodedEnvelope, VerifiedEnvelope,
 };
 
-/// Durable kind string for a grep root-pointer envelope.
-pub const GREP_ROOT_KIND: &str = "grep_root";
+/// Durable kind string for a grep hint envelope.
+pub const GREP_HINT_KIND: &str = "grep_hint";
 /// Durable kind string for a grep manifest envelope.
 pub const GREP_MANIFEST_KIND: &str = "grep_manifest";
-/// Sole root-pointer format version this build reads and writes.
-pub const GREP_ROOT_FORMAT_VERSION: u32 = 1;
+/// Sole hint format version this build reads and writes.
+pub const GREP_HINT_FORMAT_VERSION: u32 = 1;
 /// Sole manifest format version this build reads and writes.
 pub const GREP_MANIFEST_FORMAT_VERSION: u32 = 1;
 
-/// Verified in-memory representation of one grep root-pointer envelope.
-pub type GrepRootEnvelope = VerifiedEnvelope<GrepRootPointer>;
+/// Verified in-memory representation of one grep hint envelope.
+pub type GrepHintEnvelope = VerifiedEnvelope<GrepHint>;
 /// Verified in-memory representation of one immutable grep manifest.
-/// Its identity is the key named by the root pointer.
 pub type GrepManifestEnvelope = VerifiedEnvelope<GrepManifestState>;
 
-/// Encodes a root pointer and derives its framing from the exact payload bytes.
-pub fn encode_grep_root(
-    pointer: GrepRootPointer,
-) -> Result<EncodedEnvelope<GrepRootPointer>, GrepEnvelopeCodecError> {
+/// Encodes a hint and derives its framing from the exact payload bytes.
+pub fn encode_grep_hint(
+    hint: GrepHint,
+) -> Result<EncodedEnvelope<GrepHint>, GrepEnvelopeCodecError> {
     Ok(encode_json_envelope(
-        GREP_ROOT_KIND,
-        GREP_ROOT_FORMAT_VERSION,
-        pointer,
+        GREP_HINT_KIND,
+        GREP_HINT_FORMAT_VERSION,
+        hint,
     )?)
 }
 
-/// Decodes only the current root-pointer format and verifies exact payload bytes.
-/// Unknown fields are rejected because publication writes successor pointers.
-pub fn decode_grep_root(bytes: &[u8]) -> Result<GrepRootEnvelope, GrepEnvelopeCodecError> {
+/// Decodes only the current hint format and verifies exact payload bytes.
+/// Unknown fields are rejected because publication writes successor hints.
+pub fn decode_grep_hint(bytes: &[u8]) -> Result<GrepHintEnvelope, GrepEnvelopeCodecError> {
     Ok(decode_json_envelope(
         bytes,
-        GREP_ROOT_FORMAT_VERSION,
-        |found| verify_kind(GREP_ROOT_KIND, found),
+        GREP_HINT_FORMAT_VERSION,
+        |found| verify_kind(GREP_HINT_KIND, found),
     )?)
 }
 

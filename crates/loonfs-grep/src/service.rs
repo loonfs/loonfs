@@ -12,8 +12,8 @@ use crate::keyspace::{manifest_key, segment_key};
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
 use crate::root::{
-    load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepIndexStatus,
-    GrepManifestState, GrepSegmentRef,
+    load_current_grep_manifest, ChangeFeedResume, GrepIndexStatus, GrepManifestState,
+    GrepSegmentRef,
 };
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
@@ -31,7 +31,7 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 /// Unindexed-tail revisions one query will scan exhaustively before
 /// failing with `index_lagging` (or skipping the tail under `allow_stale`).
@@ -74,6 +74,7 @@ pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 #[derive(Debug)]
 pub struct GrepService {
     block_cache: Arc<GrepBlockCache>,
+    current_manifests: Mutex<BTreeMap<NamespaceId, Weak<GrepManifestState>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,80 +86,74 @@ struct MaterializedGrepIndexSnapshot {
 impl GrepService {
     /// Creates a service over a host-composed process-wide grep block cache.
     pub fn new(block_cache: Arc<GrepBlockCache>) -> Self {
-        Self { block_cache }
+        Self {
+            block_cache,
+            current_manifests: Mutex::new(BTreeMap::new()),
+        }
     }
 
-    /// Freshly loads the grep pointer, then loads or reuses its immutable
-    /// manifest.
     async fn load_index_snapshot<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
         namespace_id: &NamespaceId,
     ) -> Result<MaterializedGrepIndexSnapshot> {
-        let pointer = load_grep_root_pointer(store, namespace_id)
+        let cached = self
+            .current_manifests
+            .lock()
+            .expect("grep manifest cache lock should not be poisoned")
+            .get(namespace_id)
+            .and_then(Weak::upgrade);
+        if let Some(state) = cached {
+            let successor_present = match state.manifest_no().successor() {
+                Ok(next) => {
+                    let object_key = manifest_key(namespace_id, &next);
+                    store
+                        .head(&object_key)
+                        .await
+                        .map_err(|error| GrepError::StoreUnavailable {
+                            object_key,
+                            message: error.public_message().into_owned(),
+                            class: loonfs::StoreFailureClass::of(&error),
+                        })?
+                        .is_some()
+                }
+                Err(_) => false,
+            };
+            if !successor_present {
+                return materialized_snapshot_from_state(state);
+            }
+        }
+        let current = load_current_grep_manifest(store, namespace_id)
             .await?
             .ok_or(GrepError::NotEnabled)?;
-        let manifest_object_id = pointer.pointer().manifest_object_id();
-        let cache_key = GrepBlockCacheKey {
-            identity: pointer.pointer().manifest_payload_checksum().to_owned(),
-            block_kind: GrepBlockKind::Manifest,
-            block_offset: 0,
-        };
-        let state = match self
-            .block_cache
-            .get_or_load(&cache_key, || async {
-                let manifest = load_grep_manifest(store, namespace_id, pointer.pointer())
-                    .await?
-                    .ok_or_else(|| GrepError::CorruptIndex {
-                        message: format!(
-                            "grep root `{}` names missing manifest `{}`",
-                            pointer.object_key(),
-                            manifest_key(namespace_id, manifest_object_id)
-                        ),
-                    })?;
-                let state = Arc::new(manifest.payload().clone());
-                // As with the metadata manifest cache, JSON-backed decoded
-                // state is weighted at twice its canonical payload bytes to
-                // cover both owned strings and decoded structure overhead.
-                let decoded_bytes = serde_json::to_vec(manifest.payload())
-                    .map_err(|error| {
-                        CoreError::Internal(format!(
-                            "failed to size decoded grep manifest `{}`: {error}",
-                            manifest_key(namespace_id, manifest_object_id)
-                        ))
-                    })?
-                    .len()
-                    .saturating_mul(2);
-                Ok(DecodedGrepBlock::Manifest {
-                    manifest: state,
-                    decoded_bytes,
-                })
-            })
-            .await
+        let state = Arc::new(current.manifest_state().clone());
+        let decoded_bytes = serde_json::to_vec(current.manifest_state())
+            .map_err(|error| {
+                CoreError::Internal(format!("failed to size decoded grep manifest: {error}"))
+            })?
+            .len()
+            .saturating_mul(2);
+        self.block_cache.insert(
+            GrepBlockCacheKey {
+                identity: manifest_key(namespace_id, &state.manifest_no()),
+                block_kind: GrepBlockKind::Manifest,
+                block_offset: 0,
+            },
+            DecodedGrepBlock::Manifest {
+                manifest: state.clone(),
+                decoded_bytes,
+            },
+        );
+        let mut manifests = self
+            .current_manifests
+            .lock()
+            .expect("grep manifest cache lock should not be poisoned");
+        let entry = manifests.entry(namespace_id.clone()).or_default();
+        if entry
+            .upgrade()
+            .is_none_or(|current| current.manifest_no() < state.manifest_no())
         {
-            Ok(DecodedGrepBlock::Manifest { manifest, .. }) => manifest,
-            Ok(
-                DecodedGrepBlock::Filter { .. }
-                | DecodedGrepBlock::Index { .. }
-                | DecodedGrepBlock::Data { .. },
-            ) => {
-                return Err(GrepError::CorruptIndex {
-                    message: format!(
-                        "grep manifest `{}` resolved to a non-manifest cache entry",
-                        manifest_key(namespace_id, manifest_object_id)
-                    ),
-                });
-            }
-            Err(error) => return Err(error),
-        };
-        if state.namespace_id() != namespace_id {
-            return Err(GrepError::CorruptIndex {
-                message: format!(
-                    "grep manifest `{}` names namespace `{}` instead of requested namespace `{namespace_id}`",
-                    manifest_key(namespace_id, manifest_object_id),
-                    state.namespace_id()
-                ),
-            });
+            *entry = Arc::downgrade(&state);
         }
         materialized_snapshot_from_state(state)
     }

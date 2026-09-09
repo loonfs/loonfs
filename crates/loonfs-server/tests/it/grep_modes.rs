@@ -13,7 +13,7 @@ use loonfs_api::{
     FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
-use loonfs_grep::root::{load_grep_root, GrepIndexStatus};
+use loonfs_grep::root::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
@@ -284,7 +284,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     let disabled_response = disable_grep(&router, &namespace_id).await;
     assert_eq!(disabled_response.lifecycle, GrepIndexLifecycle::Disabled);
     assert!(!disabled_response.reorganize_pending);
-    let disabled = load_grep_root(&*store, &namespace_id)
+    let disabled = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load disabled root")
         .expect("disabled root");
@@ -295,7 +295,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     settle(&server).await;
     assert!(
         matches!(
-            load_grep_root(&*store, &namespace_id)
+            load_current_grep_manifest(&*store, &namespace_id)
                 .await
                 .expect("reload disabled root")
                 .expect("disabled root")
@@ -317,10 +317,6 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     )
     .await;
     assert_eq!(gc.namespace_id, namespace_id);
-    assert_eq!(
-        gc.next_cursor, None,
-        "an unbudgeted pass walks the whole grep keyspace"
-    );
 
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     settle(&server).await;
@@ -400,7 +396,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         )
         .await
         .expect("leave mid-backfill root");
-    let root = load_grep_root(&*store, &backfill)
+    let root = load_current_grep_manifest(&*store, &backfill)
         .await
         .expect("load root")
         .expect("backfill root");
@@ -602,7 +598,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
-    let root = load_grep_root(&*store, &namespace_id)
+    let root = load_current_grep_manifest(&*store, &namespace_id)
         .await
         .expect("load root")
         .expect("maintained root");
@@ -769,7 +765,7 @@ async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Cha
 
 /// This namespace's durable grep lifecycle, read where an operator reads it.
 async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepIndexStatus {
-    load_grep_root(&**store, namespace_id)
+    load_current_grep_manifest(&**store, namespace_id)
         .await
         .expect("load grep root")
         .expect("an enabled namespace has a grep root")

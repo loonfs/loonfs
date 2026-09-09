@@ -2204,24 +2204,6 @@
       "GrepGcRequest": {
         "additionalProperties": false,
         "description": "One explicit grep index garbage-collection pass (maintenance API group).",
-        "properties": {
-          "cursor": {
-            "description": "The opaque `next_cursor` returned by an earlier pass for the same namespace.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "max_objects": {
-            "description": "The maximum reads for this pass, or `None` for the server default.",
-            "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
         "type": "object"
       },
       "GrepGcResponse": {
@@ -2234,14 +2216,10 @@
             "type": "integer"
           },
           "deleted_segments": {
-            "description": "Unreferenced grep segments deleted after the grace window.",
+            "description": "Unreferenced grep segments older than the minimum segment age.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
-          },
-          "namespace_degraded": {
-            "description": "Whether unreadable namespace or grep state forced conservative retention.",
-            "type": "boolean"
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -2251,12 +2229,8 @@
             "description": "Whether an absent or tombstoned namespace had extension state reaped.",
             "type": "boolean"
           },
-          "next_cursor": {
-            "description": "Present when the budget stopped the pass with keys left to examine.",
-            "type": "string"
-          },
           "retained_candidates": {
-            "description": "Young or concurrently revived candidates retained by the pass.",
+            "description": "Referenced, young, or unrecognized candidates retained by the pass.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -2267,8 +2241,7 @@
           "deleted_segments",
           "deleted_other_objects",
           "namespace_reaped",
-          "retained_candidates",
-          "namespace_degraded"
+          "retained_candidates"
         ],
         "type": "object"
       },
@@ -4891,7 +4864,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable": {
       "post": {
-        "description": "Disables the namespace's grep root and clears its segment references with one durable compare-and-swap; index maintenance stops on its own once a step reads the disabled root. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
+        "description": "Disables the namespace's grep index by publishing the next manifest number with no segment references. Index maintenance stops when a step reads the disabled manifest. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
         "operationId": "disable_grep_index",
         "parameters": [
           {
@@ -4913,7 +4886,7 @@
                 }
               }
             },
-            "description": "Grep root disabled or already disabled"
+            "description": "Grep index disabled or already disabled"
           },
           "400": {
             "content": {
@@ -4953,7 +4926,7 @@
                 }
               }
             },
-            "description": "Lost a grep root-pointer publication race; retry"
+            "description": "Lost a grep manifest publication race; retry"
           },
           "500": {
             "content": {
@@ -4994,7 +4967,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable": {
       "post": {
-        "description": "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
+        "description": "Enables the namespace's grep index and asks this deployment's maintenance runner for the backfill's first step. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
         "operationId": "enable_grep_index",
         "parameters": [
           {
@@ -5016,7 +4989,7 @@
                 }
               }
             },
-            "description": "Grep root enabled or already enabled"
+            "description": "Grep index enabled or already enabled"
           },
           "400": {
             "content": {
@@ -5056,7 +5029,7 @@
                 }
               }
             },
-            "description": "Lost a grep root-pointer publication race; retry"
+            "description": "Lost a grep manifest publication race; retry"
           },
           "500": {
             "content": {
@@ -5097,7 +5070,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc": {
       "post": {
-        "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. `max_objects` bounds the reads the pass spends and returns a `next_cursor` when keys remain; resuming re-reads liveness and the grep root, so a cursor only skips enumeration. Requires this deployment to maintain the grep index.",
+        "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped. Every call reads durable roots and completes one pass. Unreadable or invalid roots fail before deletion. Requires this deployment to maintain the grep index.",
         "operationId": "gc_grep_index",
         "parameters": [
           {
@@ -6655,7 +6628,7 @@
     },
     "/v0/namespaces/{namespace_id}/grep": {
       "get": {
-        "description": "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep root.",
+        "description": "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized active grep index.",
         "operationId": "grep",
         "parameters": [
           {

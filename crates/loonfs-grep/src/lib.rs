@@ -4,8 +4,7 @@
 //! backfills files in bounded pages. Once active, it consumes the semantic
 //! change feed from the checkpoint sequence.
 //!
-//! Each step publishes the segment list and watermark with one root
-//! compare-and-swap. Failed publications leave unreferenced derived data for
+//! Each step publishes the segment list and watermark under the next manifest number. Failed publications leave unreferenced derived data for
 //! grep garbage collection. A retention gap causes a new checkpoint and
 //! backfill.
 //!
@@ -17,8 +16,7 @@ mod cache;
 pub mod codec;
 mod config;
 mod error;
-mod gc_budget;
-mod gc_cursor;
+mod gc;
 mod index_read;
 pub mod keyspace;
 mod maintenance;
@@ -39,7 +37,8 @@ pub use maintenance::{GrepGcJob, GrepMaintenanceJob, GREP_GC_JOB, GREP_INDEX_JOB
 pub use reads::NamespaceReads;
 pub use service::{GrepService, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES};
 pub use worker::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome, GrepGcOptions,
-    GrepGcReport, GrepReorganizeOutcome, GrepWorker, GREP_BACKFILL_CHECKPOINT_TTL_MS,
-    GREP_GC_GRACE_WINDOW_MS,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
+    GrepReorganizeOutcome, GrepWorker, GREP_BACKFILL_CHECKPOINT_TTL_MS,
 };
+
+pub use gc::{GrepGcReport, GREP_GC_GRACE_WINDOW_MS};

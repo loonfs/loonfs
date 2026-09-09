@@ -97,7 +97,7 @@ one gram sort together, and batches from different runs for the
 same gram are unioned by readers, so merges never need to combine
 payloads to stay correct.
 
-## Segments, manifests, and the grep root pointer
+## Segments, manifests, and the grep hint
 
 Index segments reuse the metadata segment layout described in
 `metadata-block-storage.md` — prefix-compressed keys,
@@ -110,19 +110,17 @@ block builder is generalized over the row payload to make this
 possible; metadata families keep byte-identical output.
 
 Segments live under
-`namespaces/{namespace}/extensions/grep/segments/`. The small mutable
-`extensions/grep/root.json` pointer names an immutable manifest under
-`extensions/grep/manifests/`, minted under a fresh id and bound to the
-pointer by its payload digest; that manifest records the
-query-visible segments, the lifecycle, run-number allocation, and any
-in-progress reorganization snapshot, outputs, and cursor. The pointer and
-manifests are independent of the namespace manifest, so core never has to
-understand grep state to read the filesystem.
+`namespaces/{namespace_id}/extensions/grep/segments/`. The discovery hint
+`extensions/grep/hint.json` starts a forward read of immutable numbered
+manifests under `extensions/grep/manifests/{manifest_no:020}.json`. The
+current manifest records the visible segments, lifecycle, run allocation,
+and pending reorganization. Core namespace manifests carry no grep state.
+The durable rules are in `docs/specs/format.md` section 4.2.2.
 
 Each lifecycle phase stores only its own position. The `backfilling` state
 stores the namespace sequence captured by the checkpoint and the inode after
 which the walk resumes. The `active` state stores the incremental
-`(built_through_seq, next_event_index)` cursor. A zero or absent
+`(built_through_seq, next_event_index)` cursor. A zero
 `next_event_index` is the commit boundary; a nonzero value resumes at that
 offset in the watermark commit's ordered change events, one per committed
 operation. Neither phase can report the other's sequence, because neither
@@ -130,25 +128,18 @@ has a field to put it in — which is what lets a status reader trust the
 number it sees. When backfill finishes, the lifecycle changes to `active` at
 exactly the sequence it indexed, and the change feed takes over from there.
 
-Publication writes the immutable manifest first and installs the pointer by
-one etag CAS. A CAS loser's manifest and segments are unreachable derived
-garbage for grep GC. Maintenance is created by namespace events, never by
-store discovery, and no grep path enumerates namespaces.
+Publication writes segments and then the next manifest with put-if-absent.
+A losing publisher reloads and plans from current inputs. A successful
+publisher raises the hint by compare-and-swap within its publication
+budget. Grep has no compactor epoch because each step writes output and
+publishes inside one bounded maintenance pass.
 
-Disabling writes a manifest with lifecycle `disabled` and no segment
-references, then CAS-publishes its pointer. The old objects become candidates for grep-owned collection;
-the disable call never deletes them synchronously. Grep GC retains every
-object named by a verified live root and deletes unreferenced grep objects
-only after its grace window. It walks the prefix as a stream under a read
-budget: `max_objects` bounds the object reads one pass spends —
-each key's listing plus the liveness or root re-read that authorizes its
-deletion and the probe that reads its age — and the pass answers an opaque,
-namespace-bound cursor when keys remain. That cursor skips enumeration and
-nothing else: every resumed pass re-reads liveness and the root before it
-deletes anything, so losing it costs a repeated walk and never a wrong
-delete. Collection stays explicit and per namespace; it is not registered
-with the runner. A fork does not copy a grep root, so it begins
-unmaterialized and can be enabled independently.
+Disable publishes the next manifest with `status: {kind: "disabled"}` and
+no segments. Collection is explicit and completes one pass per call. The
+collector validates durable roots before deleting, retains the chain from
+the observed hint, and applies the successor grace and segment minimum-age
+rules in format section 6.4. A fork does not copy grep state, so indexing
+starts only after enablement on the target.
 
 ## Building
 
@@ -242,8 +233,7 @@ Reorganize triggers count logical runs, never physical segments. Every
 publish that creates gram segments — a WAL or backfill build
 unit, a delta reorganization's outputs, a base reorganization's outputs — stamps one
 run number on the whole batch, allocated from a counter in the
-grep manifest and incremented in the same pointer publication,
-so allocation is atomic with the root swap. The per-segment row
+grep manifest and incremented in the same numbered publication. The per-segment row
 cap can therefore split a run into any number of segments without
 changing reorganization cadence, and backfill units — which all carry the
 unchanged enable-time watermark as their `run_seq` — still count
@@ -296,13 +286,12 @@ grep state for a missing or deleted namespace after rechecking that state is
 safe to delete. Index build and reorganization steps never perform garbage
 collection.
 
-Every candidate manifest is written under a freshly minted id, so an
-identical rebuild claims a new object rather than adopting the one an earlier
-publication left behind. That is what keeps collection and publication apart:
-an unreferenced manifest always belongs to a publication that has already
-ended, and the grace window — no shorter than the runtime's derived floor —
-covers the one that has not. The pointer carries the manifest's payload
-digest, so nothing is lost by an id that says nothing about its bytes.
+An unlisted segment is retained until its provider age exceeds
+`UNREFERENCED_SEGMENT_MIN_AGE_MS`. A step checks elapsed time from before
+its first output against its publication budget. The remaining grace
+covers provider operations, clock error, and scheduling delay. Older
+manifests wait for their immediate successor to pass the grace window, so
+a reader that loaded a lagging hint can still fetch its starting manifest.
 
 Postings for revisions that later become unobservable are not
 dropped in the first version. They are harmless — verification
@@ -415,7 +404,7 @@ Following the segment-format convention, two different contracts:
 - **Format constants.** The tokenizer (ASCII-case-folded byte
   trigrams), the eligibility rule (the 8 MiB cap and the text
   sniff), the posting row key shape, and the batch encoding are
-  pinned by the grep pointer/manifest and segment codec versions. Before the
+  pinned by the grep manifest and segment codec versions. Before the
   first stable release they evolve in place at version 1; afterward, changing
   any of them requires a new format version and a rebuild — cheap by
   construction, since the index is derived work.

@@ -28,8 +28,8 @@ use loonfs_api::{
     API_GROUP_QUERY_V0, FEATURE_QUERY_GREP,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
-use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
-use loonfs_grep::root::{encode_grep_root, load_grep_root, GrepManifestObjectId, GrepRootPointer};
+use loonfs_grep::keyspace::{hint_key as grep_hint_key, manifest_key as grep_manifest_key};
+use loonfs_grep::root::{encode_grep_hint, load_current_grep_manifest, GrepHint};
 use loonfs_grep::{GrepWorker, NamespaceReads};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
@@ -1068,7 +1068,7 @@ async fn embedded_runner_shutdown_drains_an_active_grep_step() {
     let namespace_id = namespace_id("grep-shutdown");
     let blocking_store = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
-        KeyPredicate::exact(grep_root_key(&namespace_id)),
+        KeyPredicate::exact(grep_hint_key(&namespace_id)),
         OperationClass::GetWithMetadata,
     ));
     let store = blocking_store.clone() as SharedObjectStore;
@@ -1338,7 +1338,7 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
 
 /// What the index's steps published, read where an operator reads it.
 async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> ChangeSeq {
-    load_grep_root(&*state.writer.object_store(), namespace_id)
+    load_current_grep_manifest(&*state.writer.object_store(), namespace_id)
         .await
         .expect("load grep root")
         .expect("an enabled namespace has a grep root")
@@ -1411,7 +1411,7 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     let namespace_id = namespace_id("grep-error-store");
     let fault_store = Arc::new(FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
-        KeyPredicate::exact(grep_root_key(&namespace_id)),
+        KeyPredicate::exact(grep_hint_key(&namespace_id)),
         OperationClass::GetWithMetadata,
         InjectedError::Transport("injected grep-root outage".to_owned()),
     ));
@@ -1457,44 +1457,41 @@ async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() 
 
     store
         .put_overwrite(
-            &grep_root_key(&corrupt_pointer),
+            &grep_hint_key(&corrupt_pointer),
             Bytes::from_static(b"corrupt grep pointer"),
         )
         .await
         .expect("write corrupt grep pointer");
 
-    write_grep_pointer(
+    write_grep_hint(
         &*store,
         &missing_manifest,
         missing_manifest.clone(),
-        GrepManifestObjectId::parse("gmf_11111111111111111111111111111111")
-            .expect("manifest object id"),
+        loonfs_api::ManifestNo(11),
     )
     .await;
 
-    let manifest_object_id = GrepManifestObjectId::parse("gmf_22222222222222222222222222222222")
-        .expect("manifest object id");
+    let manifest_no = loonfs_api::ManifestNo(12);
     store
         .put_overwrite(
-            &grep_manifest_key(&corrupt_manifest, &manifest_object_id),
+            &grep_manifest_key(&corrupt_manifest, &manifest_no),
             Bytes::from_static(b"corrupt grep manifest"),
         )
         .await
         .expect("write corrupt grep manifest");
-    write_grep_pointer(
+    write_grep_hint(
         &*store,
         &corrupt_manifest,
         corrupt_manifest.clone(),
-        manifest_object_id,
+        manifest_no,
     )
     .await;
 
-    write_grep_pointer(
+    write_grep_hint(
         &*store,
         &identity_mismatch,
         NamespaceId::parse("different-grep-identity").expect("different namespace id"),
-        GrepManifestObjectId::parse("gmf_33333333333333333333333333333333")
-            .expect("manifest object id"),
+        loonfs_api::ManifestNo(13),
     )
     .await;
 
@@ -1528,15 +1525,15 @@ async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() 
 async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-error-conflict");
-    let root_key = grep_root_key(&namespace_id);
+    let manifest_key = grep_manifest_key(&namespace_id, &loonfs_api::ManifestNo(1));
     let fault_store = Arc::new(FailStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
         move |context: &OperationContext<'_>| {
-            context.key() == root_key
+            context.key() == manifest_key
                 && matches!(
                     context.kind(),
                     OperationKind::Put {
-                        mode: PutMode::CreateIfAbsent | PutMode::CompareAndSwap { .. },
+                        mode: PutMode::CreateIfAbsent,
                         ..
                     }
                 )
@@ -3466,23 +3463,20 @@ fn grep_error_request() -> GrepRequest {
     }
 }
 
-async fn write_grep_pointer(
+async fn write_grep_hint(
     store: &dyn ObjectStore,
     stored_namespace_id: &NamespaceId,
-    pointer_namespace_id: NamespaceId,
-    manifest_object_id: GrepManifestObjectId,
+    hint_namespace_id: NamespaceId,
+    manifest_no: loonfs_api::ManifestNo,
 ) {
-    // Every caller here injects a fault the load hits before it compares
-    // digests, so any well-formed digest stands in for the real one.
-    let envelope = encode_grep_root(GrepRootPointer::new(
-        pointer_namespace_id,
-        manifest_object_id,
-        loonfs_api::sha256_digest(b"a manifest these tests never reach"),
-    ))
+    let envelope = encode_grep_hint(GrepHint {
+        namespace_id: hint_namespace_id,
+        manifest_no,
+    })
     .expect("build grep pointer");
     store
         .put_overwrite(
-            &grep_root_key(stored_namespace_id),
+            &grep_hint_key(stored_namespace_id),
             Bytes::from(envelope.into_bytes()),
         )
         .await

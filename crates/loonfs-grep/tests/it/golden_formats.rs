@@ -1,6 +1,6 @@
 //! Golden-byte fixtures for the durable grep encodings.
 //!
-//! These tests pin the exact bytes the grep root pointer, the grep manifest,
+//! These tests pin the exact bytes the grep hint, the grep manifest,
 //! and a gram-index data block write. They run the mechanism the core
 //! families use in `crates/loonfs-api/tests/golden_formats.rs`:
 //!
@@ -27,9 +27,8 @@ use loonfs_api::wire::sst_blocks::{
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, RevisionNo, RunNo};
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
 use loonfs_grep::root::{
-    decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root, GrepIndexState,
-    GrepIndexStatus, GrepManifestObjectId, GrepManifestState, GrepReorganizeState, GrepRootPointer,
-    GrepSegmentRef,
+    decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest, GrepHint,
+    GrepIndexState, GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef,
 };
 use loonfs_test_support::ids::namespace_id;
 use std::path::{Path, PathBuf};
@@ -38,8 +37,8 @@ use std::path::{Path, PathBuf};
 // Fixture names
 // ---------------------------------------------------------------------------
 
-/// The root pointer that names [`ACTIVE_MANIFEST_FIXTURE`].
-pub(crate) const ROOT_POINTER_FIXTURE: &str = "grep_root.v1.json";
+/// The hint that names [`ACTIVE_MANIFEST_FIXTURE`].
+pub(crate) const HINT_FIXTURE: &str = "grep_hint.v1.json";
 /// An active index reorganizing a set of segments.
 pub(crate) const ACTIVE_MANIFEST_FIXTURE: &str = "grep_manifest.v1.json";
 /// A backfill in progress, with segments and no reorganization.
@@ -48,11 +47,6 @@ pub(crate) const BACKFILLING_MANIFEST_FIXTURE: &str = "grep_manifest.backfilling
 pub(crate) const DISABLED_MANIFEST_FIXTURE: &str = "grep_manifest.disabled.v1.json";
 /// One data block of `gram_postings` rows.
 const GRAM_POSTINGS_BLOCK_FIXTURE: &str = "grep_segment_gram_postings.v1.bin";
-
-/// Pointer ids are minted, not derived, so a fixture names an arbitrary id
-/// and carries the digest of the manifest it points at. That pairing is the
-/// whole binding between a pointer and its bytes.
-const ACTIVE_MANIFEST_OBJECT_ID: &str = "gmf_2b3c4d5e6f70819a2b3c4d5e6f708192";
 
 // ---------------------------------------------------------------------------
 // Golden helpers
@@ -129,6 +123,7 @@ pub(crate) fn sample_active_manifest(
     };
     GrepManifestState::new(
         namespace_id("docs"),
+        loonfs_api::ManifestNo(1),
         GrepIndexStatus::Active {
             built_through_seq,
             next_event_index,
@@ -152,6 +147,7 @@ pub(crate) fn sample_active_manifest(
 pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
+        loonfs_api::ManifestNo(1),
         GrepIndexStatus::Backfilling {
             target_seq: ChangeSeq(7),
             cursor_inode_id: Some(InodeId(7)),
@@ -172,6 +168,7 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
 pub(crate) fn sample_disabled_manifest() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
+        loonfs_api::ManifestNo(1),
         GrepIndexStatus::Disabled {},
         GrepIndexState {
             reorganize: None,
@@ -182,18 +179,11 @@ pub(crate) fn sample_disabled_manifest() -> GrepManifestState {
     .expect("valid disabled manifest state")
 }
 
-/// The pointer a publisher installs over the manifest
-/// [`ACTIVE_MANIFEST_FIXTURE`] pins. Its digest is that manifest envelope's
-/// own `payload_checksum`.
-fn sample_root_pointer() -> GrepRootPointer {
-    let manifest = encode_grep_manifest(sample_active_manifest(ChangeSeq(11), 5))
-        .expect("manifest")
-        .into_envelope();
-    GrepRootPointer::new(
-        namespace_id("docs"),
-        GrepManifestObjectId::parse(ACTIVE_MANIFEST_OBJECT_ID).expect("valid manifest object id"),
-        manifest.payload_checksum().to_owned(),
-    )
+fn sample_hint() -> GrepHint {
+    GrepHint {
+        namespace_id: namespace_id("docs"),
+        manifest_no: loonfs_api::ManifestNo(1),
+    }
 }
 
 /// One segment descriptor. `number` picks the segment id and its run
@@ -313,34 +303,20 @@ fn assert_manifest_golden_decodes(fixture: &str, state: GrepManifestState) {
 }
 
 #[test]
-fn grep_root_matches_golden_bytes() {
-    let encoded = encode_grep_root(sample_root_pointer())
-        .expect("build a grep root envelope")
+fn grep_hint_matches_golden_bytes() {
+    let encoded = encode_grep_hint(sample_hint())
+        .expect("build a grep hint envelope")
         .into_bytes();
-    assert_matches_golden(ROOT_POINTER_FIXTURE, &encoded);
+    assert_matches_golden(HINT_FIXTURE, &encoded);
 }
 
 #[test]
-fn grep_root_golden_decodes_to_sample() {
-    let expected = encode_grep_root(sample_root_pointer())
-        .expect("build a grep root envelope")
+fn grep_hint_golden_decodes_to_sample() {
+    let expected = encode_grep_hint(sample_hint())
+        .expect("build a grep hint envelope")
         .into_envelope();
-    let decoded =
-        decode_grep_root(&read_golden(ROOT_POINTER_FIXTURE)).expect("decode the golden pointer");
+    let decoded = decode_grep_hint(&read_golden(HINT_FIXTURE)).expect("decode the golden hint");
     assert_eq!(decoded, expected);
-}
-
-#[test]
-fn grep_root_golden_carries_the_manifest_golden_checksum() {
-    let pointer =
-        decode_grep_root(&read_golden(ROOT_POINTER_FIXTURE)).expect("decode the golden pointer");
-    let manifest = decode_grep_manifest(&read_golden(ACTIVE_MANIFEST_FIXTURE))
-        .expect("decode the golden manifest");
-
-    assert_eq!(
-        pointer.payload().manifest_payload_checksum(),
-        manifest.payload_checksum()
-    );
 }
 
 #[test]
