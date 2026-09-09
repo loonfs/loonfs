@@ -187,7 +187,7 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
     }
     if basis.manifest != record.manifest {
         return Err(CoreError::NamespaceCorrupt(format!(
-            "the fork target `{target_namespace_id}` reads through checkpoint `{}` but names a \
+            "the fork target `{target_namespace_id}` names checkpoint `{}` but names a \
              different manifest reference",
             record.checkpoint_id
         )));

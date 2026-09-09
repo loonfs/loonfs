@@ -579,6 +579,12 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
     // manifest pages; a few names rebound several times, so groups carry
     // more than one row.
     for index in 0..70u32 {
+        if index % 32 == 0 {
+            namespace_engine(&store, &namespace_id, &context)
+                .flush_wal()
+                .await
+                .expect("fold seed writes");
+        }
         let path = format!("/wide/file-{index:03}.txt");
         put_file_bytes(
             &store,
@@ -1072,12 +1078,12 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
         .expect("commit typed name key");
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
+        .list_prefix("namespaces/demo/wal/")
         .await
         .expect("list wal");
-    assert_eq!(wal_keys.len(), 1);
+    assert_eq!(wal_keys.len(), 2);
     let wal_bytes = store
-        .get(&wal_keys[0], None)
+        .get(&wal_keys[1], None)
         .await
         .expect("read wal")
         .expect("wal exists");
@@ -1163,12 +1169,12 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
     assert_eq!(moved_bytes.bytes, b"hello");
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
+        .list_prefix("namespaces/demo/wal/")
         .await
         .expect("list wal");
-    assert_eq!(wal_keys.len(), 1);
+    assert_eq!(wal_keys.len(), 2);
     let wal_bytes = store
-        .get(&wal_keys[0], None)
+        .get(&wal_keys[1], None)
         .await
         .expect("read wal")
         .expect("wal exists");

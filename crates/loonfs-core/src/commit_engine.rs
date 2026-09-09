@@ -1,5 +1,5 @@
 //! [`NamespaceCommitEngine`] publishes a batch of validated mutation
-//! candidates as one WAL segment and one head compare-and-swap, then returns
+//! candidates as one numbered WAL put, then returns
 //! one result per candidate.
 
 use crate::checkpoint::MetadataSegmentCache;
@@ -8,6 +8,7 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
@@ -18,7 +19,7 @@ use crate::protocol::{
 use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
-use loonfs_api::wire::control::{AcquiredWriter, HeadState};
+use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::{ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
@@ -239,7 +240,7 @@ pub struct NamespaceCommitEnginePublishResult {
     /// WAL tail length observed by this publish, for opportunistic
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
-    /// Read state produced by a successful, unambiguous head CAS. Callers can
+    /// Read state produced by a successful, unambiguous WAL put. Callers can
     /// use it to update read caches without reloading from object storage.
     pub resulting_read_state: Option<ResultingReadState>,
 }
@@ -249,7 +250,7 @@ pub struct NamespaceCommitEnginePublishResult {
 /// clone and two small clones.
 #[derive(Debug, Clone)]
 pub struct WalFoldSnapshot {
-    pub head: HeadState,
+    pub head: NamespaceReadState,
     pub basis: MetadataBasis,
     pub retention_floor_seq: Option<ChangeSeq>,
     pub tail_state: Arc<MetadataState>,
@@ -259,7 +260,7 @@ pub struct WalFoldSnapshot {
 /// A read anchor plus the projected WAL tail as of one landed publish.
 #[derive(Debug, Clone)]
 pub struct ResultingReadState {
-    pub head: HeadState,
+    pub head: NamespaceReadState,
     pub head_etag: String,
     /// Metadata basis used for replay. The published head still references this
     /// basis, so a seeded read cache matches the next store-backed read.
@@ -296,6 +297,7 @@ pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
 pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
     publish_tail_projection: Option<PublishTailProjection>,
+    projection_loaded_ms: Option<u64>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionState`].
     session: SharedWriterSessionState,
@@ -312,6 +314,7 @@ impl NamespaceCommitEngine {
         Self {
             namespace_id,
             publish_tail_projection: None,
+            projection_loaded_ms: None,
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
@@ -348,6 +351,7 @@ impl NamespaceCommitEngine {
     /// remain in session state and are not reset by cache invalidation.
     pub fn invalidate_projection(&mut self) {
         self.publish_tail_projection = None;
+        self.projection_loaded_ms = None;
     }
 
     /// Returns the retained tail projection's memory weight, or `None` when no
@@ -362,8 +366,6 @@ impl NamespaceCommitEngine {
     /// The retained projection as a fold input, or `None` when the engine
     /// holds no projection.
     ///
-    /// A completed fold needs no invalidation: the projection key carries the
-    /// basis identity, so the next view load reloads after the root changes.
     pub fn wal_fold_snapshot(&self) -> Option<WalFoldSnapshot> {
         self.publish_tail_projection
             .as_ref()
@@ -394,9 +396,7 @@ impl NamespaceCommitEngine {
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
         }
-        let acquired_writer = acquire_writer_epoch(store, &self.namespace_id, context)
-            .await
-            .map_err(CoreError::WriterEpoch)?;
+        let acquired_writer = acquire_writer_epoch(store, &self.namespace_id, context).await?;
         let mut session = self.lock_session();
         if let WriterSessionState::Fenced(fence) = &*session {
             // Another engine fenced the shared session while this engine was acquiring
@@ -428,6 +428,7 @@ impl NamespaceCommitEngine {
             acquired_writer,
         )
         .await;
+        self.invalidate_projection();
         if let Err(CoreError::WriterFenced(fence)) = &deleted {
             *self.lock_session() = WriterSessionState::Fenced(fence.clone());
         }
@@ -441,13 +442,29 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
-        Box::pin(self.publish_batch_inner(store, candidates, context, tail_options)).await
+        let mut result =
+            Box::pin(self.publish_batch_inner(store, &candidates, context, tail_options)).await;
+        for _ in 1..crate::limits::CONTENTION_RETRY_LIMIT {
+            if !result.results.iter().any(|result| {
+                matches!(
+                    result,
+                    Err(CoreError::HeadPublish(
+                        crate::commit::CommitHeadPublishError::StaleHead
+                    ))
+                )
+            }) {
+                break;
+            }
+            result =
+                Box::pin(self.publish_batch_inner(store, &candidates, context, tail_options)).await;
+        }
+        result
     }
 
     async fn publish_batch_inner<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-        candidates: Vec<CommitCandidate>,
+        candidates: &[CommitCandidate],
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
@@ -472,6 +489,18 @@ impl NamespaceCommitEngine {
             }
         };
 
+        if self.projection_loaded_ms.is_some_and(|loaded_ms| {
+            attempt_started_ms.saturating_sub(loaded_ms) >= crate::limits::WAL_PUBLISH_BUDGET_MS
+        }) || self
+            .publish_tail_projection
+            .as_ref()
+            .is_some_and(|projection| {
+                projection.wal_tail_segments >= crate::limits::CHECKPOINT_AT_WAL_SEGMENTS
+            })
+        {
+            self.invalidate_projection();
+        }
+        let projection_loaded_ms = self.projection_loaded_ms.unwrap_or(attempt_started_ms);
         let (publish_view, projection) = match load_publish_metadata_view(
             store,
             self.segment_cache.as_deref(),
@@ -499,33 +528,19 @@ impl NamespaceCommitEngine {
         let published = crate::protocol::publish_namespace_commits_batch_against_publish_view(
             store,
             &self.namespace_id,
-            &candidates,
+            candidates,
             context,
             &publish_view,
-            self.timer.as_ref(),
-            attempt_started_ms,
+            crate::protocol::PublicationClock {
+                timer: self.timer.as_ref(),
+                attempt_started_ms,
+                tip_observed_ms: projection_loaded_ms,
+            },
         )
         .await;
-        let resulting_head = match &published.effect {
-            PublishViewEffect::Advanced { head, .. } => Some(head.clone()),
-            PublishViewEffect::Unchanged | PublishViewEffect::Invalidated => None,
-        };
-        let wal_tail_segments =
+        self.projection_loaded_ms = Some(projection_loaded_ms);
+        let (wal_tail_segments, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, tail_options);
-        // Seedable only when the CAS landed unambiguously and the updated
-        // projection survived (it carries the post-publish tail and etag).
-        let resulting_read_state = match (resulting_head, self.publish_tail_projection.as_ref()) {
-            (Some(head), Some(projection)) if projection.head_seq() == head.seq => {
-                Some(ResultingReadState {
-                    head,
-                    head_etag: projection.head_etag().to_owned(),
-                    basis: projection.basis().clone(),
-                    manifest_head_seq: projection.manifest_head_seq(),
-                    tail_rows: Arc::clone(&projection.tail_state),
-                })
-            }
-            _ => None,
-        };
         NamespaceCommitEnginePublishResult {
             results: published.results,
             wal_tail_segments,
@@ -540,52 +555,40 @@ impl NamespaceCommitEngine {
         mut projection: PublishTailProjection,
         effect: PublishViewEffect,
         tail_options: &PublishTailOptions,
-    ) -> u64 {
-        match effect {
-            // Nothing landed, so the loaded projection still describes the
-            // tail exactly.
-            PublishViewEffect::Unchanged => {
-                let wal_tail_segments = projection.wal_tail_segments;
-                self.publish_tail_projection = Some(projection);
-                wal_tail_segments
-            }
+    ) -> (u64, Option<ResultingReadState>) {
+        let state = match effect {
+            PublishViewEffect::Unchanged => None,
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
-                projection.wal_tail_segments
+                return (projection.wal_tail_segments, None);
             }
-            // A landed batch is exactly one new WAL segment.
             PublishViewEffect::Advanced {
                 records,
                 head,
                 head_etag,
             } => {
-                projection.wal_tail_segments = projection.wal_tail_segments.saturating_add(1);
-                let wal_tail_segments = projection.wal_tail_segments;
-                debug_assert!(
-                    wal_tail_segments <= crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS,
-                    "a landed publish left {wal_tail_segments} unflushed segments, \
-                     more than the head can describe"
-                );
-                // The head advanced, but without the etag its
-                // compare-and-swap acknowledged there is nothing to re-anchor
-                // the projection to.
-                let Some(head_etag) = head_etag else {
-                    self.invalidate_projection();
-                    return wal_tail_segments;
-                };
+                projection.wal_tail_segments += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
                 for record in &records {
                     tail_state.apply_committed_wal_record_mut(record);
                 }
-                projection.reanchor(head, head_etag);
-                if projection.within_limits(tail_options) {
-                    self.publish_tail_projection = Some(projection);
-                } else {
-                    self.invalidate_projection();
-                }
-                wal_tail_segments
+                projection.reanchor(head.clone(), head_etag.clone());
+                Some(ResultingReadState {
+                    head,
+                    head_etag,
+                    basis: projection.basis().clone(),
+                    manifest_head_seq: projection.manifest_head_seq(),
+                    tail_rows: Arc::clone(&projection.tail_state),
+                })
             }
+        };
+        let count = projection.wal_tail_segments;
+        if projection.within_limits(tail_options) {
+            self.publish_tail_projection = Some(projection);
+        } else {
+            self.invalidate_projection();
         }
+        (count, state)
     }
 }
 
@@ -1085,7 +1088,7 @@ mod tests {
     }
 
     /// Advances an entire publish budget per reading, so every publish
-    /// observes an expired budget between segment PUT and head CAS.
+    /// observes an expired budget between segment PUT and WAL put.
     #[derive(Debug)]
     struct ExpiredBudgetTimer(AtomicU64);
 
@@ -1097,7 +1100,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_over_budget_abandons_the_segment_and_a_retry_rebuilds() {
+    async fn publish_over_budget_writes_no_segment_and_a_retry_rebuilds() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1105,13 +1108,16 @@ mod tests {
         bootstrap_namespace(&store, &namespace_id, &writer, false)
             .await
             .expect("bootstrap");
-        let head_before = load_head_object(&store, &namespace_id)
-            .await
-            .expect("read head")
-            .state;
-
         let mut over_budget = NamespaceCommitEngine::new(namespace_id.clone())
             .monotonic_timer(Arc::new(ExpiredBudgetTimer(AtomicU64::new(0))));
+        over_budget
+            .session_writer_epoch(&store, &writer)
+            .await
+            .expect("acquire");
+        let head_before = load_head_object(&store, &namespace_id)
+            .await
+            .expect("head")
+            .state;
         let abandoned = over_budget
             .publish_batch(
                 &store,
@@ -1136,17 +1142,14 @@ mod tests {
         // rebuild the commit.
         assert_eq!(error.code(), ErrorCode::StaleHead);
 
-        // The head did not advance; the written segment is an orphan for GC.
         let head_after = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .state;
         assert_eq!(head_after.seq, head_before.seq);
-        assert_eq!(head_after.visible_wal_tip, head_before.visible_wal_tip);
+        assert_eq!(head_after.wal_no, head_before.wal_no);
         assert_eq!(wal_segment_count(&store, &namespace_id).await, 1);
 
-        // A retry with a healthy budget republishes the same commit as a
-        // fresh segment; the orphan stays behind.
         let mut healthy = NamespaceCommitEngine::new(namespace_id.clone());
         let retried = healthy
             .publish_batch(
@@ -1158,7 +1161,7 @@ mod tests {
             .await;
         let response = retried.results[0].as_ref().expect("rebuilt publish");
         assert_eq!(response.committed_seq, ChangeSeq(1));
-        assert_eq!(wal_segment_count(&store, &namespace_id).await, 2);
+        assert_eq!(wal_segment_count(&store, &namespace_id).await, 3);
         let head_final = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")

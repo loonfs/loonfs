@@ -34,7 +34,7 @@ impl CandidateFamily {
         };
         match self {
             Self::Manifests => manifest_no_of(key).is_some(),
-            Self::WalSegments => family == DurableObjectFamily::WalSegment,
+            Self::WalSegments => loonfs_objectstore::layout::wal_no_of(key).is_some(),
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
             Self::Checkpoints => family == DurableObjectFamily::CheckpointRecord,
             Self::UploadSessions => family == DurableObjectFamily::UploadSession,

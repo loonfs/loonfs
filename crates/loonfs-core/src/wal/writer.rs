@@ -3,16 +3,15 @@
 
 use super::{PreparedWalSegment, WalSegmentError};
 use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
-use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{
     encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentPayload,
 };
-use loonfs_api::{ChangeSeq, NamespaceId, WalSegmentId, WriterEpoch};
+use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 
 pub(crate) fn prepare_wal_segment(
     namespace_id: NamespaceId,
     writer_epoch: WriterEpoch,
-    prev_visible_segment: Option<WalSegmentPointer>,
+    wal_no: WalNo,
     records: &[MaterializedCommit],
 ) -> Result<PreparedWalSegment, WalSegmentError> {
     if records.is_empty() {
@@ -56,17 +55,15 @@ pub(crate) fn prepare_wal_segment(
         .checked_sub(1)
         .map(ChangeSeq)
         .ok_or(WalSegmentError::SeqOverflow)?;
-    // WAL segments are proposals: racing writers may both write one for the
-    // same position before the head chooses. The id's 20-digit position makes
-    // listings and reclamation scans sort by history position; its random
-    // suffix keeps competing proposals (and losers' harmless orphans) from
-    // ever colliding on a name.
-    let segment_id = WalSegmentId::generate(start_seq);
     let payload = WalSegmentPayload {
         namespace_id,
-        segment_id: segment_id.clone(),
+        wal_no,
+        next_inode_id: records
+            .last()
+            .expect("records should be nonempty")
+            .commit
+            .resulting_next_inode_id,
         writer_epoch,
-        prev_visible_segment,
         base_head_seq,
         start_seq,
         end_seq,

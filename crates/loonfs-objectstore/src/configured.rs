@@ -214,7 +214,7 @@ mod tests {
     use super::ConfiguredObjectStore;
     use crate::abs::AzureAbsStoreConfig;
     use crate::gcs::GcpGcsStoreConfig;
-    use crate::keys::wal_head;
+    use crate::keys::hint;
     use crate::local_fs_store::LocalFsStore;
     use crate::presign::{
         DirectTransferIssuers, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
@@ -239,8 +239,7 @@ mod tests {
         let store = ConfiguredObjectStore::local_fs(temp_dir.path(), Some("tenant-a"))
             .expect("construct configured local fs store")
             .into_shared();
-        let head_key =
-            wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let head_key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
 
         store
             .put_overwrite(&head_key, Bytes::from_static(br#"{"ok":true}"#))

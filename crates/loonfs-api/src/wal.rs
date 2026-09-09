@@ -1,13 +1,12 @@
 //! The WAL segment format: envelopes, commit payloads, and the delta
 //! records replay applies (format spec, "WAL segments").
 
-use crate::control::{validate_wal_segment_start_seq, WalSegmentPointer};
 use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{DeletedDirentry, TombstoneGeneration};
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitFingerprint, CommitId, ContentRef,
-    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalSegmentId, WriterEpoch,
+    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo, WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -181,18 +180,17 @@ pub struct WalCommitPayload {
 pub struct WalSegmentPayload {
     /// Namespace this segment belongs to; recovery rejects cross-namespace content.
     pub namespace_id: NamespaceId,
-    /// Immutable object identity expected to agree with the head pointer and object key.
-    pub segment_id: WalSegmentId,
+    /// Contiguous object number checked against the key.
+    pub wal_no: WalNo,
+    /// Allocation high-water mark after this segment.
+    pub next_inode_id: InodeId,
     /// Fencing epoch of the writer that proposed this segment.
     pub writer_epoch: WriterEpoch,
-    /// Previous accepted chain member, or `None` only when no visible segment precedes this one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prev_visible_segment: Option<WalSegmentPointer>,
     /// Head sequence the writer materialized against before adding these records.
     pub base_head_seq: ChangeSeq,
     /// Sequence of the first record, and the position encoded into `segment_id`.
     pub start_seq: ChangeSeq,
-    /// Sequence of the final record, checked against both `records` and the head pointer.
+    /// Visible sequence after this segment, unchanged for a fence.
     pub end_seq: ChangeSeq,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
@@ -200,18 +198,6 @@ pub struct WalSegmentPayload {
 
 /// A WAL segment decoded through its checked durable codec.
 pub type WalSegmentEnvelope = crate::envelope::VerifiedEnvelope<WalSegmentPayload>;
-
-impl WalSegmentEnvelope {
-    /// Projects the identity, integrity, and sequence metadata needed to link this segment.
-    pub fn pointer(&self) -> WalSegmentPointer {
-        WalSegmentPointer {
-            segment_id: self.payload.segment_id.clone(),
-            start_seq: self.payload.start_seq,
-            end_seq: self.payload.end_seq,
-            payload_checksum: self.payload_checksum.clone(),
-        }
-    }
-}
 
 /// Durable layout of a WAL segment object (before zstd compression): the
 /// envelope fields plus the payload as an opaque CBOR byte string.
@@ -285,8 +271,6 @@ pub fn decode_wal_segment_envelope_zstd(
     envelope::verify_payload_checksum(&document.payload_checksum, &document.payload)?;
     let payload: WalSegmentPayload = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
-    validate_wal_segment_start_seq(&payload.segment_id, payload.start_seq)
-        .map_err(EnvelopeCodecError::PayloadDecode)?;
 
     Ok(WalSegmentEnvelope {
         payload_checksum: document.payload_checksum,

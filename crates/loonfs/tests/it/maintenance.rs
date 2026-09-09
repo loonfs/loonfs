@@ -11,16 +11,9 @@ use loonfs::{
     MetadataCompactionOutcome, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
     RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore, WalFlushStepOutcome,
 };
-use loonfs_api::wire::control::{
-    decode_control_object, ControlObjectEnvelope, ControlObjectKind, HeadState,
-};
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::{AdvanceRetentionRequest, GcRequest, MetadataCompactionRequest};
-use loonfs_core::test_support::append_wal_segments;
-use loonfs_core::MutationContext;
-use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, wal_head, wal_segment_prefix,
-};
+use loonfs_objectstore::keys::{checkpoint_prefix, hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
@@ -47,9 +40,7 @@ fn namespace_diagnostics_reports_wal_tail_segments() {
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
-    // A namespace that has never flushed has published no manifest of its
-    // own; it reads from the built-in genesis state.
-    assert_eq!(status.current_manifest_no, None);
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
     assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
@@ -66,42 +57,10 @@ fn namespace_diagnostics_reports_wal_tail_segments() {
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
-    assert_eq!(status.current_manifest_no, None);
-    assert_eq!(status.wal_tail_segments, 1);
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
+    assert_eq!(status.wal_tail_segments, 2);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
     assert_eq!(store.count(OperationClass::List), 1);
-}
-
-#[test]
-fn namespace_diagnostics_counts_wal_tail_without_reading_segments() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    // Count only WAL segment reads: the head's chain pointers must be
-    // enough to size a hint-covered tail.
-    let store = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
-    ));
-    let fs = open_runtime(store.clone(), "status-count-test");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    for revision in 0..3 {
-        fs.put_file_bytes_blocking(
-            &namespace_id,
-            &format!("/docs/hello-{revision}.txt"),
-            format!("rev {revision}").as_bytes(),
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-        .expect("put file");
-    }
-
-    store.reset();
-    let status = fs
-        .namespace_diagnostics_blocking(&namespace_id)
-        .expect("status with populated tail");
-    assert_eq!(status.wal_tail_segments, 3);
-    assert_eq!(store.count(OperationClass::Read), 0);
 }
 
 #[test]
@@ -155,89 +114,6 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
     assert_eq!(diagnostics.live_checkpoints, 2);
 }
 
-/// Pointers a head published before the accelerator was sized to cover the
-/// whole legal WAL tail.
-const LEGACY_RECENT_SEGMENTS: usize = 32;
-
-/// Rewrites a head's replay accelerator to its newest `keep` pointers,
-/// which is the shape a head published by an older build carries.
-fn truncate_recent_segments(store: &SharedObjectStore, namespace_id: &NamespaceId, keep: usize) {
-    let key = wal_head(namespace_id);
-    let bytes = block_on(store.get(&key, None))
-        .expect("read head")
-        .expect("head exists");
-    let envelope: ControlObjectEnvelope<HeadState> =
-        decode_control_object(&bytes, ControlObjectKind::WalHead).expect("decode head");
-    let mut state = envelope.into_payload();
-    assert!(
-        state.recent_segments.len() > keep,
-        "the fixture must publish more pointers than the legacy window held"
-    );
-    state.recent_segments.truncate(keep);
-    let encoded =
-        loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &state)
-            .expect("encode head");
-    block_on(store.put_overwrite(&key, bytes::Bytes::from(encoded))).expect("rewrite head");
-}
-
-#[test]
-fn a_head_that_under_describes_its_tail_is_repaired_by_an_explicit_flush() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = store(temp_dir.path());
-    let fs = open_runtime(store.clone(), "legacy-head-test");
-    let namespace_id = namespace_id("demo");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    block_on(append_wal_segments(
-        store.as_ref(),
-        &namespace_id,
-        u64::try_from(LEGACY_RECENT_SEGMENTS + 4).expect("segment count"),
-        &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("legacy-tail-writer").expect("writer id"),
-            now_ms: 1_000,
-        },
-    ))
-    .expect("build legacy WAL tail");
-    truncate_recent_segments(&store, &namespace_id, LEGACY_RECENT_SEGMENTS);
-
-    let error = fs
-        .namespace_diagnostics_blocking(&namespace_id)
-        .expect_err("a head that does not describe its tail cannot be counted");
-    assert_eq!(
-        error.code(),
-        ErrorCode::NamespaceCorrupt,
-        "a head that under-describes its tail is corruption, not absence: {error}"
-    );
-
-    let flushed = fs
-        .flush_wal_blocking(&namespace_id)
-        .expect("an explicit flush does not read the status it cannot get");
-    assert!(
-        matches!(flushed.wal_flush, WalFlushStepOutcome::Flushed { .. }),
-        "unexpected flush outcome: {:?}",
-        flushed.wal_flush
-    );
-
-    let status = fs
-        .namespace_diagnostics_blocking(&namespace_id)
-        .expect("status after the flush");
-    assert_eq!(status.wal_tail_segments, 0);
-
-    // And the pointer count answers again for the tail written after it.
-    fs.put_file_bytes_blocking(
-        &namespace_id,
-        "/docs/after-the-flush.txt",
-        b"after",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("put file after the flush");
-    let status = fs
-        .namespace_diagnostics_blocking(&namespace_id)
-        .expect("status after the flush");
-    assert_eq!(status.wal_tail_segments, 1);
-}
-
 #[test]
 fn namespace_diagnostics_and_step_reject_missing_namespace() {
     let temp_dir = tempdir().expect("tempdir");
@@ -262,7 +138,7 @@ fn namespace_diagnostics_and_step_reject_missing_namespace() {
 }
 
 #[test]
-fn namespace_diagnostics_and_step_reject_a_namespace_whose_head_is_gone() {
+fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
@@ -271,7 +147,7 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_head_is_gone() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    block_on(raw_store.delete(&wal_head(&namespace_id))).expect("delete head");
+    block_on(raw_store.delete(&hint(&namespace_id))).expect("delete head");
 
     assert_core_error_kind(
         fs.namespace_diagnostics_blocking(&namespace_id),
@@ -323,7 +199,7 @@ fn maintenance_step_below_threshold_is_not_needed() {
     .expect("put file");
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
         .expect("maintenance pass");
     assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
 }
@@ -345,7 +221,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     .expect("put file");
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
         .expect("maintenance pass");
     assert_eq!(
         upkeep(&response).wal_flush,
@@ -357,7 +233,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after wal flush");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
     assert_eq!(status.wal_tail_segments, 0);
 
     // Maintenance is record-less: flushing the WAL must leave nothing
@@ -576,7 +452,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after delta wal flush");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(4)));
     assert_eq!(status.wal_tail_segments, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -611,7 +487,6 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    // A namespace that has published no manifest has no runs to rebuild.
     assert_eq!(
         block_on(fs.maintenance.compact_metadata(&namespace_id))
             .expect("compact an empty namespace")
@@ -688,10 +563,10 @@ fn maintenance_step_counts_segments_not_commits() {
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after first batch");
     assert_eq!(status.head_seq, ChangeSeq(2));
-    assert_eq!(status.wal_tail_segments, 1);
+    assert_eq!(status.wal_tail_segments, 2);
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
         .expect("maintenance pass");
     assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
 
@@ -699,7 +574,7 @@ fn maintenance_step_counts_segments_not_commits() {
         .expect("second segment commit");
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
+        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
         .expect("maintenance pass at segment threshold");
     assert_eq!(
         upkeep(&response).wal_flush,
@@ -710,7 +585,7 @@ fn maintenance_step_counts_segments_not_commits() {
 }
 
 #[test]
-fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
+fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
@@ -741,8 +616,8 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after lost race");
-    assert_eq!(status.current_manifest_no, None);
-    assert_eq!(status.wal_tail_segments, 1);
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
+    assert_eq!(status.wal_tail_segments, 2);
 }
 
 #[tokio::test]

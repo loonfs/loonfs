@@ -20,9 +20,9 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    ContentStoreState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HeadState, HintState,
-    ManifestRef, NamespaceStatus, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
-    UploadSessionState, WalSegmentPointer, WriterBlock,
+    ContentStoreState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintState, ManifestRef,
+    NamespaceStatus, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
+    UploadSessionState, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -38,7 +38,7 @@ use loonfs_api::{
     sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
     Attributes, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId,
     ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, MetadataSegmentId,
-    NameKey, NamespaceId, RevisionNo, RunNo, UploadId, WalSegmentId, WriterEpoch,
+    NameKey, NamespaceId, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -216,16 +216,6 @@ fn sample_attributes() -> Attributes {
     .expect("valid attribute map")
 }
 
-fn sample_wal_pointer() -> WalSegmentPointer {
-    WalSegmentPointer {
-        segment_id: WalSegmentId::parse("wal_00000000000000000001-fedcba9876543210")
-            .expect("valid segment id"),
-        start_seq: ChangeSeq(1),
-        end_seq: ChangeSeq(1),
-        payload_checksum: sha256_digest(b"previous segment payload"),
-    }
-}
-
 fn sample_wal_payload() -> WalSegmentPayload {
     let deltas = vec![
         WalCommitDelta {
@@ -293,10 +283,9 @@ fn sample_wal_payload() -> WalSegmentPayload {
     ];
     WalSegmentPayload {
         namespace_id: namespace_id(),
-        segment_id: WalSegmentId::parse("wal_00000000000000000002-0123456789abcdef")
-            .expect("valid segment id"),
+        wal_no: WalNo(2),
+        next_inode_id: InodeId(10),
         writer_epoch: WriterEpoch(3),
-        prev_visible_segment: Some(sample_wal_pointer()),
         base_head_seq: ChangeSeq(1),
         start_seq: ChangeSeq(2),
         end_seq: ChangeSeq(2),
@@ -317,6 +306,16 @@ fn sample_wal_payload() -> WalSegmentPayload {
 
 fn sample_manifest_payload() -> NamespaceManifestPayload {
     let mut manifest = NamespaceManifestPayload {
+        content_store_id: content_store_id(),
+        created_at_ms: 1_000,
+        fork_basis: None,
+        status: NamespaceStatus::Active {},
+        writer: Some(WriterBlock {
+            writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer"),
+            acquired_at_ms: 2_000,
+        }),
+        last_folded_wal_no: WalNo(2),
+        retention_floor_wal_no: WalNo(0),
         compactor_epoch: 0,
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
@@ -382,39 +381,19 @@ fn sample_manifest_ref(number: u64) -> ManifestRef {
     }
 }
 
-fn sample_head_state() -> HeadState {
-    HeadState {
-        namespace_id: namespace_id(),
-        content_store_id: content_store_id(),
-        created_at_ms: 1_000,
-        fork_basis: None,
-        seq: ChangeSeq(2),
-        head_commit_id: commit_id(),
-        writer_epoch: WriterEpoch(3),
-        writer: Some(WriterBlock {
-            writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer id"),
-            acquired_at_ms: 2_000,
-        }),
-        next_inode_id: InodeId(10),
-        visible_wal_tip: Some(sample_wal_pointer()),
-        recent_segments: Vec::new(),
-        status: NamespaceStatus::Active {},
-    }
-}
-
-fn sample_deleted_head_state() -> HeadState {
-    HeadState {
+fn sample_deleted_manifest() -> NamespaceManifestPayload {
+    NamespaceManifestPayload {
         status: NamespaceStatus::Deleted {
             reclaim_after_ms: None,
         },
-        ..sample_head_state()
+        ..sample_manifest_payload()
     }
 }
 
 /// A fork target's head: the same shape plus the permanent fork basis that
 /// authorizes reading the source's manifest before the target's first flush.
-fn sample_fork_head_state() -> HeadState {
-    HeadState {
+fn sample_fork_manifest() -> NamespaceManifestPayload {
+    NamespaceManifestPayload {
         fork_basis: Some(ForkBasis {
             manifest: ManifestRef {
                 owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
@@ -427,7 +406,7 @@ fn sample_fork_head_state() -> HeadState {
             },
             source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
         }),
-        ..sample_head_state()
+        ..sample_manifest_payload()
     }
 }
 
@@ -452,51 +431,8 @@ fn wal_segment_golden_decodes_to_sample() {
     assert_eq!(decoded.into_payload(), sample_wal_payload());
 }
 
-#[test]
-fn wal_segments_reject_an_id_that_disagrees_with_its_start_seq() {
-    let agreeing = encode_wal_segment_envelope_zstd(sample_wal_payload())
-        .expect("encode wal")
-        .into_bytes();
-    decode_wal_segment_envelope_zstd(&agreeing)
-        .expect("a segment whose id encodes its start seq decodes");
-
-    let mut payload = sample_wal_payload();
-    payload.segment_id =
-        WalSegmentId::parse("wal_00000000000000000009-0123456789abcdef").expect("valid segment id");
-    let message = assert_wal_segment_is_corrupt(payload);
-    assert!(
-        message.contains("`wal_00000000000000000009-0123456789abcdef`")
-            && message.contains("start seq `2`"),
-        "the rejection should name both values: {message}"
-    );
-
-    let mut payload = sample_wal_payload();
-    let mut link = sample_wal_pointer();
-    link.segment_id =
-        WalSegmentId::parse("wal_00000000000000000004-fedcba9876543210").expect("valid segment id");
-    payload.prev_visible_segment = Some(link);
-    let message = assert_wal_segment_is_corrupt(payload);
-    assert!(
-        message.contains("`wal_00000000000000000004-fedcba9876543210`")
-            && message.contains("start seq `1`"),
-        "the rejection should name both values: {message}"
-    );
-}
-
 /// Stores `payload` through the real codec and returns why decoding refused
 /// it.
-fn assert_wal_segment_is_corrupt(payload: WalSegmentPayload) -> String {
-    let encoded = encode_wal_segment_envelope_zstd(payload)
-        .expect("encode wal")
-        .into_bytes();
-    let error =
-        decode_wal_segment_envelope_zstd(&encoded).expect_err("the stored segment is corrupt");
-    assert!(
-        matches!(error, EnvelopeCodecError::PayloadDecode(_)),
-        "unexpected refusal: {error}"
-    );
-    error.to_string()
-}
 
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
@@ -567,17 +503,17 @@ where
 }
 
 #[test]
-fn head_status_reading_is_fail_closed_on_unknown_statuses() {
+fn manifest_status_reading_is_fail_closed_on_unknown_statuses() {
     // Every head writes the field, active heads included, and an active
     // head round-trips through the tagged object it writes.
-    let active = sample_head_state();
+    let active = sample_manifest_payload();
     let encoded = serde_json::to_string(&active).expect("encode active head");
     assert!(
         encoded.contains("\"status\":{\"kind\":\"active\"}"),
         "an active head writes its status: {encoded}"
     );
-    let round_tripped =
-        serde_json::from_str::<HeadState>(&encoded).expect("an active head round-trips");
+    let round_tripped = serde_json::from_str::<NamespaceManifestPayload>(&encoded)
+        .expect("an active head round-trips");
     assert_eq!(round_tripped, active);
 
     // A status this build does not know must fail decode, never default:
@@ -588,22 +524,23 @@ fn head_status_reading_is_fail_closed_on_unknown_statuses() {
         "\"status\":{\"kind\":\"frozen\"}",
         1,
     );
-    serde_json::from_str::<HeadState>(&future).expect_err("an unknown status must fail closed");
+    serde_json::from_str::<NamespaceManifestPayload>(&future)
+        .expect_err("an unknown status must fail closed");
 
-    let deleted = serde_json::to_string(&sample_deleted_head_state()).expect("encode deleted");
+    let deleted = serde_json::to_string(&sample_deleted_manifest()).expect("encode deleted");
     assert!(deleted.contains("\"status\":{\"kind\":\"deleted\"}"));
 }
 
 #[test]
-fn head_without_a_status_is_rejected() {
+fn manifest_without_a_status_is_rejected() {
     let mut document =
-        serde_json::to_value(sample_head_state()).expect("encode active head as a document");
+        serde_json::to_value(sample_manifest_payload()).expect("encode active head as a document");
     document
         .as_object_mut()
         .expect("head document")
         .remove("status");
 
-    let error = serde_json::from_value::<HeadState>(document)
+    let error = serde_json::from_value::<NamespaceManifestPayload>(document)
         .expect_err("a head without its status must be rejected");
     assert!(
         error.to_string().contains("status"),
@@ -612,12 +549,12 @@ fn head_without_a_status_is_rejected() {
 }
 
 #[test]
-fn head_status_rejects_unknown_fields_as_corruption() {
+fn manifest_status_rejects_unknown_fields_as_corruption() {
     let mut document =
-        serde_json::to_value(sample_head_state()).expect("encode active head as a document");
+        serde_json::to_value(sample_manifest_payload()).expect("encode active head as a document");
     document["status"]["field_from_the_future"] = serde_json::Value::from(true);
 
-    let error = serde_json::from_value::<HeadState>(document)
+    let error = serde_json::from_value::<NamespaceManifestPayload>(document)
         .expect_err("a status carrying an unknown field must be rejected");
     assert!(
         error.to_string().contains("field_from_the_future"),
@@ -636,36 +573,12 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_wal_head.v2.json",
-        ControlObjectKind::WalHead,
-        sample_head_state(),
-    );
-    check_control_golden(
-        "control_namespace_head.deleted.v2.json",
-        ControlObjectKind::WalHead,
-        sample_deleted_head_state(),
-    );
-    check_control_golden(
-        "control_namespace_head.retired.v2.json",
-        ControlObjectKind::WalHead,
-        HeadState {
-            status: NamespaceStatus::Deleted {
-                reclaim_after_ms: Some(2_000_000),
-            },
-            ..sample_head_state()
-        },
-    );
-    check_control_golden(
-        "control_namespace_head.fork.v2.json",
-        ControlObjectKind::WalHead,
-        sample_fork_head_state(),
-    );
-    check_control_golden(
         "control_hint.v1.json",
         ControlObjectKind::Hint,
         HintState {
             namespace_id: namespace_id(),
             manifest_no: ManifestNo(2),
+            wal_no: WalNo(2),
         },
     );
     check_control_golden(
@@ -856,9 +769,9 @@ fn control_objects_match_golden_bytes() {
 #[test]
 fn every_durable_status_is_a_kind_tagged_object() {
     let fixtures = [
-        "control_wal_head.v2.json",
-        "control_namespace_head.deleted.v2.json",
-        "control_namespace_head.retired.v2.json",
+        "namespace_manifest.v1.json",
+        "namespace_manifest.deleted.v1.json",
+        "namespace_manifest.retired.v1.json",
         "control_checkpoint_record.v1.json",
         "control_checkpoint_record_released.v1.json",
         "control_upload_session.v1.json",
@@ -893,11 +806,6 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
     let add_unknown = |payload: &mut serde_json::Value| {
         payload["field_from_the_future"] = serde_json::Value::from(true);
     };
-    assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v2.json",
-        ControlObjectKind::WalHead,
-        add_unknown,
-    );
     assert_control_payload_edit_is_corrupt::<HintState>(
         "control_hint.v1.json",
         ControlObjectKind::Hint,
@@ -918,44 +826,11 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
         ControlObjectKind::UploadSession,
         add_unknown,
     );
-    assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_namespace_head.fork.v2.json",
-        ControlObjectKind::WalHead,
-        add_unknown,
-    );
 }
 
 #[test]
 fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
-    assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v2.json",
-        ControlObjectKind::WalHead,
-        |payload| payload["writer"]["field_from_the_future"] = serde_json::Value::from(true),
-    );
     // Both head pointer fields must reject data that a rewrite would drop.
-    assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v2.json",
-        ControlObjectKind::WalHead,
-        |payload| {
-            payload["visible_wal_tip"]["field_from_the_future"] = serde_json::Value::from(true);
-        },
-    );
-    assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v2.json",
-        ControlObjectKind::WalHead,
-        |payload| {
-            // The fixture has no predecessor hints, so add one based on the
-            // visible tip and include an unknown field.
-            let mut hint = payload["visible_wal_tip"].clone();
-            hint["field_from_the_future"] = serde_json::Value::from(true);
-            payload["recent_segments"] = serde_json::Value::Array(vec![hint]);
-        },
-    );
-    assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_namespace_head.fork.v2.json",
-        ControlObjectKind::WalHead,
-        |payload| payload["fork_basis"]["field_from_the_future"] = serde_json::Value::from(true),
-    );
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
@@ -1098,11 +973,6 @@ fn upload_sessions_reject_an_untagged_or_incomplete_status() {
 
 #[test]
 fn mutable_control_enums_fail_closed_on_unknown_variants() {
-    assert_control_payload_edit_is_corrupt::<HeadState>(
-        "control_wal_head.v2.json",
-        ControlObjectKind::WalHead,
-        |payload| payload["status"] = serde_json::Value::from("future_status"),
-    );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
@@ -1280,12 +1150,12 @@ fn upload_sessions_reject_a_zero_multipart_part_size() {
 #[test]
 fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
     let mut document: serde_json::Value =
-        serde_json::from_slice(&read_golden("control_wal_head.v2.json"))
+        serde_json::from_slice(&read_golden("control_hint.v1.json"))
             .expect("decode control fixture");
     document["field_from_the_future"] = serde_json::Value::from(true);
     let edited = serde_json::to_vec(&document).expect("encode edited envelope");
 
-    let error = decode_control_object::<HeadState>(&edited, ControlObjectKind::WalHead)
+    let error = decode_control_object::<HintState>(&edited, ControlObjectKind::Hint)
         .expect_err("unknown mutable envelope field must be rejected");
     assert!(
         matches!(error, EnvelopeCodecError::EnvelopeDecode(_)),
@@ -1606,19 +1476,6 @@ fn wal_decode_rejects_unknown_payload_fields() {
 }
 
 #[test]
-fn wal_decode_rejects_unknown_predecessor_fields() {
-    let envelope = sample_wal_payload();
-    let document = wal_document_with_payload_edit(&envelope, |payload| {
-        with_future_field(cbor_entry(payload, "prev_visible_segment"));
-    });
-
-    let error = decode_wal_segment_envelope_zstd(&document)
-        .expect_err("unknown durable fields must be rejected");
-    assert!(matches!(error, EnvelopeCodecError::PayloadDecode(message)
-        if message.contains("unknown field") && message.contains("field_from_the_future")));
-}
-
-#[test]
 fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
     let envelope = wal_payload_with_deltas(vec![
         WalCommitDelta {
@@ -1689,16 +1546,20 @@ fn wal_decode_rejects_a_version_one_commit_without_committed_by() {
 
 #[test]
 fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
-    let envelope = sample_head_state();
+    let envelope = HintState {
+        namespace_id: namespace_id(),
+        manifest_no: ManifestNo(2),
+        wal_no: WalNo(2),
+    };
     let encoded =
-        loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &envelope)
+        loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &envelope)
             .expect("encode control object");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    document["payload"]["seq"] = serde_json::Value::from(999);
+    document["payload"]["wal_no"] = serde_json::Value::from(999);
     let tampered = serde_json::to_vec(&document).expect("encode tampered document");
 
-    let err = decode_control_object::<HeadState>(&tampered, ControlObjectKind::WalHead)
+    let err = decode_control_object::<HintState>(&tampered, ControlObjectKind::Hint)
         .expect_err("tampered payload must be rejected");
     assert!(
         matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
@@ -2826,4 +2687,31 @@ fn name_folding_matches_the_fixed_unicode_corpus() {
     let mut bytes = serde_json::to_vec_pretty(&corpus).expect("encode folding corpus");
     bytes.push(b'\n');
     assert_matches_golden("name_folding.v1.json", &bytes);
+}
+
+#[test]
+fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
+    let mut retired = sample_deleted_manifest();
+    retired.status = NamespaceStatus::Deleted {
+        reclaim_after_ms: Some(2_000_000),
+    };
+    for (name, payload) in [
+        (
+            "namespace_manifest.deleted.v1.json",
+            sample_deleted_manifest(),
+        ),
+        ("namespace_manifest.retired.v1.json", retired),
+        ("namespace_manifest.fork.v1.json", sample_fork_manifest()),
+    ] {
+        let encoded = encode_namespace_manifest_json(payload.clone())
+            .expect("manifest")
+            .into_bytes();
+        assert_matches_golden(name, &encoded);
+        assert_eq!(
+            decode_namespace_manifest_json(&encoded)
+                .expect("decode manifest")
+                .into_payload(),
+            payload
+        );
+    }
 }

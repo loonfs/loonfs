@@ -5,24 +5,32 @@ use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
 use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
-use loonfs_api::wire::control::HeadState;
+use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, InodeId, NamespaceId, WriterEpoch};
 
 pub(crate) fn project_validated_wal_tail(
-    base_head: &HeadState,
+    base_head: &NamespaceReadState,
     base_metadata_state: &MetadataState,
     expected_writer_epoch: Option<WriterEpoch>,
     wal_tail: &ValidatedWalChain,
 ) -> Result<ReplayedWalTail, WalSegmentError> {
-    let mut replayed = replay_wal_records(
-        base_head,
-        base_metadata_state,
-        expected_writer_epoch,
-        wal_tail.decoded_records(),
-    )?;
-    if let Some(last_segment) = wal_tail.segments().last() {
-        replayed.resulting_head.visible_wal_tip = Some(last_segment.pointer());
+    let mut replayed = ReplayedWalTail {
+        resulting_head: base_head.clone(),
+        resulting_metadata_state: base_metadata_state.clone(),
+    };
+    for segment in wal_tail.segments() {
+        replayed = replay_wal_records(
+            &replayed.resulting_head,
+            &replayed.resulting_metadata_state,
+            expected_writer_epoch,
+            segment.decoded_records(),
+        )?;
+        let payload = segment.envelope().payload();
+        if replayed.resulting_head.next_inode_id != payload.next_inode_id {
+            return Err(WalSegmentError::SegmentSummaryMismatch);
+        }
+        replayed.resulting_head.wal_no = payload.wal_no;
     }
     Ok(replayed)
 }
@@ -32,15 +40,14 @@ pub(crate) fn project_validated_wal_tail(
 /// An empty tail retains the basis tip, so the tip is compared only when the
 /// replay produced one.
 pub(crate) fn ensure_replayed_head_matches(
-    current_head: &HeadState,
-    reconstructed: &HeadState,
+    current_head: &NamespaceReadState,
+    reconstructed: &NamespaceReadState,
 ) -> Result<(), MetadataProjectionLoadError> {
     if current_head.namespace_id != reconstructed.namespace_id
         || current_head.seq != reconstructed.seq
         || current_head.head_commit_id != reconstructed.head_commit_id
         || current_head.next_inode_id != reconstructed.next_inode_id
-        || (reconstructed.visible_wal_tip.is_some()
-            && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
+        || current_head.wal_no != reconstructed.wal_no
     {
         return Err(MetadataProjectionLoadError::ReplayedHeadMismatch {
             expected: Box::new(current_head.clone()),
@@ -51,7 +58,7 @@ pub(crate) fn ensure_replayed_head_matches(
 }
 
 pub(crate) fn replay_wal_records<'a, I>(
-    base_head: &HeadState,
+    base_head: &NamespaceReadState,
     base_metadata_state: &MetadataState,
     expected_writer_epoch: Option<WriterEpoch>,
     records: I,
@@ -88,7 +95,7 @@ where
 }
 
 fn validate_replay_record(
-    current_head: &HeadState,
+    current_head: &NamespaceReadState,
     expected_writer_epoch: Option<WriterEpoch>,
     record: &DecodedWalRecord<'_>,
 ) -> Result<(), WalSegmentError> {
@@ -121,7 +128,7 @@ fn validate_replay_record(
     Ok(())
 }
 
-pub(super) fn validate_wal_segment_for_replay(
+pub(crate) fn validate_wal_segment_for_replay(
     expected_namespace_id: &NamespaceId,
     expected_base_head_seq: ChangeSeq,
     envelope: &WalSegmentEnvelope,
@@ -140,6 +147,14 @@ pub(super) fn validate_wal_segment_for_replay(
         });
     }
 
+    if envelope.payload().records.is_empty() {
+        if envelope.payload().start_seq != expected_base_head_seq
+            || envelope.payload().end_seq != expected_base_head_seq
+        {
+            return Err(WalSegmentError::SegmentSummaryMismatch);
+        }
+        return Ok(());
+    }
     let expected_start = expected_base_head_seq
         .successor()
         .map_err(|_| WalSegmentError::SeqOverflow)?;
@@ -149,9 +164,6 @@ pub(super) fn validate_wal_segment_for_replay(
             expected: expected_start,
             actual: envelope.payload().start_seq,
         });
-    }
-    if envelope.payload().records.is_empty() {
-        return Err(WalSegmentError::EmptySegment);
     }
     if envelope.payload().records.first().map(|record| record.seq)
         != Some(envelope.payload().start_seq)

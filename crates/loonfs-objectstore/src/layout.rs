@@ -7,8 +7,6 @@ use loonfs_api::{ManifestNo, UploadId};
 /// [durable object key grammar]: ../../../docs/specs/format.md#12-durable-object-families
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableObjectFamily {
-    /// Classifies the mutable visibility and fencing head.
-    WalHead,
     /// Classifies an immutable segment in a namespace's WAL chain.
     WalSegment,
     /// Starts forward discovery of namespace manifests.
@@ -69,18 +67,16 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             Some(owner_namespace_id),
             Some(content_id),
         )),
-        ["namespaces", namespace, "wal", "head.json"] => {
-            Some(parsed(DurableObjectFamily::WalHead, Some(namespace), None))
-        }
-        ["namespaces", namespace, "wal", "segments", segment] => {
-            segment.strip_suffix(".wal.zst").map(|identifier| {
+        ["namespaces", namespace, "wal", segment] => segment
+            .strip_suffix(".wal.zst")
+            .filter(|identifier| parse_wal_no(identifier).is_some())
+            .map(|identifier| {
                 parsed(
                     DurableObjectFamily::WalSegment,
                     Some(namespace),
                     Some(identifier),
                 )
-            })
-        }
+            }),
         ["namespaces", namespace, "hint.json"] => {
             Some(parsed(DurableObjectFamily::Hint, Some(namespace), None))
         }
@@ -124,10 +120,21 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     }
 }
 
-pub(crate) fn wal_segment_id_from_key(key: &str) -> Option<&str> {
-    parse_object_key(key)
-        .filter(|parsed| parsed.family() == DurableObjectFamily::WalSegment)
-        .and_then(|parsed| parsed.identifier())
+/// Parses the fixed-width WAL number in a segment key.
+pub fn wal_no_of(key: &str) -> Option<loonfs_api::WalNo> {
+    let parsed = parse_object_key(key)?;
+    if parsed.family() != DurableObjectFamily::WalSegment {
+        return None;
+    }
+    parse_wal_no(parsed.identifier()?)
+}
+
+fn parse_wal_no(number: &str) -> Option<loonfs_api::WalNo> {
+    if number.len() != 20 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number = loonfs_api::WalNo::parse(number.parse().ok()?).ok()?;
+    (number.0 > 0).then_some(number)
 }
 
 /// Extracts a manifest number from its twenty-digit durable name.
@@ -169,18 +176,17 @@ mod tests {
     use crate::keys::{
         checkpoint_record, content_blob, content_owner_prefix, content_store, hint,
         metadata_manifest_object, metadata_segment, metadata_segment_prefix, upload_session,
-        wal_head, wal_segment, wal_segment_prefix,
+        wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceId,
-        UploadId, WalSegmentId,
+        UploadId, WalNo,
     };
 
     #[test]
     fn built_keys_parse_to_their_family_owner_and_identifier() {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
-        let wal_segment_id = WalSegmentId::parse("wal_00000000000000000001-0123456789abcdef")
-            .expect("WAL segment id");
+        let wal_no = WalNo(1);
         let manifest_object_id = ManifestNo(400);
         let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000000000001")
             .expect("metadata segment id");
@@ -197,11 +203,10 @@ mod tests {
                 DurableObjectFamily::ContentStore,
                 Some(content_store_id.as_str()),
             ),
-            (wal_head(&namespace_id), DurableObjectFamily::WalHead, None),
             (
-                wal_segment(&namespace_id, &wal_segment_id),
+                wal_segment(&namespace_id, &wal_no),
                 DurableObjectFamily::WalSegment,
-                Some(wal_segment_id.as_str()),
+                Some("00000000000000000001"),
             ),
             (hint(&namespace_id), DurableObjectFamily::Hint, None),
             (
@@ -281,7 +286,7 @@ mod tests {
 
         assert!(segment.starts_with(&metadata_segment_prefix(&namespace_id)));
         let wal_segments = wal_segment_prefix(&namespace_id);
-        assert!(!wal_head(&namespace_id).starts_with(&wal_segments));
+        assert!(!hint(&namespace_id).starts_with(&wal_segments));
     }
 
     #[test]

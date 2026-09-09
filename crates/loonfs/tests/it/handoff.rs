@@ -1,4 +1,4 @@
-//! Multi-node handoff, durable reconstruction, and orphan-WAL coverage.
+//! Multi-node handoff and durable reconstruction.
 
 #![allow(clippy::panic)]
 
@@ -6,17 +6,11 @@ use crate::common::{collect_path_entries, directory_options, expect_code, writer
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, ManifestNo,
     MetadataMaintenanceOptions, NamespaceId, NamespaceSessionPolicy, NamespaceSessionState,
-    PutFileOptions, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
-    WalFlushStepOutcome, GC_MIN_GRACE_WINDOW_MS,
+    PutFileOptions, SharedObjectStore,
 };
-use loonfs_api::{GcRequest, WriterId};
-use loonfs_core::test_support::append_wal_segments;
-use loonfs_core::MutationContext;
-use loonfs_objectstore::keys::{namespace_prefix, wal_head, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -69,10 +63,9 @@ async fn put_file(writer: &FsWriter, namespace_id: &NamespaceId, path: &str) {
 async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("paused-takeover").expect("namespace id");
-    let blocking = BlockingStore::new(
+    let blocking = BlockingStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::wal_head(&namespace_id),
-        OperationClass::CompareAndSwap,
+        crate::common::data_wal_put_for(&namespace_id),
     );
     let failing = Arc::new(FailStore::new(
         blocking,
@@ -234,7 +227,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         .get_namespace_diagnostics(&namespace_id)
         .await
         .expect("read diagnostics after fold");
-    assert_eq!(diagnostics.current_manifest_no, Some(ManifestNo(1)));
+    assert_eq!(diagnostics.current_manifest_no, Some(ManifestNo(3)));
     assert_root_paths(&fresh_reader(store.clone()).await, &namespace_id, &expected).await;
 
     for index in fold_threshold..(fold_threshold + 3) {
@@ -243,122 +236,4 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         expected.insert(path);
     }
     assert_root_paths(&fresh_reader(store).await, &namespace_id, &expected).await;
-}
-
-#[tokio::test]
-async fn an_orphan_wal_object_is_harmless() {
-    let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
-    let store: SharedObjectStore = raw_store.clone();
-    let namespace_id = NamespaceId::parse("orphan-wal").expect("namespace id");
-    let writer = writer(store.clone(), "orphan-test-writer").await;
-    writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
-    put_file(&writer, &namespace_id, "/before-orphan.txt").await;
-
-    let head_key = wal_head(&namespace_id);
-    let saved_head = raw_store
-        .get(&head_key, None)
-        .await
-        .expect("read head")
-        .expect("head exists");
-    let segment_prefix = wal_segment_prefix(&namespace_id);
-    let before_segments = raw_store
-        .list_prefix(&segment_prefix)
-        .await
-        .expect("list WAL segments before orphan")
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    append_wal_segments(
-        raw_store.as_ref(),
-        &namespace_id,
-        1,
-        &MutationContext {
-            writer_id: WriterId::parse("raw-orphan-writer").expect("writer id"),
-            now_ms: 1_000,
-        },
-    )
-    .await
-    .expect("write valid WAL segment");
-    let after_segments = raw_store
-        .list_prefix(&segment_prefix)
-        .await
-        .expect("list WAL segments after orphan")
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let orphan_keys = after_segments
-        .difference(&before_segments)
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(orphan_keys.len(), 1);
-    let orphan_key = orphan_keys.into_iter().next().expect("one orphan key");
-    raw_store
-        .put_overwrite(&head_key, saved_head)
-        .await
-        .expect("restore head without orphan reference");
-
-    let before_publish = BTreeSet::from(["/before-orphan.txt".to_owned()]);
-    assert_root_paths(
-        &fresh_reader(store.clone()).await,
-        &namespace_id,
-        &before_publish,
-    )
-    .await;
-    put_file(&writer, &namespace_id, "/after-orphan.txt").await;
-    put_file(&writer, &namespace_id, "/after-boundary.txt").await;
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("orphan-test-maintenance")
-        .build()
-        .await
-        .expect("build maintenance handle");
-    let fold = maintenance
-        .flush_wal(&namespace_id)
-        .await
-        .expect("fold visible WAL tail");
-    assert!(matches!(
-        fold.wal_flush,
-        WalFlushStepOutcome::Flushed { .. }
-    ));
-
-    maintenance
-        .advance_retention_floor(&namespace_id)
-        .await
-        .expect("advance past the orphan position");
-
-    let aged_store: SharedObjectStore = Arc::new(MetadataMapStore::aged(
-        LocalFsStore::new(temp_dir.path()).expect("reopen local-fs store"),
-        KeyPredicate::prefix(namespace_prefix(&namespace_id)),
-    ));
-    let gc = FsMaintenance::builder_with_store(aged_store)
-        .actor_id("orphan-test-gc")
-        .build()
-        .await
-        .expect("build GC handle")
-        .run_maintenance(
-            &namespace_id,
-            RunMaintenanceRequest::Gc(GcRequest {
-                grace_window_ms: Some(GC_MIN_GRACE_WINDOW_MS),
-                ..GcRequest::default()
-            }),
-        )
-        .await
-        .expect("run GC");
-    let RunMaintenanceResponse::Gc(report) = gc else {
-        panic!("GC request returned a different response")
-    };
-    assert!(report.deleted.wal_segments >= 1);
-    assert!(raw_store
-        .head(&orphan_key)
-        .await
-        .expect("head orphan")
-        .is_none());
-
-    let after_gc = BTreeSet::from([
-        "/after-boundary.txt".to_owned(),
-        "/after-orphan.txt".to_owned(),
-        "/before-orphan.txt".to_owned(),
-    ]);
-    assert_root_paths(&fresh_reader(store).await, &namespace_id, &after_gc).await;
 }

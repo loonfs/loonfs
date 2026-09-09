@@ -45,7 +45,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
             }
             summary.namespace_objects += 1;
             match parsed.family() {
-                DurableObjectFamily::WalHead | DurableObjectFamily::Hint => {
+                DurableObjectFamily::Hint => {
                     summary.control_objects += 1;
                 }
                 DurableObjectFamily::WalSegment => {
@@ -89,7 +89,7 @@ mod tests {
     use loonfs_api::IndexSegmentId;
     use loonfs_grep::keyspace::{manifest_key, root_key, segment_key};
     use loonfs_grep::root::GrepManifestObjectId;
-    use loonfs_objectstore::keys::{wal_head, wal_segment};
+    use loonfs_objectstore::keys::{hint, wal_segment};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
 
     #[tokio::test]
@@ -99,16 +99,12 @@ mod tests {
         let namespace_id = NamespaceId::parse("sim").expect("valid namespace id");
 
         store
-            .put_overwrite(&wal_head(&namespace_id), Bytes::from_static(b"head"))
+            .put_overwrite(&hint(&namespace_id), Bytes::from_static(b"head"))
             .await
             .expect("head");
         store
             .put_overwrite(
-                &wal_segment(
-                    &namespace_id,
-                    &loonfs_api::WalSegmentId::parse("wal_00000000000000000001-644e4d336fd4ee33")
-                        .expect("valid WAL segment id"),
-                ),
+                &wal_segment(&namespace_id, &loonfs_api::WalNo(1)),
                 Bytes::from_static(b"wal"),
             )
             .await

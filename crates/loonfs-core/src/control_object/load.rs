@@ -2,7 +2,7 @@
 
 use super::ControlObjectLoadError;
 use crate::error::StoreFailureClass;
-use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, ForkBasis, ManifestRef};
+use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, ManifestRef};
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -26,8 +26,6 @@ pub(crate) enum EmbeddedIdentityMismatch {
         expected: String,
         actual: String,
     },
-    /// A fork basis incorrectly references its target namespace.
-    ForkBasisOwner { namespace_id: NamespaceId },
 }
 
 enum ControlLoadFailure {
@@ -109,19 +107,6 @@ pub(crate) fn expect_own_manifest(
     )
 }
 
-/// Requires a fork basis to reference a different namespace.
-pub(crate) fn expect_foreign_fork_basis(
-    namespace_id: &NamespaceId,
-    fork_basis: &ForkBasis,
-) -> Result<(), EmbeddedIdentityMismatch> {
-    if fork_basis.manifest.owner_namespace_id != *namespace_id {
-        return Ok(());
-    }
-    Err(EmbeddedIdentityMismatch::ForkBasisOwner {
-        namespace_id: namespace_id.clone(),
-    })
-}
-
 fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadError {
     match failure {
         ControlLoadFailure::Absent => ControlObjectLoadError::MissingObject {
@@ -156,12 +141,6 @@ fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadE
             expected,
             actual,
         },
-        ControlLoadFailure::EmbeddedIdentity(EmbeddedIdentityMismatch::ForkBasisOwner {
-            namespace_id,
-        }) => ControlObjectLoadError::ForkBasisOwnerIsSelf {
-            object_key: object_key.to_owned(),
-            namespace_id,
-        },
         ControlLoadFailure::MissingEtag => ControlObjectLoadError::Store {
             object_key: object_key.to_owned(),
             message: "object store omitted the required control-object etag".to_owned(),
@@ -180,9 +159,9 @@ mod tests {
     use super::*;
     use crate::error::StoreFailureClass;
     use bytes::Bytes;
-    use loonfs_api::wire::control::HeadState;
-    use loonfs_api::{ContentStoreId, NamespaceId};
-    use loonfs_objectstore::keys::wal_head;
+    use loonfs_api::wire::control::HintState;
+    use loonfs_api::NamespaceId;
+    use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{
@@ -201,11 +180,15 @@ mod tests {
         NamespaceId::parse(value).expect("valid namespace id")
     }
 
-    fn encoded_head(namespace_id: &NamespaceId) -> (HeadState, Vec<u8>) {
-        let state = HeadState::initial(namespace_id.clone(), ContentStoreId::generate(), 1_000);
+    fn encoded_hint(namespace_id: &NamespaceId) -> (HintState, Vec<u8>) {
+        let state = HintState {
+            namespace_id: namespace_id.clone(),
+            manifest_no: loonfs_api::ManifestNo(1),
+            wal_no: loonfs_api::WalNo(0),
+        };
         let bytes =
-            loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &state)
-                .expect("head bytes");
+            loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &state)
+                .expect("hint bytes");
         (state, bytes)
     }
 
@@ -216,16 +199,16 @@ mod tests {
             .expect("write test object");
     }
 
-    async fn load_head<S: ObjectStore + ?Sized>(
+    async fn load_hint<S: ObjectStore + ?Sized>(
         store: &S,
         object_key: &str,
         expected_namespace_id: &NamespaceId,
-    ) -> Result<LoadedControl<HeadState>, ControlObjectLoadError> {
+    ) -> Result<LoadedControl<HintState>, ControlObjectLoadError> {
         load_control_object(
             store,
             object_key.to_owned(),
-            ControlObjectKind::WalHead,
-            |state: &HeadState| expect_namespace(expected_namespace_id, &state.namespace_id),
+            ControlObjectKind::Hint,
+            |state: &HintState| expect_namespace(expected_namespace_id, &state.namespace_id),
         )
         .await
     }
@@ -234,9 +217,9 @@ mod tests {
     async fn absence_is_missing_object() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
+        let object_key = hint(&namespace_id);
 
-        let error = load_head(&store, &object_key, &namespace_id)
+        let error = load_hint(&store, &object_key, &namespace_id)
             .await
             .expect_err("absent object should fail");
 
@@ -247,7 +230,7 @@ mod tests {
     async fn permission_failure_preserves_its_store_class() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
+        let object_key = hint(&namespace_id);
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key.clone()),
@@ -256,7 +239,7 @@ mod tests {
         );
         store.fail_next(1);
 
-        let error = load_head(&store, &object_key, &namespace_id)
+        let error = load_hint(&store, &object_key, &namespace_id)
             .await
             .expect_err("permission failure should surface");
 
@@ -273,7 +256,7 @@ mod tests {
     async fn other_provider_failure_preserves_its_store_class() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
+        let object_key = hint(&namespace_id);
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key.clone()),
@@ -282,7 +265,7 @@ mod tests {
         );
         store.fail_next(1);
 
-        let error = load_head(&store, &object_key, &namespace_id)
+        let error = load_hint(&store, &object_key, &namespace_id)
             .await
             .expect_err("provider failure should surface");
 
@@ -299,12 +282,12 @@ mod tests {
     async fn missing_etag_is_a_store_failure() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
-        let (_, bytes) = encoded_head(&namespace_id);
+        let object_key = hint(&namespace_id);
+        let (_, bytes) = encoded_hint(&namespace_id);
         write_bytes(&inner, &object_key, bytes).await;
         let store = MetadataMapStore::without_etag(inner, KeyPredicate::exact(object_key.clone()));
 
-        let error = load_head(&store, &object_key, &namespace_id)
+        let error = load_hint(&store, &object_key, &namespace_id)
             .await
             .expect_err("missing etag should fail");
 
@@ -322,10 +305,10 @@ mod tests {
     async fn malformed_envelope_is_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
+        let object_key = hint(&namespace_id);
         write_bytes(&store, &object_key, b"not json".to_vec()).await;
 
-        let error = load_head(&store, &object_key, &namespace_id)
+        let error = load_hint(&store, &object_key, &namespace_id)
             .await
             .expect_err("malformed envelope should fail");
 
@@ -336,10 +319,10 @@ mod tests {
     async fn wrong_envelope_kind_is_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
-        let (_, bytes) = encoded_head(&namespace_id);
+        let object_key = hint(&namespace_id);
+        let (_, bytes) = encoded_hint(&namespace_id);
         let mut document: Value = serde_json::from_slice(&bytes).expect("envelope json");
-        document["kind"] = Value::String(ControlObjectKind::Hint.as_str().to_owned());
+        document["kind"] = Value::String(ControlObjectKind::ContentStore.as_str().to_owned());
         write_bytes(
             &store,
             &object_key,
@@ -347,7 +330,7 @@ mod tests {
         )
         .await;
 
-        let error = load_head(&store, &object_key, &namespace_id)
+        let error = load_hint(&store, &object_key, &namespace_id)
             .await
             .expect_err("wrong kind should fail");
 
@@ -362,8 +345,8 @@ mod tests {
     async fn checksum_disagreement_has_its_own_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
-        let (_, bytes) = encoded_head(&namespace_id);
+        let object_key = hint(&namespace_id);
+        let (_, bytes) = encoded_hint(&namespace_id);
         let mut document: Value = serde_json::from_slice(&bytes).expect("envelope json");
         let recorded = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         document["payload_checksum"] = Value::String(recorded.to_owned());
@@ -374,7 +357,7 @@ mod tests {
         )
         .await;
 
-        let error = load_head(&store, &object_key, &namespace_id)
+        let error = load_hint(&store, &object_key, &namespace_id)
             .await
             .expect_err("checksum mismatch should fail");
 
@@ -393,11 +376,11 @@ mod tests {
         let (_directory, store) = local_store();
         let expected_namespace_id = namespace("demo");
         let actual_namespace_id = namespace("other");
-        let object_key = wal_head(&expected_namespace_id);
-        let (_, bytes) = encoded_head(&actual_namespace_id);
+        let object_key = hint(&expected_namespace_id);
+        let (_, bytes) = encoded_hint(&actual_namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
-        let error = load_head(&store, &object_key, &expected_namespace_id)
+        let error = load_hint(&store, &object_key, &expected_namespace_id)
             .await
             .expect_err("namespace mismatch should fail");
 
@@ -415,14 +398,14 @@ mod tests {
     async fn other_identity_disagreement_is_not_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
-        let (_, bytes) = encoded_head(&namespace_id);
+        let object_key = hint(&namespace_id);
+        let (_, bytes) = encoded_hint(&namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
-        let error = load_control_object::<_, HeadState, _>(
+        let error = load_control_object::<_, HintState, _>(
             &store,
             object_key.clone(),
-            ControlObjectKind::WalHead,
+            ControlObjectKind::Hint,
             |_state| expect_identity_field("test id", "expected", "actual"),
         )
         .await
@@ -443,11 +426,11 @@ mod tests {
     async fn successful_load_returns_state_key_and_etag() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = wal_head(&namespace_id);
-        let (state, bytes) = encoded_head(&namespace_id);
+        let object_key = hint(&namespace_id);
+        let (state, bytes) = encoded_hint(&namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
-        let loaded = load_head(&store, &object_key, &namespace_id)
+        let loaded = load_hint(&store, &object_key, &namespace_id)
             .await
             .expect("valid control object");
 

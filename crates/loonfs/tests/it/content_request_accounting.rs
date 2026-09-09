@@ -12,12 +12,10 @@ use loonfs::{
     ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
     CONTENT_READ_CHUNK_BYTES,
 };
-use loonfs_api::wire::control::ControlObjectKind;
 use loonfs_api::{ContentId, ContentStoreId};
-use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, RecordingStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -172,25 +170,19 @@ async fn bind_namespace_to_content_store(
     namespace_id: &NamespaceId,
     content_store_id: ContentStoreId,
 ) {
-    let mut head = loonfs_core::control::load_namespace_head_control(store, namespace_id)
+    let current = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
         .await
-        .expect("load namespace head")
-        .state;
-    head.content_store_id = content_store_id;
-    let envelope = head;
+        .expect("load manifest");
+    let mut payload = current.envelope.into_payload();
+    payload.content_store_id = content_store_id;
+    let bytes = loonfs_api::wire::manifest::encode_namespace_manifest_json(payload)
+        .expect("encode manifest")
+        .into_parts()
+        .1;
     store
-        .put_overwrite(
-            &wal_head(namespace_id),
-            Bytes::from(
-                loonfs_api::wire::control::encode_control_state(
-                    ControlObjectKind::WalHead,
-                    &envelope,
-                )
-                .expect("encode namespace head"),
-            ),
-        )
+        .put_overwrite(&current.object_key, Bytes::from(bytes))
         .await
-        .expect("rebind the namespace head to the shared content store");
+        .expect("bind fixture content store");
 }
 
 /// Full external preparation performs one content HEAD and one full GET.
@@ -1009,10 +1001,9 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("in-flight-duplicate").expect("valid namespace id");
     let recording = RequestLog::new(temp_dir.path());
-    let blocking = Arc::new(BlockingStore::new(
+    let blocking = Arc::new(BlockingStore::matching(
         recording.store(),
-        KeyPredicate::wal_head(&namespace_id),
-        OperationClass::CompareAndSwap,
+        crate::common::data_wal_put_for(&namespace_id),
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "duplicate-writer").await;
@@ -1079,10 +1070,9 @@ async fn stale_head_retry_preserves_content_admission() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("stale-head-retry").expect("valid namespace id");
     let recording = RequestLog::new(temp_dir.path());
-    let conflicting = Arc::new(FailStore::new(
+    let conflicting = Arc::new(FailStore::matching(
         recording.store(),
-        KeyPredicate::wal_head(&namespace_id),
-        OperationClass::CompareAndSwap,
+        crate::common::data_wal_put_for(&namespace_id),
         InjectedError::PreconditionFailed,
     ));
     let store: SharedObjectStore = conflicting.clone();
@@ -1117,10 +1107,9 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("mixed-preparation").expect("valid namespace id");
     let recording = RequestLog::new(temp_dir.path());
-    let blocking = Arc::new(BlockingStore::new(
+    let blocking = Arc::new(BlockingStore::matching(
         recording.store(),
-        KeyPredicate::wal_head(&namespace_id),
-        OperationClass::CompareAndSwap,
+        crate::common::data_wal_put_for(&namespace_id),
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "mixed-writer").await;

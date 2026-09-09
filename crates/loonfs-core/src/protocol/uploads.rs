@@ -22,7 +22,7 @@ use crate::limits::{
     UPLOAD_SESSION_LEASE_MS,
 };
 use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
-use crate::namespace::control::load_namespace_head_control;
+use crate::namespace::control::load_current_manifest;
 use crate::storage::content::{
     abort_unpublished_multipart_upload, complete_content_multipart_upload, content_key_for_id,
     create_content_multipart_upload, delete_unpublished_content_object, identify_streamed_payload,
@@ -462,19 +462,14 @@ async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
     Ok((state, metadata))
 }
 
-/// Verifies that the namespace exists and accepts writes.
-///
-/// A missing head means the namespace was not created. A deleted head
-/// rejects the upload.
 async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<()> {
-    let head = load_namespace_head_control(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .state;
-    crate::namespace::control::ensure_namespace_live(&head)?;
+    let manifest = load_current_manifest(store, namespace_id).await?;
+    crate::namespace::control::ensure_namespace_live(
+        &crate::namespace::state::NamespaceReadState::from(manifest.envelope.payload()),
+    )?;
     Ok(())
 }
 

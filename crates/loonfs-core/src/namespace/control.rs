@@ -1,22 +1,23 @@
 //! Loads namespace heads and discovers numbered manifests through their hints.
 
 use crate::control_object::{
-    expect_foreign_fork_basis, expect_namespace, load_control_object, ControlObjectLoadError,
-    LoadedControl,
+    expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
 use crate::error::CoreError;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control_snapshot::load_head_and_metadata_basis;
-use loonfs_api::wire::control::{ControlObjectKind, HeadState, HintState, ManifestRef};
+use crate::namespace::state::NamespaceReadState;
+use loonfs_api::wire::control::{ControlObjectKind, HintState, ManifestRef};
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::keys::{hint, wal_head};
+use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStore;
 
-pub(crate) type LoadedHeadObject = LoadedControl<HeadState>;
+pub(crate) type LoadedHeadObject = LoadedControl<NamespaceReadState>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentManifest {
     pub manifest: ManifestRef,
     pub retention_floor_seq: loonfs_api::ChangeSeq,
+    pub last_folded_wal_no: loonfs_api::WalNo,
     pub compactor_epoch: u64,
 }
 
@@ -25,10 +26,12 @@ pub struct LoadedManifest {
     pub object_key: String,
     pub discovery_start_manifest_no: loonfs_api::ManifestNo,
     pub state: CurrentManifest,
+    pub hint_etag: String,
+    pub hinted_wal_no: loonfs_api::WalNo,
     pub envelope: loonfs_api::wire::manifest::NamespaceManifestEnvelope,
 }
 
-pub(crate) fn ensure_namespace_live(head: &HeadState) -> crate::error::Result<()> {
+pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::Result<()> {
     if head.status.is_deleted() {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: head.namespace_id.clone(),
@@ -37,28 +40,71 @@ pub(crate) fn ensure_namespace_live(head: &HeadState) -> crate::error::Result<()
     Ok(())
 }
 
-pub(crate) async fn update_manifest_hint<S: ObjectStore + ?Sized>(
+pub type LoadedHint = LoadedControl<HintState>;
+
+async fn load_hint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> crate::error::Result<LoadedHint> {
+    load_control_object(
+        store,
+        hint(namespace_id),
+        ControlObjectKind::Hint,
+        |state: &HintState| expect_namespace(namespace_id, &state.namespace_id),
+    )
+    .await
+    .map_err(CoreError::ControlObjectLoad)
+}
+
+/// Raises the hint to at least the given numbers and returns the hint as
+/// written. `known` is the hint as the caller last saw it; a raise from a
+/// current token needs no read. Each number only ever increases, so a
+/// stale actor cannot regress what a newer one wrote.
+pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_api::ManifestNo,
-) -> crate::error::Result<()> {
+    wal_no: loonfs_api::WalNo,
+    known: Option<LoadedHint>,
+) -> crate::error::Result<LoadedHint> {
     let object_key = hint(namespace_id);
-    let bytes = loonfs_api::wire::control::encode_control_state(
-        ControlObjectKind::Hint,
-        &HintState {
+    let mut current = match known {
+        Some(known) => known,
+        None => load_hint(store, namespace_id).await?,
+    };
+    loop {
+        let raised = HintState {
             namespace_id: namespace_id.clone(),
-            manifest_no,
-        },
-    )
-    .map_err(|error| CoreError::Codec {
-        object_key: object_key.clone(),
-        message: error.to_string(),
-    })?;
-    store
-        .put_overwrite(&object_key, bytes::Bytes::from(bytes))
-        .await
-        .map_err(|error| CoreError::store(&object_key, &error))?;
-    Ok(())
+            manifest_no: current.state.manifest_no.max(manifest_no),
+            wal_no: current.state.wal_no.max(wal_no),
+        };
+        if raised.manifest_no == current.state.manifest_no && raised.wal_no == current.state.wal_no
+        {
+            return Ok(current);
+        }
+        let bytes =
+            loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &raised)
+                .map_err(|error| CoreError::Codec {
+                    object_key: object_key.clone(),
+                    message: error.to_string(),
+                })?;
+        match store
+            .compare_and_swap(&object_key, &current.etag, bytes::Bytes::from(bytes))
+            .await
+        {
+            Ok(metadata) => {
+                return Ok(LoadedControl {
+                    object_key,
+                    etag: metadata.etag.unwrap_or_default(),
+                    state: raised,
+                })
+            }
+            Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. }) => {
+                current = load_hint(store, namespace_id).await?;
+            }
+            Err(error) => return Err(CoreError::store(&object_key, &error)),
+        }
+    }
 }
 
 pub(crate) async fn load_current_manifest<S: ObjectStore + ?Sized>(
@@ -80,57 +126,74 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
     let object_key = hint(namespace_id);
-    let hint = load_control_object(
+    let hint = match load_control_object(
         store,
         object_key.clone(),
         ControlObjectKind::Hint,
         |state: &HintState| expect_namespace(namespace_id, &state.namespace_id),
     )
     .await
-    .map_err(|error| match error {
-        ControlObjectLoadError::MissingObject { .. } => ControlObjectLoadError::Codec {
-            object_key: object_key.clone(),
-            message: "namespace hint is missing".to_owned(),
-        },
-        error => error,
-    })?;
-    let mut manifest_no = hint.state.manifest_no;
-    let mut current = if manifest_no == loonfs_api::ManifestNo(0) {
-        None
-    } else {
-        Some(
-            load_discovered_manifest(store, namespace_id, manifest_no)
-                .await?
-                .ok_or_else(|| ControlObjectLoadError::Codec {
-                    object_key,
-                    message: format!("hinted manifest `{manifest_no}` is missing"),
-                })?,
-        )
+    {
+        Ok(hint) => hint,
+        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
+        Err(error) => return Err(error),
     };
+    let mut manifest_no = hint.state.manifest_no;
+    if manifest_no == loonfs_api::ManifestNo(0) {
+        return Err(ControlObjectLoadError::Codec {
+            object_key,
+            message: "manifest hint must be at least one".to_owned(),
+        });
+    }
+    let mut current = load_discovered_manifest(store, namespace_id, manifest_no).await?;
+    if current.is_none() {
+        if manifest_no == loonfs_api::ManifestNo(1) {
+            return Ok(None);
+        }
+        return Err(ControlObjectLoadError::Codec {
+            object_key,
+            message: format!("hinted manifest `{manifest_no}` is missing"),
+        });
+    }
     while let Ok(next) = manifest_no.successor() {
         let Some(manifest) = load_discovered_manifest(store, namespace_id, next).await? else {
             break;
         };
-        if current.as_ref().is_some_and(|previous| {
-            previous.state.manifest.manifest_head_seq > manifest.state.manifest.manifest_head_seq
-                || previous.state.retention_floor_seq > manifest.state.retention_floor_seq
-        }) {
-            return Err(ControlObjectLoadError::Codec {
-                object_key: manifest.object_key,
-                message: "manifest lowers its predecessor's head sequence or retention floor"
-                    .to_owned(),
-            });
+        if let Some(previous) = &current {
+            previous
+                .envelope
+                .payload()
+                .ensure_successor_identity(manifest.envelope.payload())
+                .map_err(|error| ControlObjectLoadError::Codec {
+                    object_key: manifest.object_key.clone(),
+                    message: error.to_string(),
+                })?;
+            let before = previous.envelope.payload();
+            let after = manifest.envelope.payload();
+            if before.head_seq > after.head_seq
+                || before.retention_floor_seq > after.retention_floor_seq
+                || before.last_folded_wal_no > after.last_folded_wal_no
+                || before.retention_floor_wal_no > after.retention_floor_wal_no
+                || before.writer_epoch > after.writer_epoch
+            {
+                return Err(ControlObjectLoadError::Codec {
+                    object_key: manifest.object_key,
+                    message: "manifest lowers a predecessor counter".to_owned(),
+                });
+            }
         }
         current = Some(manifest);
         manifest_no = next;
     }
     if let Some(current) = &mut current {
         current.discovery_start_manifest_no = hint.state.manifest_no;
+        current.hint_etag = hint.etag;
+        current.hinted_wal_no = hint.state.wal_no;
     }
     Ok(current)
 }
 
-async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_api::ManifestNo,
@@ -157,6 +220,8 @@ async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
     Ok(envelope.map(|envelope| LoadedManifest {
         object_key,
         discovery_start_manifest_no: manifest_no,
+        hint_etag: String::new(),
+        hinted_wal_no: loonfs_api::WalNo(0),
         state: CurrentManifest {
             manifest: ManifestRef {
                 owner_namespace_id: namespace_id.clone(),
@@ -165,6 +230,7 @@ async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
                 manifest_payload_checksum: envelope.payload_checksum().to_owned(),
             },
             retention_floor_seq: envelope.payload().retention_floor_seq,
+            last_folded_wal_no: envelope.payload().last_folded_wal_no,
             compactor_epoch: envelope.payload().compactor_epoch,
         },
         envelope,
@@ -175,20 +241,11 @@ pub(crate) async fn load_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
-    let object_key = wal_head(expected_namespace_id);
-    load_control_object(
-        store,
-        object_key,
-        ControlObjectKind::WalHead,
-        |state: &HeadState| {
-            expect_namespace(expected_namespace_id, &state.namespace_id)?;
-            match &state.fork_basis {
-                None => Ok(()),
-                Some(fork_basis) => expect_foreign_fork_basis(&state.namespace_id, fork_basis),
-            }
-        },
+    Ok(
+        crate::namespace::control_snapshot::load_control_snapshot(store, expected_namespace_id)
+            .await?
+            .head,
     )
-    .await
 }
 
 pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
@@ -214,7 +271,7 @@ pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
 pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<(LoadedControl<HeadState>, MetadataBasis), ControlObjectLoadError> {
+) -> Result<(LoadedControl<NamespaceReadState>, MetadataBasis), ControlObjectLoadError> {
     let loaded = load_head_and_metadata_basis(store, expected_namespace_id).await?;
     Ok((loaded.head, loaded.basis))
 }
@@ -222,121 +279,24 @@ pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
 pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<LoadedControl<HeadState>, ControlObjectLoadError> {
+) -> Result<LoadedControl<NamespaceReadState>, ControlObjectLoadError> {
     load_head_object(store, expected_namespace_id).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bytes::Bytes;
-    use loonfs_api::wire::control::{
-        encode_control_state, ForkBasis, ManifestRef, NamespaceStatus,
-    };
-    use loonfs_api::{ChangeSeq, CheckpointId, ContentStoreId, ManifestNo, WriterEpoch};
-    use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use tempfile::{tempdir, TempDir};
-
-    fn local_store() -> (TempDir, LocalFsStore) {
-        let directory = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        (directory, store)
-    }
-
-    fn namespace(value: &str) -> NamespaceId {
-        NamespaceId::parse(value).expect("valid namespace id")
-    }
-
-    fn manifest_ref(owner: &NamespaceId) -> ManifestRef {
-        ManifestRef {
-            owner_namespace_id: owner.clone(),
-            manifest_no: ManifestNo(1),
-
-            manifest_head_seq: ChangeSeq(1),
-            manifest_payload_checksum: "sha256:test".to_owned(),
-        }
-    }
-
-    async fn write_control<T: serde::Serialize>(
-        store: &LocalFsStore,
-        object_key: &str,
-        kind: ControlObjectKind,
-        state: &T,
-    ) {
-        let bytes = encode_control_state(kind, state).expect("encode control state");
-        store
-            .put_overwrite(object_key, Bytes::from(bytes))
-            .await
-            .expect("write control object");
-    }
-
-    #[tokio::test]
-    async fn head_loader_rejects_a_fork_basis_owned_by_the_namespace_itself() {
-        let (_directory, store) = local_store();
-        let namespace_id = namespace("demo");
-        let mut head = HeadState::initial(
-            namespace_id.clone(),
-            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("valid content store id"),
-            1_000,
-        );
-        head.fork_basis = Some(ForkBasis {
-            manifest: manifest_ref(&namespace_id),
-            source_checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
-                .expect("valid checkpoint id"),
-        });
-        write_control(
-            &store,
-            &wal_head(&namespace_id),
-            ControlObjectKind::WalHead,
-            &head,
-        )
-        .await;
-
-        let error = load_head_object(&store, &namespace_id)
-            .await
-            .expect_err("a self-owned fork basis should fail");
-
-        assert_eq!(
-            error,
-            ControlObjectLoadError::ForkBasisOwnerIsSelf {
-                object_key: wal_head(&namespace_id),
-                namespace_id,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn head_loader_accepts_a_fork_basis_owned_by_the_source() {
-        let (_directory, store) = local_store();
-        let namespace_id = namespace("clone");
-        let source_id = namespace("source");
-        let mut head = HeadState::initial(
-            namespace_id.clone(),
-            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("valid content store id"),
-            1_000,
-        );
-        head.seq = ChangeSeq(1);
-        head.writer_epoch = WriterEpoch(0);
-        head.status = NamespaceStatus::Active {};
-        head.fork_basis = Some(ForkBasis {
-            manifest: manifest_ref(&source_id),
-            source_checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
-                .expect("valid checkpoint id"),
-        });
-        write_control(
-            &store,
-            &wal_head(&namespace_id),
-            ControlObjectKind::WalHead,
-            &head,
-        )
-        .await;
-
-        let loaded = load_head_object(&store, &namespace_id)
-            .await
-            .expect("a fork target head loads");
-
-        assert_eq!(loaded.state, head);
-    }
+/// Records a writer's acknowledged tip in the hint before the batch is
+/// acknowledged, so a reader polling the hint sees the commit at once.
+pub async fn raise_namespace_hint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    wal_no: loonfs_api::WalNo,
+    known: Option<LoadedHint>,
+) -> crate::error::Result<LoadedHint> {
+    raise_hint(
+        store,
+        namespace_id,
+        loonfs_api::ManifestNo(1),
+        wal_no,
+        known,
+    )
+    .await
 }

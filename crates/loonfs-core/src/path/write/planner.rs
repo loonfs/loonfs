@@ -18,7 +18,7 @@ use crate::commit::{
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
-use loonfs_api::wire::control::HeadState;
+use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{
     next_public_ordinal, ChangeSeq, DestinationGuard, GuardFields, NamespaceId, MAX_PUBLIC_INTEGER,
 };
@@ -59,7 +59,7 @@ pub(crate) fn commit_fingerprint(
 pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
     request: &CommitRequest,
     semantic_identity: CommitFingerprint,
-    head: &HeadState,
+    head: &NamespaceReadState,
     base_view: MetadataView<'_, '_, S>,
     accepted_rows: &MetadataState,
     committed_at_ms: u64,

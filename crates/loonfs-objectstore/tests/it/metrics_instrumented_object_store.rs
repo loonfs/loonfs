@@ -4,7 +4,7 @@ use futures::stream::{self, BoxStream};
 use futures::TryStreamExt;
 use loonfs_api::ManifestNo;
 use loonfs_objectstore::keys::{
-    checkpoint_record, metadata_manifest_object, metadata_segment, wal_head, wal_segment,
+    checkpoint_record, hint, metadata_manifest_object, metadata_segment, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
@@ -84,8 +84,8 @@ async fn records_put_success() {
 
     store
         .put(
-            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
-            bytes(b"head"),
+            &hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            bytes(b"hint"),
             PutMode::CreateIfAbsent,
         )
         .await
@@ -99,7 +99,7 @@ async fn records_put_success() {
     assert_eq!(sample.bytes_in, Some(4));
     assert_eq!(sample.bytes_out, None);
     assert_eq!(sample.put_mode, Some(PutModeClass::CreateIfAbsent));
-    assert_eq!(sample.key_class, KeyClass::NamespaceHead);
+    assert_eq!(sample.key_class, KeyClass::NamespaceManifest);
     assert_eq!(sample.store_kind.as_deref(), Some("local-fs"));
     assert_eq!(sample.attempts, 1);
 }
@@ -111,21 +111,21 @@ async fn convenience_writes_funnel_through_put_with_distinct_modes() {
 
     store
         .put_overwrite(
-            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"overwrite"),
         )
         .await
         .expect("put overwrite");
     store
         .put_if_absent(
-            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"create"),
         )
         .await
         .expect("put if absent");
     store
         .compare_and_swap(
-            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
             "etag-old",
             bytes(b"swap"),
         )
@@ -233,7 +233,7 @@ async fn records_list_count() {
         .expect("put descriptor");
     store
         .put_overwrite(
-            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"head"),
         )
         .await
@@ -288,8 +288,7 @@ async fn classifies_durable_key_families() {
         .put_overwrite(
             &wal_segment(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_api::WalSegmentId::parse("wal_00000000000000000001-644e4d336fd4ee33")
-                    .expect("valid WAL segment id"),
+                &loonfs_api::WalNo(1),
             ),
             bytes(b"wal"),
         )
@@ -355,7 +354,7 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
 
     store
         .put_overwrite(
-            &wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"head"),
         )
         .await

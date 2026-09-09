@@ -11,8 +11,12 @@ pub(crate) mod control;
 pub(crate) mod control_snapshot;
 pub(crate) mod delete;
 pub(crate) mod fork;
+pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod writer_epoch;
 
 pub use basis::MetadataBasis;
 pub use bootstrap::BootstrapNamespaceError;
+
+#[cfg(test)]
+mod tests;

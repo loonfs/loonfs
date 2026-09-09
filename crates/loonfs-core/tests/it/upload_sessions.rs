@@ -73,13 +73,10 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
 }
 
 fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore<LocalFsStore> {
-    let wal_prefix = format!("namespaces/{namespace}/wal/segments/");
-    let manifest_prefix = format!("namespaces/{namespace}/manifests/");
+    let wal_prefix = format!("namespaces/{namespace}/wal/");
     let store = FailStore::new(
         LocalFsStore::new(root.as_ref()).expect("store"),
-        KeyPredicate::new(move |key| {
-            key.starts_with(&wal_prefix) || key.starts_with(&manifest_prefix)
-        }),
+        KeyPredicate::prefix(wal_prefix),
         OperationClass::Read,
         InjectedError::Transport("begin_upload unexpectedly read replay object".to_owned()),
     );
@@ -151,7 +148,7 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
 }
 
 #[tokio::test]
-async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
+async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

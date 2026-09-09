@@ -1,32 +1,28 @@
-//! Publish-time metadata view: the current head plus the WAL tail replayed
-//! over the manifest, with head-etag freshness checks against concurrent
-//! publishers.
+//! Publish-time metadata and the numbered WAL tip retained between batches.
 
 use crate::checkpoint::VerifiedMetadataSegments;
 use crate::checkpoint::{load_basis_metadata_segments, LoadedMetadataBasis, MetadataSegmentCache};
-use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, Result, StoreFailureClass};
+use crate::error::{CoreError, Result};
 use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-use crate::namespace::control::load_head_object;
 use crate::namespace::control_snapshot::load_head_and_metadata_basis;
+use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::{
     ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::v0::CommittedChange;
-use loonfs_api::wire::control::{AcquiredWriter, HeadState};
+use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
-use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     content_store_id: ContentStoreId,
-    pub(super) head: HeadState,
+    pub(super) head: NamespaceReadState,
     pub(super) head_etag: String,
     pub(super) acquired_writer: AcquiredWriter,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
@@ -115,7 +111,7 @@ struct PublishProjectionKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishTailProjection {
     key: PublishProjectionKey,
-    pub(crate) head: HeadState,
+    pub(crate) head: NamespaceReadState,
     pub(crate) retention_floor_seq: Option<ChangeSeq>,
     pub(crate) wal_tail_segments: u64,
     pub(crate) tail_state: Arc<MetadataState>,
@@ -139,10 +135,6 @@ impl PublishTailProjection {
             && weight.decoded_bytes <= options.max_tail_decoded_bytes
     }
 
-    pub(crate) fn head_seq(&self) -> ChangeSeq {
-        self.key.head.seq
-    }
-
     pub(crate) fn head_etag(&self) -> &str {
         &self.key.head.etag
     }
@@ -155,7 +147,7 @@ impl PublishTailProjection {
         self.key.basis.manifest_head_seq()
     }
 
-    pub(crate) fn reanchor(&mut self, head: HeadState, etag: String) {
+    pub(crate) fn reanchor(&mut self, head: NamespaceReadState, etag: String) {
         self.key.head = HeadAnchor {
             seq: head.seq,
             etag,
@@ -172,9 +164,21 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
-    let loaded = load_head_and_metadata_basis(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+    let loaded = if let Some(cached) = cached_projection {
+        crate::namespace::control_snapshot::LoadedNamespaceBasis {
+            head: crate::control_object::LoadedControl {
+                object_key: loonfs_objectstore::keys::hint(namespace_id),
+                etag: cached.head_etag().to_owned(),
+                state: cached.head.clone(),
+            },
+            basis: cached.basis().clone(),
+            retention_floor_seq: cached.retention_floor_seq,
+        }
+    } else {
+        load_head_and_metadata_basis(store, namespace_id)
+            .await
+            .map_err(CoreError::ControlObjectLoad)?
+    };
     let retention_floor_seq = loaded.retention_floor_seq;
     let head_etag = loaded.head.etag;
     let head = loaded.head.state;
@@ -187,9 +191,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     }
     ensure_writer_not_fenced(&head, &acquired_writer)?;
     let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
-    let loaded_basis =
-        load_basis_metadata_segments(store, segment_cache, &loaded.basis, head.created_at_ms)
-            .await?;
+    let loaded_basis = load_basis_metadata_segments(store, segment_cache, &loaded.basis).await?;
     let key = PublishProjectionKey {
         namespace_id: namespace_id.clone(),
         head: HeadAnchor {
@@ -208,8 +210,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 
     let manifest_segments = loaded_basis.segments;
     let tail_state = Arc::clone(&projection.tail_state);
-    ensure_publish_head_etag_still_current(store, namespace_id, &head_etag, &acquired_writer)
-        .await?;
 
     Ok((
         PublishMetadataView {
@@ -228,7 +228,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 
 async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     store: &S,
-    head: &HeadState,
+    head: &NamespaceReadState,
     retention_floor_seq: Option<ChangeSeq>,
     key: PublishProjectionKey,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
@@ -240,17 +240,15 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
             namespace_id: &key.namespace_id,
             chain_base_seq: manifest_head.seq,
             head_seq: head.seq,
-            visible_tip: head.visible_wal_tip.clone(),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &head.recent_segments,
+            base_wal_no: head.last_folded_wal_no,
+            tip_wal_no: head.wal_no,
+            writer_epoch: head.writer_epoch,
         },
     )
     .await
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-    })?
-    .into_complete();
+    })?;
     let replayed = project_validated_wal_tail(
         &manifest_head,
         &loaded_basis.base_state,
@@ -272,57 +270,6 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     Ok(projection)
 }
 
-/// Confirms that the namespace head did not change while the publish view
-/// was loading.
-///
-/// When the ETag changes, the method distinguishes a normal concurrent
-/// commit from writer fencing. It rereads the head only on this failure path
-/// so a fenced writer receives a terminal error instead of a retryable stale
-/// head error.
-async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    loaded_head_etag: &str,
-    acquired_writer: &AcquiredWriter,
-) -> Result<()> {
-    let object_key = wal_head(namespace_id);
-    let metadata = store
-        .head(&object_key)
-        .await
-        .map_err(|error| {
-            CoreError::ControlObjectLoad(ControlObjectLoadError::Store {
-                object_key: object_key.clone(),
-                message: error.public_message().into_owned(),
-                class: StoreFailureClass::of(&error),
-            })
-        })?
-        .ok_or_else(|| {
-            CoreError::ControlObjectLoad(ControlObjectLoadError::MissingObject {
-                object_key: object_key.clone(),
-            })
-        })?;
-    let current_head_etag = metadata.etag.ok_or_else(|| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::MissingHeadEtag {
-            object_key: object_key.clone(),
-        })
-    })?;
-    if current_head_etag != loaded_head_etag {
-        let moved_head = load_head_object(store, namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?
-            .state;
-        ensure_writer_not_fenced(&moved_head, acquired_writer)?;
-        return Err(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::HeadChangedDuringLoad {
-                object_key,
-                loaded_head_etag: loaded_head_etag.to_owned(),
-                current_head_etag,
-            },
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,7 +278,7 @@ mod tests {
     use loonfs_test_support::ids::namespace_id;
 
     fn manifest_basis(owner: &str, manifest_no: u64, checksum: &str) -> MetadataBasis {
-        MetadataBasis::Manifest(ManifestRef {
+        MetadataBasis(ManifestRef {
             owner_namespace_id: namespace_id(owner),
             manifest_no: loonfs_api::ManifestNo(manifest_no),
 
@@ -358,7 +305,7 @@ mod tests {
     }
 
     fn projection(key: PublishProjectionKey) -> PublishTailProjection {
-        let mut head = HeadState::initial(
+        let mut head = NamespaceReadState::initial(
             key.namespace_id.clone(),
             ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("valid content store id"),
@@ -424,10 +371,6 @@ mod tests {
                     manifest_basis("fork-source", 4, "sha256:basis-a"),
                     7,
                 ),
-            ),
-            (
-                "basis kind",
-                projection_key("fork-target", 9, "head-etag-a", MetadataBasis::Genesis, 0),
             ),
             (
                 "basis owner namespace",
@@ -505,7 +448,7 @@ mod tests {
             "genesis-namespace",
             0,
             "genesis-etag",
-            MetadataBasis::Genesis,
+            manifest_basis("genesis-namespace", 1, "sha256:genesis"),
             0,
         );
         let projection = projection(key.clone());

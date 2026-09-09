@@ -54,6 +54,7 @@ pub(crate) struct WriterIdentity {
 
 /// Writer state shared weakly with the publisher worker.
 pub(crate) struct WriterBits {
+    pub(crate) discovery_hints: crate::discovery_hints::DiscoveryHints,
     pub(crate) identity: WriterIdentity,
     pub(crate) wal_fold_permits: Semaphore,
     pub(crate) wal_folds_waiting: AtomicUsize,

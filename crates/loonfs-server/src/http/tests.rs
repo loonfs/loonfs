@@ -31,9 +31,8 @@ use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePat
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
 use loonfs_grep::root::{encode_grep_root, load_grep_root, GrepManifestObjectId, GrepRootPointer};
 use loonfs_grep::{GrepWorker, NamespaceReads};
-use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
 use std::path::Path;
 
 fn options_with_store(store: SharedObjectStore) -> AppOptions {
@@ -446,7 +445,7 @@ use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, BufferWatchStore, FailStore, InjectedError, KeyPredicate,
     OperationClass, OperationContext, OperationKind,
 };
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -578,42 +577,19 @@ async fn invalid_presign_content_is_a_bad_request() {
     assert!(rendered.contains("/content"), "{rendered}");
 }
 
-#[derive(Debug)]
-struct StaleHeadOnceStore {
-    inner: LocalFsStore,
-    head_key: String,
-    armed: AtomicBool,
-}
-
-impl StaleHeadOnceStore {
-    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner: LocalFsStore::new(root.as_ref()).expect("construct local store"),
-            head_key: wal_head(namespace_id),
-            armed: AtomicBool::new(true),
+fn data_wal_put_for(
+    namespace_id: &NamespaceId,
+) -> impl Fn(&OperationContext<'_>) -> bool + Send + Sync + 'static {
+    let prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
+    move |operation| match operation.kind() {
+        OperationKind::Put {
+            bytes,
+            mode: PutMode::CreateIfAbsent,
+        } if operation.key().starts_with(&prefix) => {
+            loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(bytes)
+                .is_ok_and(|envelope| !envelope.payload().records.is_empty())
         }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for StaleHeadOnceStore {
-    delegate_object_store!(self => self.inner; except put);
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key
-            && matches!(mode, PutMode::CompareAndSwap { .. })
-            && self.armed.swap(false, Ordering::SeqCst)
-        {
-            if let Some(existing) = self.inner.get(key, None).await? {
-                let _ = self.inner.put_overwrite(key, existing).await?;
-            }
-        }
-        self.inner.put(key, bytes, mode).await
+        _ => false,
     }
 }
 
@@ -709,8 +685,11 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     assert_eq!(diagnostics.namespace_id, namespace_id);
     assert_eq!(diagnostics.head_seq, ChangeSeq(1));
     assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
-    assert_eq!(diagnostics.current_manifest_no, None);
-    assert_eq!(diagnostics.wal_tail_segments, 1);
+    assert_eq!(
+        diagnostics.current_manifest_no,
+        Some(loonfs_api::ManifestNo(2))
+    );
+    assert_eq!(diagnostics.wal_tail_segments, 2);
     assert_eq!(diagnostics.live_snapshots, 0);
     assert_eq!(diagnostics.live_checkpoints, 0);
 
@@ -1175,10 +1154,9 @@ impl MaintenanceJob for StepCountingJob {
 async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("shutdown-order");
-    let blocking = Arc::new(BlockingStore::new(
+    let blocking = Arc::new(BlockingStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
-        KeyPredicate::wal_head(&namespace_id),
-        OperationClass::CompareAndSwap,
+        data_wal_put_for(&namespace_id),
     ));
     let config = test_config(temp_dir.path(), "shutdown-order-server");
     let (_router, state) = app(
@@ -2039,12 +2017,17 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_path_mutation_retries_transient_stale_head_cas() {
+async fn http_path_mutation_retries_a_wal_put_collision() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let store =
-        Arc::new(StaleHeadOnceStore::new(temp_dir.path(), &namespace_id)) as SharedObjectStore;
+    let failures = Arc::new(FailStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        data_wal_put_for(&namespace_id),
+        InjectedError::PreconditionFailed,
+    ));
+    let store = failures.clone() as SharedObjectStore;
     bootstrap_namespace(&store, "server-writer", &namespace_id).await;
+    failures.fail_next(1);
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
@@ -2052,8 +2035,9 @@ async fn http_path_mutation_retries_transient_stale_head_cas() {
         .client
         .put_file_bytes(&target, b"race", &replace_file_options())
         .await
-        .expect("path write retries stale head");
+        .expect("path write retries the WAL collision");
     assert_eq!(result.committed_seq, ChangeSeq(1));
+    assert_eq!(failures.attempts(), 2);
 
     harness.server.abort();
 }

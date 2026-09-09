@@ -1,99 +1,94 @@
-//! Writer epoch acquisition: the last-writer-wins fencing that keeps two
-//! sessions from publishing interleaved commits.
+//! Writer acquisition through a manifest epoch and a numbered fence segment.
 
+use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::context::MutationContext;
-use crate::control_object::ControlObjectLoadError;
-use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
-use crate::error::{CoreError, StoreFailureClass, WriterFence};
-use loonfs_api::wire::control::{AcquiredWriter, HeadIdentityDrift, HeadState, WriterBlock};
-use loonfs_api::{next_public_ordinal, ErrorCode, NamespaceId, WriterEpoch};
+use crate::error::{CoreError, Result, WriterFence};
+use crate::namespace::control::{load_current_manifest, load_head_object};
+use crate::namespace::state::NamespaceReadState;
+use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_api::wire::control::{AcquiredWriter, WriterBlock};
+use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentPayload};
+use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum WriterEpochAcquireError {
-    // Control loads map differently from head writes, so conversion stays explicit.
-    #[error(transparent)]
-    LoadHead(ControlObjectLoadError),
-    #[error("namespace `{namespace_id}` is deleted")]
-    NamespaceDeleted { namespace_id: NamespaceId },
-    #[error(
-        "writer epoch `{active}` cannot be incremented because the maximum is 9007199254740991"
-    )]
-    WriterEpochOverflow { active: WriterEpoch },
-    #[error("failed to write head object `{object_key}` during writer epoch acquire: {message}")]
-    HeadWrite {
-        object_key: String,
-        message: String,
-        class: StoreFailureClass,
-    },
-    #[error("{}", crate::error::contention_message(object_key))]
-    RetryExhausted { object_key: String },
-    /// The successor head changed immutable namespace identity.
-    #[error(transparent)]
-    HeadIdentityDrift(HeadIdentityDrift),
-}
-
-impl WriterEpochAcquireError {
-    pub fn code(&self) -> ErrorCode {
-        match self {
-            Self::LoadHead(error) => error.code(),
-            Self::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-            Self::WriterEpochOverflow { .. }
-            | Self::RetryExhausted { .. }
-            | Self::HeadIdentityDrift(_) => ErrorCode::ServerError,
-            Self::HeadWrite { class, .. } => crate::error::classify_store_failure(*class),
-        }
-    }
-}
-
-/// Acquires the namespace writer epoch for one writer session.
-///
-/// A session acquires lazily on its first write and caches the result.
-/// Acquisition increments `writer_epoch`; any older session is fenced on its
-/// next publish. There is no lease or expiry, so concurrent acquisitions use
-/// last-writer-wins ordering.
-///
-/// Deleted namespaces reject acquisition before the compare-and-swap. A
-/// fenced session may reacquire only when its caller explicitly starts a new
-/// writer session.
-///
-/// Every acquisition attempt increments the epoch, even when the same writer
-/// ID is already recorded. Writer IDs do not identify sessions, and the
-/// commit engine normally calls this only once per session.
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<AcquiredWriter, WriterEpochAcquireError> {
-    update_head(store, namespace_id, |loaded_head| {
-        let head = &loaded_head.state;
-        // A deleted namespace cannot grant another writer epoch, even to the
-        // writer recorded in its tombstone.
-        if head.status.is_deleted() {
-            return Err(WriterEpochAcquireError::NamespaceDeleted {
-                namespace_id: head.namespace_id.clone(),
-            });
+) -> Result<AcquiredWriter> {
+    let timer = StdMonotonicTimer::default();
+    let started_ms = timer.monotonic_now_ms();
+    let acquired = loop {
+        let current = load_current_manifest(store, namespace_id).await?;
+        let mut payload = current.envelope.payload().clone();
+        super::control::ensure_namespace_live(&NamespaceReadState::from(&payload))?;
+        payload.manifest_no = payload
+            .manifest_no
+            .successor()
+            .map_err(|error| CoreError::Internal(format!("manifest number {error}")))?;
+        payload.writer_epoch = payload
+            .writer_epoch
+            .successor()
+            .map_err(|error| CoreError::Internal(format!("writer epoch {error}")))?;
+        payload.writer = Some(WriterBlock {
+            writer_id: context.writer_id.clone(),
+            acquired_at_ms: context.now_ms,
+        });
+        let acquired = AcquiredWriter {
+            writer_id: context.writer_id.clone(),
+            writer_epoch: payload.writer_epoch,
+        };
+        let manifest = encode_manifest(payload)?;
+        if matches!(
+            publish_manifest(
+                store,
+                namespace_id,
+                &manifest,
+                Some(current.state.manifest.manifest_no),
+                &timer,
+                started_ms
+            )
+            .await?,
+            ManifestPublicationOutcome::Published(_)
+        ) {
+            break acquired;
         }
-
-        let next_epoch = next_writer_epoch(head.writer_epoch)?;
-        Ok(HeadReplacement {
-            next: Box::new(head_with_writer(head, next_epoch, context)?),
-            outcome: AcquiredWriter {
-                writer_id: context.writer_id.clone(),
-                writer_epoch: next_epoch,
-            },
+    };
+    loop {
+        let head = load_head_object(store, namespace_id).await?.state;
+        ensure_writer_not_fenced(&head, &acquired)?;
+        super::control::ensure_namespace_live(&head)?;
+        let wal_no = head
+            .wal_no
+            .successor()
+            .map_err(|error| CoreError::Internal(format!("WAL number {error}")))?;
+        let fence = encode_wal_segment_envelope_zstd(WalSegmentPayload {
+            namespace_id: namespace_id.clone(),
+            wal_no,
+            writer_epoch: acquired.writer_epoch,
+            next_inode_id: head.next_inode_id,
+            base_head_seq: head.seq,
+            start_seq: head.seq,
+            end_seq: head.seq,
+            records: Vec::new(),
         })
-    })
-    .await
+        .map_err(|error| CoreError::Codec {
+            object_key: loonfs_objectstore::keys::wal_segment(namespace_id, &wal_no),
+            message: error.to_string(),
+        })?;
+        crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
+        match crate::commit::publish_wal(store, &fence).await {
+            Ok(()) => return Ok(acquired),
+            Err(CoreError::HeadPublish(crate::commit::CommitHeadPublishError::StaleHead)) => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
-/// Rejects a write when another writer has acquired a newer epoch.
 pub(crate) fn ensure_writer_not_fenced(
-    head: &HeadState,
+    head: &NamespaceReadState,
     acquired_writer: &AcquiredWriter,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if head.writer_epoch == acquired_writer.writer_epoch {
         return Ok(());
     }
@@ -103,551 +98,4 @@ pub(crate) fn ensure_writer_not_fenced(
         active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
         active_acquired_at_ms: head.writer.as_ref().map(|writer| writer.acquired_at_ms),
     }))
-}
-
-fn next_writer_epoch(active: WriterEpoch) -> Result<WriterEpoch, WriterEpochAcquireError> {
-    next_public_ordinal(active.0)
-        .map(WriterEpoch)
-        .ok_or(WriterEpochAcquireError::WriterEpochOverflow { active })
-}
-
-fn head_with_writer(
-    current_head: &HeadState,
-    writer_epoch: WriterEpoch,
-    context: &MutationContext,
-) -> Result<HeadState, WriterEpochAcquireError> {
-    let successor = HeadState {
-        writer_epoch,
-        writer: Some(WriterBlock {
-            writer_id: context.writer_id.clone(),
-            acquired_at_ms: context.now_ms,
-        }),
-        ..current_head.clone()
-    };
-    current_head
-        .ensure_successor_identity(&successor)
-        .map_err(WriterEpochAcquireError::HeadIdentityDrift)?;
-    Ok(successor)
-}
-
-impl From<ControlUpdateError> for WriterEpochAcquireError {
-    fn from(value: ControlUpdateError) -> Self {
-        match value {
-            ControlUpdateError::LoadHead(error) => Self::LoadHead(error),
-            ControlUpdateError::Codec {
-                object_key,
-                message,
-            } => Self::HeadWrite {
-                object_key,
-                message,
-                class: StoreFailureClass::Other,
-            },
-            ControlUpdateError::Store {
-                object_key,
-                message,
-                class,
-            } => Self::HeadWrite {
-                object_key,
-                message,
-                class,
-            },
-            ControlUpdateError::RetryExhausted { object_key } => {
-                Self::RetryExhausted { object_key }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::commit_engine::delete_namespace;
-    use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
-    use crate::error::{CoreError, ErrorCode};
-    use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::control::load_head_object;
-    use crate::options::DeleteNamespaceOptions;
-
-    async fn submit_commit<S: loonfs_objectstore::ObjectStore + ?Sized>(
-        store: &S,
-        namespace_id: &NamespaceId,
-        request: crate::path::write::CommitRequest,
-        context: &crate::context::MutationContext,
-    ) -> crate::error::Result<loonfs_api::v0::CommitResponse> {
-        let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-        engine
-            .publish_batch(
-                store,
-                vec![CommitCandidate::new(request)],
-                context,
-                &crate::protocol::PublishTailOptions::default(),
-            )
-            .await
-            .results
-            .pop()
-            .expect("one commit result")
-    }
-    use bytes::Bytes;
-    use loonfs_api::wire::control::{
-        decode_control_object, ControlObjectKind, HeadStateEnvelope, NamespaceStatus,
-    };
-    use loonfs_api::{ChangeSeq, CommitId, NamespaceId, MAX_PUBLIC_INTEGER};
-    use loonfs_objectstore::keys::wal_head;
-    use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::{ObjectStore, PutMode};
-    use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, OperationClass, OperationKind,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use tempfile::tempdir;
-
-    fn context(writer_id: &str, now_ms: u64) -> MutationContext {
-        MutationContext {
-            writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
-            now_ms,
-        }
-    }
-
-    fn head_owned_by(
-        namespace_id: &NamespaceId,
-        writer_id: &str,
-        writer_epoch: WriterEpoch,
-    ) -> HeadState {
-        let mut head = HeadState::initial(
-            namespace_id.clone(),
-            loonfs_api::ContentStoreId::generate(),
-            1_000,
-        );
-        head.writer_epoch = writer_epoch;
-        head.writer = Some(WriterBlock {
-            writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
-            acquired_at_ms: 500,
-        });
-        head
-    }
-
-    async fn write_head(store: &LocalFsStore, namespace_id: &NamespaceId, head: HeadState) {
-        let bytes =
-            loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &head)
-                .expect("head bytes");
-        store
-            .put_if_absent(&wal_head(namespace_id), Bytes::from(bytes))
-            .await
-            .expect("write head");
-    }
-
-    async fn head_etag(store: &LocalFsStore, namespace_id: &NamespaceId) -> String {
-        store
-            .head(&wal_head(namespace_id))
-            .await
-            .expect("head metadata")
-            .expect("head exists")
-            .etag
-            .expect("head etag")
-    }
-
-    #[test]
-    fn writer_epoch_advancement_accepts_the_maximum_and_rejects_the_next_value() {
-        assert_eq!(
-            next_writer_epoch(WriterEpoch(MAX_PUBLIC_INTEGER - 1))
-                .expect("advance to public maximum"),
-            WriterEpoch(MAX_PUBLIC_INTEGER)
-        );
-        assert!(matches!(
-            next_writer_epoch(WriterEpoch(MAX_PUBLIC_INTEGER)),
-            Err(WriterEpochAcquireError::WriterEpochOverflow {
-                active: WriterEpoch(MAX_PUBLIC_INTEGER),
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn acquiring_twice_from_the_same_context_takes_a_higher_epoch_each_time() {
-        // Nothing recognizes an already-owned head, so a repeat acquire is
-        // an ordinary takeover of the caller's own epoch: it bumps, and the
-        // head's writer block is rewritten with the new acquisition stamp.
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_head(
-            &store,
-            &namespace_id,
-            head_owned_by(&namespace_id, "writer", WriterEpoch(7)),
-        )
-        .await;
-
-        let first = acquire_writer_epoch(&store, &namespace_id, &context("writer", 1_000))
-            .await
-            .expect("first acquire");
-        let second = acquire_writer_epoch(&store, &namespace_id, &context("writer", 2_000))
-            .await
-            .expect("second acquire");
-
-        assert_eq!(first.writer_epoch, WriterEpoch(8));
-        assert_eq!(second.writer_epoch, WriterEpoch(9));
-        let head = load_head_object(&store, &namespace_id)
-            .await
-            .expect("read head")
-            .state;
-        assert_eq!(head.writer_epoch, WriterEpoch(9));
-        let writer = head.writer.expect("writer block");
-        assert_eq!(writer.writer_id.as_str(), "writer");
-        assert_eq!(writer.acquired_at_ms, 2_000);
-    }
-
-    #[tokio::test]
-    async fn a_permission_denied_head_write_is_classified_as_storage_permission_denied() {
-        let temp_dir = tempdir().expect("tempdir");
-        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_head(
-            &inner,
-            &namespace_id,
-            head_owned_by(&namespace_id, "writer-a", WriterEpoch(7)),
-        )
-        .await;
-        let store = FailStore::new(
-            inner,
-            KeyPredicate::exact(wal_head(&namespace_id)),
-            OperationClass::CompareAndSwap,
-            InjectedError::PermissionDenied("head write forbidden".to_owned()),
-        );
-        store.fail_all();
-
-        let error = acquire_writer_epoch(&store, &namespace_id, &context("writer-b", 2_000))
-            .await
-            .expect_err("permission-denied head write must fail");
-        assert!(matches!(
-            &error,
-            WriterEpochAcquireError::HeadWrite {
-                class: StoreFailureClass::PermissionDenied,
-                ..
-            }
-        ));
-        assert_eq!(
-            CoreError::from(error).code(),
-            ErrorCode::StoragePermissionDenied
-        );
-    }
-
-    #[tokio::test]
-    async fn acquire_on_deleted_namespace_is_rejected_and_leaves_the_tombstone_unchanged() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        // The tombstone names the deleting writer in its writer block: even
-        // that writer must be refused, so the guard precedes the bump.
-        let mut tombstone = head_owned_by(&namespace_id, "writer-a", WriterEpoch(7));
-        tombstone.status = NamespaceStatus::Deleted {
-            reclaim_after_ms: None,
-        };
-        write_head(&store, &namespace_id, tombstone).await;
-        let etag_before = head_etag(&store, &namespace_id).await;
-
-        for writer_id in ["writer-a", "writer-b"] {
-            let error = acquire_writer_epoch(&store, &namespace_id, &context(writer_id, 1_000))
-                .await
-                .expect_err("acquire on a deleted namespace must be refused");
-            assert!(matches!(
-                &error,
-                WriterEpochAcquireError::NamespaceDeleted { namespace_id: deleted_id }
-                    if *deleted_id == namespace_id
-            ));
-            assert_eq!(
-                crate::error::CoreError::from(error).code(),
-                ErrorCode::NamespaceDeleted
-            );
-        }
-
-        // The tombstone is byte-identical after every attempt: no epoch
-        // inflation, no new writer block, no churn on a terminal object.
-        assert_eq!(head_etag(&store, &namespace_id).await, etag_before);
-        let head = load_head_object(&store, &namespace_id)
-            .await
-            .expect("read head")
-            .state;
-        assert_eq!(
-            head.status,
-            NamespaceStatus::Deleted {
-                reclaim_after_ms: None
-            }
-        );
-        assert_eq!(head.writer_epoch, WriterEpoch(7));
-    }
-
-    #[tokio::test]
-    async fn deleting_an_already_deleted_namespace_still_answers_namespace_deleted() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = context("writer-a", 1_000);
-        bootstrap_namespace(&store, &namespace_id, &writer, false)
-            .await
-            .expect("bootstrap");
-        delete_namespace(
-            &store,
-            &namespace_id,
-            DeleteNamespaceOptions::default(),
-            &writer,
-        )
-        .await
-        .expect("first delete");
-
-        // The refusal now surfaces at epoch acquire instead of inside the
-        // delete loop; the public code is unchanged.
-        let error = delete_namespace(
-            &store,
-            &namespace_id,
-            DeleteNamespaceOptions::default(),
-            &context("writer-a", 2_000),
-        )
-        .await
-        .expect_err("second delete must be refused");
-        assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
-    }
-
-    #[tokio::test]
-    async fn new_writer_takes_over_and_records_writer_block() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_head(
-            &store,
-            &namespace_id,
-            head_owned_by(&namespace_id, "writer-a", WriterEpoch(7)),
-        )
-        .await;
-
-        let acquired = acquire_writer_epoch(&store, &namespace_id, &context("writer-b", 2_000))
-            .await
-            .expect("takeover acquire");
-
-        assert_eq!(acquired.writer_epoch, WriterEpoch(8));
-        assert_eq!(acquired.writer_id.as_str(), "writer-b");
-        let head = load_head_object(&store, &namespace_id)
-            .await
-            .expect("read head")
-            .state;
-        let writer = head.writer.expect("writer block");
-        assert_eq!(writer.writer_id.as_str(), "writer-b");
-        assert_eq!(writer.acquired_at_ms, 2_000);
-    }
-
-    fn create_dir_request(
-        commit_id: &str,
-        display_name: &str,
-    ) -> crate::path::write::CommitRequest {
-        crate::path::write::CommitRequest::single(
-            CommitId::parse(commit_id).expect("valid commit id"),
-            loonfs_test_support::test_actor(),
-            None,
-            crate::path::write::FilesystemOperation::CreateDirectory {
-                path: loonfs_api::AbsolutePath::parse(format!("/{display_name}"))
-                    .expect("valid path"),
-                parents: false,
-            },
-        )
-    }
-
-    #[tokio::test]
-    async fn one_shot_commits_reacquire_and_alternate_writers_ping_pong() {
-        // Each one-shot commit is its own acquisition decision, so two
-        // alternating writers fence each other back and forth instead of one
-        // being locked out: deterministic last-writer-wins, every commit
-        // lands exactly once.
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer_a = context("writer-a", 1_000);
-        bootstrap_namespace(&store, &namespace_id, &writer_a, false)
-            .await
-            .expect("bootstrap");
-
-        submit_commit(
-            &store,
-            &namespace_id,
-            create_dir_request("writer-a-first", "from-a"),
-            &writer_a,
-        )
-        .await
-        .expect("writer a first commit");
-
-        let writer_b = context("writer-b", 2_000);
-        submit_commit(
-            &store,
-            &namespace_id,
-            create_dir_request("writer-b-first", "from-b"),
-            &writer_b,
-        )
-        .await
-        .expect("writer b commit after takeover");
-
-        let writer_a_again = context("writer-a", 3_000);
-        submit_commit(
-            &store,
-            &namespace_id,
-            create_dir_request("writer-a-second", "from-a-again"),
-            &writer_a_again,
-        )
-        .await
-        .expect("writer a reacquires on its next one-shot commit");
-
-        let head = load_head_object(&store, &namespace_id)
-            .await
-            .expect("read head")
-            .state;
-        assert_eq!(head.seq, ChangeSeq(3));
-        assert_eq!(
-            head.writer.expect("writer block").writer_id.as_str(),
-            "writer-a"
-        );
-    }
-
-    #[tokio::test]
-    async fn stale_writer_epoch_cannot_delete_namespace_after_takeover() {
-        let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer_a = context("writer-a", 1_000);
-        bootstrap_namespace(
-            &LocalFsStore::new(temp_dir.path()).expect("store"),
-            &namespace_id,
-            &writer_a,
-            false,
-        )
-        .await
-        .expect("bootstrap");
-
-        let inner = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let head_key = wal_head(&namespace_id);
-        let selected_head_key = head_key.clone();
-        let head_reads = AtomicUsize::new(0);
-        let takeover_inner = Arc::clone(&inner);
-        let store = FailStore::matching(
-            inner,
-            move |operation| {
-                operation.key() == selected_head_key
-                    && matches!(operation.kind(), OperationKind::GetWithMetadata)
-                    && head_reads.fetch_add(1, Ordering::SeqCst) == 1
-            },
-            InjectedError::Transport("unused".to_owned()),
-        )
-        .before_operation(move |_| {
-            let inner = Arc::clone(&takeover_inner);
-            let head_key = head_key.clone();
-            Box::pin(async move {
-                let body = inner
-                    .get_with_metadata(&head_key)
-                    .await
-                    .expect("read head for takeover")
-                    .expect("head exists");
-                let envelope: HeadStateEnvelope =
-                    decode_control_object(&body.bytes, ControlObjectKind::WalHead)
-                        .expect("decode head");
-                let mut head = envelope.into_payload();
-                head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
-                head.writer = Some(WriterBlock {
-                    writer_id: loonfs_api::WriterId::parse("writer-b").expect("writer id"),
-                    acquired_at_ms: 1_500,
-                });
-                let bytes = loonfs_api::wire::control::encode_control_state(
-                    ControlObjectKind::WalHead,
-                    &head,
-                )
-                .expect("head bytes");
-                inner
-                    .put(&head_key, Bytes::from(bytes), PutMode::Overwrite)
-                    .await
-                    .expect("write takeover head");
-            })
-        });
-
-        // The deleting session supplies its own acquired epoch (in
-        // production the commit engine's), so the interleaving is explicit:
-        // acquire (head read #1), takeover, delete-loop reload (head read
-        // #2).
-        let delete_attempt = context("writer-a", 2_000);
-        let acquired = acquire_writer_epoch(&store, &namespace_id, &delete_attempt)
-            .await
-            .expect("acquire before the takeover");
-        let error = crate::namespace::delete::delete_namespace(
-            &store,
-            &namespace_id,
-            DeleteNamespaceOptions::default(),
-            acquired,
-        )
-        .await
-        .expect_err("stale-epoch delete must be fenced");
-        assert_eq!(error.code(), ErrorCode::WriterFenced);
-
-        let head = load_head_object(store.inner(), &namespace_id)
-            .await
-            .expect("read head")
-            .state;
-        assert_eq!(head.status, NamespaceStatus::Active {});
-        let writer = head.writer.expect("writer block");
-        assert_eq!(writer.writer_id.as_str(), "writer-b");
-    }
-
-    #[tokio::test]
-    async fn losing_an_acquire_race_retries_and_takes_the_next_epoch() {
-        // writer-c's first CAS loses to writer-b. With no lease there is
-        // nothing to defer to: the retry observes writer-b's epoch and bumps
-        // past it, so the last acquirer deterministically wins.
-        let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let inner = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        write_head(
-            &inner,
-            &namespace_id,
-            head_owned_by(&namespace_id, "writer-a", WriterEpoch(7)),
-        )
-        .await;
-        let winner_inner = Arc::clone(&inner);
-        let winner_namespace_id = namespace_id.clone();
-        let store = FailStore::new(
-            inner,
-            KeyPredicate::exact(wal_head(&namespace_id)),
-            OperationClass::CompareAndSwap,
-            InjectedError::PreconditionFailed,
-        )
-        .before_operation(move |_| {
-            let inner = Arc::clone(&winner_inner);
-            let namespace_id = winner_namespace_id.clone();
-            Box::pin(async move {
-                let winner = head_owned_by(&namespace_id, "writer-b", WriterEpoch(8));
-                let bytes = loonfs_api::wire::control::encode_control_state(
-                    ControlObjectKind::WalHead,
-                    &winner,
-                )
-                .expect("head bytes");
-                inner
-                    .put(
-                        &wal_head(&namespace_id),
-                        Bytes::from(bytes),
-                        PutMode::Overwrite,
-                    )
-                    .await
-                    .expect("write winner head");
-            })
-        });
-        store.fail_next(1);
-
-        let acquired = acquire_writer_epoch(&store, &namespace_id, &context("writer-c", 2_000))
-            .await
-            .expect("acquire after losing the race");
-
-        // writer-b installed epoch 8 during the conflict; writer-c retried
-        // and took 9.
-        assert_eq!(acquired.writer_epoch, WriterEpoch(9));
-        let head = load_head_object(store.inner(), &namespace_id)
-            .await
-            .expect("read head")
-            .state;
-        assert_eq!(head.writer_epoch, WriterEpoch(9));
-        assert_eq!(
-            head.writer.expect("writer block").writer_id.as_str(),
-            "writer-c"
-        );
-    }
 }

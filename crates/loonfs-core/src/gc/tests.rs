@@ -26,8 +26,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{CheckpointId, ContentRef, ContentStoreId, ManifestNo, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
-    metadata_segment_prefix, wal_head, wal_segment_prefix,
+    checkpoint_prefix, hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
+    metadata_segment_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -227,7 +227,7 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted.wal_segments, 1);
+    assert_eq!(report.deleted.wal_segments, 4);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -412,7 +412,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .expect("gc pass");
     assert!(report.deleted.wal_segments >= 1);
     assert_eq!(report.deleted.metadata_segments, 0);
-    assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(report.deleted.manifests, 4);
     // The pin on a tombstone has one route out, the same as every other
     // pin: released here, deleted a grace window after that release.
     assert_eq!(report.released_checkpoints.expired, 1);
@@ -427,7 +427,6 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     for prefix in [
         wal_segment_prefix(&namespace_id),
         metadata_segment_prefix(&namespace_id),
-        metadata_manifest_prefix(&namespace_id),
         checkpoint_prefix(&namespace_id),
     ] {
         assert!(
@@ -435,26 +434,47 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
             "prefix `{prefix}` must be empty after reclamation"
         );
     }
-    // The tombstone is the head; the root and floor survive alongside it
-    // wherever the namespace published them, because neither is ever a
-    // collection candidate.
-    for key in [
-        loonfs_objectstore::keys::wal_head(&namespace_id),
-        loonfs_objectstore::keys::hint(&namespace_id),
-    ] {
-        assert!(
-            store.head(&key).await.expect("head").is_some(),
-            "tombstone object `{key}` must survive"
-        );
-    }
-
+    let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("tombstone");
+    assert!(current.envelope.payload().status.is_deleted());
+    assert!(current
+        .envelope
+        .payload()
+        .status
+        .reclaim_after_ms()
+        .is_some());
+    assert!(store
+        .head(&current.object_key)
+        .await
+        .expect("tombstone")
+        .is_some());
+    assert!(store
+        .head(&hint(&namespace_id))
+        .await
+        .expect("hint")
+        .is_some());
     // Idempotent, and never degraded by its own reclamation.
     let again = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &again)
         .await
         .expect("second gc pass");
     assert_eq!(report.deleted.wal_segments, 0);
-    assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(report.deleted.manifests, 1);
+    assert_eq!(
+        store
+            .list_prefix(&metadata_manifest_prefix(&namespace_id))
+            .await
+            .expect("manifests"),
+        vec![current.object_key]
+    );
+    assert_eq!(
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect_err("retired id")
+            .code(),
+        loonfs_api::ErrorCode::NamespaceDeleted
+    );
 }
 
 #[tokio::test]
@@ -660,7 +680,7 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
     let report = gc_namespace(&store, &namespace_id, &config(), &inside)
         .await
         .expect("gc pass inside the lease");
-    assert_eq!(report.retained_candidates, 1);
+    assert_eq!(report.retained_candidates, 2);
     assert_eq!(
         report.next_reclamation_at_ms,
         Some(expires_at_ms + GRACE_MS),
@@ -1406,7 +1426,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted.wal_segments, 1);
+    assert_eq!(report.deleted.wal_segments, 4);
     // Latest reads replay the retained tail over the root basis.
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
@@ -1613,7 +1633,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     // The first flush materialized the namespace's first manifest and the
     // next two superseded it; only the root's manifest is reachable. Its
     // segments are all still referenced (a flush only appends delta runs).
-    assert_eq!(report.deleted.manifests, 2);
+    assert_eq!(report.deleted.manifests, 6);
     let manifests_left = store
         .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
@@ -2264,7 +2284,7 @@ async fn gc_retains_active_checkpoint_bases() {
 
     // Only the unpinned bootstrap manifest is collectable; both active
     // checkpoint bases stay.
-    assert!(report.deleted.manifests <= 1);
+    assert_eq!(report.deleted.manifests, 3);
     assert_eq!(report.deleted.checkpoint_records, 0);
     let first_record =
         crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
@@ -2407,7 +2427,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
     let clone = NamespaceId::parse("clone").expect("namespace id");
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(wal_head(&clone)),
+        KeyPredicate::exact(hint(&clone)),
         OperationClass::Read,
         InjectedError::Transport("target head timed out".to_owned()),
     );
@@ -2432,34 +2452,20 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
     );
 
     store.clear();
-    let head_key = wal_head(&clone);
-    let bytes = store
-        .get(&head_key, None)
+    let current = crate::namespace::control::load_current_manifest(store.inner(), &clone)
         .await
-        .expect("read target head")
-        .expect("target head exists");
-    let mut head = decode_control_object::<loonfs_api::wire::control::HeadState>(
-        &bytes,
-        ControlObjectKind::WalHead,
-    )
-    .expect("decode target head")
-    .into_payload();
-    let basis = head.fork_basis.as_mut().expect("a fork target has a basis");
+        .expect("target manifest");
+    let head_key = current.object_key;
+    let mut payload = current.envelope.into_payload();
+    let basis = payload.fork_basis.as_mut().expect("fork basis");
     basis.manifest.manifest_no = ManifestNo(basis.manifest.manifest_no.0 + 1);
-    let drifted = head;
+    let bytes = loonfs_api::wire::manifest::encode_namespace_manifest_json(payload)
+        .expect("manifest")
+        .into_bytes();
     store
-        .put_overwrite(
-            &head_key,
-            Bytes::from(
-                loonfs_api::wire::control::encode_control_state(
-                    ControlObjectKind::WalHead,
-                    &drifted,
-                )
-                .expect("encode head"),
-            ),
-        )
+        .put_overwrite(&head_key, Bytes::from(bytes))
         .await
-        .expect("write drifted target head");
+        .expect("write drifted manifest");
     let error = gc_namespace(&store, &source, &config(), &setup)
         .await
         .expect_err("a target naming this record with another manifest is corruption");
@@ -2467,7 +2473,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
     assert!(error.message().contains(fork_record.checkpoint_id.as_str()));
 
     store
-        .put_overwrite(&wal_head(&clone), Bytes::from_static(b"not json"))
+        .put_overwrite(&hint(&clone), Bytes::from_static(b"not json"))
         .await
         .expect("corrupt target head");
     let before = namespace_keys(store.inner(), &source).await;
@@ -2475,7 +2481,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .await
         .expect_err("a corrupt target head must fail the source pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(&wal_head(&clone)));
+    assert!(error.message().contains(&hint(&clone)));
     assert_eq!(namespace_keys(store.inner(), &source).await, before);
 }
 
@@ -2953,7 +2959,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
 }
 
 #[tokio::test]
-async fn gc_of_an_absent_namespace_lists_and_deletes_nothing() {
+async fn gc_of_an_absent_namespace_reads_the_hint_and_sweeps_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("orphan").expect("namespace id");
@@ -3124,8 +3130,8 @@ async fn competing_collectors_preserve_the_winning_retirement_deadline() {
     .expect("delete");
     let store = BlockingStore::new(
         inner,
-        KeyPredicate::exact(wal_head(&namespace_id)),
-        OperationClass::CompareAndSwap,
+        KeyPredicate::manifest(&namespace_id),
+        OperationClass::PutCreateIfAbsent,
     );
     store.block_next();
     let first_clock = context(GRACE_MS);
@@ -3171,8 +3177,8 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_fu
         .expect("delete");
         let store = FailStore::new(
             inner,
-            KeyPredicate::exact(wal_head(&namespace_id)),
-            OperationClass::CompareAndSwap,
+            KeyPredicate::manifest(&namespace_id),
+            OperationClass::PutCreateIfAbsent,
             InjectedError::Transport("uncertain retirement".to_owned()),
         );
         let store = if landed {
@@ -3192,7 +3198,7 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_fu
             landed.then_some(GRACE_MS * 2)
         );
         if !landed {
-            assert_eq!(store.counts().compare_and_swaps, 1);
+            assert_eq!(store.counts().create_if_absent_puts, 1);
         }
     }
 }
@@ -3326,7 +3332,8 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         ControlObjectKind::Hint,
         &HintState {
             namespace_id: namespace_id.clone(),
-            manifest_no: ManifestNo(0),
+            manifest_no: ManifestNo(1),
+            wal_no: loonfs_api::WalNo(0),
         },
     )
     .expect("hint");
@@ -3360,7 +3367,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("collect after publication");
-    assert_eq!(report.deleted.manifests, 2);
+    assert_eq!(report.deleted.manifests, 7);
     assert_eq!(
         store
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
@@ -3565,7 +3572,10 @@ async fn retirement_uses_the_complete_listing_and_the_calls_clock() {
 async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("owner-sweep").expect("namespace");
-    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let inner = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
     let (content_store_id, deadline) = retired_content_namespace(&inner, &namespace_id).await;
     let keys = owned_content_keys(&inner, &content_store_id, &namespace_id).await;
     let store = RecordingStore::new(
@@ -3587,6 +3597,14 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
     .expect("before deadline");
     assert_eq!(before.deleted.retired_content_objects, 0);
     assert_eq!(before.next_reclamation_at_ms, Some(deadline.now_ms));
+    gc_namespace(
+        &store,
+        &namespace_id,
+        &config(),
+        &context(deadline.now_ms - 1),
+    )
+    .await
+    .expect("collect older manifests");
     store.inner().fail_next(1);
     assert!(gc_namespace(&store, &namespace_id, &config(), &deadline)
         .await
@@ -3615,7 +3633,7 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         .expect("collect earlier key");
     assert_eq!(late.deleted.retired_content_objects, 1);
     assert!(store
-        .head(&wal_head(&namespace_id))
+        .head(&hint(&namespace_id))
         .await
         .expect("tombstone")
         .is_some());
@@ -3632,7 +3650,7 @@ async fn retired_owner_head_recheck_fails_without_writes() {
         BlockingStore::new(
             FailStore::new(
                 inner,
-                KeyPredicate::exact(wal_head(&namespace_id)),
+                KeyPredicate::manifest(&namespace_id),
                 OperationClass::Read,
                 InjectedError::Transport("head recheck failed".to_owned()),
             ),

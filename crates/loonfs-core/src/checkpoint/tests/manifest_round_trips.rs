@@ -206,19 +206,24 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    crate::namespace::bootstrap::bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
 
     let genesis = super::super::load::load_basis_metadata_segments(
         &store,
         None,
-        &crate::namespace::basis::MetadataBasis::Genesis,
-        context.now_ms,
+        &crate::namespace::basis::MetadataBasis(
+            load_current_manifest(&store, &namespace_id)
+                .await
+                .expect("manifest")
+                .state
+                .manifest,
+        ),
     )
     .await
-    .expect("load genesis without a manifest");
-    assert!(genesis.segments.manifest.is_none());
+    .expect("load genesis from manifest one");
+    assert!(genesis.segments.manifest().payload().runs.is_empty());
     let head = load_head_object(&store, &namespace_id)
         .await
         .expect("head")
@@ -255,12 +260,10 @@ async fn manifest_round_trip_supports_empty_namespace() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(1))
             .await
             .expect("first manifest is valid");
-    assert_eq!(published.manifest.payload().next_run_no, RunNo(1));
-    assert_eq!(published.manifest.payload().runs.len(), 1);
-    assert_eq!(published.manifest.payload().runs[0].run_no, RunNo(0));
-    assert_eq!(published.manifest.payload().runs[0].tier, RunTier::Base);
+    assert_eq!(published.manifest.payload().next_run_no, RunNo(0));
+    assert!(published.manifest.payload().runs.is_empty());
     assert!(metadata_states_equivalent(
-        &published.metadata_state,
+        &materialization.metadata_state,
         &genesis.base_state
     ));
 }
@@ -303,7 +306,7 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
 }
 
 #[tokio::test]
-async fn current_reads_reject_a_missing_hint_after_retention_advances() {
+async fn current_reads_report_a_missing_hint_as_absent_after_retention_advances() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -337,8 +340,7 @@ async fn current_reads_reject_a_missing_hint_after_retention_advances() {
         Ok(_) => panic!("retained WAL must not mask a root lost after floor advancement"),
         Err(error) => error,
     };
-    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    assert!(error.to_string().contains("hint is missing"), "{error}");
+    assert_eq!(error.code(), ErrorCode::NamespaceNotFound);
 }
 
 #[tokio::test]
@@ -346,17 +348,12 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let manifest_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
-    let store = ConflictOnManifestCreateStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        manifest_key,
-        br#"{"bad":"json"}"#.to_vec(),
-    );
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
     write_file_bytes(
-        &store,
+        &inner,
         &namespace_id,
         "/docs/hello.txt",
         b"hello\n",
@@ -366,6 +363,20 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     .await
     .expect("write hello");
 
+    let current = load_current_manifest(&inner, &namespace_id)
+        .await
+        .expect("manifest");
+    let manifest_key = metadata_manifest_object(
+        &namespace_id,
+        &current
+            .state
+            .manifest
+            .manifest_no
+            .successor()
+            .expect("next"),
+    );
+    let store =
+        ConflictOnManifestCreateStore::new(inner, manifest_key, br#"{"bad":"json"}"#.to_vec());
     let error = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect_err("invalid winning manifest");
@@ -399,79 +410,6 @@ async fn checkpoint_publication_preserves_writer_identity() {
 
     assert_eq!(after.writer_epoch, before.writer_epoch);
     assert_eq!(after.writer, before.writer);
-}
-
-#[tokio::test]
-async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/first.txt",
-        b"first\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write first");
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/second.txt",
-        b"second\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write second");
-
-    let orphan_key = wal_segment(
-        &namespace_id,
-        &loonfs_api::WalSegmentId::parse("wal_00000000000000000002-deadbeefdeadbeef")
-            .expect("valid WAL segment id"),
-    );
-    store
-        .put_overwrite(&orphan_key, Bytes::from_static(b"not a wal envelope"))
-        .await
-        .expect("write orphan wal");
-    let status = load_namespace_diagnostics(&store, &namespace_id)
-        .await
-        .expect("load namespace status");
-    // Status reports the documented visible-chain length, not race-loser
-    // objects that await garbage collection.
-    assert_eq!(status.wal_tail_segments, 1);
-
-    advance_retention_floor(&store, &namespace_id, &context)
-        .await
-        .expect("advance retention");
-
-    let head_after = load_head_object(&store, &namespace_id)
-        .await
-        .expect("read head")
-        .state;
-    assert_eq!(head_after.seq, ChangeSeq(2));
-
-    let changes = list_changes_after(
-        &store,
-        &namespace_id,
-        ChangeSeq(1),
-        EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
-    )
-    .await
-    .expect("list changes");
-
-    assert_eq!(changes.through_seq, ChangeSeq(2));
-    assert_eq!(changes.changes.len(), 1);
-    assert_eq!(changes.changes[0].committed_seq, ChangeSeq(2));
 }
 
 #[tokio::test]
@@ -828,6 +766,14 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     .await
     .expect("write empty metadata run segments");
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
+        content_store_id: loonfs_api::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+            .expect("content store"),
+        created_at_ms: 1_000,
+        fork_basis: None,
+        status: loonfs_api::wire::control::NamespaceStatus::Active {},
+        writer: None,
+        last_folded_wal_no: loonfs_api::WalNo(0),
+        retention_floor_wal_no: loonfs_api::WalNo(0),
         compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),

@@ -326,11 +326,6 @@ pub fn generated_id(prefix: &'static str) -> String {
     format!("{prefix}_{}", hex_encode_bytes(&random_128()))
 }
 
-fn generated_position_suffix() -> String {
-    let suffix = hex_encode_bytes(&random_128());
-    suffix[..16].to_owned()
-}
-
 /// Draws 128 fresh random bits.
 ///
 /// Generated ids hex-encode these bytes. Content ids use the same generator,
@@ -413,41 +408,6 @@ fn validate_name_key(value: &str) -> Result<(), NameKeyValidationError> {
         ));
     }
     Ok(())
-}
-
-/// Splits a positional id into its position digits and its random suffix.
-///
-/// Positional ids carry a family prefix like every other generated id, then
-/// the 20-digit position that gives a listing its order, then a random
-/// suffix that keeps competing proposals for one position distinct.
-fn parse_position_suffix_id<'a>(
-    prefix: &str,
-    position_field: &str,
-    value: &'a str,
-) -> Result<(&'a str, &'a str), GeneratedIdValidationError> {
-    let Some((position, suffix)) = value
-        .strip_prefix(prefix)
-        .and_then(|rest| rest.strip_prefix('_'))
-        .and_then(|rest| rest.split_once('-'))
-    else {
-        return Err(generated_id_error(
-            value,
-            format!("must be `{prefix}_<20 digit {position_field}>-<16 lowercase hex>`"),
-        ));
-    };
-    if position.len() != 20 || !position.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(generated_id_error(
-            value,
-            format!("`{position_field}` must be 20 decimal digits"),
-        ));
-    }
-    if suffix.len() != 16 || !suffix.bytes().all(is_lower_hex_byte) {
-        return Err(generated_id_error(
-            value,
-            "suffix must be 16 lowercase hex characters".to_owned(),
-        ));
-    }
-    Ok((position, suffix))
 }
 
 fn validate_id_grammar(value: &str) -> Result<(), String> {
@@ -702,59 +662,6 @@ string_id! {
     prefix = "gmf"
 }
 
-/// Family prefix carried by every WAL segment id.
-const WAL_SEGMENT_ID_PREFIX: &str = "wal";
-/// Field a WAL segment id's 20-digit position encodes.
-const WAL_SEGMENT_ID_POSITION_FIELD: &str = "start_seq";
-
-string_id! {
-    /// Durable id for one WAL segment.
-    WalSegmentId,
-    error = GeneratedIdValidationError,
-    validate = |value: &str| {
-        parse_position_suffix_id(WAL_SEGMENT_ID_PREFIX, WAL_SEGMENT_ID_POSITION_FIELD, value)
-            .map(|_| ())
-    }
-}
-
-impl WalSegmentId {
-    /// WAL segment ids order by history position and stay unique under races.
-    ///
-    /// The 20 digits after `wal_` are the segment's `start_seq`, so listings
-    /// sort by position and reclamation can range-scan below a boundary
-    /// cursor. The 16-hex suffix keeps speculative writes unique: racing
-    /// writers proposing different segments for the same position never
-    /// collide, and the head compare-and-swap chooses among them. The name is
-    /// an inspection and reclamation hint only — recovery authority is the
-    /// head and chain.
-    pub fn generate(start_seq: ChangeSeq) -> Self {
-        Self(format!(
-            "{WAL_SEGMENT_ID_PREFIX}_{:020}-{}",
-            start_seq.0,
-            generated_position_suffix()
-        ))
-    }
-}
-
-/// Start seq encoded in a WAL segment id's 20-digit position.
-///
-/// Returns `None` when the value does not follow the generated id shape, so
-/// listings can skip foreign objects instead of failing. Like the name
-/// itself, the parsed position is an inspection and reclamation hint only —
-/// recovery authority is the head and chain.
-pub fn wal_segment_id_start_seq(segment_id: &str) -> Option<ChangeSeq> {
-    let (position, _) = parse_position_suffix_id(
-        WAL_SEGMENT_ID_PREFIX,
-        WAL_SEGMENT_ID_POSITION_FIELD,
-        segment_id,
-    )
-    .ok()?;
-    position
-        .parse()
-        .ok()
-        .and_then(|value| ChangeSeq::parse(value).ok())
-}
-
 string_id! {
     /// Name-policy-derived directory entry key.
     ///
@@ -851,6 +758,13 @@ numeric_id! {
 }
 
 numeric_id! {
+    /// Contiguous WAL object number within one namespace.
+    WalNo,
+    public_ordinal,
+    schema_description = "Contiguous WAL object number within one namespace."
+}
+
+numeric_id! {
     /// Monotonic manifest counter for one namespace.
     ///
     /// The manifest number can increase when metadata changes, even if no
@@ -918,7 +832,7 @@ mod tests {
     use super::{
         next_public_ordinal, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentId,
         ContentStoreId, InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
-        RunNo, UploadId, WalSegmentId, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
+        RunNo, UploadId, WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributeRevisionNo;
     use std::collections::BTreeSet;
@@ -966,6 +880,7 @@ mod tests {
         assert_range!(ChangeSeq);
         assert_range!(AttributeRevisionNo);
         assert_range!(ManifestNo);
+        assert_range!(WalNo);
         assert_range!(RunNo);
         assert_range!(WriterEpoch);
 
@@ -1151,14 +1066,8 @@ mod tests {
         assert!(MetadataSegmentId::parse("seg_00000000000000000000000000000001").is_ok());
         assert!(CheckpointId::parse("chk_00000000000000000000000000000001").is_ok());
         assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
-        assert!(WalSegmentId::parse("wal_00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
-        assert!(WalSegmentId::parse("wal_412-9f2a6c0e4b7d4a90").is_err());
-        assert!(WalSegmentId::parse("wal_00000000000000000412-9F2A6C0E4B7D4A90").is_err());
-        assert!(WalSegmentId::parse("seg_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         // The two positional families are told apart by their prefix, never
         // by context.
-        assert!(WalSegmentId::parse("00000000000000000412-9f2a6c0e4b7d4a90").is_err());
-        assert!(WalSegmentId::parse("man_00000000000000000412-9f2a6c0e4b7d4a90").is_err());
         assert!(MetadataSegmentId::parse(["seg", "123"].join("-")).is_err());
         assert!(CheckpointId::parse(["chk", "123"].join("-")).is_err());
     }
@@ -1166,45 +1075,15 @@ mod tests {
     #[test]
     fn generated_runtime_ids_use_lower_hex_bodies() {
         let upload_id = UploadId::generate();
-        let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
         let metadata_segment_id = MetadataSegmentId::generate();
         let checkpoint_id = CheckpointId::generate();
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
-        assert!(wal_segment_id
-            .as_str()
-            .starts_with("wal_00000000000000000412-"));
         assert_generated_id_shape(metadata_segment_id.as_str(), "seg");
         assert_generated_id_shape(checkpoint_id.as_str(), "chk");
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
-        assert!(WalSegmentId::parse(wal_segment_id.as_str()).is_ok());
         assert!(MetadataSegmentId::parse(metadata_segment_id.as_str()).is_ok());
         assert!(CheckpointId::parse(checkpoint_id.as_str()).is_ok());
-    }
-
-    #[test]
-    fn generated_positional_ids_are_not_reused_across_samples() {
-        let mut wal_segment_ids = BTreeSet::new();
-        for _ in 0..128 {
-            let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
-            assert!(
-                wal_segment_ids.insert(wal_segment_id.clone()),
-                "generated duplicate WAL segment id {wal_segment_id}"
-            );
-        }
-    }
-
-    #[test]
-    fn wal_segment_id_start_seq_reads_the_position_digits() {
-        assert_eq!(
-            super::wal_segment_id_start_seq("wal_00000000000000000412-9f2a6c0e4b7d4a90"),
-            Some(ChangeSeq(412))
-        );
-        assert_eq!(super::wal_segment_id_start_seq("not-a-segment-id"), None);
-        assert_eq!(
-            super::wal_segment_id_start_seq("wal_00009007199254740992-9f2a6c0e4b7d4a90"),
-            None
-        );
     }
 
     #[test]

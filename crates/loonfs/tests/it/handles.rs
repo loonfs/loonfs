@@ -16,14 +16,11 @@ use loonfs::{
 };
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
-use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
-};
+use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -98,12 +95,17 @@ async fn writer_with_runner(
 async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    seed_segments: u64,
 ) {
+    let current = loonfs_core::control::load_namespace_head_control(store, namespace_id)
+        .await
+        .expect("tail state")
+        .state;
     append_wal_segments(
         store,
         namespace_id,
-        loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS - seed_segments,
+        loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS
+            - (current.wal_no.0 - current.last_folded_wal_no.0)
+            - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("wal-tail-test-writer").expect("writer id"),
             now_ms: 1_000,
@@ -169,7 +171,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
             .await
             .expect("namespace status");
         assert_eq!(status.namespace_id, namespace_id);
-        assert_eq!(status.wal_tail_segments, 1);
+        assert_eq!(status.wal_tail_segments, 2);
         // Admin-driven work is observable through the maintenance handle's own
         // cache counters, like writer and reader work through theirs.
         let _ = maintenance.runtime_cache_stats();
@@ -414,7 +416,7 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
             .expect("status after writes");
         assert_eq!(
             status.current_manifest_no,
-            Some(ManifestNo(2)),
+            Some(ManifestNo(4)),
             "the writer should have folded twice without a maintenance runner: {status:?}"
         );
         assert!(
@@ -455,10 +457,11 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
                 .await
                 .expect("status below the threshold");
             assert_eq!(
-                status.current_manifest_no, None,
+                status.current_manifest_no,
+                Some(ManifestNo(2)),
                 "a publish below the threshold must not step: {status:?}"
             );
-            assert_eq!(status.wal_tail_segments, 1, "{status:?}");
+            assert_eq!(status.wal_tail_segments, 2, "{status:?}");
 
             for round in 0..writes_past_wal_tail_threshold() {
                 writer
@@ -500,10 +503,9 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let failing = Arc::new(FailStore::new(
+        let failing = Arc::new(FailStore::matching(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::family(DurableObjectFamily::MetadataManifest),
-            OperationClass::Put,
+            crate::common::folded_manifest_put,
             InjectedError::PermissionDenied("injected manifest write failure".to_owned()),
         ));
         let (observer, receiver) =
@@ -615,16 +617,15 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .await
             .expect("land the commit before the ceiling");
         let tail_store = LocalFsStore::new(temp_dir.path()).expect("open tail store");
-        fill_wal_tail_to_write_stop(&tail_store, &namespace_id, 1).await;
+        fill_wal_tail_to_write_stop(&tail_store, &namespace_id).await;
         stalled
             .shutdown()
             .await
             .expect("shut down the first writer");
 
-        let blocking = Arc::new(BlockingStore::new(
+        let blocking = Arc::new(BlockingStore::matching(
             tail_store,
-            KeyPredicate::family(DurableObjectFamily::MetadataManifest),
-            OperationClass::Put,
+            crate::common::folded_manifest_put,
         ));
         let writer = FsWriter::builder_with_store(blocking.clone())
             .writer_id("handle-test-writer")
@@ -685,10 +686,9 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let failing = Arc::new(FailStore::new(
+        let failing = Arc::new(FailStore::matching(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::family(DurableObjectFamily::MetadataManifest),
-            OperationClass::Put,
+            crate::common::folded_manifest_put,
             InjectedError::PermissionDenied("manifest writes disabled".to_owned()),
         ));
         let store: SharedObjectStore = failing.clone();
@@ -715,7 +715,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         .expect("seed WAL tail below fold threshold");
 
         failing.fail_all();
-        for round in 0..(loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS - seed_segments) {
+        for round in 0..(loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS - seed_segments - 2) {
             writer
                 .put_file_bytes(
                     &namespace_id,
@@ -769,10 +769,9 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let blocking = Arc::new(BlockingStore::new(
+        let blocking = Arc::new(BlockingStore::matching(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::family(DurableObjectFamily::MetadataManifest),
-            OperationClass::Put,
+            crate::common::folded_manifest_put,
         ));
         let writer = FsWriter::builder_with_store(blocking.clone())
             .writer_id("parked-fold-writer")
@@ -903,7 +902,8 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .await
             .expect("status after the shutdown");
         assert_eq!(
-            status.current_manifest_no, None,
+            status.current_manifest_no,
+            Some(ManifestNo(2)),
             "a shut-down writer must not schedule checkpoints: {status:?}"
         );
         assert_eq!(

@@ -22,7 +22,6 @@ use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::load_control_snapshot;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     RunTier,
@@ -146,14 +145,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     let floor_seq = snapshot.retention_floor_seq;
-    // A namespace that has published no manifest of its own has no runs to
-    // fold: reorganization has nothing to do until its first flush.
-    let Some(root) = snapshot.root.map(|loaded| loaded.state) else {
-        return Ok(report(
-            namespace_id,
-            MetadataReorganizeOutcome::NotNeeded { delta_runs: 0 },
-        ));
-    };
+    let root = snapshot.root.state;
     if root.compactor_epoch != compactor_epoch {
         return Ok(report(namespace_id, MetadataReorganizeOutcome::Fenced));
     }
@@ -296,29 +288,12 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     crate::namespace::control::ensure_namespace_live(&snapshot.head.state)?;
-    let basis = snapshot.basis();
-    let basis_head_seq = basis
-        .manifest()
-        .map_or(ChangeSeq(0), |manifest| manifest.manifest_head_seq);
     let head = &snapshot.head.state;
-    let wal_tail_segments = count_visible_wal_tail_segments(&WalChainLoadRequest {
-        namespace_id,
-        chain_base_seq: basis_head_seq,
-        head_seq: head.seq,
-        visible_tip: head.visible_wal_tip.clone(),
-        stop_after_seq: None,
-        max_segment_fetches: None,
-        recent_segments: &head.recent_segments,
-    })
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-    })?;
+    let wal_tail_segments = head.wal_no.0 - head.last_folded_wal_no.0;
     if wal_tail_segments >= max_wal_tail_segments {
         return Ok(true);
     }
-    let Some(root) = snapshot.root else {
-        return Ok(false);
-    };
+    let root = snapshot.root;
     let segments = load_manifest_segments(store, segment_cache, &root.state.manifest).await?;
     Ok(manifest_has_reorganization_work(
         segments.manifest().payload(),
@@ -856,6 +831,7 @@ pub(super) fn build_replacement_manifest(
         next_run_no,
         retention_floor_seq,
         runs,
+        ..previous.payload().clone()
     })
 }
 

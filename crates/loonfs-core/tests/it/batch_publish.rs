@@ -5,12 +5,9 @@
 
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
-use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs_api::{
     v0::FilesystemChange,
-    wire::control::{decode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope},
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, ActorId, ActorRef, ChangeSeq, CommitId, DeleteDirectoryBehavior,
     DestinationBehavior, InodeId, NamespaceId,
@@ -22,15 +19,11 @@ use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
-use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, OperationContext, OperationKind};
 use std::path::Path;
-use std::sync::Mutex;
 use tempfile::tempdir;
 
 async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
@@ -66,161 +59,73 @@ fn commit_request(commit_id: &str, operation: FilesystemOperation) -> CommitRequ
     )
 }
 
-#[derive(Debug)]
-struct StaleHeadGetStore {
-    inner: LocalFsStore,
-    head_key: String,
-    state: Mutex<StaleHeadGetState>,
-}
-
-#[derive(Debug)]
-struct StaleHeadGetState {
-    stale_head_body: Option<ObjectBody>,
-    clean_head_gets_before_injection: Option<usize>,
-    injected_stale_head_get: bool,
-}
-
-impl StaleHeadGetStore {
-    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: wal_head(namespace_id),
-            state: Mutex::new(StaleHeadGetState {
-                stale_head_body: None,
-                clean_head_gets_before_injection: None,
-                injected_stale_head_get: false,
-            }),
-        }
-    }
-
-    fn inject_stale_head_get_after(&self, clean_head_gets: usize) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert!(
-            state.stale_head_body.is_some(),
-            "stale head body should be captured before injection"
-        );
-        state.clean_head_gets_before_injection = Some(clean_head_gets);
-        state.injected_stale_head_get = false;
-    }
-
-    fn injected_stale_head_get(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .injected_stale_head_get
-    }
-
-    fn record_head_write(&self, previous_head: Option<ObjectBody>) {
-        if let Some(previous_head) = previous_head {
-            self.state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .stale_head_body = Some(previous_head);
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for StaleHeadGetStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        if key == self.head_key {
-            let stale_head = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                match state.clean_head_gets_before_injection {
-                    Some(0) => {
-                        state.clean_head_gets_before_injection = None;
-                        state.injected_stale_head_get = true;
-                        state.stale_head_body.clone()
-                    }
-                    Some(remaining) => {
-                        state.clean_head_gets_before_injection = Some(remaining - 1);
-                        None
-                    }
-                    None => None,
-                }
-            };
-            if let Some(stale_head) = stale_head {
-                return Ok(Some(stale_head));
-            }
-        }
-
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let previous_head = if key == self.head_key {
-            self.inner.get_with_metadata(key).await?
-        } else {
-            None
-        };
-        let metadata = self.inner.put(key, bytes, mode).await?;
-        if key == self.head_key {
-            self.record_head_write(previous_head);
-        }
-        Ok(metadata)
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
-    }
-}
-
-fn ack_lost_head_cas_store(
+fn ack_lost_wal_put_store(
     root: impl AsRef<Path>,
     namespace_id: &NamespaceId,
 ) -> FailStore<LocalFsStore> {
-    let head_key = wal_head(namespace_id);
+    let head_key = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
     let store = FailStore::matching(
         LocalFsStore::new(root.as_ref()).expect("store"),
         move |operation: &OperationContext<'_>| {
-            if operation.key() != head_key {
+            if !operation.key().starts_with(&head_key) {
                 return false;
             }
             let bytes = match operation.kind() {
-                OperationKind::CompareAndSwap { bytes, .. }
-                | OperationKind::Put {
+                OperationKind::Put {
                     bytes,
-                    mode: PutMode::CompareAndSwap { .. },
+                    mode: PutMode::CreateIfAbsent,
                 } => bytes,
                 _ => return false,
             };
-            decode_control_object::<HeadState>(bytes, ControlObjectKind::WalHead)
-                .is_ok_and(|envelope| envelope.payload().seq > ChangeSeq(0))
+            decode_wal_segment_envelope_zstd(bytes)
+                .is_ok_and(|envelope| !envelope.payload().records.is_empty())
         },
-        InjectedError::Transport("response lost after head compare-and-swap".to_owned()),
+        InjectedError::Transport("response lost after WAL put".to_owned()),
     )
     .apply_then_fail();
+    store.fail_next(1);
+    store
+}
+
+async fn data_wal_keys<S: ObjectStore + ?Sized>(store: &S) -> Vec<String> {
+    let mut data_keys = Vec::new();
+    for key in store
+        .list_prefix("namespaces/demo/wal/")
+        .await
+        .expect("list WAL")
+    {
+        let bytes = store
+            .get(&key, None)
+            .await
+            .expect("read WAL")
+            .expect("WAL exists");
+        if !decode_wal_segment_envelope_zstd(&bytes)
+            .expect("decode WAL")
+            .payload()
+            .records
+            .is_empty()
+        {
+            data_keys.push(key);
+        }
+    }
+    data_keys
+}
+
+fn failed_data_put_store(inner: LocalFsStore) -> FailStore<LocalFsStore> {
+    let store = FailStore::matching(
+        inner,
+        |operation: &OperationContext<'_>| match operation.kind() {
+            OperationKind::Put {
+                bytes,
+                mode: PutMode::CreateIfAbsent,
+            } if operation.key().starts_with("namespaces/demo/wal/") => {
+                decode_wal_segment_envelope_zstd(bytes)
+                    .is_ok_and(|envelope| !envelope.payload().records.is_empty())
+            }
+            _ => false,
+        },
+        InjectedError::PermissionDenied("WAL put refused".to_owned()),
+    );
     store.fail_next(1);
     store
 }
@@ -233,114 +138,6 @@ impl AckLossProbe for FailStore<LocalFsStore> {
     fn injected_ack_loss(&self) -> bool {
         self.attempts() > 0 && self.remaining() == 0
     }
-}
-
-#[derive(Debug)]
-struct StaleHeadAfterWalWriteStore {
-    inner: LocalFsStore,
-    head_key: String,
-    injected_stale_head: Mutex<bool>,
-}
-
-impl StaleHeadAfterWalWriteStore {
-    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: wal_head(namespace_id),
-            injected_stale_head: Mutex::new(false),
-        }
-    }
-
-    fn injected_stale_head(&self) -> bool {
-        *self
-            .injected_stale_head
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-#[async_trait]
-impl ObjectStore for StaleHeadAfterWalWriteStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key
-            && matches!(mode, PutMode::CompareAndSwap { .. })
-            && head_cas_advances_seq(&self.inner, key, &bytes).await?
-        {
-            let should_inject = {
-                let mut injected = self
-                    .injected_stale_head
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if *injected {
-                    false
-                } else {
-                    *injected = true;
-                    true
-                }
-            };
-            if should_inject {
-                if let Some(existing) = self.inner.get(key, None).await? {
-                    self.inner.put_overwrite(key, existing).await?;
-                }
-                return Err(ObjectStoreError::PreconditionFailed {
-                    object_key: key.to_owned(),
-                });
-            }
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
-    }
-}
-
-async fn head_cas_advances_seq(
-    store: &LocalFsStore,
-    key: &str,
-    candidate_bytes: &[u8],
-) -> Result<bool, ObjectStoreError> {
-    let candidate: HeadStateEnvelope =
-        decode_control_object(candidate_bytes, ControlObjectKind::WalHead).map_err(|err| {
-            ObjectStoreError::transport(key, format!("decode candidate head: {err}"))
-        })?;
-    let Some(existing_bytes) = store.get(key, None).await? else {
-        return Ok(true);
-    };
-    let existing: HeadStateEnvelope =
-        decode_control_object(&existing_bytes, ControlObjectKind::WalHead).map_err(|err| {
-            ObjectStoreError::transport(key, format!("decode existing head: {err}"))
-        })?;
-    Ok(candidate.payload().seq > existing.payload().seq)
 }
 
 #[tokio::test]
@@ -453,10 +250,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(first.committed_seq, ChangeSeq(1));
     assert_eq!(second.committed_seq, ChangeSeq(2));
 
-    let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
-        .await
-        .expect("list wal");
+    let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
     let wal_bytes = store
         .get(&wal_keys[0], None)
@@ -481,14 +275,6 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         }
         delta => panic!("expected bind delta, got {delta:?}"),
     }
-    store
-        .put_if_absent(
-            "namespaces/demo/wal/segments/wal_00000000000000000099-9999999999999999.wal.zst",
-            wal_bytes,
-        )
-        .await
-        .expect("write unreachable orphan");
-
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
         .await
         .expect("changes");
@@ -528,10 +314,7 @@ async fn change_feed_validates_wal_chain_before_current_manifest() {
         .await
         .expect("checkpoint");
 
-    let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
-        .await
-        .expect("list wal");
+    let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
     store
         .put_overwrite(&wal_keys[0], Bytes::from_static(b"not a wal segment"))
@@ -548,11 +331,11 @@ async fn change_feed_validates_wal_chain_before_current_manifest() {
 }
 
 #[tokio::test]
-async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
+async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    let store = ack_lost_head_cas_store(temp_dir.path(), &namespace_id);
+    let store = ack_lost_wal_put_store(temp_dir.path(), &namespace_id);
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
@@ -594,128 +377,11 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
 }
 
 #[tokio::test]
-async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"retry")
-        .await
-        .expect("stage content");
-    let put = commit_request(
-        "retry-after-orphan",
-        FilesystemOperation::PutFile {
-            path: AbsolutePath::parse("/retry.txt").expect("path"),
-            content_ref: content.into_content_ref(),
-            behavior: DestinationBehavior::NoReplace,
-            expected_inode_id: None,
-            expected_revision_no: None,
-        },
-    );
-    let error = submit_commit(&store, &namespace_id, put.clone(), &context)
-        .await
-        .expect_err("injected stale head surfaces to the caller");
-    assert_eq!(error.code(), ErrorCode::StaleHead);
-    assert!(store.injected_stale_head());
-
-    // The orphaned segment from the failed attempt must not block a retry
-    // with the same commit id.
-    let result = submit_commit(&store, &namespace_id, put, &context)
-        .await
-        .expect("retry after the orphaned segment");
-    assert_eq!(result.committed_seq, ChangeSeq(1));
-
-    let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
-        .await
-        .expect("list wal");
-    assert_eq!(wal_keys.len(), 2);
-
-    let head = load_namespace_head_control(&store, &namespace_id)
-        .await
-        .expect("load head");
-    assert_eq!(head.state.seq, ChangeSeq(1));
-    let visible_tip = head
-        .state
-        .visible_wal_tip
-        .as_ref()
-        .expect("visible wal tip");
-    let visible_key = loonfs_objectstore::keys::wal_segment(&namespace_id, &visible_tip.segment_id);
-    assert!(wal_keys.contains(&visible_key));
-    let orphan_keys = wal_keys
-        .iter()
-        .filter(|key| *key != &visible_key)
-        .collect::<Vec<_>>();
-    assert_eq!(orphan_keys.len(), 1);
-
-    let visible_wal = store
-        .get(&visible_key, None)
-        .await
-        .expect("read visible wal")
-        .expect("visible wal exists");
-    let visible_segment =
-        decode_wal_segment_envelope_zstd(&visible_wal).expect("decode visible segment");
-    assert_eq!(visible_segment.payload().start_seq, ChangeSeq(1));
-    assert_eq!(visible_segment.payload().end_seq, ChangeSeq(1));
-    assert_eq!(visible_segment.payload().records.len(), 1);
-    assert_eq!(
-        visible_segment.payload().records[0].commit_id,
-        CommitId::parse("retry-after-orphan").expect("valid commit id")
-    );
-    let orphan_wal = store
-        .get(orphan_keys[0], None)
-        .await
-        .expect("read orphan wal")
-        .expect("orphan wal exists");
-    let orphan_segment =
-        decode_wal_segment_envelope_zstd(&orphan_wal).expect("decode orphan segment");
-    let visible_created_ids = visible_segment.payload().records[0]
-        .deltas
-        .iter()
-        .filter_map(|delta| match &delta.delta {
-            WalDelta::CreateInode { inode_id, .. } => Some(*inode_id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let orphan_created_ids = orphan_segment.payload().records[0]
-        .deltas
-        .iter()
-        .filter_map(|delta| match &delta.delta {
-            WalDelta::CreateInode { inode_id, .. } => Some(*inode_id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        visible_created_ids, orphan_created_ids,
-        "retrying from the unchanged head must assign the same inode ids"
-    );
-
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
-        .await
-        .expect("changes");
-    assert_eq!(changes.changes.len(), 1);
-    assert_eq!(
-        changes.changes[0].commit_id,
-        CommitId::parse("retry-after-orphan").expect("valid commit id")
-    );
-}
-
-#[tokio::test]
 async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    let store = InjectCreateFailureStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Prefix("namespaces/demo/wal/segments/".to_owned()),
-        InjectedCreateFailure::PreconditionFailed {
-            write_attempted_object: false,
-            additional_writes: Vec::new(),
-        },
-    );
+    let store = failed_data_put_store(LocalFsStore::new(temp_dir.path()).expect("store"));
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
@@ -866,14 +532,7 @@ async fn failed_batch_preserves_an_independent_commit_id_conflict() {
     .await
     .expect("publish durable receipt");
 
-    let store = InjectCreateFailureStore::new(
-        store,
-        KeyMatcher::Prefix("namespaces/demo/wal/segments/".to_owned()),
-        InjectedCreateFailure::PreconditionFailed {
-            write_attempted_object: false,
-            additional_writes: Vec::new(),
-        },
-    );
+    let store = failed_data_put_store(store);
     let failed = publish_namespace_commits_batch(
         &store,
         &namespace_id,
@@ -908,218 +567,6 @@ async fn failed_batch_preserves_an_independent_commit_id_conflict() {
 }
 
 #[tokio::test]
-async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"batch bytes")
-        .await
-        .expect("stage content");
-
-    let batch = || async {
-        vec![
-            CommitCandidate::new(commit_request(
-                "reject-materialization",
-                FilesystemOperation::DeletePath {
-                    path: AbsolutePath::parse("/missing.txt").expect("path"),
-                    behavior: DeleteDirectoryBehavior::NonRecursive,
-                    expected_inode_id: None,
-                },
-            )),
-            prepared_candidate(
-                &store,
-                &namespace_id,
-                commit_request(
-                    "accept-a",
-                    FilesystemOperation::PutFile {
-                        path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: content.content_ref().clone(),
-                        behavior: DestinationBehavior::NoReplace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-            )
-            .await,
-            prepared_candidate(
-                &store,
-                &namespace_id,
-                commit_request(
-                    "reject-speculative",
-                    FilesystemOperation::PutFile {
-                        path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: content.content_ref().clone(),
-                        behavior: DestinationBehavior::NoReplace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-            )
-            .await,
-        ]
-    };
-
-    let failed =
-        publish_namespace_commits_batch(&store, &namespace_id, batch().await, &context).await;
-    assert!(store.injected_stale_head());
-
-    assert_eq!(
-        failed[0]
-            .as_ref()
-            .expect_err("materialization-decided rejection")
-            .code(),
-        ErrorCode::PathNotFound
-    );
-    assert_eq!(
-        failed[1]
-            .as_ref()
-            .expect_err("accepted candidate fails")
-            .code(),
-        ErrorCode::StaleHead
-    );
-    let speculative = failed[2].as_ref().expect_err("speculative rejection");
-    assert_eq!(
-        speculative.code(),
-        ErrorCode::StaleHead,
-        "rejection decided against unpublished in-batch state must take the \
-         batch error, got {speculative:?}"
-    );
-
-    let retried =
-        publish_namespace_commits_batch(&store, &namespace_id, batch().await, &context).await;
-    assert_eq!(
-        retried[0].as_ref().expect_err("still missing").code(),
-        ErrorCode::PathNotFound
-    );
-    assert_eq!(
-        retried[1]
-            .as_ref()
-            .expect("create lands on retry")
-            .committed_seq,
-        ChangeSeq(1)
-    );
-    assert_eq!(
-        retried[2]
-            .as_ref()
-            .expect_err("conflict against durably published state")
-            .code(),
-        ErrorCode::PathConflict
-    );
-}
-
-#[tokio::test]
-async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    let store = StaleHeadGetStore::new(temp_dir.path(), &namespace_id);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-
-    create_directory_path(
-        &store,
-        &namespace_id,
-        "/parent",
-        &context,
-        Some("mkdir-parent"),
-    )
-    .await
-    .expect("create parent");
-    put_file_bytes(
-        &store,
-        &namespace_id,
-        "/file.txt",
-        b"first contents",
-        DestinationBehavior::NoReplace,
-        &context,
-        Some("write-first"),
-    )
-    .await
-    .expect("write first revision");
-    put_file_bytes(
-        &store,
-        &namespace_id,
-        "/file.txt",
-        b"second contents win",
-        DestinationBehavior::Replace,
-        &context,
-        Some("write-second"),
-    )
-    .await
-    .expect("write second revision");
-    assert_eq!(
-        read_file_bytes(&store, &namespace_id, "/file.txt")
-            .await
-            .expect("read before stale get")
-            .bytes,
-        b"second contents win"
-    );
-
-    // One engine across the rest of the test, so the injected stale read
-    // lands on the publish-view load and not on an epoch acquisition —
-    // acquisition reads the head too, and a stale read there is a different
-    // failure. The engine acquires once, on this warm-up publish.
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    let publish = async |engine: &mut NamespaceCommitEngine, path: &str, commit_id: &str| {
-        let mkdir = commit_request(
-            commit_id,
-            FilesystemOperation::CreateDirectory {
-                path: AbsolutePath::parse(path).expect("path"),
-                parents: false,
-            },
-        );
-        engine
-            .publish_batch(
-                &store,
-                vec![CommitCandidate::new(mkdir)],
-                &context,
-                &PublishTailOptions::default(),
-            )
-            .await
-            .results
-            .pop()
-            .expect("one publish result")
-    };
-    let warm = publish(&mut engine, "/parent/warm", "mkdir-warm")
-        .await
-        .expect("warm-up publish acquires the epoch");
-    assert_eq!(warm.committed_seq, ChangeSeq(4));
-
-    store.inject_stale_head_get_after(0);
-    let error = publish(&mut engine, "/parent/child", "mkdir-child")
-        .await
-        .expect_err("injected stale head read surfaces to the caller");
-    assert_eq!(error.code(), ErrorCode::StaleHead);
-    assert!(store.injected_stale_head_get());
-
-    // The failed attempt must not block a retry with the same commit id.
-    let result = publish(&mut engine, "/parent/child", "mkdir-child")
-        .await
-        .expect("retry after the stale head read");
-    assert_eq!(result.committed_seq, ChangeSeq(5));
-    assert_eq!(
-        read_file_bytes(&store, &namespace_id, "/file.txt")
-            .await
-            .expect("read after stale get")
-            .bytes,
-        b"second contents win"
-    );
-    resolve_path(&store, &namespace_id, "/parent/child")
-        .await
-        .expect("child directory remains visible");
-
-    let head = load_namespace_head_control(&store, &namespace_id)
-        .await
-        .expect("load head");
-    assert_eq!(head.state.seq, ChangeSeq(5));
-}
-
-#[tokio::test]
 async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1148,10 +595,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let duplicate = responses[1].as_ref().expect("duplicate commit");
     assert_eq!(first, duplicate);
 
-    let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
-        .await
-        .expect("list wal");
+    let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
     let wal_bytes = store
         .get(&wal_keys[0], None)
@@ -1444,10 +888,7 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
 
     // Corrupt the original WAL so the checks below can only use the commit
     // receipt stored in the checkpoint.
-    let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
-        .await
-        .expect("list WAL");
+    let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
     store
         .put_overwrite(
@@ -1554,10 +995,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         } if commit_id == "req-conflict"
     ));
 
-    let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
-        .await
-        .expect("list wal");
+    let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
     let wal_bytes = store
         .get(&wal_keys[0], None)
@@ -1637,10 +1075,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             && fingerprint.starts_with("v2:sha256:")
     ));
 
-    let wal_keys = store
-        .list_prefix("namespaces/demo/wal/segments/")
-        .await
-        .expect("list wal");
+    let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
 }
 

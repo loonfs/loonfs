@@ -51,17 +51,15 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
             namespace_id,
             chain_base_seq: retention_floor_seq,
             head_seq: head.seq,
-            visible_tip: head.visible_wal_tip.clone(),
-            stop_after_seq: Some(after_seq),
-            max_segment_fetches: None,
-            recent_segments: &head.recent_segments,
+            base_wal_no: head.retention_floor_wal_no,
+            tip_wal_no: head.wal_no,
+            writer_epoch: head.writer_epoch,
         },
     )
     .await
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-    })?
-    .into_complete();
+    })?;
     let mut changes = Vec::with_capacity(limit.as_usize());
     let mut through_seq = head.seq;
     let mut next_after_seq = None;

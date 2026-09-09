@@ -1,16 +1,15 @@
-//! Durable control-object shapes: the head and discovery hint,
+//! Durable control-object shapes: the discovery hint,
 //! checkpoint records, upload sessions, and their envelopes (format spec,
 //! "Control objects").
 
 use crate::envelope::EnvelopeCodecError;
 use crate::{
-    wal_segment_id_start_seq, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId,
-    ContentRef, ContentStoreId, InodeId, ManifestNo, NamespaceId, UploadId, WalSegmentId,
+    ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentStoreId,
+    ManifestNo, NamespaceId, UploadId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::fmt;
 use std::num::NonZeroU64;
 
 /// Selects one independently versioned control-object family.
@@ -19,8 +18,6 @@ use std::num::NonZeroU64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlObjectKind {
-    /// Carries the sole live-visibility and writer-fencing authority.
-    WalHead,
     /// Starts forward discovery of numbered manifests.
     Hint,
     /// Pins a manifest basis for a user or fork lifecycle.
@@ -33,8 +30,7 @@ pub enum ControlObjectKind {
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 5] = [
-        Self::WalHead,
+    pub const ALL: [Self; 4] = [
         Self::Hint,
         Self::CheckpointRecord,
         Self::UploadSession,
@@ -49,7 +45,6 @@ impl ControlObjectKind {
     /// a raw JSON fragment whose checksum covers its exact bytes.
     pub const fn format_version(self) -> u32 {
         match self {
-            Self::WalHead => 2,
             Self::Hint => 1,
             Self::CheckpointRecord => 1,
             Self::UploadSession => 1,
@@ -60,7 +55,6 @@ impl ControlObjectKind {
     /// Returns the frozen envelope discriminator for this control-object family.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::WalHead => "wal_head",
             Self::Hint => "hint",
             Self::CheckpointRecord => "checkpoint_record",
             Self::UploadSession => "upload_session",
@@ -92,6 +86,8 @@ pub struct HintState {
     pub namespace_id: NamespaceId,
     /// First number to read; zero starts before the first manifest.
     pub manifest_no: ManifestNo,
+    /// Highest acknowledged WAL number known to the publisher.
+    pub wal_no: crate::WalNo,
 }
 
 /// One reference to a namespace manifest.
@@ -165,7 +161,7 @@ pub enum CheckpointOwner {
     Fork {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,
-        /// Lease bounding the fork attempt before its target head is installed.
+        /// Lease bounding the fork attempt before its target manifest is installed.
         expires_at_ms: u64,
     },
     /// An application-created read view with a required expiry.
@@ -217,105 +213,15 @@ pub struct CheckpointRecordState {
     pub status: CheckpointStatus,
 }
 
-/// Links one accepted WAL segment identity to its verified sequence range.
-///
-/// Every stored pointer rejects unknown fields and verifies that its
-/// `segment_id` encodes `start_seq`.
-///
-/// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct WalSegmentPointer {
-    /// Segment identity used to derive the immutable object key and expected
-    /// to agree with the decoded payload.
-    pub segment_id: WalSegmentId,
-    /// First logical commit sequence carried by the segment.
-    pub start_seq: ChangeSeq,
-    /// Final logical commit sequence carried by the segment.
-    pub end_seq: ChangeSeq,
-    /// Checksum of the referenced segment's payload bytes, in `sha256:<hex>`
-    /// form. Must equal the `payload_checksum` in the referenced envelope.
-    pub payload_checksum: String,
-}
-
-impl<'de> Deserialize<'de> for WalSegmentPointer {
-    /// Decodes a pointer and verifies that its id matches `start_seq`.
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        /// Stored fields before validating the segment position.
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct StoredWalSegmentPointer {
-            segment_id: WalSegmentId,
-            start_seq: ChangeSeq,
-            end_seq: ChangeSeq,
-            payload_checksum: String,
-        }
-
-        let stored = StoredWalSegmentPointer::deserialize(deserializer)?;
-        validated_wal_segment_pointer(Self {
-            segment_id: stored.segment_id,
-            start_seq: stored.start_seq,
-            end_seq: stored.end_seq,
-            payload_checksum: stored.payload_checksum,
-        })
-    }
-}
-
-/// Verifies that a WAL segment id encodes the supplied start sequence.
-/// Reclamation derives the sequence from the object key, so a mismatch could
-/// cause a live segment to be collected.
-pub(crate) fn validate_wal_segment_start_seq(
-    segment_id: &WalSegmentId,
-    start_seq: ChangeSeq,
-) -> Result<(), String> {
-    if wal_segment_id_start_seq(segment_id.as_str()) == Some(start_seq) {
-        return Ok(());
-    }
-    Err(format!(
-        "wal segment id `{segment_id}` does not encode start seq `{start_seq}`"
-    ))
-}
-
-/// Applies the shared position check after strict decoding.
-fn validated_wal_segment_pointer<E>(pointer: WalSegmentPointer) -> Result<WalSegmentPointer, E>
-where
-    E: serde::de::Error,
-{
-    validate_wal_segment_start_seq(&pointer.segment_id, pointer.start_seq).map_err(E::custom)?;
-    Ok(pointer)
-}
-
-/// Decodes the head's predecessor hints without accepting unknown fields.
-fn deserialize_recent_segments<'de, D>(deserializer: D) -> Result<Vec<WalSegmentPointer>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let pointers = Vec::<WalSegmentPointer>::deserialize(deserializer)?;
-    if pointers.len() > RECENT_SEGMENTS_LIMIT {
-        return Err(serde::de::Error::custom(format_args!(
-            "head `recent_segments` exceeds {RECENT_SEGMENTS_LIMIT} entries"
-        )));
-    }
-    Ok(pointers)
-}
-
 /// Who most recently acquired the writer epoch, and when.
 ///
-/// Observability only, written during the epoch-acquisition CAS. Fencing
-/// authority is `writer_epoch` + CAS; nothing may consult this block for
-/// commit validity, takeover permission, or expiry, and no wall-clock
-/// comparison may gate a publish.
-///
-/// There is no session identity here: two runs of the same writer are told
-/// apart by `acquired_at_ms`, not by an id.
+/// Writer label and acquisition time; the epoch determines fencing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WriterBlock {
     /// Stable writer label supplied by the embedding process for diagnostics.
     pub writer_id: WriterId,
-    /// Unix-millisecond stamp of the successful epoch-acquisition CAS.
+    /// Unix-millisecond stamp of the epoch acquisition.
     pub acquired_at_ms: u64,
 }
 
@@ -324,13 +230,13 @@ pub struct WriterBlock {
 /// See [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcquiredWriter {
-    /// Stable writer label copied into the head's observability block.
+    /// Stable writer label copied into the manifest's writer block.
     pub writer_id: WriterId,
     /// Fencing epoch every commit publication from this session must match.
     pub writer_epoch: WriterEpoch,
 }
 
-/// Status recorded in every namespace head.
+/// Terminal namespace status.
 ///
 /// A namespace is either active or permanently deleted. Missing and unknown
 /// status values fail decoding.
@@ -365,14 +271,7 @@ impl NamespaceStatus {
     }
 }
 
-/// Where a fork target's metadata basis lives before the target publishes
-/// its own manifest, and the permanent record of what it was forked from.
-///
-/// Present in every successor head of a fork target, absent in every head of
-/// a created namespace. The basis is head-authorized: a reader that resolves
-/// through it must verify the loaded manifest against both the namespace id
-/// and the checksum recorded here, and report corruption on any mismatch —
-/// there is no fallback (format spec, "Resolving the metadata basis").
+/// Immutable fork provenance matched against the source checkpoint by GC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkBasis {
@@ -384,147 +283,12 @@ pub struct ForkBasis {
     pub source_checkpoint_id: CheckpointId,
 }
 
-/// Maximum number of pointers accepted in a head's `recent_segments` accelerator.
-pub const RECENT_SEGMENTS_LIMIT: usize = 256;
-
-/// Carries the authoritative visibility, allocation, and fencing state of a namespace.
-///
-/// See [head update authority](../../../docs/specs/format.md#14-head-update-authority).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HeadState {
-    /// Namespace whose live history this head governs.
-    pub namespace_id: NamespaceId,
-    /// Immutable content store in which the namespace publishes file bytes.
-    /// Minted at creation; a fork target carries its source's, sharing the
-    /// content keyspace copy-on-write.
-    pub content_store_id: ContentStoreId,
-    /// Time the namespace was created, in Unix milliseconds. Sequence numbers
-    /// determine order; this value is for display.
-    pub created_at_ms: u64,
-    /// Provenance and pre-first-flush basis of a fork target; absent for a
-    /// created namespace. Immutable for the namespace's life.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_basis: Option<ForkBasis>,
-    /// Greatest visible logical commit sequence.
-    pub seq: ChangeSeq,
-    /// Commit id assigned to `seq`, or the fixed genesis id at sequence zero.
-    pub head_commit_id: CommitId,
-    /// Current fencing generation; a publisher holding any other epoch is rejected.
-    pub writer_epoch: WriterEpoch,
-    /// Non-authoritative record of the most recent epoch acquisition.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub writer: Option<WriterBlock>,
-    /// First namespace-scoped inode identity available for allocation.
-    pub next_inode_id: InodeId,
-    /// Accepted tip of the visible WAL chain, or `None` before the first commit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visible_wal_tip: Option<WalSegmentPointer>,
-    /// Bounded newest-first predecessor accelerator below `visible_wal_tip`.
-    /// Chain links remain the only history authority — any disagreement
-    /// resolves in favor of the chain, and this array never protects anything
-    /// from GC.
-    /// An empty list is written as `[]`. A head that omits the field fails
-    /// to decode.
-    #[serde(deserialize_with = "deserialize_recent_segments")]
-    pub recent_segments: Vec<WalSegmentPointer>,
-    /// Whether the namespace is active or terminally deleted. Every head
-    /// writes it, and a head that omits it fails to decode.
-    pub status: NamespaceStatus,
-}
-
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
 
 /// The commit id every namespace's sequence zero carries, before any commit
 /// has landed.
 pub fn genesis_commit_id() -> CommitId {
     CommitId::parse(GENESIS_COMMIT_ID).expect("genesis commit id is valid")
-}
-
-/// A successor head changed one of the namespace's immutable identity
-/// fields. Every head a namespace ever publishes carries them forward
-/// verbatim from the head that created it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeadIdentityDrift {
-    /// Which field the successor changed.
-    pub field: String,
-}
-
-impl fmt::Display for HeadIdentityDrift {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "successor head changes the namespace's immutable `{}`",
-            self.field
-        )
-    }
-}
-
-impl std::error::Error for HeadIdentityDrift {}
-
-impl HeadState {
-    /// Constructs the active sequence-zero head with the root inode already reserved.
-    pub fn initial(
-        namespace_id: NamespaceId,
-        content_store_id: ContentStoreId,
-        created_at_ms: u64,
-    ) -> Self {
-        Self {
-            namespace_id,
-            content_store_id,
-            created_at_ms,
-            fork_basis: None,
-            seq: ChangeSeq(0),
-            head_commit_id: CommitId::parse(GENESIS_COMMIT_ID).expect("genesis commit id is valid"),
-            writer_epoch: WriterEpoch(0),
-            writer: None,
-            // Inode 1 is the root directory; inode 2 is the first assignable id.
-            next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
-            visible_wal_tip: None,
-            recent_segments: Vec::new(),
-            status: NamespaceStatus::Active {},
-        }
-    }
-
-    /// Checks that `successor` carries this head's immutable identity
-    /// forward verbatim.
-    ///
-    /// The head is the only durable home of the namespace's content store
-    /// and fork provenance, so every publication that rewrites
-    /// the head must copy them unchanged. Publishers call this before the
-    /// compare-and-swap: a drifting successor is a construction bug, not a
-    /// state to persist.
-    pub fn ensure_successor_identity(
-        &self,
-        successor: &HeadState,
-    ) -> Result<(), HeadIdentityDrift> {
-        let drift = |field: &str| {
-            Err(HeadIdentityDrift {
-                field: field.to_owned(),
-            })
-        };
-        if successor.namespace_id != self.namespace_id {
-            return drift("namespace_id");
-        }
-        if successor.content_store_id != self.content_store_id {
-            return drift("content_store_id");
-        }
-        if successor.created_at_ms != self.created_at_ms {
-            return drift("created_at_ms");
-        }
-        if successor.fork_basis != self.fork_basis {
-            return drift("fork_basis");
-        }
-        if self.status.is_deleted() && !successor.status.is_deleted() {
-            return drift("status");
-        }
-        if self.status.reclaim_after_ms().is_some()
-            && self.status.reclaim_after_ms() != successor.status.reclaim_after_ms()
-        {
-            return drift("reclaim_after_ms");
-        }
-        Ok(())
-    }
 }
 
 /// Staging progress for a service-proxied upload.
@@ -885,8 +649,6 @@ impl<'de> Deserialize<'de> for UploadSessionState {
 /// Control state decoded through its checked durable codec.
 pub type ControlObjectEnvelope<T> = crate::envelope::VerifiedEnvelope<T>;
 
-/// Specializes a control envelope for the authoritative namespace head.
-pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 /// Specializes a control envelope for a durable upload workflow.
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 /// Specializes a control envelope for manifest discovery.
@@ -1047,260 +809,5 @@ mod tests {
             assert_eq!(serialized, serde_json::Value::from(kind.as_str()));
         }
         assert_eq!(ControlObjectKind::parse("not_a_kind"), None);
-    }
-
-    fn sample_head() -> HeadState {
-        HeadState::initial(
-            NamespaceId::parse("demo").expect("valid namespace id"),
-            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("valid content store id"),
-            1_000,
-        )
-    }
-
-    #[test]
-    fn head_without_content_store_is_rejected() {
-        // The content store is the namespace's addressing-semantics
-        // authority; a head that omits it is malformed, never defaulted.
-        let mut missing = head_json(None, Vec::new());
-        missing
-            .as_object_mut()
-            .expect("head payload object")
-            .remove("content_store_id");
-
-        let error = serde_json::from_value::<HeadState>(missing)
-            .expect_err("head without its immutable identity must be rejected");
-        assert!(
-            error.to_string().contains("content_store_id"),
-            "the rejection should name the missing field: {error}"
-        );
-    }
-
-    /// One WAL pointer as it appears inside a durable head payload.
-    fn wal_pointer_json(segment_id: &str, start_seq: u64, end_seq: u64) -> serde_json::Value {
-        serde_json::json!({
-            "segment_id": segment_id,
-            "start_seq": start_seq,
-            "end_seq": end_seq,
-            "payload_checksum": format!("sha256:{}", "b".repeat(64)),
-        })
-    }
-
-    /// A decodable head payload carrying whatever tip and accelerator the
-    /// caller wants to present. Both fields are omitted when empty, exactly
-    /// as the encoder writes them.
-    fn head_json(
-        visible_wal_tip: Option<serde_json::Value>,
-        recent_segments: Vec<serde_json::Value>,
-    ) -> serde_json::Value {
-        let mut head = serde_json::json!({
-            "namespace_id": "demo",
-            "content_store_id": "cs_0123456789abcdef0123456789abcdef",
-            "created_at_ms": 1_000,
-            "seq": 2,
-            "head_commit_id": GENESIS_COMMIT_ID,
-            "writer_epoch": 0,
-            "next_inode_id": 2,
-            "status": { "kind": "active" }
-        });
-        if let Some(tip) = visible_wal_tip {
-            head["visible_wal_tip"] = tip;
-        }
-        head["recent_segments"] = serde_json::Value::Array(recent_segments);
-        head
-    }
-
-    #[test]
-    fn a_head_decodes_its_tip_with_and_without_predecessor_hints() {
-        let tip = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
-        let older = wal_pointer_json("wal_00000000000000000001-0123456789abcdef", 1, 1);
-
-        let head = serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), Vec::new()))
-            .expect("the first published segment has no predecessor hints");
-        assert!(head.visible_wal_tip.is_some());
-        assert!(head.recent_segments.is_empty());
-
-        let head = serde_json::from_value::<HeadState>(head_json(Some(tip), vec![older.clone()]))
-            .expect("predecessor hints decode independently of the authoritative tip");
-        assert_eq!(
-            head.recent_segments,
-            vec![serde_json::from_value(older).expect("valid predecessor pointer")]
-        );
-    }
-
-    #[test]
-    fn a_head_rejects_too_many_predecessor_hints() {
-        let pointer = wal_pointer_json("wal_00000000000000000001-0123456789abcdef", 1, 1);
-        let error = serde_json::from_value::<HeadState>(head_json(
-            None,
-            vec![pointer; RECENT_SEGMENTS_LIMIT + 1],
-        ))
-        .expect_err("the head rejects an oversized predecessor accelerator");
-        assert!(
-            error
-                .to_string()
-                .contains("head `recent_segments` exceeds 256 entries"),
-            "the rejection should name the field and limit: {error}"
-        );
-    }
-
-    #[test]
-    fn head_rejects_a_pointer_field_it_does_not_define() {
-        let mut tip = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
-        tip["object_key"] = serde_json::json!(
-            "namespaces/demo/wal/segments/wal_00000000000000000002-fedcba9876543210.wal.zst"
-        );
-
-        serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), Vec::new()))
-            .expect_err("the head rejects a field its tip pointer does not define");
-
-        let older = wal_pointer_json("wal_00000000000000000001-0123456789abcdef", 1, 1);
-        serde_json::from_value::<HeadState>(head_json(Some(older), vec![tip]))
-            .expect_err("the head rejects a field a predecessor hint does not define");
-    }
-
-    #[test]
-    fn wal_pointers_reject_an_id_that_disagrees_with_its_start_seq() {
-        let agreeing = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
-        serde_json::from_value::<WalSegmentPointer>(agreeing)
-            .expect("a pointer whose id encodes its start seq decodes");
-
-        let disagreeing = wal_pointer_json("wal_00000000000000000003-fedcba9876543210", 2, 2);
-        let error = serde_json::from_value::<WalSegmentPointer>(disagreeing)
-            .expect_err("a pointer whose id disagrees with its start seq is corruption");
-        let message = error.to_string();
-        assert!(
-            message.contains("`wal_00000000000000000003-fedcba9876543210`")
-                && message.contains("start seq `2`"),
-            "the rejection should name both values: {message}"
-        );
-    }
-
-    #[test]
-    fn the_head_rejects_a_pointer_whose_id_disagrees_with_its_start_seq() {
-        let tip = wal_pointer_json("wal_00000000000000000003-aaaaaaaaaaaaaaaa", 3, 3);
-        let older = wal_pointer_json("wal_00000000000000000002-fedcba9876543210", 2, 2);
-        serde_json::from_value::<HeadState>(head_json(Some(tip.clone()), vec![older.clone()]))
-            .expect("pointers whose ids encode their start seqs decode");
-
-        let drifted_tip = wal_pointer_json("wal_00000000000000000004-aaaaaaaaaaaaaaaa", 3, 3);
-        let error = serde_json::from_value::<HeadState>(head_json(Some(drifted_tip), vec![older]))
-            .expect_err("the head rejects a tip that disagrees with its start seq");
-        let message = error.to_string();
-        assert!(
-            message.contains("`wal_00000000000000000004-aaaaaaaaaaaaaaaa`")
-                && message.contains("start seq `3`"),
-            "the rejection should name both values: {message}"
-        );
-
-        let drifted_hint = wal_pointer_json("wal_00000000000000000001-fedcba9876543210", 2, 2);
-        serde_json::from_value::<HeadState>(head_json(Some(tip), vec![drifted_hint]))
-            .expect_err("the head rejects a hint that disagrees with its start seq");
-    }
-
-    #[test]
-    fn genesis_head_decodes_without_a_tip_or_hints() {
-        let genesis = serde_json::from_value::<HeadState>(head_json(None, Vec::new()))
-            .expect("a head with no visible tip decodes");
-        assert_eq!(genesis.visible_wal_tip, None);
-        assert!(genesis.recent_segments.is_empty());
-    }
-
-    #[test]
-    fn a_head_that_omits_its_predecessor_hints_does_not_decode() {
-        let mut head = head_json(None, Vec::new());
-        assert_eq!(head["recent_segments"], serde_json::json!([]));
-        head.as_object_mut()
-            .expect("the head is a JSON object")
-            .remove("recent_segments");
-
-        let error = serde_json::from_value::<HeadState>(head)
-            .expect_err("a head without `recent_segments` is corruption");
-        assert!(
-            error.to_string().contains("recent_segments"),
-            "the rejection should name the field: {error}"
-        );
-    }
-
-    #[test]
-    fn control_object_codec_round_trips_and_validates() {
-        let state = sample_head();
-
-        let encoded = encode_control_state(ControlObjectKind::WalHead, &state).expect("encode");
-        let decoded: HeadStateEnvelope =
-            decode_control_object(&encoded, ControlObjectKind::WalHead).expect("decode");
-        assert_eq!(decoded.into_payload(), state);
-
-        let mismatch = decode_control_object::<HintState>(&encoded, ControlObjectKind::Hint)
-            .expect_err("kind mismatch");
-        assert!(matches!(mismatch, EnvelopeCodecError::KindMismatch { .. }));
-    }
-
-    #[test]
-    fn successor_head_must_carry_the_namespace_identity_forward() {
-        let head = sample_head();
-        let mut successor = head.clone();
-        successor.seq = ChangeSeq(4);
-        head.ensure_successor_identity(&successor)
-            .expect("advancing the sequence keeps the identity");
-
-        let mut deleted = head.clone();
-        deleted.status = NamespaceStatus::Deleted {
-            reclaim_after_ms: None,
-        };
-        assert!(deleted.ensure_successor_identity(&head).is_err());
-        let mut retired = deleted.clone();
-        retired.status = NamespaceStatus::Deleted {
-            reclaim_after_ms: Some(100),
-        };
-        deleted
-            .ensure_successor_identity(&retired)
-            .expect("retirement is allowed");
-        retired
-            .ensure_successor_identity(&retired)
-            .expect("deadline is preserved");
-        assert!(retired.ensure_successor_identity(&head).is_err());
-        for deadline in [None, Some(99), Some(101)] {
-            successor = retired.clone();
-            successor.status = NamespaceStatus::Deleted {
-                reclaim_after_ms: deadline,
-            };
-            assert_eq!(
-                retired
-                    .ensure_successor_identity(&successor)
-                    .expect_err("deadline cannot change")
-                    .field,
-                "reclaim_after_ms"
-            );
-        }
-
-        let mut drifted = head.clone();
-        drifted.content_store_id = ContentStoreId::parse("cs_fedcba9876543210fedcba9876543210")
-            .expect("valid content store id");
-        assert_eq!(
-            head.ensure_successor_identity(&drifted)
-                .expect_err("content store drift is rejected")
-                .field,
-            "content_store_id"
-        );
-
-        let mut forked = head.clone();
-        forked.fork_basis = Some(ForkBasis {
-            manifest: ManifestRef {
-                owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
-                manifest_no: ManifestNo(7),
-
-                manifest_head_seq: ChangeSeq(7),
-                manifest_payload_checksum: "sha256:test".to_owned(),
-            },
-            source_checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000002")
-                .expect("valid checkpoint id"),
-        });
-        assert_eq!(
-            head.ensure_successor_identity(&forked)
-                .expect_err("gaining a fork basis is rejected")
-                .field,
-            "fork_basis"
-        );
     }
 }

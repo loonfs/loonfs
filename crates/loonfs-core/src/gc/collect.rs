@@ -9,7 +9,7 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
-use crate::namespace::control_snapshot::{load_control_snapshot, NamespaceControlSnapshot};
+use crate::namespace::control_snapshot::load_control_snapshot;
 use futures::{stream, StreamExt};
 use loonfs_api::{GcResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -22,21 +22,10 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
 ) -> Result<GcResponse> {
     config.validate()?;
     let mut report = GcResponse::empty(namespace_id.clone());
-    let head = match load_head_object(store, namespace_id).await {
-        Ok(head) => head,
+    let snapshot = match load_control_snapshot(store, namespace_id).await {
+        Ok(snapshot) => snapshot,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
-        Err(error) => return Err(CoreError::ControlObjectLoad(error)),
-    };
-    let snapshot = if head.state.status.is_deleted() {
-        NamespaceControlSnapshot {
-            retention_floor_seq: crate::namespace::basis::namespace_birth_seq(&head.state),
-            head,
-            root: None,
-        }
-    } else {
-        load_control_snapshot(store, namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?
+        Err(error) => return Err(error.into()),
     };
     let live = LiveSet::load(store, namespace_id, &snapshot, context).await?;
     let basis = snapshot.basis();

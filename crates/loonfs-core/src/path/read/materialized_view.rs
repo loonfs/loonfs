@@ -17,13 +17,13 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 #[cfg(test)]
 use crate::namespace::control_snapshot::load_head_and_metadata_basis;
+use crate::namespace::state::NamespaceReadState;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
 use crate::wal::{
     ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
 };
 use loonfs_api::v0::DirectoryBinding;
-use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
     AbsolutePath, AttributeInclusion, AttributesProjection, ChangeSeq, ContentRef, ContentStoreId,
     DirectoryPageCursor, DisplayName, FileBytes, FileRevision, FileRevisionsPageCursor, InodeId,
@@ -37,7 +37,7 @@ use tracing::Instrument;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ReadLoadContext<'anchor, 'cache> {
-    head: &'anchor HeadState,
+    head: &'anchor NamespaceReadState,
     head_etag: &'anchor str,
     /// Basis pinned together with the head when the snapshot was taken. The
     /// live root may have moved past a pinned head; the pinned pair stays
@@ -50,7 +50,7 @@ pub(crate) struct ReadLoadContext<'anchor, 'cache> {
 
 impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
     pub(crate) fn pinned_head(
-        head: &'anchor HeadState,
+        head: &'anchor NamespaceReadState,
         head_etag: &'anchor str,
         basis: &'anchor MetadataBasis,
         segment_cache: Option<&'cache MetadataSegmentCache>,
@@ -150,7 +150,7 @@ pub struct DirectDownloadByInodeTarget {
 pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: NamespaceId,
     pub(super) content_store_id: ContentStoreId,
-    pub(super) head: HeadState,
+    pub(super) head: NamespaceReadState,
     pub(super) segments: VerifiedMetadataSegments<'a, S>,
     wal_tail_rows: Arc<MetadataState>,
     anchor: ReadAnchor,
@@ -158,7 +158,7 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     #[cfg(test)]
-    pub(crate) fn head(&self) -> &HeadState {
+    pub(crate) fn head(&self) -> &NamespaceReadState {
         &self.head
     }
 
@@ -170,7 +170,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     async fn load_at_head(
         store: &'a S,
         namespace_id: &NamespaceId,
-        head: HeadState,
+        head: NamespaceReadState,
         basis: &MetadataBasis,
         load_context: ReadLoadContext<'_, 'a>,
     ) -> Result<Self> {
@@ -183,13 +183,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         crate::namespace::control::ensure_namespace_live(&head)?;
         let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
         let manifest_no = basis.manifest_no();
-        let loaded_basis = load_basis_metadata_segments(
-            store,
-            load_context.segment_cache,
-            basis,
-            head.created_at_ms,
-        )
-        .await?;
+        let loaded_basis =
+            load_basis_metadata_segments(store, load_context.segment_cache, basis).await?;
         let manifest_head = loaded_basis.replay_head(&head);
         let segments = loaded_basis.segments;
         let anchor = ReadAnchor {
@@ -222,17 +217,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 namespace_id,
                 chain_base_seq: manifest_head.seq,
                 head_seq: head.seq,
-                visible_tip: head.visible_wal_tip.clone(),
-                stop_after_seq: None,
-                max_segment_fetches: None,
-                recent_segments: &head.recent_segments,
+                base_wal_no: head.last_folded_wal_no,
+                tip_wal_no: head.wal_no,
+                writer_epoch: head.writer_epoch,
             },
         )
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-        })?
-        .into_complete();
+        })?;
         let replayed = {
             let _span =
                 tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
@@ -926,9 +919,7 @@ mod tests {
     use crate::namespace::control::load_head_object;
     use crate::path::write::{CommitRequest, FilesystemOperation};
     use bytes::Bytes;
-    use loonfs_api::wire::control::ControlObjectKind;
     use loonfs_api::{AttributeRevisionNo, AttributeValue, CommitId, ErrorCode};
-    use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::attribute_key;
     use std::collections::BTreeMap;
@@ -1012,25 +1003,23 @@ mod tests {
     #[tokio::test]
     async fn a_tail_that_replays_to_another_head_is_refused_by_reads_and_publishes_alike() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let mut head = load_head_object(&store, &namespace_id)
+        let head = load_head_object(&store, &namespace_id)
             .await
-            .expect("load head")
+            .expect("state")
             .state;
-        head.next_inode_id = InodeId(head.next_inode_id.0 + 1);
-        let envelope = head;
+        let key = loonfs_objectstore::keys::wal_segment(&namespace_id, &head.wal_no);
+        let bytes = store.get(&key, None).await.expect("WAL").expect("exists");
+        let mut payload = loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(&bytes)
+            .expect("decode")
+            .into_payload();
+        payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
+        let bytes = loonfs_api::wire::wal::encode_wal_segment_envelope_zstd(payload)
+            .expect("encode")
+            .into_bytes();
         store
-            .put_overwrite(
-                &wal_head(&namespace_id),
-                Bytes::from(
-                    loonfs_api::wire::control::encode_control_state(
-                        ControlObjectKind::WalHead,
-                        &envelope,
-                    )
-                    .expect("encode head"),
-                ),
-            )
+            .put_overwrite(&key, Bytes::from(bytes))
             .await
-            .expect("rewrite head");
+            .expect("corrupt allocation");
 
         let read = load_current_metadata_view(&store, &namespace_id)
             .await

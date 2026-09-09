@@ -19,13 +19,12 @@ use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
 use loonfs_api::{AbsolutePath, ActorId, ActorRef, ChangeSeq, DestinationBehavior};
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
-use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_head, wal_segment_prefix};
-use loonfs_objectstore::layout::DurableObjectFamily;
+use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
-    RecordingStore,
+    OperationContext, OperationKind, RecordingStore,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -33,19 +32,49 @@ use std::sync::Condvar;
 use tempfile::tempdir;
 use tokio::time::timeout;
 
-fn blocking_head_cas_store(
+fn is_publication(bytes: &[u8]) -> bool {
+    decode_wal_segment_envelope_zstd(bytes).is_ok_and(|wal| !wal.payload().records.is_empty())
+        || loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes)
+            .is_ok_and(|manifest| manifest.payload().status.is_deleted())
+}
+
+fn is_fold(operation: &OperationContext<'_>) -> bool {
+    match operation.kind() {
+        OperationKind::Put {
+            bytes,
+            mode: PutMode::CreateIfAbsent,
+        } => loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes).is_ok_and(
+            |manifest| {
+                manifest.payload().last_folded_wal_no.0 > 0
+                    && !manifest.payload().status.is_deleted()
+            },
+        ),
+        _ => false,
+    }
+}
+
+fn blocking_fold_store<S>(inner: S, prefix: String) -> BlockingStore<S> {
+    BlockingStore::matching(inner, move |operation| {
+        operation.key().starts_with(&prefix) && is_fold(operation)
+    })
+}
+
+fn blocking_publication_store(
     root: impl AsRef<Path>,
     namespace_id: &NamespaceId,
 ) -> BlockingStore<LocalFsStore> {
-    BlockingStore::new(
+    let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
+    BlockingStore::matching(
         LocalFsStore::new(root.as_ref()).expect("store"),
-        KeyPredicate::wal_head(namespace_id),
-        OperationClass::CompareAndSwap,
+        move |operation| {
+            operation.key().starts_with(&prefix)
+                && matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent } if is_publication(bytes))
+        },
     )
 }
 
 #[derive(Debug)]
-struct PanicHeadCasStore {
+struct PanicWalPutStore {
     inner: LocalFsStore,
     head_key: String,
     gate: Arc<PanicGate>,
@@ -64,11 +93,11 @@ struct PanicGateState {
     released: bool,
 }
 
-impl PanicHeadCasStore {
+impl PanicWalPutStore {
     fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: wal_head(namespace_id),
+            head_key: loonfs_objectstore::keys::namespace_prefix(namespace_id),
             gate: Arc::new(PanicGate {
                 state: Mutex::new(PanicGateState {
                     armed: false,
@@ -99,7 +128,7 @@ impl PanicHeadCasStore {
             }
         })
         .await
-        .expect("wait for blocked head CAS");
+        .expect("wait for blocked WAL put");
     }
 
     fn release_into_panic(&self) {
@@ -120,7 +149,7 @@ impl PanicGate {
 }
 
 #[async_trait]
-impl ObjectStore for PanicHeadCasStore {
+impl ObjectStore for PanicWalPutStore {
     delegate_object_store!(self => self.inner; except put);
 
     async fn put(
@@ -129,7 +158,10 @@ impl ObjectStore for PanicHeadCasStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+        if key.starts_with(&self.head_key)
+            && matches!(mode, PutMode::CreateIfAbsent)
+            && is_publication(&bytes)
+        {
             let gate = self.gate.clone();
             tokio::task::spawn_blocking(move || {
                 let mut state = gate.lock_state();
@@ -147,23 +179,20 @@ impl ObjectStore for PanicHeadCasStore {
                 }
             })
             .await
-            .expect("head CAS gate task");
+            .expect("WAL put gate task");
         }
         self.inner.put(key, bytes, mode).await
     }
 }
 
-fn lost_head_cas_ack_store(
+fn lost_wal_put_ack_store(
     root: impl AsRef<Path>,
     namespace_id: &NamespaceId,
 ) -> FailStore<LocalFsStore> {
-    FailStore::new(
-        LocalFsStore::new(root.as_ref()).expect("store"),
-        KeyPredicate::wal_head(namespace_id),
-        OperationClass::CompareAndSwap,
-        InjectedError::Transport("injected lost head CAS acknowledgement".to_owned()),
-    )
-    .apply_then_fail()
+    let prefix = wal_segment_prefix(namespace_id);
+    FailStore::matching(LocalFsStore::new(root.as_ref()).expect("store"), move |operation| {
+        operation.key().starts_with(&prefix) && matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent } if is_publication(bytes))
+    }, InjectedError::Transport("lost WAL put acknowledgement".to_owned())).apply_then_fail()
 }
 
 fn test_read_core(store: SharedStore) -> ReadCore {
@@ -183,6 +212,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
 
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
+        discovery_hints: crate::discovery_hints::DiscoveryHints::default(),
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
         wal_fold_permits: tokio::sync::Semaphore::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS),
         wal_folds_waiting: AtomicUsize::new(0),
@@ -678,7 +708,7 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
 async fn publisher_admits_pending_batch_while_active_publish_blocks() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -715,14 +745,14 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
         ))
         .await
         .expect("list wal");
-    assert_eq!(wal_keys.len(), 2);
+    assert_eq!(wal_keys.len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_contender_waits_for_active_request_receipt() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -882,7 +912,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
 async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -975,7 +1005,7 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
 async fn publisher_takes_a_cold_full_batch_immediately() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -1086,14 +1116,14 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
 async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(lost_head_cas_ack_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(lost_wal_put_ack_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared);
     create_namespace(&runtime, &namespace_id).await;
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     // One clean commit first, so the session holds its writer epoch. Epoch
-    // acquisition is a head compare-and-swap too, and this test is about the
+    // acquisition is a WAL put too, and this test is about the
     // publication swap.
     let warm = recv_commit(
         admit_commit(
@@ -1126,7 +1156,7 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
 async fn publisher_survives_publish_panic_and_keeps_serving() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
+    let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -1150,7 +1180,7 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
 
     store.release_into_panic();
 
-    // The panic may have struck either side of the head CAS, so the
+    // The panic may have struck either side of the WAL put, so the
     // taken request reports an unknown outcome, not definite failure.
     let doomed_error = doomed
         .await
@@ -1177,13 +1207,13 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
 async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
-    // A publishes and blocks at its head CAS; B queues behind it.
+    // A publishes and blocks at its WAL put; B queues behind it.
     store.block_next();
     let before_a = admit_commit(
         &publisher,
@@ -1251,14 +1281,14 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
 async fn second_delete_during_inflight_delete_settles_both() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     // One publication first, so the session already holds its writer epoch:
-    // the next head compare-and-swap is the delete's own tombstone swap.
+    // the next WAL put is the delete's own tombstone swap.
     recv_commit(
         admit_commit(
             &publisher,
@@ -1322,7 +1352,7 @@ async fn second_delete_during_inflight_delete_settles_both() {
 async fn identical_pending_deletes_coalesce_into_one_outcome() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -1377,7 +1407,7 @@ async fn identical_pending_deletes_coalesce_into_one_outcome() {
 async fn pending_deletes_with_different_preconditions_settle_separately() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -1432,7 +1462,7 @@ async fn pending_deletes_with_different_preconditions_settle_separately() {
 async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -1487,7 +1517,7 @@ async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
 async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let runtime = test_runtime(shared.clone());
     create_namespace(&runtime, &namespace_id).await;
@@ -1537,7 +1567,7 @@ async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
 async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
@@ -1621,7 +1651,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
         ))
         .await
         .expect("list wal");
-    assert_eq!(wal_keys.len(), 2);
+    assert_eq!(wal_keys.len(), 3);
 
     let mut batched_actors = std::collections::BTreeMap::new();
     for key in &wal_keys {
@@ -1662,7 +1692,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
 async fn publisher_batches_plain_and_prepared_mutations_together() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
@@ -1784,14 +1814,14 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     }
     record_counts.sort_unstable();
     // The warmup published alone; the concurrent pair shares a segment.
-    assert_eq!(record_counts, vec![1, 2]);
+    assert_eq!(record_counts, vec![0, 1, 2]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
@@ -1800,7 +1830,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .expect("bootstrap");
     let registry = writer.publisher();
 
-    // An admitted publication blocks at its head CAS...
+    // An admitted publication blocks at its WAL put...
     store.block_next();
     let active = {
         let registry = registry.clone();
@@ -1862,7 +1892,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
 async fn worker_survives_panic_and_processes_later_queue_items() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
+    let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
@@ -2013,10 +2043,9 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
 #[tokio::test]
 async fn a_failed_fold_notifies_maintenance_when_the_attempt_finishes() {
     let temp_dir = tempdir().expect("tempdir");
-    let failing = Arc::new(FailStore::new(
+    let failing = Arc::new(FailStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::family(DurableObjectFamily::MetadataManifest),
-        OperationClass::Put,
+        is_fold,
         InjectedError::PermissionDenied("injected manifest write failure".to_owned()),
     ));
     let namespace_id = NamespaceId::parse("failed-fold-hint").expect("valid namespace id");
@@ -2079,20 +2108,14 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         NamespaceId::parse("fold-b").expect("valid namespace id"),
         NamespaceId::parse("fold-c").expect("valid namespace id"),
     ];
-    let fold_c = BlockingStore::new(
+    let fold_c = blocking_fold_store(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespaces[2])),
-        OperationClass::Put,
+        metadata_manifest_prefix(&namespaces[2]),
     );
-    let fold_b = BlockingStore::new(
-        fold_c,
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespaces[1])),
-        OperationClass::Put,
-    );
-    let blocking = Arc::new(BlockingStore::new(
+    let fold_b = blocking_fold_store(fold_c, metadata_manifest_prefix(&namespaces[1]));
+    let blocking = Arc::new(blocking_fold_store(
         fold_b,
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespaces[0])),
-        OperationClass::Put,
+        metadata_manifest_prefix(&namespaces[0]),
     ));
     let writer = crate::FsWriter::builder_with_store(blocking.clone())
         .writer_id("writer-a")
@@ -2175,10 +2198,9 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_a = NamespaceId::parse("fold-a").expect("valid namespace id");
     let namespace_b = NamespaceId::parse("fold-b").expect("valid namespace id");
-    let blocked = BlockingStore::new(
+    let blocked = blocking_fold_store(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_a)),
-        OperationClass::Put,
+        metadata_manifest_prefix(&namespace_a),
     );
     let recording = Arc::new(RecordingStore::new(
         blocked,
@@ -2225,6 +2247,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         }
     }
 
+    recording.reset();
     writer
         .maintenance_handle("late-fold-maintenance")
         .expect("maintenance handle")
@@ -2261,10 +2284,9 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publisher() {
     let temp_dir = tempdir().expect("tempdir");
-    let blocking = Arc::new(BlockingStore::new(
+    let blocking = Arc::new(blocking_fold_store(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::family(DurableObjectFamily::MetadataManifest),
-        OperationClass::Put,
+        "namespaces/".to_owned(),
     ));
     let store = blocking.clone() as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2376,7 +2398,7 @@ async fn close_admission_refuses_without_creating_publishers() {
 async fn a_delete_admitted_before_close_admission_lands_terminal() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
@@ -2385,7 +2407,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
         .expect("bootstrap");
     let registry = writer.publisher();
 
-    // A publication parks at its head CAS, so the delete deterministically
+    // A publication parks at its WAL put, so the delete deterministically
     // queues behind it instead of being taken first.
     store.block_next();
     let active = {
@@ -2444,7 +2466,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
 async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
@@ -2453,7 +2475,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         .expect("bootstrap");
     let registry = writer.publisher();
 
-    // Park the first publication at its head CAS, batch a second commit
+    // Park the first publication at its WAL put, batch a second commit
     // behind it, then queue the delete: the queued batch must publish
     // before the delete runs, and the blocked CAS outlasts the pacing
     // interval — the interleaving where a racing second worker could run
@@ -2512,7 +2534,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     // after the gate is released: a regression then fails the test
     // instead of hanging runtime teardown on the never-released gate.
     let single_worker_while_blocked = single_live_worker(&publisher);
-    // With the queued batch still blocked at its head CAS, outlast the
+    // With the queued batch still blocked at its WAL put, outlast the
     // pacing interval: the delete must still not have run.
     wait_past_cas_pacing().await;
     let (deleted_while_blocked, delete_queued_while_blocked) = {
@@ -2846,7 +2868,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     let temp_dir = tempdir().expect("tempdir");
     let a = NamespaceId::parse("a").expect("namespace");
     let b = NamespaceId::parse("b").expect("namespace");
-    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &a));
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &a));
     let writer = crate::FsWriter::builder_with_store(store.clone())
         .writer_id("bounded-writer")
         .publication_limits(crate::PublicationLimits {

@@ -434,6 +434,7 @@ impl FsWriterBuilder {
         let runtime = owning_runtime()?;
         let core = self.core.open_read_core()?;
         let bits = Arc::new(WriterBits {
+            discovery_hints: crate::discovery_hints::DiscoveryHints::default(),
             identity,
             wal_fold_permits: Semaphore::new(self.max_concurrent_folds.get()),
             wal_folds_waiting: AtomicUsize::new(0),
@@ -507,7 +508,7 @@ mod tests {
         ));
     }
 
-    /// A writer whose store parks the first head compare-and-swap, so a
+    /// A writer whose store parks the first WAL put, so a
     /// publication can be held open across a shutdown's first poll.
     async fn parked_publication_writer(
         temp_dir: &std::path::Path,
@@ -516,8 +517,8 @@ mod tests {
     ) -> (FsWriter, Arc<BlockingStore<LocalFsStore>>) {
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir).expect("create local-fs store"),
-            KeyPredicate::wal_head(namespace_id),
-            OperationClass::CompareAndSwap,
+            KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(namespace_id)),
+            OperationClass::PutCreateIfAbsent,
         ));
         let writer = FsWriter::builder_with_store(blocking.clone())
             .writer_id(writer_id)

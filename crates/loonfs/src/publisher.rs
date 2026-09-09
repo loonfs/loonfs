@@ -804,7 +804,7 @@ struct NamespacePublisherState {
     worker: Option<WorkerHandle>,
     fold: Option<FoldHandle>,
     next_fold_generation: u64,
-    /// Earliest instant the next head compare-and-swap may start. `None` is
+    /// Earliest instant the next WAL put may start. `None` is
     /// a cold namespace: it publishes immediately.
     next_allowed_cas_at: Option<u64>,
 }
@@ -1241,7 +1241,7 @@ impl NamespacePublisher {
     ///
     /// This worker is the namespace's only publication path. If publication
     /// panics, each request in the batch receives `commit_outcome_unknown`
-    /// because the panic may have occurred before or after the head CAS. Callers
+    /// because the panic may have occurred before or after the WAL put. Callers
     /// can retry with the same commit ID and use the durable receipt to resolve
     /// the outcome. The worker then continues with queued work.
     async fn publish_batch(&self, candidates: Vec<BatchCandidate>) {
@@ -1640,7 +1640,7 @@ impl NamespacePublisher {
         Ok(())
     }
 
-    /// Waits until the namespace may start another head CAS.
+    /// Waits until the namespace may start another WAL put.
     async fn await_cas_slot(&self) {
         loop {
             let Some(sleep_until) = self.lock_state().next_allowed_cas_at else {

@@ -17,9 +17,10 @@ use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
-use loonfs_api::wire::control::{HeadState, ManifestRef};
+use crate::namespace::state::NamespaceReadState;
+use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, NamespaceManifestEnvelope};
-use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_api::{ManifestNo, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -91,58 +92,33 @@ pub(crate) fn ensure_manifest_reference_matches(
 pub(crate) struct LoadedMetadataBasis<'a, S: ObjectStore + ?Sized> {
     pub(crate) identity: MetadataBasisIdentity,
     pub(crate) segments: VerifiedMetadataSegments<'a, S>,
-    /// Rows the basis contributes outside any segment: the genesis root inode,
-    /// and nothing at all once a manifest exists.
+    /// The root inode contributed by an empty manifest.
     pub(crate) base_state: MetadataState,
 }
 
 impl<S: ObjectStore + ?Sized> LoadedMetadataBasis<'_, S> {
     /// Reconstructs the head from which this basis replays its WAL tail.
-    pub(crate) fn replay_head(&self, current_head: &HeadState) -> HeadState {
-        match self.identity.basis() {
-            MetadataBasis::Genesis => {
-                let mut head = HeadState::initial(
-                    current_head.namespace_id.clone(),
-                    current_head.content_store_id.clone(),
-                    current_head.created_at_ms,
-                );
-                head.writer = current_head.writer.clone();
-                head.status = current_head.status;
-                head
-            }
-            MetadataBasis::Manifest(_) => {
-                head_from_manifest(current_head, self.segments.manifest())
-            }
-        }
+    pub(crate) fn replay_head(&self, current_head: &NamespaceReadState) -> NamespaceReadState {
+        head_from_manifest(current_head, self.segments.manifest())
     }
 }
 
-/// Loads the segments referenced by a resolved basis.
-///
-/// A genesis basis loads nothing: its single row is synthesized. A manifest
-/// basis is loaded under its owner's prefix — this namespace's own root, or
-/// the fork source the head authorizes — and is validated against the
-/// checksum the authorizing object recorded. A mismatch is corruption; there
-/// is no second attempt against another basis.
 pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     basis: &MetadataBasis,
-    genesis_created_at_ms: u64,
 ) -> crate::error::Result<LoadedMetadataBasis<'a, S>> {
-    let Some(manifest) = basis.manifest() else {
-        return Ok(LoadedMetadataBasis {
-            identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), ChangeSeq(0)),
-            segments: VerifiedMetadataSegments::empty(store),
-            base_state: bootstrap_metadata_state(genesis_created_at_ms),
-        });
-    };
+    let manifest = basis.manifest();
     let segments = load_manifest_segments(store, segment_cache, manifest).await?;
     let manifest_head_seq = segments.manifest().payload().head_seq;
     Ok(LoadedMetadataBasis {
         identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), manifest_head_seq),
+        base_state: if segments.manifest().payload().runs.is_empty() {
+            bootstrap_metadata_state(segments.manifest().payload().created_at_ms)
+        } else {
+            MetadataState::default()
+        },
         segments,
-        base_state: MetadataState::default(),
     })
 }
 
@@ -258,24 +234,14 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
 }
 
 pub(crate) fn head_from_manifest(
-    current_head: &HeadState,
+    current_head: &NamespaceReadState,
     manifest: &NamespaceManifestEnvelope,
-) -> HeadState {
-    HeadState {
-        namespace_id: current_head.namespace_id.clone(),
-        content_store_id: current_head.content_store_id.clone(),
-        created_at_ms: current_head.created_at_ms,
-        fork_basis: current_head.fork_basis.clone(),
-        seq: manifest.payload().head_seq,
-        head_commit_id: manifest.payload().head_commit_id.clone(),
-        // The manifest records the manifest-time writer epoch. That may lag the
-        // live head if writer takeover advanced the epoch without WAL replay.
-        writer_epoch: manifest.payload().writer_epoch,
-        writer: current_head.writer.clone(),
-        next_inode_id: manifest.payload().next_inode_id,
-        visible_wal_tip: None,
-        recent_segments: Vec::new(),
+) -> NamespaceReadState {
+    NamespaceReadState {
         status: current_head.status,
+        writer_epoch: current_head.writer_epoch,
+        writer: current_head.writer.clone(),
+        ..NamespaceReadState::from(manifest.payload())
     }
 }
 

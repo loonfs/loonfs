@@ -2,14 +2,16 @@
 //! metadata segment runs that materialize one namespace file-set version
 //! (format spec, "Namespace manifests").
 
+use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
-use crate::WriterEpoch;
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName,
     InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo,
 };
+use crate::{ContentStoreId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// An uncompressed JSON envelope document carrying the payload as
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
@@ -962,13 +964,29 @@ pub mod lookup_keys {
 pub struct NamespaceManifestPayload {
     /// Namespace whose materialized state this manifest describes.
     pub namespace_id: NamespaceId,
+    /// Content domain shared by this namespace and its forks.
+    pub content_store_id: ContentStoreId,
+    /// Namespace creation stamp in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Permanent fork provenance and source checkpoint identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_basis: Option<ForkBasis>,
+    /// Terminal deletion and retirement state.
+    pub status: NamespaceStatus,
+    /// Writer that acquired the current epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<WriterBlock>,
+    /// Highest WAL number represented by the runs.
+    pub last_folded_wal_no: WalNo,
+    /// WAL number covered by the manifest whose head established the floor.
+    pub retention_floor_wal_no: WalNo,
     /// Monotonic logical manifest position selected by the namespace root.
     pub manifest_no: ManifestNo,
     /// Fences compaction publications from earlier claims.
     pub compactor_epoch: u64,
     /// Greatest namespace sequence materialized by the referenced file set.
     pub head_seq: ChangeSeq,
-    /// Commit id assigned to `head_seq`, used to validate agreement with the head.
+    /// Commit identity used when no newer data segment exists.
     pub head_commit_id: CommitId,
     /// Oldest run sequence still represented by `runs`.
     pub base_seq: ChangeSeq,
@@ -982,6 +1000,90 @@ pub struct NamespaceManifestPayload {
     pub retention_floor_seq: ChangeSeq,
     /// Complete set of metadata runs required to reconstruct the snapshot.
     pub runs: Vec<MetadataRunRef>,
+}
+
+/// A successor manifest changed one of the namespace's immutable identity
+/// fields. Every manifest a namespace ever publishes carries them forward
+/// verbatim from the manifest that created it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestIdentityDrift {
+    /// Which field the successor changed.
+    pub field: String,
+}
+
+impl fmt::Display for ManifestIdentityDrift {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "successor manifest changes the namespace's immutable `{}`",
+            self.field
+        )
+    }
+}
+
+impl std::error::Error for ManifestIdentityDrift {}
+
+impl NamespaceManifestPayload {
+    /// Constructs manifest 1 with the root inode reserved.
+    pub fn initial(
+        namespace_id: NamespaceId,
+        content_store_id: ContentStoreId,
+        created_at_ms: u64,
+    ) -> Self {
+        Self {
+            namespace_id,
+            content_store_id,
+            created_at_ms,
+            fork_basis: None,
+            status: NamespaceStatus::Active {},
+            writer: None,
+            manifest_no: ManifestNo(1),
+            compactor_epoch: 0,
+            head_seq: ChangeSeq(0),
+            head_commit_id: crate::control::genesis_commit_id(),
+            base_seq: ChangeSeq(0),
+            writer_epoch: WriterEpoch(0),
+            next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
+            next_run_no: RunNo(0),
+            last_folded_wal_no: WalNo(0),
+            retention_floor_wal_no: WalNo(0),
+            retention_floor_seq: ChangeSeq(0),
+            runs: Vec::new(),
+        }
+    }
+
+    /// Rejects changes to permanent identity and terminal lifecycle state.
+    pub fn ensure_successor_identity(
+        &self,
+        successor: &NamespaceManifestPayload,
+    ) -> Result<(), ManifestIdentityDrift> {
+        let drift = |field: &str| {
+            Err(ManifestIdentityDrift {
+                field: field.to_owned(),
+            })
+        };
+        if successor.namespace_id != self.namespace_id {
+            return drift("namespace_id");
+        }
+        if successor.content_store_id != self.content_store_id {
+            return drift("content_store_id");
+        }
+        if successor.created_at_ms != self.created_at_ms {
+            return drift("created_at_ms");
+        }
+        if successor.fork_basis != self.fork_basis {
+            return drift("fork_basis");
+        }
+        if self.status.is_deleted() && !successor.status.is_deleted() {
+            return drift("status");
+        }
+        if self.status.reclaim_after_ms().is_some()
+            && self.status.reclaim_after_ms() != successor.status.reclaim_after_ms()
+        {
+            return drift("reclaim_after_ms");
+        }
+        Ok(())
+    }
 }
 
 /// A manifest decoded through its checked durable codec.
@@ -1039,6 +1141,81 @@ mod tests {
     }
 
     #[test]
+    fn successor_preserves_identity_and_terminal_status() {
+        let initial = NamespaceManifestPayload::initial(
+            NamespaceId::parse("original").expect("namespace"),
+            crate::ContentStoreId::parse("cs_00000000000000000000000000000001")
+                .expect("content store"),
+            1_000,
+        );
+        for (field, change) in [
+            ("namespace_id", 0),
+            ("content_store_id", 1),
+            ("created_at_ms", 2),
+            ("fork_basis", 3),
+        ] {
+            let mut successor = initial.clone();
+            match change {
+                0 => successor.namespace_id = NamespaceId::parse("changed").expect("namespace"),
+                1 => {
+                    successor.content_store_id =
+                        crate::ContentStoreId::parse("cs_00000000000000000000000000000002")
+                            .expect("content store")
+                }
+                2 => successor.created_at_ms += 1,
+                _ => {
+                    successor.fork_basis = Some(crate::control::ForkBasis {
+                        manifest: crate::control::ManifestRef {
+                            owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
+                            manifest_no: ManifestNo(1),
+                            manifest_head_seq: ChangeSeq(0),
+                            manifest_payload_checksum: "sha256:source".to_owned(),
+                        },
+                        source_checkpoint_id: crate::CheckpointId::parse(
+                            "chk_00000000000000000000000000000001",
+                        )
+                        .expect("checkpoint"),
+                    })
+                }
+            }
+            assert_eq!(
+                initial
+                    .ensure_successor_identity(&successor)
+                    .expect_err("identity drift")
+                    .field,
+                field
+            );
+        }
+        let mut deleted = initial.clone();
+        deleted.status = crate::control::NamespaceStatus::Deleted {
+            reclaim_after_ms: None,
+        };
+        initial.ensure_successor_identity(&deleted).expect("delete");
+        assert!(deleted.ensure_successor_identity(&initial).is_err());
+        let mut retired = deleted.clone();
+        retired.status = crate::control::NamespaceStatus::Deleted {
+            reclaim_after_ms: Some(2_000),
+        };
+        deleted.ensure_successor_identity(&retired).expect("retire");
+        retired
+            .ensure_successor_identity(&retired)
+            .expect("same deadline");
+        for deadline in [None, Some(1_999), Some(2_001)] {
+            let mut successor = retired.clone();
+            successor.status = crate::control::NamespaceStatus::Deleted {
+                reclaim_after_ms: deadline,
+            };
+            assert_eq!(
+                retired
+                    .ensure_successor_identity(&successor)
+                    .expect_err("fixed deadline")
+                    .field,
+                "reclaim_after_ms"
+            );
+        }
+    }
+
+    #[test]
     fn inode_row_keys_sort_by_ascending_inode_id() {
         // The inode family's durable order IS ascending inode id, which is
         // what lets a whole-namespace file walk resume from one bound.
@@ -1080,6 +1257,14 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
+            content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+                .expect("content store"),
+            created_at_ms: 1_000,
+            fork_basis: None,
+            status: crate::control::NamespaceStatus::Active {},
+            writer: None,
+            last_folded_wal_no: crate::WalNo(0),
+            retention_floor_wal_no: crate::WalNo(0),
             compactor_epoch: 0,
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
@@ -1118,6 +1303,14 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_inherited_source_segments() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
+            content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+                .expect("content store"),
+            created_at_ms: 1_000,
+            fork_basis: None,
+            status: crate::control::NamespaceStatus::Active {},
+            writer: None,
+            last_folded_wal_no: crate::WalNo(0),
+            retention_floor_wal_no: crate::WalNo(0),
             compactor_epoch: 0,
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),

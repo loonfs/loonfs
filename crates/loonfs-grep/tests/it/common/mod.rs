@@ -184,9 +184,10 @@ impl GrepHost {
 /// specified artifact, so a test can check it without reaching into the
 /// engine that produced it.
 pub(crate) mod control {
+    use loonfs::control::NamespaceReadState;
     use loonfs::SharedObjectStore;
     use loonfs_api::wire::control::{
-        decode_control_object, CheckpointRecordState, ControlObjectKind, HeadState,
+        decode_control_object, CheckpointRecordState, ControlObjectKind,
     };
     use loonfs_api::{CheckpointId, NamespaceId};
     use loonfs_objectstore::keys;
@@ -199,13 +200,14 @@ pub(crate) mod control {
             .map(|body| body.to_vec())
     }
 
-    pub(crate) async fn head(store: &SharedObjectStore, namespace_id: &NamespaceId) -> HeadState {
-        let bytes = control_bytes(store, &keys::wal_head(namespace_id))
+    pub(crate) async fn head(
+        store: &SharedObjectStore,
+        namespace_id: &NamespaceId,
+    ) -> NamespaceReadState {
+        loonfs::control::load_namespace_head_control(store, namespace_id)
             .await
-            .expect("namespace head exists");
-        decode_control_object::<HeadState>(&bytes, ControlObjectKind::WalHead)
-            .expect("decode namespace head")
-            .into_payload()
+            .expect("namespace state")
+            .state
     }
 
     pub(crate) async fn metadata_root(

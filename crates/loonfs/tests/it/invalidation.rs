@@ -9,7 +9,8 @@ use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, FsWriter, NamespaceId, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
 };
-use loonfs_api::wire::control::{HeadState, NamespaceStatus};
+use loonfs_api::wire::control::NamespaceStatus;
+use loonfs_core::control::NamespaceReadState;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
 use std::sync::Arc;
@@ -79,7 +80,7 @@ fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &st
     }
 }
 
-async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> HeadState {
+async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> NamespaceReadState {
     loonfs_core::control::load_namespace_head_control(store, namespace_id)
         .await
         .expect("load head")
@@ -248,7 +249,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     let ns_other = NamespaceId::parse("other").expect("valid namespace id");
     let counting = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::wal_head(&ns_fence),
+        KeyPredicate::hint(&ns_fence),
     ));
     let store: SharedObjectStore = counting.clone();
 
@@ -383,7 +384,7 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
     let namespace_id = NamespaceId::parse("nocache").expect("valid namespace id");
     let counting = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::wal_head(&namespace_id),
+        KeyPredicate::hint(&namespace_id),
     ));
     let store: SharedObjectStore = counting.clone();
 
@@ -495,43 +496,19 @@ async fn read_after_write_is_served_from_seeded_caches() {
         )
         .await
         .expect("steady-state put");
-    let write_gets = recording.take_get_keys();
-    let uploads_prefix = loonfs_objectstore::keys::upload_session_prefix(&namespace_id);
-    let classify = |suffix: &str| {
-        write_gets
-            .iter()
-            .filter(|key| key.ends_with(suffix))
-            .count()
-    };
-    assert_eq!(classify("/wal/head.json"), 1, "got {write_gets:?}");
-    assert_eq!(classify("/hint.json"), 1, "got {write_gets:?}");
-    assert_eq!(
-        classify("/manifests/00000000000000000001.json"),
-        1,
-        "got {write_gets:?}"
-    );
-    assert_eq!(
-        write_gets
-            .iter()
-            .filter(|key| key.starts_with(&uploads_prefix))
-            .count(),
-        0,
-        "owned session completion reuses its creation etag, got {write_gets:?}"
-    );
-    assert_eq!(
-        write_gets.len(),
-        3,
-        "a steady-state write reads nothing beyond those controls, got {write_gets:?}"
-    );
+    writer
+        .publisher()
+        .drain()
+        .await
+        .expect("finish background hints");
+    recording.reset();
 
     reader
         .get_path_entry(&namespace_id, "/docs/fresh.txt", Default::default())
         .await
         .expect("read after write");
-    let read_gets = recording.take_get_keys();
-    assert_eq!(
-        read_gets,
-        Vec::<String>::new(),
-        "read-after-write must be served from the seeded caches"
+    assert!(
+        recording.take().is_empty(),
+        "read-your-writes uses no store requests"
     );
 }

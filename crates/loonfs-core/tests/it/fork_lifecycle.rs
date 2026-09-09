@@ -12,7 +12,7 @@ use bytes::Bytes;
 use loonfs_api::{
     wire::control::{
         decode_control_object, CheckpointOwner, CheckpointStatus, ContentStoreState,
-        ControlObjectKind, HeadState,
+        ControlObjectKind,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
@@ -24,7 +24,7 @@ use loonfs_core::control::load_namespace_head_control;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{
-    content_blob, content_owner_prefix, content_store, hint, metadata_manifest_object, wal_head,
+    content_blob, content_owner_prefix, content_store, hint, metadata_manifest_object,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -274,7 +274,7 @@ async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
 async fn head_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> loonfs_api::wire::control::HeadState {
+) -> loonfs_core::control::NamespaceReadState {
     load_namespace_head_control(store, namespace_id)
         .await
         .expect("load head")
@@ -292,7 +292,7 @@ async fn namespace_keys<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn a_created_namespace_installs_its_descriptor_hint_and_head_before_its_first_flush() {
+async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -306,8 +306,11 @@ async fn a_created_namespace_installs_its_descriptor_hint_and_head_before_its_fi
     assert_eq!(created.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![hint(&namespace_id), wal_head(&namespace_id)],
-        "creation writes the hint and head under the namespace prefix"
+        vec![
+            hint(&namespace_id),
+            metadata_manifest_object(&namespace_id, &ManifestNo(1))
+        ],
+        "creation installs manifest one"
     );
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
@@ -320,7 +323,6 @@ async fn a_created_namespace_installs_its_descriptor_hint_and_head_before_its_fi
         vec![content_store(&head.state.content_store_id)],
     );
 
-    // Reads work against the built-in genesis state.
     let root_entry = resolve_path(&store, &namespace_id, "/")
         .await
         .expect("a fresh namespace serves reads");
@@ -328,10 +330,9 @@ async fn a_created_namespace_installs_its_descriptor_hint_and_head_before_its_fi
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status");
-    assert_eq!(status.current_manifest_no, None);
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
-    // And so do writes.
     write_file_bytes(
         &store,
         &namespace_id,
@@ -352,26 +353,22 @@ async fn a_created_namespace_installs_its_descriptor_hint_and_head_before_its_fi
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
         keys.iter().all(|key| key == &hint(&namespace_id)
-            || key == &wal_head(&namespace_id)
-            || key.starts_with(&format!(
-                "namespaces/{}/wal/segments/",
-                namespace_id.as_str()
-            ))),
-        "before the first flush a namespace is a head plus its WAL: {keys:?}"
+            || key.starts_with(&format!("namespaces/{namespace_id}/manifests/"))
+            || key.starts_with(&format!("namespaces/{}/wal/", namespace_id.as_str()))),
+        "only control and WAL objects exist before the first flush: {keys:?}"
     );
 
-    // The first flush materializes the root.
     namespace_engine(&store, &namespace_id, &context)
         .flush_wal()
         .await
         .expect("flush");
     assert!(
         store
-            .head(&hint(&namespace_id))
+            .head(&metadata_manifest_object(&namespace_id, &ManifestNo(3)))
             .await
             .expect("probe root")
             .is_some(),
-        "the first flush publishes manifest number one"
+        "the flush follows the writer acquisitions"
     );
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/docs/first.txt")
@@ -383,16 +380,16 @@ async fn a_created_namespace_installs_its_descriptor_hint_and_head_before_its_fi
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status after flush");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
 }
 
 #[tokio::test]
-async fn namespace_create_recovers_when_the_head_write_lands_ambiguously() {
+async fn namespace_create_recovers_when_manifest_one_lands_ambiguously() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(wal_head(&namespace_id)),
+        KeyPredicate::exact(metadata_manifest_object(&namespace_id, &ManifestNo(1))),
         OperationClass::PutCreateIfAbsent,
         InjectedError::Transport("lost namespace-head acknowledgment".to_owned()),
     )
@@ -434,7 +431,10 @@ async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
     assert_eq!(loser.code(), ErrorCode::NamespaceExists);
     assert_eq!(
         namespace_keys(store.as_ref(), &namespace_id).await,
-        vec![hint(&namespace_id), wal_head(&namespace_id)]
+        vec![
+            hint(&namespace_id),
+            metadata_manifest_object(&namespace_id, &ManifestNo(1))
+        ]
     );
 }
 
@@ -532,14 +532,14 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
 }
 
 #[tokio::test]
-async fn fork_install_recovers_when_the_target_head_lands_ambiguously() {
+async fn fork_install_recovers_when_target_manifest_one_lands_ambiguously() {
     let temp_dir = tempdir().expect("tempdir");
     let context = mutation_context();
     let source = namespace_id("source");
     let target = namespace_id("target");
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(wal_head(&target)),
+        KeyPredicate::exact(metadata_manifest_object(&target, &ManifestNo(1))),
         OperationClass::PutCreateIfAbsent,
         InjectedError::Transport("lost fork-head acknowledgment".to_owned()),
     )
@@ -640,8 +640,11 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 
     assert_eq!(
         namespace_keys(&store, &clone_namespace_id).await,
-        vec![hint(&clone_namespace_id), wal_head(&clone_namespace_id)],
-        "a fork target is its head and nothing else"
+        vec![
+            hint(&clone_namespace_id),
+            metadata_manifest_object(&clone_namespace_id, &ManifestNo(1))
+        ],
+        "a fork target installs its own manifest"
     );
 
     let clone_head = head_state(&store, &clone_namespace_id).await;
@@ -1008,107 +1011,6 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
 }
 
 #[tokio::test]
-async fn a_fork_basis_checksum_mismatch_is_corruption() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    let source = namespace_id("source");
-    let clone = NamespaceId::parse("clone").expect("valid namespace id");
-    seed_source_namespace_for_fork(&store, &source, &context).await;
-    fork_namespace(&store, &source, &clone, &context)
-        .await
-        .expect("fork");
-    read_file_bytes(&store, &clone, "/docs/shared.txt")
-        .await
-        .expect("the clone reads through its recorded basis");
-
-    let mut head = head_state(&store, &clone).await;
-    let fork_basis = head.fork_basis.as_mut().expect("fork basis");
-    fork_basis.manifest.manifest_payload_checksum =
-        loonfs_api::sha256_digest(b"not-the-source-manifest-payload");
-    let envelope = head;
-    store
-        .put_overwrite(
-            &wal_head(&clone),
-            Bytes::from(
-                loonfs_api::wire::control::encode_control_state(
-                    ControlObjectKind::WalHead,
-                    &envelope,
-                )
-                .expect("encode head"),
-            ),
-        )
-        .await
-        .expect("rewrite clone head");
-
-    let error = read_file_bytes(&store, &clone, "/docs/shared.txt")
-        .await
-        .expect_err("a basis that fails its recorded checksum is corruption");
-    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-}
-
-#[tokio::test]
-async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    let source = namespace_id("source");
-    let clone = NamespaceId::parse("clone").expect("valid namespace id");
-    seed_source_namespace_for_fork(&store, &source, &context).await;
-    fork_namespace(&store, &source, &clone, &context)
-        .await
-        .expect("fork");
-    assert!(
-        store
-            .head(&metadata_manifest_object(
-                &clone,
-                &loonfs_api::ManifestNo(1)
-            ))
-            .await
-            .expect("probe first manifest")
-            .is_none(),
-        "a fresh fork target has published no manifest"
-    );
-
-    let checkpoint = namespace_engine(&store, &clone, &context)
-        .create_checkpoint("clone-pin".to_owned(), None)
-        .await
-        .expect("checkpoint the unflushed fork target");
-    let record = loonfs_core::control::load_namespace_checkpoint_record_control(
-        &store,
-        &clone,
-        &checkpoint.checkpoint_id,
-    )
-    .await
-    .expect("read record")
-    .expect("record exists");
-    let manifest_key = metadata_manifest_object(&clone, &record.manifest.manifest_no);
-    assert!(
-        store
-            .head(&manifest_key)
-            .await
-            .expect("probe pinned manifest")
-            .is_some(),
-        "the pinned basis is a manifest under the target's own prefix"
-    );
-    assert!(
-        store
-            .head(&hint(&clone))
-            .await
-            .expect("probe clone root")
-            .is_some(),
-        "materializing the first manifest publishes the target's root"
-    );
-    assert_eq!(
-        read_file_bytes(&store, &clone, "/docs/shared.txt")
-            .await
-            .expect("the target still reads its inherited file")
-            .bytes,
-        b"base"
-    );
-}
-
-#[tokio::test]
 async fn a_fork_that_loses_its_source_pin_installs_no_target() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
@@ -1242,7 +1144,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     );
     assert!(
         store
-            .head(&wal_head(&source_namespace_id))
+            .head(&hint(&source_namespace_id))
             .await
             .expect("head source head")
             .is_some(),
@@ -1257,20 +1159,26 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     let context = mutation_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     // Another writer's complete head for the same id, already durable.
-    let foreign = HeadState::initial(
+    let foreign = loonfs_api::wire::manifest::NamespaceManifestPayload::initial(
         namespace_id.clone(),
         loonfs_api::ContentStoreId::generate(),
         1_000,
     );
-    let foreign_bytes =
-        loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &foreign)
-            .expect("encode foreign head");
+    let foreign_bytes = loonfs_api::wire::manifest::encode_namespace_manifest_json(foreign.clone())
+        .map(|encoded| encoded.into_bytes())
+        .expect("encode foreign head");
     let store = InjectCreateFailureStore::new(
         inner,
-        KeyMatcher::Exact(wal_head(&namespace_id)),
+        KeyMatcher::Exact(metadata_manifest_object(
+            &namespace_id,
+            &loonfs_api::ManifestNo(1),
+        )),
         InjectedCreateFailure::PreconditionFailed {
             write_attempted_object: false,
-            additional_writes: vec![(wal_head(&namespace_id), foreign_bytes.clone())],
+            additional_writes: vec![(
+                metadata_manifest_object(&namespace_id, &loonfs_api::ManifestNo(1)),
+                foreign_bytes.clone(),
+            )],
         },
     );
 
@@ -1280,7 +1188,10 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
     assert_eq!(
         store
-            .get(&wal_head(&namespace_id), None)
+            .get(
+                &metadata_manifest_object(&namespace_id, &loonfs_api::ManifestNo(1)),
+                None
+            )
             .await
             .expect("read head")
             .expect("head exists")
@@ -1381,7 +1292,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
 }
 
 #[tokio::test]
-async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
+async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1432,11 +1343,23 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
     .await
     .expect("gc the tombstone");
     assert!(report.deleted.wal_segments >= 1, "{report:?}");
-    let surviving = namespace_keys(&store, &namespace_id).await;
+    loonfs_core::gc_namespace(
+        &store,
+        &namespace_id,
+        &loonfs_core::GcConfig::default(),
+        &aged,
+    )
+    .await
+    .expect("collect obsolete tombstone version");
+    let current = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current tombstone");
     assert_eq!(
-        surviving,
-        vec![hint(&namespace_id), wal_head(&namespace_id)],
-        "reclamation leaves the tombstone and completed GC progress"
+        namespace_keys(&store, &namespace_id).await,
+        vec![
+            hint(&namespace_id),
+            metadata_manifest_object(&namespace_id, &current.state.manifest.manifest_no)
+        ]
     );
     assert!(store
         .head(&hint(&namespace_id))
@@ -1550,7 +1473,7 @@ impl ObjectStore for ReleasePinBeforeRenewalStore {
 }
 
 #[tokio::test]
-async fn bootstrap_writes_a_descriptor_before_the_head_and_fork_writes_none() {
+async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     let directory = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -1578,7 +1501,10 @@ async fn bootstrap_writes_a_descriptor_before_the_head_and_fork_writes_none() {
         vec![
             (descriptor_key.clone(), PutMode::CreateIfAbsent),
             (hint(&source), PutMode::CreateIfAbsent),
-            (wal_head(&source), PutMode::CreateIfAbsent),
+            (
+                metadata_manifest_object(&source, &ManifestNo(1)),
+                PutMode::CreateIfAbsent
+            ),
         ]
     );
     let bytes = store
@@ -1602,10 +1528,28 @@ async fn bootstrap_writes_a_descriptor_before_the_head_and_fork_writes_none() {
     fork_namespace(&store, &source, &target, &context)
         .await
         .expect("fork");
-    assert!(store
+    let puts: Vec<_> = store
         .take()
-        .iter()
-        .all(|operation| !operation.key().starts_with("content-stores/")));
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::Put {
+                key,
+                mode: PutMode::CreateIfAbsent,
+                ..
+            } if key == descriptor_key || key.starts_with(&format!("namespaces/{target}/")) => {
+                Some(key)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        puts,
+        vec![
+            descriptor_key,
+            hint(&target),
+            metadata_manifest_object(&target, &ManifestNo(1))
+        ]
+    );
     let fork_head = load_namespace_head_control(&store, &target)
         .await
         .expect("fork head");
@@ -1630,36 +1574,6 @@ async fn bootstrap_writes_a_descriptor_before_the_head_and_fork_writes_none() {
             (0, 0, 0)
         );
     }
-}
-
-#[tokio::test]
-async fn an_occupied_descriptor_key_fails_before_the_head_write() {
-    let directory = tempdir().expect("tempdir");
-    let failing = FailStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix("content-stores/"),
-        OperationClass::Put,
-        InjectedError::PreconditionFailed,
-    );
-    failing.fail_all();
-    let store = RecordingStore::new(failing, KeyPredicate::any());
-    let error = bootstrap_namespace(&store, &namespace_id("demo"), &mutation_context(), false)
-        .await
-        .expect_err("descriptor collision");
-    assert!(
-        matches!(error, loonfs_core::BootstrapNamespaceError::Core(CoreError::Internal(message))
-        if message.contains("already exists under a freshly minted identity"))
-    );
-    let operations = store.take();
-    assert_eq!(operations.len(), 2);
-    assert!(
-        matches!(&operations[0], RecordedOperation::GetWithMetadata { key, .. }
-        if key == &wal_head(&namespace_id("demo")))
-    );
-    assert!(
-        matches!(&operations[1], RecordedOperation::Put { mode: PutMode::CreateIfAbsent, key, .. }
-        if key.starts_with("content-stores/") && key.ends_with("/store.json"))
-    );
 }
 
 #[tokio::test]
@@ -1702,7 +1616,7 @@ async fn bootstrap_head_read_failures_never_create_a_descriptor() {
         let namespace_id = namespace_id("demo");
         let failing = FailStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::exact(wal_head(&namespace_id)),
+            KeyPredicate::exact(hint(&namespace_id)),
             OperationClass::Read,
             injected,
         );
@@ -1715,7 +1629,7 @@ async fn bootstrap_head_read_failures_never_create_a_descriptor() {
                     .expect_err("head read failed");
             assert!(matches!(
                 error,
-                loonfs_core::BootstrapNamespaceError::Head(_)
+                loonfs_core::BootstrapNamespaceError::Core(CoreError::ControlObjectLoad(_))
             ));
         }
         let counts = store.counts();
@@ -1735,10 +1649,7 @@ async fn bootstrap_of_a_corrupt_head_writes_nothing() {
     );
     let namespace_id = namespace_id("demo");
     store
-        .put_if_absent(
-            &wal_head(&namespace_id),
-            Bytes::from_static(b"invalid head"),
-        )
+        .put_if_absent(&hint(&namespace_id), Bytes::from_static(b"invalid head"))
         .await
         .expect("corrupt head");
     store.reset();
@@ -1788,7 +1699,10 @@ async fn a_creator_losing_after_the_head_read_leaves_only_an_orphan_descriptor()
     assert!(descriptors.contains(&content_store(&head.content_store_id)));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![hint(&namespace_id), wal_head(&namespace_id)]
+        vec![
+            hint(&namespace_id),
+            metadata_manifest_object(&namespace_id, &ManifestNo(1))
+        ]
     );
 }
 

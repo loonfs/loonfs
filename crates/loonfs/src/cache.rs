@@ -9,15 +9,15 @@ use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
 use crate::{CheckpointId, CommitResponse, CoreError, NamespaceId, Recency, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
-use loonfs_api::wire::control::HeadState;
 use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
+use loonfs_core::control::NamespaceReadState;
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_namespace_read_anchor, load_snapshot_read_basis,
     CheckpointReadBasis, ControlObjectLoadError, LoadedControl, MetadataBasis,
     VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
-use loonfs_objectstore::keys::wal_head;
+use loonfs_objectstore::keys::hint;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -40,8 +40,9 @@ pub(crate) struct CachedControl<T> {
 /// cache refreshes.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedNamespaceAnchor {
-    pub(crate) head: CachedControl<HeadState>,
+    pub(crate) head: CachedControl<NamespaceReadState>,
     pub(crate) basis: MetadataBasis,
+    locally_published: bool,
 }
 
 /// Snapshot of runtime cache counters.
@@ -155,7 +156,9 @@ impl RuntimeControlCache {
         &mut self,
         namespace_id: &NamespaceId,
     ) -> Option<CachedNamespaceAnchor> {
-        let head = self.namespaces.get(namespace_id)?.0.clone();
+        let cached = &mut self.namespaces.get_mut(namespace_id)?.0;
+        let head = cached.clone();
+        cached.locally_published = false;
         self.touch_namespace(namespace_id);
         Some(head)
     }
@@ -233,8 +236,11 @@ impl ReadCore {
             .control_cache()
             .cached_namespace_head(namespace_id);
         if let Some(head) = cached {
+            if head.locally_published {
+                return Ok(head);
+            }
             match self
-                .cached_control_identity_matches(&wal_head(namespace_id), &head.head.etag)
+                .cached_control_identity_matches(&hint(namespace_id), &head.head.etag)
                 .await
             {
                 Ok(true) => return Ok(head),
@@ -407,6 +413,7 @@ impl ReadCore {
                 state: pinned.head,
             },
             basis: pinned.basis,
+            locally_published: false,
         });
         (self.reader_engine(namespace_id), read_context)
     }
@@ -469,6 +476,7 @@ impl ReadCore {
                     state: state.head,
                 },
                 basis: state.basis,
+                locally_published: true,
             },
             max_cached_namespaces,
         );
@@ -514,7 +522,7 @@ impl ReadCore {
 }
 
 fn cached_anchor(
-    (head, basis): (LoadedControl<HeadState>, MetadataBasis),
+    (head, basis): (LoadedControl<NamespaceReadState>, MetadataBasis),
 ) -> CachedNamespaceAnchor {
     CachedNamespaceAnchor {
         head: CachedControl {
@@ -522,5 +530,6 @@ fn cached_anchor(
             state: head.state,
         },
         basis,
+        locally_published: false,
     }
 }

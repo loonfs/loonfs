@@ -7,13 +7,13 @@ use super::publish_path_planning::{
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, VisiblePathError};
-use loonfs_api::wire::control::HeadState;
+use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{AbsolutePath, BindingGeneration, CommitAssertion, InodeId};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn evaluate_assertions<S: ObjectStore + ?Sized>(
     assertions: &[CommitAssertion],
-    head: &HeadState,
+    head: &NamespaceReadState,
     pre_state: &MetadataView<'_, '_, S>,
 ) -> Result<()> {
     let view = PublishPathPlanningView {

@@ -1,7 +1,7 @@
 //! Reusable key predicates for object-store wrappers.
 
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::keys::{hint, metadata_manifest_prefix, wal_head};
+use loonfs_objectstore::keys::{hint, metadata_manifest_prefix};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use std::fmt;
 use std::sync::Arc;
@@ -52,11 +52,6 @@ impl KeyPredicate {
     /// Selects metadata-segment keys.
     pub fn metadata_segment() -> Self {
         Self::family(DurableObjectFamily::MetadataSegment)
-    }
-
-    /// Selects the WAL head key for the given namespace.
-    pub fn wal_head(namespace_id: &NamespaceId) -> Self {
-        Self::exact(wal_head(namespace_id))
     }
 
     /// Selects the manifest discovery hint key for the given namespace.
