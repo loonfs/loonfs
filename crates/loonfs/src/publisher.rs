@@ -28,7 +28,7 @@ use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, CONTENTION_RETRY_LIMIT};
 use loonfs_core::publish::{
     NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
 };
-use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_objectstore::timing::MonotonicTimer;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -353,10 +353,10 @@ impl PublisherRegistry {
                 }),
                 panicked_units: AtomicUsize::new(0),
             }),
+            timer: Arc::clone(&read_core.inner.timer),
             read_core,
             writer,
             runtime,
-            timer: Arc::new(StdMonotonicTimer::default()),
             min_publish_interval,
         }
     }

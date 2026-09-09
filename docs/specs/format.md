@@ -294,14 +294,25 @@ cannot make a reclaimed WAL number look unused. Required missing or corrupt
 objects fail closed.
 
 A manifest publisher raises the hint within its publication budget. A
-writer raises the hint's WAL number after each WAL put and before the
-batch is acknowledged, so a reader polling the hint sees the commit at
-once. A raise compare-and-swaps the greater of each number from the token
-of the raiser's last write, reading the hint only when that token is stale,
-so no actor lowers what another wrote and a writer's steady state is one
-request. A raise never fails a commit. A writer whose raise finds a newer
-manifest number has learned of a publication and reloads its view. A
-freshness poll is HEAD on the hint.
+writer raises the hint's WAL number only when a raise is due: when the tip
+is at least `HINT_RAISE_SEGMENTS` (8) past the last raised number or the
+revalidation interval has elapsed since the last raise, whichever comes
+first. This bounds cold discovery above the hinted number while a writer is
+active; the WAL write stop still bounds the unfolded tail. A failed raise is
+logged and retried at the next trigger; it never fails a commit.
+
+A raise compare-and-swaps the greater of each number from the token of the
+raiser's last write, reading the hint only when that token is stale. No
+actor lowers what another wrote. A cached reader at WAL number `N` probes
+`wal/{N+1}` with GET. An absent object confirms the cached tip. A present
+object advances the read state, and the reader continues probing until
+404. A different writer epoch requires full discovery before replay.
+On a monotonic interval, defaulting to 1000 milliseconds, the runtime
+probes for a successor to its cached manifest with HEAD. A present
+successor reloads the namespace, which is how a warm reader observes
+deletion, a retention floor advance, and a new manifest. The hint is never
+a freshness input. A read after the interval probes the successor and the
+next WAL number; a locally published read state skips both once.
 
 Durable decoders reject unknown envelope and payload fields. A changed
 shape requires its golden fixture to change. These format families are
@@ -792,7 +803,10 @@ epoch with `status: {"kind":"deleted"}`. The manifest put is the deletion
 point. It records the final sequence, commit id, and next inode id, so these
 survive WAL reclamation. Its runs and folded WAL number remain the last
 materialized file set. Operations observing deletion return
-`namespace_deleted`. Previously acknowledged commits remain committed.
+`namespace_deleted`. A warm reader observes deletion when its next
+successor probe is due, within the revalidation interval. Reads before that
+probe may still use the cached active manifest. Previously acknowledged
+commits remain committed.
 
 GC keeps the current manifest permanently to prevent reuse of the id.
 A deleted namespace protects no WAL or current runs. Active checkpoint
@@ -1059,7 +1073,8 @@ when:
 4. Check the monotonic publication budget and content proofs immediately
    before putting that segment with put-if-absent.
 5. A successful put commits the batch. Update the in-process tip and read
-   state. Raise the hint's WAL number, then acknowledge.
+   state. Raise the hint's WAL number if its segment threshold or interval
+   is due, then acknowledge.
 
 A precondition failure writes nothing. Probe forward, detect fencing,
 re-plan, and retry. Other definite failures create no WAL object. An
@@ -1104,7 +1119,8 @@ The result is pinned to one sequence. Point reads and directory listings
 may query verified segments and the projected WAL tail directly. Missing or
 corrupt required objects are errors. A shared writer/read runtime can seed
 its read caches directly from an acknowledged batch without a store request.
-Subsequent freshness polls HEAD the hint.
+Subsequent reads probe the next WAL number with GET and probe for a
+successor manifest on the revalidation interval.
 
 #### 3.2.2 Visibility rules
 

@@ -42,7 +42,7 @@ pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::
 
 pub type LoadedHint = LoadedControl<HintState>;
 
-async fn load_hint<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> crate::error::Result<LoadedHint> {
@@ -70,7 +70,7 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
     let object_key = hint(namespace_id);
     let mut current = match known {
         Some(known) => known,
-        None => load_hint(store, namespace_id).await?,
+        None => load_namespace_hint(store, namespace_id).await?,
     };
     loop {
         let raised = HintState {
@@ -100,7 +100,7 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
                 })
             }
             Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. }) => {
-                current = load_hint(store, namespace_id).await?;
+                current = load_namespace_hint(store, namespace_id).await?;
             }
             Err(error) => return Err(CoreError::store(&object_key, &error)),
         }
@@ -283,8 +283,7 @@ pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     load_head_object(store, expected_namespace_id).await
 }
 
-/// Records a writer's acknowledged tip in the hint before the batch is
-/// acknowledged, so a reader polling the hint sees the commit at once.
+/// Raises the discovery start without changing the committed WAL tip.
 pub async fn raise_namespace_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

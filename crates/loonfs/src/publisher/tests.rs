@@ -207,6 +207,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
         None,
         None,
         RuntimeInstruments::new(None),
+        Arc::new(loonfs_api::StdMonotonicTimer::default()),
     )
 }
 

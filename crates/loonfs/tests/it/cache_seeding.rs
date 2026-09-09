@@ -24,7 +24,12 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
-    let fs = open_runtime(object_store, "tail-projection-cache-test");
+    let fs = open_runtime_with(object_store, "tail-projection-cache-test", |builder| {
+        builder.runtime_cache(RuntimeCacheConfig {
+            control_revalidation_interval_ms: u64::MAX,
+            ..Default::default()
+        })
+    });
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -48,7 +53,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     raw_store.reset_wal_get_count();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should reuse cached WAL-tail projection");
-    assert_eq!(raw_store.wal_get_count(), 0);
+    assert_eq!(raw_store.wal_get_count(), 1);
     let after_second = fs.runtime_cache_stats();
     assert!(
         after_second.wal_tail_projection_cache_hits > after_first.wal_tail_projection_cache_hits
@@ -233,7 +238,9 @@ fn runtime_cache_can_be_disabled() {
         .expect("first read should project WAL tail");
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should project WAL tail again");
-    assert_eq!(raw_store.wal_get_count(), 8);
+    // Each cold read discovers from the folded number, since the hint is
+    // raised only every eighth segment: three probes, then two tail reads.
+    assert_eq!(raw_store.wal_get_count(), 10);
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.wal_tail_projection_cache_hits, 0);
     assert_eq!(stats.wal_tail_projection_cache_misses, 0);
@@ -291,7 +298,9 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
     fs.get_file_bytes_blocking(&first, "/file.txt")
         .expect("first tail projection reloads after eviction");
     let after_reload = fs.runtime_cache_stats();
-    assert_eq!(raw_store.wal_get_count(), 4);
+    // Discovery from the folded number probes three numbers, then the tail
+    // projection reads two.
+    assert_eq!(raw_store.wal_get_count(), 5);
     assert_eq!(after_reload.wal_tail_projection_cache_evictions, 2);
 }
 
@@ -303,6 +312,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
+            control_revalidation_interval_ms: u64::MAX,
             max_cached_wal_tail_projection_rows: 0,
             ..RuntimeCacheConfig::default()
         })
@@ -324,7 +334,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
         .expect("first read projects oversized tail");
     fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("second read projects oversized tail again");
-    assert_eq!(raw_store.wal_get_count(), 4);
+    assert_eq!(raw_store.wal_get_count(), 5);
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.wal_tail_projection_cache_misses, 2);
     assert_eq!(stats.wal_tail_projection_cache_hits, 0);
@@ -580,12 +590,17 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
 }
 
 #[test]
-fn runtime_control_cache_reloads_head_after_external_change() {
+fn runtime_control_cache_probes_wal_after_external_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
-    let reader = open_runtime(object_store.clone(), "control-cache-reader");
+    let reader = open_runtime_with(object_store.clone(), "control-cache-reader", |builder| {
+        builder.runtime_cache(RuntimeCacheConfig {
+            control_revalidation_interval_ms: u64::MAX,
+            ..Default::default()
+        })
+    });
     let writer = open_runtime(object_store, "control-cache-writer");
 
     writer
@@ -620,8 +635,8 @@ fn runtime_control_cache_reloads_head_after_external_change() {
     raw_store.reset_control_get_counts();
     reader
         .stat_path_blocking(&namespace_id, "/docs/new")
-        .expect("reload changed head");
-    assert!(raw_store.head_get_count() > 0);
+        .expect("probe changed head");
+    assert_eq!(raw_store.head_get_count(), 0);
 }
 
 #[test]
@@ -703,17 +718,22 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     )
     .expect("put second file");
 
-    let file = fs
+    // The writer's own reads are served from the state its batches seeded,
+    // so a runtime that reads cold is what fills the stored cache.
+    let filler = open_runtime_with(shared_store.clone(), "stored-block-filler", |builder| {
+        builder.stored_metadata_block_cache(stored_blocks.clone())
+    });
+    let file = filler
         .get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("read file");
     assert_eq!(file.bytes, b"file");
-    let entries = fs
+    let entries = filler
         .list_path_blocking(&namespace_id, "/docs")
         .expect("list docs");
     assert_eq!(entries.len(), 2);
 
     assert!(
-        fs.runtime_cache_stats().metadata_segment_cache_inserts > 0,
+        filler.runtime_cache_stats().metadata_segment_cache_inserts > 0,
         "the cycle must reach the decoded block cache for this to prove anything"
     );
     let offered: Vec<StoredMetadataBlockKind> = stored_blocks

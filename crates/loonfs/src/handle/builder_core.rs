@@ -29,6 +29,7 @@ pub(super) struct HandleBuilderCore {
     pub(super) source: StoreSource,
     pub(super) max_read_content_bytes: Option<u64>,
     pub(super) runtime_cache: RuntimeCacheConfig,
+    pub(super) timer: Arc<dyn loonfs_api::MonotonicTimer>,
     /// An existing decoded-block cache to share instead of sizing a fresh
     /// one from `runtime_cache`; see [`ReadCore::open`].
     pub(super) shared_metadata_segment_cache: Option<Arc<MetadataSegmentCache>>,
@@ -55,6 +56,7 @@ impl HandleBuilderCore {
             source,
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
+            timer: Arc::new(loonfs_api::StdMonotonicTimer::default()),
             shared_metadata_segment_cache: None,
             stored_metadata_block_cache: None,
             trace_mode: TraceMode::Embedded,
@@ -105,6 +107,7 @@ impl HandleBuilderCore {
             self.shared_metadata_segment_cache,
             self.stored_metadata_block_cache,
             instruments,
+            self.timer,
         ))
     }
 }

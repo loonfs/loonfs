@@ -153,7 +153,7 @@ async fn discover_head<S: ObjectStore + ?Sized>(
     Ok(state)
 }
 
-fn validate_segment(
+pub(super) fn validate_segment(
     namespace_id: &NamespaceId,
     base_seq: ChangeSeq,
     segment: &loonfs_api::wire::wal::WalSegmentEnvelope,
@@ -175,7 +175,7 @@ async fn load_required_segment<S: ObjectStore + ?Sized>(
         .ok_or_else(|| corrupt(&key, "hinted WAL object is missing"))
 }
 
-fn apply_segment(
+pub(super) fn apply_segment(
     state: &mut NamespaceReadState,
     segment: &loonfs_api::wire::wal::WalSegmentEnvelope,
     last_record: &mut Option<loonfs_api::CommitId>,
@@ -194,7 +194,10 @@ fn apply_segment(
     Ok(())
 }
 
-fn wal_error(object_key: &str, error: crate::wal::WalChainLoadError) -> ControlObjectLoadError {
+pub(super) fn wal_error(
+    object_key: &str,
+    error: crate::wal::WalChainLoadError,
+) -> ControlObjectLoadError {
     match error {
         crate::wal::WalChainLoadError::ReadWal {
             object_key,
@@ -209,7 +212,7 @@ fn wal_error(object_key: &str, error: crate::wal::WalChainLoadError) -> ControlO
     }
 }
 
-fn corrupt(object_key: &str, error: impl std::fmt::Display) -> ControlObjectLoadError {
+pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> ControlObjectLoadError {
     ControlObjectLoadError::Codec {
         object_key: object_key.to_owned(),
         message: error.to_string(),

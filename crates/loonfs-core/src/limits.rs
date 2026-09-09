@@ -46,6 +46,9 @@ pub const CONTROL_SNAPSHOT_REREAD_LIMIT: usize = 3;
 /// so a landed publication never leaves more than this behind.
 pub const MAX_UNFLUSHED_WAL_SEGMENTS: u64 = 128;
 
+/// Bounds the WAL probes a cold open makes above the hinted number.
+pub const HINT_RAISE_SEGMENTS: u64 = 8;
+
 /// Visible WAL-tail length, in segments, at which maintenance publishes a
 /// checkpoint.
 pub const CHECKPOINT_AT_WAL_SEGMENTS: u64 = 32;
