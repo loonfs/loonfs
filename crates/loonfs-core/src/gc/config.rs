@@ -4,30 +4,14 @@ use crate::error::{CoreError, Result};
 use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use serde::{Deserialize, Serialize};
 
-/// The grace window for the sweep (format spec, "Garbage collection"). It is
-/// wall-clock cleanup policy, never a validity input, and the default is
-/// conservative: every object gets one hour of unconditional protection.
-/// Abandoned fork records are not under it — a fork attempt carries its own
-/// lease, and letting that pass is the whole proof
-/// (`gc/fork_checkpoints.rs`) — and neither are upload sessions or the
-/// content they leave behind: a session carries its own lease, and the
-/// window a completed session's content is protected for is derived in
-/// `limits`, not configured.
+/// Per-call limits for namespace collection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
-    /// Maximum durable work steps in this invocation. One source object,
-    /// merge page, revision block, or sweep candidate is one step. Progress
-    /// is saved between calls, including with a budget of one.
-    /// `None` runs the active collection to completion.
+    /// Maximum candidates inspected after roots have been loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
-    /// Opaque namespace-bound run identity returned by an earlier invocation.
-    /// Progress and deletion evidence live on the server. Omitting the token
-    /// joins any active run; an old token never starts a new collection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
 }
 
 impl Default for GcConfig {
@@ -35,7 +19,6 @@ impl Default for GcConfig {
         Self {
             grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
             max_steps: None,
-            cursor: None,
         }
     }
 }

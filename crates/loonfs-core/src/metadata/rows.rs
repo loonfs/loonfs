@@ -5,8 +5,8 @@ use super::indexes::MetadataIndexes;
 use crate::checkpoint::DecodedRowWeight;
 use loonfs_api::wire::manifest::{
     ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord, CommitReceiptRecord,
-    DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord, TombstoneRowAction,
+    ContentPublicationRecord, DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord,
+    InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::{ActorRef, ChangeSeq, CommitId, InodeId};
 
@@ -18,6 +18,7 @@ pub struct MetadataState {
     pub(super) revisions: Vec<RevisionRecord>,
     pub(super) subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     pub(super) commit_receipts: Vec<CommitReceiptRecord>,
+    pub(super) content_publications: Vec<ContentPublicationRecord>,
     pub(super) attributes_revisions: Vec<AttributesRevisionRecord>,
     pub(super) row_count: usize,
     pub(super) decoded_bytes: usize,
@@ -27,6 +28,7 @@ pub struct MetadataState {
 impl Default for MetadataState {
     fn default() -> Self {
         Self::from_rows(
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -136,6 +138,7 @@ impl MetadataState {
         subtree_tombstones: Vec<SubtreeTombstoneRecord>,
         commit_receipts: Vec<CommitReceiptRecord>,
         attributes_revisions: Vec<AttributesRevisionRecord>,
+        content_publications: Vec<ContentPublicationRecord>,
     ) -> Self {
         let mut state = Self {
             inodes,
@@ -145,6 +148,7 @@ impl MetadataState {
             subtree_tombstones,
             commit_receipts,
             attributes_revisions,
+            content_publications,
             row_count: 0,
             decoded_bytes: 0,
             indexes: MetadataIndexes::default(),
@@ -186,6 +190,23 @@ impl MetadataState {
 
     pub fn commit_receipts(&self) -> &[CommitReceiptRecord] {
         &self.commit_receipts
+    }
+
+    pub fn content_publications(&self) -> &[ContentPublicationRecord] {
+        &self.content_publications
+    }
+
+    pub fn find_content_publication(
+        &self,
+        content_id: &loonfs_api::ContentId,
+    ) -> Option<ChangeSeq> {
+        self.indexes.content_publication(content_id)
+    }
+
+    pub(crate) fn push_content_publication_record(&mut self, record: ContentPublicationRecord) {
+        self.indexes.record_content_publication(&record);
+        self.record_row_weight(record.decoded_weight());
+        self.content_publications.push(record);
     }
 
     pub fn attributes_revisions(&self) -> &[AttributesRevisionRecord] {
@@ -286,6 +307,10 @@ impl MetadataStateBuilder {
         self.state.push_subtree_tombstone_record(record);
     }
 
+    pub(crate) fn push_content_publication(&mut self, record: ContentPublicationRecord) {
+        self.state.push_content_publication_record(record);
+    }
+
     pub(crate) fn push_commit_receipt(&mut self, record: CommitReceiptRecord) {
         self.state.push_commit_receipt_record(record);
     }
@@ -309,6 +334,7 @@ fn metadata_row_count(state: &MetadataState) -> usize {
         .saturating_add(state.revisions.len())
         .saturating_add(state.subtree_tombstones.len())
         .saturating_add(state.commit_receipts.len())
+        .saturating_add(state.content_publications.len())
         .saturating_add(state.attributes_revisions.len())
 }
 
@@ -325,5 +351,6 @@ fn metadata_decoded_bytes(state: &MetadataState) -> usize {
         .saturating_add(total(&state.revisions))
         .saturating_add(total(&state.subtree_tombstones))
         .saturating_add(total(&state.commit_receipts))
+        .saturating_add(total(&state.content_publications))
         .saturating_add(total(&state.attributes_revisions))
 }

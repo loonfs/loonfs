@@ -268,17 +268,8 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
             report.released_checkpoints.fork
         ));
     }
-    if report.retention_degraded {
-        summary.push_str("; retention degraded: ambiguous roots suppressed deletion");
-    }
-    if report.content_reclamation_deferred {
-        summary.push_str("; content reclamation deferred: reference marking is not finished");
-    }
     if report.budget_exhausted {
         summary.push_str("; stopped on --max-steps before the pass finished");
-    }
-    if let Some(cursor) = &report.next_cursor {
-        summary.push_str(&format!("; next_cursor: {cursor}"));
     }
     if let Some(deadline) = report.reclaim_after_ms {
         // A future retirement deadline always contributes to the run's earliest deadline.

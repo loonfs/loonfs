@@ -1234,7 +1234,7 @@ pub(crate) enum MaintenanceCommand {
         #[command(subcommand)]
         command: MaintenanceRetentionCommand,
     },
-    /// Run a mark-and-sweep garbage-collection pass.
+    /// Collect aged, unreferenced objects.
     Gc(MaintenanceGcArgs),
     /// Inspect and manage the profile's object store.
     Store {
@@ -1320,7 +1320,7 @@ pub(crate) enum MaintenanceJobArg {
     Metadata,
     /// Run one full metadata compaction.
     MetadataCompaction,
-    /// Run one bounded mark-and-sweep collection pass per step.
+    /// Run one bounded collection call per step.
     Gc,
     /// Build and fold the gram content index.
     GrepIndex,
@@ -1414,18 +1414,10 @@ pub(crate) struct MaintenanceGcArgs {
     /// omitted).
     #[arg(long)]
     pub grace_window_ms: Option<u64>,
-    /// Perform at most this many durable GC work steps and return after one
-    /// bounded pass. Omit to loop bounded passes through completion.
+    /// Inspect at most this many candidates and return after one call.
+    /// Omit to repeat while cleanup makes progress and candidates remain.
     #[arg(long)]
     pub max_steps: Option<u64>,
-    /// Resume token from a previous pass's next_cursor; only valid for the
-    /// same namespace.
-    #[arg(
-        long,
-        value_name = "TOKEN",
-        value_hint = ValueHint::Other
-    )]
-    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1904,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn namespace_gc_budget_uses_work_steps() {
+    fn namespace_gc_budget_uses_candidate_steps() {
         let cli = Cli::try_parse_from(["loonfs", "maintenance", "gc", "--max-steps", "7"])
             .expect("namespace GC arguments");
         assert!(matches!(
@@ -1922,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn index_gc_accepts_the_same_cursor_flag_as_core_gc() {
+    fn index_gc_accepts_a_continuation_cursor() {
         let cli = Cli::try_parse_from([
             "loonfs",
             "maintenance",

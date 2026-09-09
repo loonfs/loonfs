@@ -316,7 +316,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
 }
 
 fn sample_manifest_payload() -> NamespaceManifestPayload {
-    NamespaceManifestPayload {
+    let mut manifest = NamespaceManifestPayload {
         compactor_epoch: 0,
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
@@ -358,7 +358,16 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 object_checksum: sha256_digest(b"sst payload"),
             }],
         }],
-    }
+    };
+    let mut publication = manifest.runs[0].segments[0].clone();
+    publication.family = MetadataRowFamily::ContentPublications;
+    publication.segment_id =
+        MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdee").expect("segment id");
+    publication.min_row_key = sample_content_publication_row().row_key();
+    publication.max_row_key = publication.min_row_key.clone();
+    publication.row_count = 1;
+    manifest.runs[0].segments.push(publication);
+    manifest
 }
 
 /// Returns a manifest reference owned by the sample namespace.
@@ -1368,6 +1377,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
         MetadataRowFamily::Tombstones,
         MetadataRowFamily::ActiveDeletions,
         MetadataRowFamily::CommitReceipts,
+        MetadataRowFamily::ContentPublications,
         MetadataRowFamily::Attributes,
     ]
     .iter()
@@ -1384,6 +1394,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"tombstones\"",
             "\"active_deletions\"",
             "\"commit_receipts\"",
+            "\"content_publications\"",
             "\"attributes\"",
         ],
         "family tags are durable bytes in every manifest descriptor"
@@ -2680,204 +2691,34 @@ fn every_metadata_row_rejects_unknown_fields() {
     }
 }
 
+fn sample_content_publication_row() -> MetadataRow {
+    MetadataRow::ContentPublication(loonfs_api::wire::manifest::ContentPublicationRecord {
+        content_id: sample_content_ref().content_id,
+        committed_seq: ChangeSeq(2),
+        delta_index: 3,
+    })
+}
+
 #[test]
-fn gc_progress_and_mark_pages_match_golden_bytes() {
-    use loonfs_api::wire::gc::*;
-    let run_id = loonfs_api::GcRunId::parse("gcr_0123456789abcdef0123456789abcdef").expect("run");
-    let table = GcMarkTable {
-        table_id: loonfs_api::GcMarkTableId::parse("gct_0123456789abcdef0123456789abcdef")
-            .expect("table"),
-        page_count: 1,
-        entry_count: 1,
-    };
-    let roots = GcRoots {
-        content_store_id: content_store_id(),
-        namespace_deleted: false,
-        reclaim_after_ms: None,
-        degraded: false,
-        discovery_start_manifest_no: Some(ManifestNo(4)),
-    };
-    let index = GcMarkIndex {
-        levels: vec![Some(table.clone())],
-        merge: None,
-    };
-    let phases = [
-        ("starting", GcPhase::Starting {}),
-        (
-            "marking",
-            GcPhase::Marking {
-                work: Box::new(GcMarkWork {
-                    roots: roots.clone(),
-                    index: index.clone(),
-                    source: GcMarkSource::Checkpoints { last_key: None },
-                    floor_seq: ChangeSeq(4),
-                    wal_tip: None,
-                }),
-            },
-        ),
-        (
-            "revisions",
-            GcPhase::Revisions {
-                roots: roots.clone(),
-                objects: table.clone(),
-                position: GcMarkPosition::default(),
-                block_index: 0,
-                content: GcMarkIndex::default(),
-            },
-        ),
-        (
-            "sealing",
-            GcPhase::Sealing {
-                roots: roots.clone(),
-                index,
-            },
-        ),
-        (
-            "sweeping",
-            GcPhase::Sweeping {
-                checkpoints_retained: false,
-                roots: roots.clone(),
-                table: table.clone(),
-                family: GcCandidateFamily::WalSegments,
-                last_key: None,
-            },
-        ),
-        ("cleaning", GcPhase::Cleaning { last_key: None }),
-        ("complete", GcPhase::Complete {}),
-        ("owned_content", GcPhase::Sweeping {
-            checkpoints_retained: false,
-            roots: GcRoots { namespace_deleted: true, reclaim_after_ms: Some(900_000), ..roots },
-            table: table.clone(),
-            family: GcCandidateFamily::OwnedContent,
-            last_key: Some("content-stores/cs_0123456789abcdef0123456789abcdef/objects/demo/01/23/con_0123456789abcdef0123456789abcdef".to_owned()),
-        }),
-    ];
-    for (step_no, (name, phase)) in phases.into_iter().enumerate() {
-        check_control_golden(
-            &format!("control_gc_run.{name}.v1.json"),
-            ControlObjectKind::GcRun,
-            GcRunState {
-                namespace_id: namespace_id(),
-                gc_run_id: run_id.clone(),
-                step_no: step_no as u64,
-                started_at_ms: 1_000_000,
-                grace_window_ms: 600_000,
-                phase,
-            },
-        );
-    }
-    let page = GcMarkPage {
-        namespace_id: namespace_id(),
-        gc_run_id: run_id,
-        table_id: table.table_id,
-        page_index: 0,
-        entries: vec![GcMarkEntry {
-            key: "content/con_0123456789abcdef0123456789abcdef".to_owned(),
-            value: GcMarkValue::Content {},
-        }],
-    };
-    let encoded = encode_gc_mark_page(page.clone()).expect("encode");
-    assert_matches_golden("gc_mark_page.v1.json", encoded.as_bytes());
-    let bytes = std::fs::read(golden_path("gc_mark_page.v1.json")).expect("fixture");
-    assert_eq!(
-        decode_gc_mark_page(&bytes).expect("decode").into_payload(),
-        page
+fn content_publication_rows_match_golden_bytes_and_lookup_grammar() {
+    let row = sample_content_publication_row();
+    let key = format!(
+        "content-publication-{}-00000000000000000002",
+        sample_content_ref().content_id
     );
-}
-
-#[test]
-fn gc_optional_members_and_empty_merge_slots_round_trip_exactly() {
-    use loonfs_api::wire::gc::{GcMarkIndex, GcPhase};
-
-    for bytes in [r#"{"levels":[]}"#, r#"{"levels":[null]}"#] {
-        let index: GcMarkIndex = serde_json::from_str(bytes).expect("decode index");
-        assert_eq!(serde_json::to_string(&index).expect("encode index"), bytes);
-    }
-    for bytes in [
-        r#"{"kind":"cleaning"}"#,
-        r#"{"kind":"cleaning","last_key":"namespaces/demo/gc/runs/gcr_0123456789abcdef0123456789abcdef/tables/gct_0123456789abcdef0123456789abcdef/00000000000000000000.json"}"#,
-    ] {
-        let phase: GcPhase = serde_json::from_str(bytes).expect("decode phase");
-        assert_eq!(serde_json::to_string(&phase).expect("encode phase"), bytes);
-    }
-}
-
-#[test]
-fn gc_progress_rejects_unknown_fields_inside_progress_and_merge_state() {
-    use loonfs_api::wire::gc::*;
-    let bytes = std::fs::read(golden_path("control_gc_run.marking.v1.json")).expect("fixture");
-    let state: GcRunState = decode_control_object(&bytes, ControlObjectKind::GcRun)
-        .expect("decode")
-        .into_payload();
-    let original = serde_json::to_value(state).expect("payload");
-    for path in [
-        "",
-        "/phase",
-        "/phase/work",
-        "/phase/work/roots",
-        "/phase/work/source",
-        "/phase/work/index",
-        "/phase/work/index/levels/0",
-    ] {
-        let mut payload = original.clone();
-        payload
-            .pointer_mut(path)
-            .expect("path")
-            .as_object_mut()
-            .expect("object")
-            .insert("unexpected".to_owned(), serde_json::json!(true));
-        let encoded =
-            loonfs_api::wire::control::encode_control_state(ControlObjectKind::GcRun, &payload)
-                .expect("encode");
-        assert!(
-            decode_control_object::<GcRunState>(&encoded, ControlObjectKind::GcRun).is_err(),
-            "unknown field at {path}"
-        );
-    }
-    let merge = GcMarkMerge {
-        inputs: [
-            GcMarkTable {
-                table_id: loonfs_api::GcMarkTableId::generate(),
-                page_count: 1,
-                entry_count: 1,
-            },
-            GcMarkTable {
-                table_id: loonfs_api::GcMarkTableId::generate(),
-                page_count: 1,
-                entry_count: 1,
-            },
-        ],
-        positions: [GcMarkPosition::default(); 2],
-        output: GcMarkTable {
-            table_id: loonfs_api::GcMarkTableId::generate(),
-            page_count: 0,
-            entry_count: 0,
-        },
-        output_level: 1,
-    };
-    let mut value = serde_json::to_value(merge).expect("merge");
-    value["positions"][0]["unexpected"] = serde_json::json!(true);
-    assert!(serde_json::from_value::<GcMarkMerge>(value).is_err());
-}
-
-#[test]
-fn gc_mark_pages_reject_wrong_order_oversize_and_unknown_entries() {
-    use loonfs_api::wire::gc::*;
-    let bytes = std::fs::read(golden_path("gc_mark_page.v1.json")).expect("fixture");
-    let page = decode_gc_mark_page(&bytes).expect("page").into_payload();
-    let mut duplicate = page.clone();
-    duplicate.entries.push(duplicate.entries[0].clone());
-    assert!(encode_gc_mark_page(duplicate).is_err());
-    assert!(decode_gc_mark_page(&vec![0; GC_MARK_PAGE_MAX_BYTES + 1]).is_err());
-    let mut payload = serde_json::to_value(page).expect("payload");
-    payload["entries"][0]["value"]["unexpected"] = serde_json::json!(true);
-    let encoded = loonfs_api::wire::envelope::encode_json_envelope(
-        GC_MARK_PAGE_KIND,
-        GC_MARK_PAGE_VERSION,
-        payload,
-    )
-    .expect("encode");
-    assert!(decode_gc_mark_page(encoded.as_bytes()).is_err());
+    assert_eq!(row.row_key(), key);
+    assert_eq!(
+        row.filter_key_for_family(MetadataRowFamily::ContentPublications),
+        format!("content-publication-{}", sample_content_ref().content_id)
+    );
+    assert_rows_match_single_block_golden(
+        "sst_block_data_content_publications.v1.bin",
+        std::slice::from_ref(&row),
+    );
+    assert_eq!(
+        decode_golden_data_block("sst_block_data_content_publications.v1.bin").rows,
+        [row]
+    );
 }
 
 #[test]

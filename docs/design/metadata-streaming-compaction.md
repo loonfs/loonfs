@@ -165,9 +165,9 @@ number with an incremented epoch and otherwise identical content. Clones share
 that claim. Another runtime can claim a newer epoch and fence earlier jobs.
 A fenced runtime does not automatically reclaim the role.
 
-GC determines whether a segment is listed through its mark table. An unlisted
+GC builds the live segment set from the manifests protected in that call. An unlisted
 segment becomes eligible only after 24 hours of provider age. This applies to
-both failed output and replaced runs, independently of the run's grace window.
+both failed output and replaced runs, independently of the call's grace window.
 
 Streaming jobs measure monotonic elapsed time from before their first output.
 They abandon publication after `UNREFERENCED_SEGMENT_MIN_AGE_MS -

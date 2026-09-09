@@ -26,8 +26,7 @@ unreferenced staged output under its lease-claim rules. Successful jobs also
 retain their lease until expiry to protect published output from older GC scans.
 This protection can delay the next compaction window for the same family group.
 
-GC cursors currently resume candidate enumeration only. Every invocation rebuilds
-reachability, so a budget too small to finish that work can still prevent
-progress. Periodic assignment and restart recovery do not solve resumable marking.
-A safe marking continuation needs a protocol for protecting its basis while new
-checkpoints, forks, and manifests are published.
+GC reads current roots and builds its live set in memory on every call.
+Candidate listings start from the beginning. The budget charges only
+candidates that need a store request, so a call always gets past the
+objects its live set retains.

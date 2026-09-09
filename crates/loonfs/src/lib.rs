@@ -88,9 +88,9 @@ pub use loonfs_core::{
     select_next_iterator, write_segments_in_waves, BootstrapNamespaceError, CheckpointFile,
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState,
     DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig,
-    GcCursorKeyspace, GraceAge, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
-    MetadataViewError, NamespaceGcCursor, PassBudget, SegmentBlockLoader, SegmentRowIterator,
-    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    GraceAge, MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError,
+    PassBudget, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, WriterFence,
+    CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 

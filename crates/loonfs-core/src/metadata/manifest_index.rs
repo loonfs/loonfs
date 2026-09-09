@@ -329,6 +329,30 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
         .collect()
 }
 
+pub(super) async fn content_publication<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    content_id: &loonfs_api::ContentId,
+    visible_seq: ChangeSeq,
+) -> Result<Option<ChangeSeq>> {
+    let rows = segments
+        .scan_prefix_for_lookup(
+            MetadataRowFamily::ContentPublications,
+            &lookup_keys::content_publication_prefix(content_id),
+            &lookup_keys::content_publication_probe(content_id),
+            Readahead::Disabled,
+        )
+        .await
+        .map_err(manifest_error_to_core)?;
+    Ok(rows
+        .into_iter()
+        .map(super::row_decode::content_publication_from_manifest_row)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .map(|record| record.committed_seq)
+        .filter(|seq| *seq <= visible_seq)
+        .max())
+}
+
 pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     commit_id: &CommitId,

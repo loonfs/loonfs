@@ -65,7 +65,6 @@ pub use self::streaming_compaction::{
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 
-pub(crate) use self::compaction_merge::revision_content_block;
 pub(crate) use self::compactor::claim_compactor;
 pub(crate) use self::create::{create_checkpoint, create_checkpoint_at_basis};
 pub(crate) use self::data_block_load::DecodedRowWeight;
@@ -73,8 +72,9 @@ pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
-    load_basis_metadata_segments, load_namespace_manifest_envelope,
-    load_namespace_manifest_envelope_if_present, LoadedMetadataBasis,
+    ensure_manifest_reference_matches, load_basis_metadata_segments,
+    load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present,
+    LoadedMetadataBasis,
 };
 pub(crate) use self::record::load_checkpoint_record;
 pub(crate) use self::release::release_checkpoint;

@@ -3,8 +3,9 @@
 
 use super::visibility::{same_binding, unbind_matches_binding, BindingIdentity};
 use super::{
-    AttributesRevisionRecord, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord, DirentryBindRecord,
+    DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+    TombstoneRowAction,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
 use std::collections::{HashMap, HashSet};
@@ -22,6 +23,7 @@ pub(super) struct MetadataIndexes {
     unbound_binding_keys: HashSet<BindingIdentity>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
+    content_publication_by_id: HashMap<loonfs_api::ContentId, ChangeSeq>,
 }
 
 impl Default for MetadataIndexes {
@@ -35,6 +37,7 @@ impl Default for MetadataIndexes {
             unbound_binding_keys: HashSet::new(),
             tombstone_by_root: HashMap::new(),
             commit_receipt_by_id: HashMap::new(),
+            content_publication_by_id: HashMap::new(),
         }
     }
 }
@@ -96,6 +99,9 @@ impl MetadataIndexes {
             indexes.record_tombstone(tombstone);
         }
 
+        for publication in &state.content_publications {
+            indexes.record_content_publication(publication);
+        }
         for receipt in &state.commit_receipts {
             indexes.record_commit_receipt(receipt);
         }
@@ -272,6 +278,21 @@ impl MetadataIndexes {
             record.clone(),
             tombstone_order_key,
         );
+    }
+
+    pub(super) fn content_publication(
+        &self,
+        content_id: &loonfs_api::ContentId,
+    ) -> Option<ChangeSeq> {
+        self.content_publication_by_id.get(content_id).copied()
+    }
+
+    pub(super) fn record_content_publication(&mut self, record: &ContentPublicationRecord) {
+        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
+        self.content_publication_by_id
+            .entry(record.content_id.clone())
+            .and_modify(|seq| *seq = (*seq).max(record.committed_seq))
+            .or_insert(record.committed_seq);
     }
 
     pub(super) fn record_commit_receipt(&mut self, record: &CommitReceiptRecord) {

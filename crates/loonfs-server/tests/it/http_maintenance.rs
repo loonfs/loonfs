@@ -344,21 +344,20 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
     .expect_err("the old budget name is not an alias");
     assert_eq!(old_budget.code, "invalid_request");
 
-    // Resume saved marking and sweeping work with the returned cursor.
     let bounded = post_gc_with(
         &server_url,
         namespace.as_str(),
-        serde_json::json!({ "max_steps": 14 }),
+        serde_json::json!({ "max_steps": 1 }),
     )
     .expect("bounded gc pass");
-    let cursor = bounded.next_cursor.expect("more candidate families remain");
-    let resumed = post_gc_with(
+    assert!(bounded.budget_exhausted);
+    let refused = post_gc_with(
         &server_url,
         namespace.as_str(),
-        serde_json::json!({ "max_steps": 14, "cursor": cursor }),
+        serde_json::json!({ "cursor": "obsolete" }),
     )
-    .expect("resumed gc pass");
-    assert!(resumed.next_cursor.is_some());
+    .expect_err("GC requests reject continuation tokens");
+    assert_eq!(refused.code, "invalid_request");
 
     // Objects inside the grace window remain readable.
     let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
@@ -366,8 +365,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(report.deleted.checkpoint_records, 0);
-    assert!(!report.retention_degraded);
-    assert!(report.next_cursor.is_none());
+    assert!(!report.budget_exhausted);
 
     let bytes = client
         .get_file_bytes(&target, &Default::default())
@@ -440,7 +438,6 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     assert_eq!(retention_floor(retention), ChangeSeq(1));
     let gc = post_gc(&server_url, namespace.as_str()).expect("GC run");
     assert_eq!(gc.deleted.wal_segments, 0);
-    assert!(!gc.retention_degraded);
 
     let bytes = client
         .get_file_bytes(&target, &Default::default())

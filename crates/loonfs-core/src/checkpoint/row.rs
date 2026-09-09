@@ -56,6 +56,12 @@ pub(super) fn manifest_rows_for_family(
             .map(active_deletion_from_tombstone)
             .map(MetadataRow::ActiveDeletion)
             .collect::<Vec<_>>(),
+        MetadataRowFamily::ContentPublications => metadata_state
+            .content_publications()
+            .iter()
+            .cloned()
+            .map(MetadataRow::ContentPublication)
+            .collect::<Vec<_>>(),
         MetadataRowFamily::CommitReceipts => metadata_state
             .commit_receipts()
             .iter()
@@ -98,6 +104,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
             ActiveDeletionRowAction::Removed { revocation_seq } => *revocation_seq,
         },
         MetadataRow::CommitReceipt(record) => record.committed_seq,
+        MetadataRow::ContentPublication(record) => record.committed_seq,
         MetadataRow::AttributesRevision(record) => record.committed_seq,
     }
 }
@@ -112,6 +119,7 @@ pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::Tombstone(_) => "tombstone",
         MetadataRow::ActiveDeletion(_) => "active_deletion",
         MetadataRow::CommitReceipt(_) => "commit_receipt",
+        MetadataRow::ContentPublication(_) => "content_publication",
         MetadataRow::AttributesRevision(_) => "attributes_revision",
     }
 }

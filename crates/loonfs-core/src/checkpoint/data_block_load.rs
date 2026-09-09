@@ -16,8 +16,9 @@ use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
 use loonfs_api::wire::manifest::{
     ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord, CommitReceiptRecord,
-    DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataRow,
-    MetadataSegmentRef, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    ContentPublicationRecord, DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord,
+    InodeRecord, MetadataRow, MetadataSegmentRef, RevisionRecord, SubtreeTombstoneRecord,
+    TombstoneRowAction,
 };
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
 use loonfs_api::ActorRef;
@@ -297,6 +298,7 @@ impl DecodedRowWeight for MetadataRow {
             MetadataRow::Tombstone(record) => record.decoded_weight(),
             MetadataRow::ActiveDeletion(record) => record.decoded_weight(),
             MetadataRow::CommitReceipt(record) => record.decoded_weight(),
+            MetadataRow::ContentPublication(record) => record.decoded_weight(),
             MetadataRow::AttributesRevision(record) => record.decoded_weight(),
         }
     }
@@ -355,6 +357,12 @@ impl DecodedRowWeight for ActiveDeletionRecord {
             }
             ActiveDeletionRowAction::Removed { .. } => FIXED_ROW_OVERHEAD,
         }
+    }
+}
+
+impl DecodedRowWeight for ContentPublicationRecord {
+    fn decoded_weight(&self) -> usize {
+        ALLOCATED_ROW_OVERHEAD + self.content_id.as_str().len()
     }
 }
 

@@ -132,15 +132,7 @@ fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> 
         .collect()
 }
 
-/// Compares two states written by two independent runs of the same
-/// operations.
-///
-/// Every such run stages its own content objects, so revision rows name
-/// different ids by design — and because a commit's fingerprint covers which
-/// object a put attached, the receipt rows differ too. Both differences come
-/// from the seeding, not from the reorganization under test, so both are
-/// normalized away here and only here. Comparisons within one store stay
-/// exact.
+// Independent uploads have different content ids and receipt fingerprints.
 fn metadata_states_equivalent_ignoring_content_identity(
     left: &MetadataState,
     right: &MetadataState,
@@ -149,7 +141,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
         CHECKPOINT_ROW_FAMILIES
             .into_iter()
             .map(|family| {
-                let rows = manifest_rows_for_family(state, family)
+                let mut rows = manifest_rows_for_family(state, family)
                     .into_iter()
                     .map(|row| match row {
                         MetadataRow::FileRevision(crate::metadata::RevisionRecord {
@@ -193,9 +185,17 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             committed_at_ms,
                             message,
                         }),
+                        MetadataRow::ContentPublication(mut record) => {
+                            record.content_id = loonfs_api::ContentId::parse(
+                                "con_00000000000000000000000000000000",
+                            )
+                            .expect("placeholder content id");
+                            MetadataRow::ContentPublication(record)
+                        }
                         other => other,
                     })
                     .collect::<Vec<_>>();
+                rows.sort_by_cached_key(|row| row.row_key_for_family(family));
                 (family, rows)
             })
             .collect::<Vec<_>>()

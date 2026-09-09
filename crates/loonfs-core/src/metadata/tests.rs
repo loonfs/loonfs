@@ -148,6 +148,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert!(metadata_state
@@ -206,6 +207,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 bind_delta_index: 0,
             },
         ],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -361,6 +363,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert_eq!(
@@ -408,6 +411,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -462,6 +466,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
                 message: Some("new message".to_owned()),
             },
         ],
+        Vec::new(),
         Vec::new(),
     );
 
@@ -815,6 +820,7 @@ fn churned_binding_state_rebuilt() -> MetadataState {
         incremental.subtree_tombstones().to_vec(),
         incremental.commit_receipts().to_vec(),
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -930,6 +936,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
     let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(2));
     assert!(
@@ -955,6 +962,7 @@ fn has_visible_children_sees_through_unbinds() {
             unbind_seq: ChangeSeq(3),
             unbind_delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

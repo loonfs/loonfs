@@ -2,9 +2,8 @@
 
 #![allow(clippy::panic)]
 
+use super::collect::gc_namespace;
 use super::config::GcConfig;
-use super::mark_table::MarkTables;
-use super::run::gc_namespace;
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::tests::{
@@ -25,14 +24,13 @@ use loonfs_api::wire::control::{
     ControlObjectKind, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
     UploadSessionState,
 };
-use loonfs_api::wire::gc::*;
 use loonfs_api::{CheckpointId, ContentRef, ContentStoreId, ManifestNo, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
-    metadata_segment_prefix, wal_head, wal_segment, wal_segment_prefix,
+    metadata_segment_prefix, wal_head, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 use crate::commit_engine::delete_namespace;
@@ -41,16 +39,13 @@ use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::read::load_current_metadata_view;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs_api::AttributeInclusion;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
+use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
     OperationContext, OperationKind, RecordingStore,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 use tempfile::tempdir;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
@@ -59,107 +54,11 @@ fn config() -> GcConfig {
     GcConfig {
         grace_window_ms: GRACE_MS,
         max_steps: None,
-        cursor: None,
     }
 }
 
 fn context(now_ms: u64) -> MutationContext {
     mutation_context("gc-test", now_ms)
-}
-
-/// The roots one unbounded collection finds, for tests that assert against
-/// the same set a pass marks.
-async fn live_set<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) -> LiveSet {
-    marked(store, namespace_id, context).await.0
-}
-
-/// Returns the budget units required to mark this namespace. Bounded tests
-/// add candidate work to this measured value instead of hard-coding it.
-async fn marking_units<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) -> u64 {
-    marked(store, namespace_id, context).await.1
-}
-
-#[derive(Default)]
-struct LiveSet {
-    manifests: BTreeSet<ManifestNo>,
-    wal_segments: BTreeSet<String>,
-    segments: BTreeSet<String>,
-    checkpoint_keys: BTreeSet<String>,
-}
-
-async fn mark_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) -> Result<(GcRunState, u64), CoreError> {
-    let mut state = GcRunState {
-        namespace_id: namespace_id.clone(),
-        gc_run_id: loonfs_api::GcRunId::generate(),
-        step_no: 0,
-        started_at_ms: context.now_ms,
-        grace_window_ms: GRACE_MS,
-        phase: GcPhase::Starting {},
-    };
-    let id = state.gc_run_id.clone();
-    let mut pass = super::run::Pass::new(store, namespace_id, &id, context);
-    let mut report = GcResponse::empty(namespace_id.clone());
-    let mut units = 0;
-    while !matches!(state.phase, GcPhase::Sweeping { .. }) {
-        pass.step(&mut state, &mut report, context.now_ms).await?;
-        units += 1;
-        assert!(units < 100_000, "marking must converge");
-    }
-    Ok((state, units))
-}
-
-async fn marked<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) -> (LiveSet, u64) {
-    let (state, units) = mark_state(store, namespace_id, context)
-        .await
-        .expect("mark roots");
-    let GcPhase::Sweeping { table, .. } = state.phase else {
-        panic!("mark_state must finish at sweeping")
-    };
-    let mut tables = MarkTables::new(store, namespace_id, &state.gc_run_id);
-    let mut position = GcMarkPosition::default();
-    let mut live = LiveSet::default();
-    while let Some(entry) = tables
-        .peek(&table, position)
-        .await
-        .expect("read marked page")
-    {
-        if let Some(key) = entry.key.strip_prefix("object/") {
-            use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
-            match parse_object_key(key).map(|parsed| parsed.family()) {
-                Some(DurableObjectFamily::WalSegment) => {
-                    live.wal_segments.insert(key.to_owned());
-                }
-                Some(DurableObjectFamily::MetadataSegment) => {
-                    live.segments.insert(key.to_owned());
-                }
-                Some(DurableObjectFamily::CheckpointRecord) => {
-                    live.checkpoint_keys.insert(key.to_owned());
-                }
-                _ => {}
-            }
-        }
-        if let GcMarkValue::Manifest { manifest } = entry.value {
-            live.manifests.insert(manifest.manifest_no);
-        }
-        MarkTables::<S>::advance(&table, &mut position);
-    }
-    (live, units)
 }
 
 /// The durable lifecycle of one checkpoint record, stamp included.
@@ -206,32 +105,6 @@ async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
         .resolve_path("/", AttributeInclusion::Omit)
         .await
         .expect("resolve root");
-}
-
-#[derive(Debug)]
-struct IncompleteGcAccountingStore {
-    inner: LocalFsStore,
-    deletes: AtomicUsize,
-    lists: AtomicUsize,
-}
-
-#[derive(Debug)]
-struct ListingCursorStore<S> {
-    inner: S,
-    calls: Mutex<Vec<(String, Option<String>)>>,
-}
-
-impl<S> ListingCursorStore<S> {
-    fn new(inner: S) -> Self {
-        Self {
-            inner,
-            calls: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn take_calls(&self) -> Vec<(String, Option<String>)> {
-        std::mem::take(&mut *self.calls.lock().expect("listing calls lock poisoned"))
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -297,92 +170,6 @@ fn blocking_control_cas_store(
     store
 }
 
-#[async_trait::async_trait]
-impl ObjectStore for IncompleteGcAccountingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.deletes.fetch_add(1, Ordering::SeqCst);
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.lists.fetch_add(1, Ordering::SeqCst);
-        self.inner.list_prefix_from_stream(prefix, start_after)
-    }
-}
-
-#[async_trait::async_trait]
-impl<S: ObjectStore> ObjectStore for ListingCursorStore<S> {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.calls
-            .lock()
-            .expect("listing calls lock poisoned")
-            .push((prefix.to_owned(), start_after.map(str::to_owned)));
-        self.inner.list_prefix_from_stream(prefix, start_after)
-    }
-}
-
 #[tokio::test]
 async fn gc_rejects_grace_windows_below_the_derived_minimum() {
     let temp_dir = tempdir().expect("tempdir");
@@ -427,6 +214,7 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
@@ -439,9 +227,7 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
         .await
         .expect("gc pass");
 
-    // The only segment sits at the floor with no replay gap above it.
     assert_eq!(report.deleted.wal_segments, 1);
-    assert!(!report.retention_degraded);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -569,10 +355,6 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
         .await
         .expect("gc pass");
     assert_eq!(report.released_checkpoints.missing_basis, 1);
-    assert!(
-        !report.retention_degraded,
-        "a verifiably absent basis is not ambiguity"
-    );
     let released = crate::checkpoint::record::load_checkpoint_record(
         &store,
         &namespace_id,
@@ -596,7 +378,6 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
         .await
         .expect("second gc pass");
     assert_eq!(report.released_checkpoints.missing_basis, 0);
-    assert!(!report.retention_degraded);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -635,7 +416,6 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     // The pin on a tombstone has one route out, the same as every other
     // pin: released here, deleted a grace window after that release.
     assert_eq!(report.released_checkpoints.expired, 1);
-    assert!(!report.retention_degraded);
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
         .await
@@ -643,7 +423,6 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     assert!(report.deleted.checkpoint_records >= 1);
     assert!(report.deleted.metadata_segments >= 1);
     assert!(report.deleted.manifests >= 1);
-    assert!(!report.retention_degraded);
 
     for prefix in [
         wal_segment_prefix(&namespace_id),
@@ -676,7 +455,6 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .expect("second gc pass");
     assert_eq!(report.deleted.wal_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
-    assert!(!report.retention_degraded);
 }
 
 #[tokio::test]
@@ -705,7 +483,6 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("gc pass with live clone");
     assert_eq!(report.released_checkpoints.fork, 0);
-    assert!(!report.retention_degraded);
     assert!(
         store.head(&basis_key).await.expect("head basis").is_some(),
         "fork basis must survive while the clone lives"
@@ -731,10 +508,10 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("gc pass after clone delete");
     assert_eq!(report.released_checkpoints.fork, 1);
-    assert!(report.deleted.manifests >= 1);
+    assert_eq!(report.deleted.manifests, 0);
     assert!(
-        store.head(&basis_key).await.expect("head basis").is_none(),
-        "the basis ages out once no living target needs it"
+        store.head(&basis_key).await.expect("head basis").is_some(),
+        "the active record protects its basis during the call that releases it"
     );
 
     // Idempotent: the released record ages out on later passes and
@@ -744,8 +521,12 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("idempotent pass");
     assert_eq!(report.released_checkpoints.fork, 0);
-    assert_eq!(report.deleted.manifests, 0);
-    assert!(!report.retention_degraded);
+    assert_eq!(report.deleted.manifests, 1);
+    assert!(store
+        .head(&basis_key)
+        .await
+        .expect("basis after release")
+        .is_none());
 }
 
 #[tokio::test]
@@ -1285,7 +1066,7 @@ async fn completed_content_delete_failure_keeps_the_session_for_retry() {
 }
 
 #[tokio::test]
-async fn content_gc_never_reclaims_published_content() {
+async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
     for materialize in [false, true] {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1315,6 +1096,35 @@ async fn content_gc_never_reclaims_published_content() {
                 .await
                 .expect("advance floor");
         }
+        let (orphan_upload_id, orphan, _, _) =
+            complete_upload_for_gc(&store, &namespace_id, b"never published", &setup).await;
+        let orphan_key = loonfs_objectstore::keys::content_blob(
+            &content_store_id,
+            &namespace_id,
+            &orphan.content_id,
+        );
+        let publication_keys: BTreeSet<_> = if materialize {
+            crate::namespace::control::load_current_manifest(&store, &namespace_id)
+                .await
+                .expect("manifest")
+                .envelope
+                .payload()
+                .runs
+                .iter()
+                .flat_map(|run| &run.segments)
+                .filter(|segment| {
+                    segment.family
+                        == loonfs_api::wire::manifest::MetadataRowFamily::ContentPublications
+                })
+                .map(loonfs_objectstore::keys::metadata_segment_object_key)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let store = RecordingStore::new(
+            store,
+            KeyPredicate::prefix(metadata_segment_prefix(&namespace_id)),
+        );
         let content_key = loonfs_objectstore::keys::content_blob(
             &content_store_id,
             &content_ref.owner_namespace_id,
@@ -1327,12 +1137,28 @@ async fn content_gc_never_reclaims_published_content() {
             .expect("gc pass past the content grace");
 
         assert_eq!(
-            report.deleted.upload_sessions, 1,
+            report.deleted.upload_sessions, 2,
             "materialize={materialize}"
         );
         assert_eq!(
-            report.deleted.content_objects, 0,
+            report.deleted.content_objects, 1,
             "materialize={materialize}"
+        );
+        assert_eq!(store.counts().gets, if materialize { 1 } else { 0 });
+        assert_eq!(store.counts().gets_with_metadata, 0);
+        for (key, range) in store.take_gets() {
+            assert!(publication_keys.contains(&key));
+            assert!(range.is_some());
+        }
+        assert!(store
+            .head(&orphan_key)
+            .await
+            .expect("orphan object")
+            .is_none());
+        assert!(
+            read_upload_session(&store, &namespace_id, &orphan_upload_id)
+                .await
+                .is_none()
         );
         assert!(
             store.head(&content_key).await.expect("head").is_some(),
@@ -1341,364 +1167,6 @@ async fn content_gc_never_reclaims_published_content() {
         assert!(read_upload_session(&store, &namespace_id, &upload_id)
             .await
             .is_none());
-        assert!(!report.retention_degraded);
-    }
-}
-
-/// Builds a namespace whose content reference scan has real work to do: a
-/// materialized manifest to open and page through, and a WAL tail to fetch
-/// on top of it.
-async fn namespace_with_a_scan_worth_bounding(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    setup: &MutationContext,
-) {
-    bootstrap_namespace(store, namespace_id, setup, false)
-        .await
-        .expect("bootstrap");
-    for index in 0..3 {
-        write_test_file(
-            store,
-            namespace_id,
-            &format!("/docs/materialized-{index}.txt"),
-            &format!("scan-fixture-{index}"),
-            setup,
-        )
-        .await;
-    }
-    crate::checkpoint::flush_wal(store, namespace_id, setup)
-        .await
-        .expect("flush wal");
-    for index in 0..3 {
-        write_test_file(
-            store,
-            namespace_id,
-            &format!("/docs/tail-{index}.txt"),
-            &format!("scan-fixture-tail-{index}"),
-            setup,
-        )
-        .await;
-    }
-}
-
-#[tokio::test]
-async fn a_corrupt_marked_manifest_fails_the_scan_and_an_unreadable_one_makes_it_unavailable() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let store = FailStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationClass::Read,
-        InjectedError::Transport("marked manifest timed out".to_owned()),
-    );
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(store.inner(), &namespace_id, &setup).await;
-    let live = live_set(store.inner(), &namespace_id, &setup).await;
-    let manifest_number = *live.manifests.iter().next().expect("live manifest");
-    let manifest_key = metadata_manifest_object(&namespace_id, &manifest_number);
-
-    store.fail_all();
-    let error = mark_state(&store, &namespace_id, &setup)
-        .await
-        .expect_err("discovery read fails closed");
-    assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
-
-    store.clear();
-    store
-        .put_overwrite(&manifest_key, Bytes::from_static(b"not json"))
-        .await
-        .expect("corrupt marked manifest");
-    let error = mark_state(&store, &namespace_id, &setup)
-        .await
-        .expect_err("corruption after marking must still surface");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(&manifest_key));
-}
-
-#[tokio::test]
-async fn corrupt_metadata_rows_fail_the_pass_and_unreadable_ones_retain_the_content() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let store = FailStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_segment_prefix(&namespace_id)),
-        OperationClass::Read,
-        InjectedError::Transport("metadata rows timed out".to_owned()),
-    );
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(store.inner(), &namespace_id, &setup).await;
-    let (upload_id, content_ref, content_store_id, _) =
-        complete_upload_for_gc(store.inner(), &namespace_id, b"unpublished\n", &setup).await;
-    let content_key = loonfs_objectstore::keys::content_blob(
-        &content_store_id,
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    );
-    let segment_keys = store
-        .inner()
-        .list_prefix(&metadata_segment_prefix(&namespace_id))
-        .await
-        .expect("list metadata segments");
-    assert!(
-        !segment_keys.is_empty(),
-        "the fixture must publish metadata segments"
-    );
-    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-
-    store.fail_all();
-    gc_namespace(&store, &namespace_id, &config(), &past)
-        .await
-        .expect_err("a failed revision read stops before sweeping");
-    assert!(store
-        .inner()
-        .head(&content_key)
-        .await
-        .expect("head content")
-        .is_some());
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
-        .await
-        .is_some());
-
-    store.clear();
-    for key in &segment_keys {
-        let mut bytes = store
-            .get(key, None)
-            .await
-            .expect("read metadata segment")
-            .expect("metadata segment exists")
-            .to_vec();
-        bytes[0] ^= 0xff;
-        store
-            .put_overwrite(key, Bytes::from(bytes))
-            .await
-            .expect("corrupt metadata segment");
-    }
-    let error = gc_namespace(&store, &namespace_id, &config(), &past)
-        .await
-        .expect_err("corrupt content-reference rows must fail the pass");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(segment_keys.iter().any(|key| error.message().contains(key)));
-    assert!(store
-        .inner()
-        .head(&content_key)
-        .await
-        .expect("head content")
-        .is_some());
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
-        .await
-        .is_some());
-}
-
-#[tokio::test]
-async fn a_budget_that_covers_the_roots_exactly_finishes_marking() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
-    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
-    let (live, marking) = marked(&inner, &namespace_id, &aged).await;
-    let retained = live.wal_segments;
-    assert!(!retained.is_empty(), "the fixture must retain a chain");
-
-    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
-    let store = RecordingStore::new(inner, segment_reads);
-    let mut exact = config();
-    exact.max_steps = Some(marking);
-    let report = gc_namespace(&store, &namespace_id, &exact, &aged)
-        .await
-        .expect("pass with a budget for the roots");
-
-    assert_eq!(
-        store.take_get_keys().into_iter().collect::<BTreeSet<_>>(),
-        retained,
-        "marking read every retained segment"
-    );
-    assert!(report.budget_exhausted);
-    assert!(
-        !report.content_reclamation_deferred,
-        "this pass did finish marking, so it has a root set and a reference set"
-    );
-
-    // After marking, another call spends its budget on candidate decisions.
-    let mut one_more = config();
-    one_more.max_steps = Some(marking + 1);
-    let walked = gc_namespace(&store, &namespace_id, &one_more, &aged)
-        .await
-        .expect("pass with one candidate of room");
-    assert!(walked.budget_exhausted);
-    assert!(
-        walked.next_cursor.is_some(),
-        "a pass that decided a candidate reports where it walked to"
-    );
-}
-
-#[tokio::test]
-async fn a_complete_pass_fetches_each_retained_segment_once() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&inner, &namespace_id, &setup).await;
-    let (upload_id, content_ref, content_store_id, prepared) =
-        complete_upload_for_gc(&inner, &namespace_id, b"wal-only\n", &setup).await;
-    // Nothing has been flushed since this publish, so the newest WAL
-    // segment is the only place the reference lives.
-    publish_completed_content(
-        &inner,
-        &namespace_id,
-        "/docs/wal-only.txt",
-        content_ref.clone(),
-        prepared,
-        &setup,
-    )
-    .await;
-    let content_key = loonfs_objectstore::keys::content_blob(
-        &content_store_id,
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    );
-    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-    let retained = live_set(&inner, &namespace_id, &past).await.wal_segments;
-    assert!(!retained.is_empty(), "the fixture must retain a chain");
-
-    let segment_reads = KeyPredicate::prefix(wal_segment_prefix(&namespace_id));
-    let store = RecordingStore::new(inner, segment_reads);
-    let report = gc_namespace(&store, &namespace_id, &config(), &past)
-        .await
-        .expect("unbounded pass");
-
-    let mut fetches: BTreeMap<String, usize> = BTreeMap::new();
-    for key in store.take_get_keys() {
-        *fetches.entry(key).or_default() += 1;
-    }
-    assert_eq!(
-        fetches.keys().cloned().collect::<BTreeSet<_>>(),
-        retained,
-        "a pass reads the retained chain and nothing else under the segment prefix"
-    );
-    for (key, count) in &fetches {
-        assert_eq!(*count, 1, "segment `{key}` was fetched {count} times");
-    }
-    assert_eq!(
-        report.deleted.content_objects, 0,
-        "a reference that only a retained WAL record carries still protects its bytes"
-    );
-    assert!(store.head(&content_key).await.expect("head").is_some());
-    assert_eq!(
-        report.deleted.upload_sessions, 1,
-        "the session itself has said everything it will say"
-    );
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
-        .await
-        .is_none());
-}
-
-#[tokio::test]
-async fn a_budget_that_dies_among_the_checkpoint_records_decides_nothing() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    add_bounded_gc_fixture(&inner, &namespace_id, &setup).await;
-    let aged = context(
-        now_after_newest_object(
-            &inner,
-            &namespace_id,
-            UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1,
-        )
-        .await,
-    );
-
-    let record_reads = KeyPredicate::prefix(checkpoint_prefix(&namespace_id));
-    let store = RecordingStore::new(inner, record_reads);
-    let mut bounded = config();
-    bounded.max_steps = Some(3);
-    let report = gc_namespace(&store, &namespace_id, &bounded, &aged)
-        .await
-        .expect("pass stopped among the records");
-
-    assert!(report.budget_exhausted);
-    assert!(report.next_cursor.is_some());
-    assert_eq!(report.retained_candidates, 0);
-    assert_eq!(
-        (
-            report.deleted.wal_segments,
-            report.deleted.metadata_segments,
-            report.deleted.manifests,
-            report.deleted.checkpoint_records,
-        ),
-        (0, 0, 0, 0)
-    );
-    assert_eq!(
-        store.count(OperationClass::Read),
-        1,
-        "the control snapshot and owned root precede the first checkpoint"
-    );
-}
-
-#[tokio::test]
-async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
-    let temp_dir = tempdir().expect("tempdir");
-    let seed_root = temp_dir.path().join("seed");
-    let seed = LocalFsStore::new(&seed_root).expect("seed store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    namespace_with_a_scan_worth_bounding(&seed, &namespace_id, &setup).await;
-    let (upload_id, content_ref, content_store_id, prepared) =
-        complete_upload_for_gc(&seed, &namespace_id, b"published-last\n", &setup).await;
-    // The publish that saves this content lands in the newest WAL segment,
-    // so the reference sorts behind everything else the scan reads.
-    publish_completed_content(
-        &seed,
-        &namespace_id,
-        "/docs/published.txt",
-        content_ref.clone(),
-        prepared,
-        &setup,
-    )
-    .await;
-    let content_key = loonfs_objectstore::keys::content_blob(
-        &content_store_id,
-        &content_ref.owner_namespace_id,
-        &content_ref.content_id,
-    );
-    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-    for max_steps in [1, 2, 5, 17, 64] {
-        let trial_root = temp_dir.path().join(format!("trial-{max_steps}"));
-        copy_tree(&seed_root, &trial_root);
-        let store = LocalFsStore::new(&trial_root).expect("trial store");
-        let mut bounded = config();
-        bounded.max_steps = Some(max_steps);
-        let mut previous = None;
-        for pass_no in 0..1000 {
-            let pass = gc_namespace(&store, &namespace_id, &bounded, &past)
-                .await
-                .expect("bounded pass");
-            assert_eq!(pass.deleted.content_objects, 0);
-            assert!(store.head(&content_key).await.expect("head").is_some());
-            let state = super::run::load_run(&store, &namespace_id)
-                .await
-                .expect("progress")
-                .expect("run");
-            assert_ne!(
-                previous.as_ref(),
-                Some(&state.state),
-                "budget {max_steps} must advance durable progress"
-            );
-            previous = Some(state.state);
-            bounded.cursor = pass.next_cursor;
-            if bounded.cursor.is_none() {
-                break;
-            }
-            assert!(pass_no < 999, "budget {max_steps} must finish");
-        }
-        assert!(
-            read_upload_session(&store, &namespace_id, &upload_id)
-                .await
-                .is_none(),
-            "every budget eventually decides the completed session"
-        );
     }
 }
 
@@ -1719,6 +1187,11 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .await
         .expect("advance floor");
 
+    let orphan = metadata_segment(&namespace_id, &loonfs_api::MetadataSegmentId::generate());
+    store
+        .put_if_absent(&orphan, Bytes::from_static(b"unused"))
+        .await
+        .expect("young orphan");
     let young = context(now_after_newest_object(&store, &namespace_id, 0).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &young)
         .await
@@ -1738,23 +1211,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
     stat_root(&store, &namespace_id).await;
 }
 
-/// Reports every object written before this point as ancient, leaving
-/// everything written after it with its real age.
-///
-/// Real filesystem stamps put a whole fixture inside the same millisecond,
-/// so a test that needs "written long ago" and "written just now" in one
-/// namespace has to say which is which itself.
-fn aged_before_now(
-    inner: LocalFsStore,
-    already_written: BTreeSet<String>,
-) -> MetadataMapStore<LocalFsStore> {
-    MetadataMapStore::aged(
-        inner,
-        KeyPredicate::new(move |key| already_written.contains(key)),
-    )
-}
-
-/// Every reason's count, summed — what `retained_candidates` must equal.
+/// The sum of every reason, which `retained_candidates` must equal.
 fn reason_total(report: &GcResponse) -> u64 {
     report
         .retained
@@ -1927,6 +1384,14 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(
+        &store,
+        &namespace_id,
+        "/docs/before-floor.txt",
+        "before-floor",
+        &setup,
+    )
+    .await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
@@ -1963,9 +1428,8 @@ async fn gc_pass(
     let mut total = GcResponse::empty(namespace_id.clone());
     loop {
         let pass = gc_namespace(store, namespace_id, &config, context).await?;
-        config.cursor.clone_from(&pass.next_cursor);
         accumulate_report(&mut total, &pass);
-        if config.cursor.is_none() {
+        if !pass.budget_exhausted {
             return Ok(total);
         }
     }
@@ -1979,7 +1443,6 @@ async fn assert_record_and_basis_reaped(
     manifest_number: &ManifestNo,
 ) {
     assert_eq!(pass.deleted.checkpoint_records, 1);
-    assert!(!pass.retention_degraded);
     assert!(
         crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
             .await
@@ -2012,11 +1475,6 @@ async fn assert_basis_reaped(
 #[tokio::test]
 async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     assert_a_dead_records_cascade(None).await;
-}
-
-#[tokio::test]
-async fn a_chunked_sweep_reaches_the_same_dead_record_cascade() {
-    assert_a_dead_records_cascade(Some(1)).await;
 }
 
 async fn assert_a_dead_records_cascade(max_steps: Option<usize>) {
@@ -2156,7 +1614,6 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     // next two superseded it; only the root's manifest is reachable. Its
     // segments are all still referenced (a flush only appends delta runs).
     assert_eq!(report.deleted.manifests, 2);
-    assert!(!report.retention_degraded);
     let manifests_left = store
         .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
@@ -2196,7 +1653,6 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         after_fold.deleted.metadata_segments > 0,
         "folded-away run segments become collectable"
     );
-    assert!(!after_fold.retention_degraded);
 
     stat_root(&store, &namespace_id).await;
     let view = load_current_metadata_view(&store, &namespace_id)
@@ -3191,7 +2647,6 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     let tight = GcConfig {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
         max_steps: None,
-        cursor: None,
     };
     // The crash window itself: the fork wrote its leased source record and
     // died before installing the target head, so nothing under the target
@@ -3502,91 +2957,14 @@ async fn gc_of_an_absent_namespace_lists_and_deletes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("orphan").expect("namespace id");
-    let store = IncompleteGcAccountingStore {
-        inner,
-        deletes: AtomicUsize::new(0),
-        lists: AtomicUsize::new(0),
-    };
+    let store = RecordingStore::new(inner, KeyPredicate::any());
 
     let report = gc_namespace(&store, &namespace_id, &config(), &context(u64::MAX))
         .await
         .expect("gc absent namespace");
     assert_eq!(report, GcResponse::empty(namespace_id.clone()));
-    assert_eq!(store.lists.load(Ordering::SeqCst), 0);
-    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-}
-
-async fn add_bounded_gc_fixture(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    setup: &MutationContext,
-) {
-    bootstrap_namespace(store, namespace_id, setup, false)
-        .await
-        .expect("bootstrap");
-    let mut checkpoints = Vec::new();
-    for index in 0..6 {
-        write_test_file(
-            store,
-            namespace_id,
-            &format!("/docs/{index}.txt"),
-            &format!("bounded-gc-{index}"),
-            setup,
-        )
-        .await;
-        checkpoints.push(
-            create_checkpoint(store, namespace_id, setup)
-                .await
-                .expect("checkpoint"),
-        );
-    }
-    for checkpoint in &checkpoints[..checkpoints.len() - 1] {
-        release_checkpoint_record(store, namespace_id, &checkpoint.checkpoint_id, setup.now_ms)
-            .await
-            .expect("release checkpoint");
-    }
-    advance_retention_floor(store, namespace_id, setup)
-        .await
-        .expect("advance floor");
-
-    for index in 0..6 {
-        for key in [
-            wal_segment(
-                namespace_id,
-                &loonfs_api::WalSegmentId::parse(format!("wal_{index:020}-0000000000000000"))
-                    .expect("valid WAL segment id"),
-            ),
-            metadata_segment(
-                namespace_id,
-                &loonfs_api::MetadataSegmentId::parse(format!("seg_{index:032x}"))
-                    .expect("valid metadata segment id"),
-            ),
-            format!(
-                "{}000-orphan-{index:02}.manifest.json",
-                metadata_manifest_prefix(namespace_id)
-            ),
-        ] {
-            store
-                .put_if_absent(&key, Bytes::from_static(b"orphan"))
-                .await
-                .expect("write orphan");
-        }
-    }
-    write_upload_session(store, namespace_id).await;
-}
-
-fn copy_tree(source: &std::path::Path, target: &std::path::Path) {
-    std::fs::create_dir_all(target).expect("create copied store directory");
-    for entry in std::fs::read_dir(source).expect("read source store") {
-        let entry = entry.expect("read source entry");
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        if entry.file_type().expect("read source file type").is_dir() {
-            copy_tree(&source_path, &target_path);
-        } else {
-            std::fs::copy(&source_path, &target_path).expect("copy store object");
-        }
-    }
+    assert_eq!(store.counts().lists, 0);
+    assert_eq!(store.counts().deletes, 0);
 }
 
 async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTreeSet<String> {
@@ -3604,570 +2982,11 @@ fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.released_checkpoints.add(&pass.released_checkpoints);
     total.retained_candidates += pass.retained_candidates;
     total.retained.add(&pass.retained);
-    total.retention_degraded |= pass.retention_degraded;
-    total.content_reclamation_deferred |= pass.content_reclamation_deferred;
     total.next_reclamation_at_ms = match (total.next_reclamation_at_ms, pass.next_reclamation_at_ms)
     {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
-}
-
-#[tokio::test]
-async fn interrupted_revision_scan_resumes_at_the_saved_page_entry_and_block() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let store = FailStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_segment_prefix(&namespace_id)),
-        OperationClass::Read,
-        InjectedError::Transport("revision read interrupted".to_owned()),
-    );
-    add_bounded_gc_fixture(store.inner(), &namespace_id, &context(1_000)).await;
-    let now = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let mut bounded = config();
-    bounded.max_steps = Some(1);
-    let mut passes = 0;
-    let mut first_revision_position = None;
-    let saved = loop {
-        let pass = gc_namespace(&store, &namespace_id, &bounded, &now)
-            .await
-            .expect("bounded pass");
-        bounded.cursor = pass.next_cursor;
-        assert!(bounded.cursor.is_some(), "run must reach revision scanning");
-        passes += 1;
-        assert!(passes < 1_000, "marking must converge");
-        let loaded = super::run::load_run(&store, &namespace_id)
-            .await
-            .expect("load progress")
-            .expect("run");
-        if let GcPhase::Revisions {
-            position,
-            block_index: 1,
-            content,
-            ..
-        } = &loaded.state.phase
-        {
-            if first_revision_position.is_some_and(|first| first != *position)
-                && content.merge.is_none()
-            {
-                break loaded.state;
-            }
-            first_revision_position.get_or_insert(*position);
-        }
-    };
-    let GcPhase::Revisions {
-        position,
-        block_index,
-        ..
-    } = &saved.phase
-    else {
-        panic!("expected revision scan");
-    };
-    assert_eq!(*block_index, 1);
-    let run_key = super::run::run_key(&namespace_id);
-    let bytes = store
-        .get(&run_key, None)
-        .await
-        .expect("saved bytes")
-        .expect("run");
-    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("run document");
-    assert_eq!(
-        payload["payload"]["phase"]["position"],
-        serde_json::json!({
-            "page_index": position.page_index,
-            "entry_index": position.entry_index,
-        })
-    );
-    assert_eq!(payload["payload"]["phase"]["block_index"], *block_index);
-
-    store.fail_all();
-    gc_namespace(&store, &namespace_id, &bounded, &now)
-        .await
-        .expect_err("revision read must fail");
-    assert!(store.attempts() > 0);
-    assert_eq!(
-        store.get(&run_key, None).await.expect("saved bytes"),
-        Some(bytes)
-    );
-    store.clear();
-
-    gc_namespace(&store, &namespace_id, &bounded, &context(now.now_ms + 1))
-        .await
-        .expect("resume revision scan");
-    let resumed = super::run::load_run(&store, &namespace_id)
-        .await
-        .expect("load resumed progress")
-        .expect("run")
-        .state;
-    let GcPhase::Revisions {
-        position: actual_position,
-        block_index: actual_block_index,
-        ..
-    } = resumed.phase
-    else {
-        panic!("expected revision scan");
-    };
-    assert_eq!(actual_position.page_index, position.page_index);
-    assert_eq!(actual_position.entry_index, position.entry_index + 1);
-    assert_eq!(actual_block_index, 0);
-    assert_eq!(resumed.step_no, saved.step_no + 1);
-}
-
-#[tokio::test]
-async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
-    let temp_dir = tempdir().expect("tempdir");
-    let unbounded_root = temp_dir.path().join("unbounded");
-    let bounded_root = temp_dir.path().join("bounded");
-    let unbounded_store = LocalFsStore::new(&unbounded_root).expect("unbounded store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    add_bounded_gc_fixture(&unbounded_store, &namespace_id, &setup).await;
-    copy_tree(&unbounded_root, &bounded_root);
-    let bounded_store = LocalFsStore::new(&bounded_root).expect("bounded store");
-
-    let unbounded_now = now_after_newest_object(
-        &unbounded_store,
-        &namespace_id,
-        UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1,
-    )
-    .await;
-    let unbounded_report = gc_namespace(
-        &unbounded_store,
-        &namespace_id,
-        &config(),
-        &context(unbounded_now),
-    )
-    .await
-    .expect("unbounded pass");
-
-    let bounded_now = now_after_newest_object(
-        &bounded_store,
-        &namespace_id,
-        UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1,
-    )
-    .await;
-    let mut bounded_config = config();
-    // Keep every invocation small, including marking and cleanup.
-    bounded_config.max_steps = Some(3);
-    let mut bounded_report = GcResponse::empty(namespace_id.clone());
-    let mut passes = 0;
-    loop {
-        let pass = gc_namespace(
-            &bounded_store,
-            &namespace_id,
-            &bounded_config,
-            &context(bounded_now),
-        )
-        .await
-        .expect("bounded pass");
-        passes += 1;
-        accumulate_report(&mut bounded_report, &pass);
-        let Some(cursor) = pass.next_cursor else {
-            break;
-        };
-        bounded_config.cursor = Some(cursor);
-    }
-
-    assert!(passes > 5, "fixture should require substantial resumption");
-    assert_eq!(
-        namespace_keys(&bounded_store, &namespace_id).await,
-        namespace_keys(&unbounded_store, &namespace_id).await
-    );
-    assert_eq!(
-        (
-            bounded_report.deleted.wal_segments,
-            bounded_report.deleted.metadata_segments,
-            bounded_report.deleted.manifests,
-            bounded_report.deleted.checkpoint_records,
-            bounded_report.deleted.upload_sessions,
-            bounded_report.deleted.content_objects,
-        ),
-        (
-            unbounded_report.deleted.wal_segments,
-            unbounded_report.deleted.metadata_segments,
-            unbounded_report.deleted.manifests,
-            unbounded_report.deleted.checkpoint_records,
-            unbounded_report.deleted.upload_sessions,
-            unbounded_report.deleted.content_objects,
-        )
-    );
-}
-
-#[tokio::test]
-async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    let orphan_keys: Vec<String> = (0..5)
-        .map(|index| {
-            wal_segment(
-                &namespace_id,
-                &loonfs_api::WalSegmentId::parse(format!("wal_{index:020}-0000000000000000"))
-                    .expect("valid WAL segment id"),
-            )
-        })
-        .collect();
-    for key in &orphan_keys {
-        inner
-            .put_if_absent(key, Bytes::from_static(b"orphan"))
-            .await
-            .expect("write orphan");
-    }
-    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
-    let wal_prefix = wal_segment_prefix(&namespace_id);
-    let store = RecordingStore::new(
-        ListingCursorStore::new(inner),
-        KeyPredicate::prefix(wal_prefix.clone()),
-    );
-    let mut bounded = config();
-    // Two candidates a pass, plus the roots the pass marks before it walks.
-    bounded.max_steps = Some(marking_units(&store, &namespace_id, &aged).await + 2);
-    store.reset();
-
-    let first = gc_namespace(&store, &namespace_id, &bounded, &aged)
-        .await
-        .expect("first bounded pass");
-    assert_eq!(first.deleted.wal_segments, 2);
-    assert!(first.next_cursor.is_some());
-    assert_eq!(store.counts().heads, 2);
-    assert_eq!(store.counts().deletes, 2);
-    for key in &orphan_keys[..2] {
-        assert!(store.head(key).await.expect("head orphan").is_none());
-    }
-    assert!(store
-        .head(&orphan_keys[2])
-        .await
-        .expect("head next orphan")
-        .is_some());
-
-    store.inner().take_calls();
-    bounded.cursor = first.next_cursor;
-    bounded.max_steps = Some(2);
-    store.reset();
-    let second = gc_namespace(&store, &namespace_id, &bounded, &aged)
-        .await
-        .expect("second bounded pass");
-    assert_eq!(second.deleted.wal_segments, 2);
-    assert!(second.next_cursor.is_some());
-    assert_eq!(store.counts().heads, 2);
-    assert_eq!(store.counts().deletes, 2);
-    let resumed_wal_starts: Vec<Option<String>> = store
-        .inner()
-        .take_calls()
-        .into_iter()
-        .filter_map(|(prefix, start_after)| (prefix == wal_prefix).then_some(start_after))
-        .collect();
-    assert_eq!(
-        resumed_wal_starts,
-        vec![Some(orphan_keys[1].clone())],
-        "the resumed family listing starts strictly after the cursor key"
-    );
-    for key in &orphan_keys[..4] {
-        assert!(store.head(key).await.expect("head orphan").is_none());
-    }
-
-    bounded.cursor = second.next_cursor;
-    loop {
-        store.reset();
-        let pass = gc_namespace(&store, &namespace_id, &bounded, &aged)
-            .await
-            .expect("remaining bounded pass");
-        assert!(store.counts().heads <= 2);
-        assert!(store.counts().deletes <= 2);
-        let Some(cursor) = pass.next_cursor else {
-            break;
-        };
-        bounded.cursor = Some(cursor);
-    }
-    for key in &orphan_keys {
-        assert!(store.head(key).await.expect("head orphan").is_none());
-    }
-}
-
-#[tokio::test]
-async fn stale_cursor_preserves_new_publications_with_the_original_cutoff() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    for index in 0..2 {
-        let key = wal_segment(
-            &namespace_id,
-            &loonfs_api::WalSegmentId::parse(format!("wal_{index:020}-0000000000000000"))
-                .expect("valid WAL segment id"),
-        );
-        store
-            .put_if_absent(&key, Bytes::from_static(b"orphan"))
-            .await
-            .expect("write orphan");
-    }
-    let first_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
-    let mut bounded = config();
-    // Stop shortly after marking so a publication lands before resumption.
-    bounded.max_steps = Some(marking_units(&store, &namespace_id, &context(first_now)).await + 1);
-    let first = gc_namespace(&store, &namespace_id, &bounded, &context(first_now))
-        .await
-        .expect("first bounded pass");
-    let cursor = first.next_cursor.expect("work remains");
-
-    write_test_file(
-        &store,
-        &namespace_id,
-        "/docs/new.txt",
-        "stale-cursor-new-wal",
-        &setup,
-    )
-    .await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("new checkpoint");
-    let resume_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
-    let resume_context = context(resume_now);
-    let live = live_set(&store, &namespace_id, &resume_context).await;
-
-    let mut resume = config();
-    resume.cursor = Some(cursor);
-    gc_namespace(&store, &namespace_id, &resume, &resume_context)
-        .await
-        .expect("resume stale cursor");
-
-    for key in live
-        .wal_segments
-        .iter()
-        .chain(live.segments.iter())
-        .chain(live.checkpoint_keys.iter())
-    {
-        assert!(
-            store.head(key).await.expect("head live object").is_some(),
-            "live object `{key}` must survive stale-cursor resumption"
-        );
-    }
-    for manifest_number in live.manifests {
-        let key = metadata_manifest_object(&namespace_id, &manifest_number);
-        assert!(
-            store
-                .head(&key)
-                .await
-                .expect("head live manifest")
-                .is_some(),
-            "live manifest `{key}` must survive stale-cursor resumption"
-        );
-    }
-    stat_root(&store, &namespace_id).await;
-}
-
-#[tokio::test]
-async fn one_step_calls_resume_on_another_host_without_aging_new_objects() {
-    let dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(dir.path()).expect("store");
-    let ns = NamespaceId::parse("demo").expect("namespace");
-    let setup = context(1000);
-    namespace_with_a_scan_worth_bounding(&inner, &ns, &setup).await;
-    let old_keys = namespace_keys(&inner, &ns).await;
-    let start = context(now_after_newest_object(&inner, &ns, 0).await);
-    let store = aged_before_now(inner, old_keys);
-    let mut bounded = config();
-    bounded.max_steps = Some(1);
-    let first = gc_namespace(&store, &ns, &bounded, &start)
-        .await
-        .expect("reserve and capture");
-    bounded.cursor = first.next_cursor;
-    let late_key = wal_segment(
-        &ns,
-        &loonfs_api::WalSegmentId::parse("wal_00000000000000000000-ffffffffffffffff")
-            .expect("segment"),
-    );
-    store
-        .put_if_absent(&late_key, Bytes::from_static(b"new orphan"))
-        .await
-        .expect("late object");
-    let other_host = mutation_context("gc-host-two", start.now_ms + 10 * GRACE_MS);
-    let mut steps = 0;
-    loop {
-        let pass = gc_namespace(&store, &ns, &bounded, &other_host)
-            .await
-            .expect("resume on another host");
-        let run = super::run::load_run(&store, &ns)
-            .await
-            .expect("load")
-            .expect("run");
-        assert_eq!(run.state.started_at_ms, start.now_ms);
-        assert!(store
-            .head(&late_key)
-            .await
-            .expect("head new object")
-            .is_some());
-        steps += 1;
-        bounded.cursor = pass.next_cursor;
-        if bounded.cursor.is_none() {
-            break;
-        }
-        assert!(steps < 1000, "a one-step budget must finish");
-    }
-    assert!(steps > 20, "the scan and merges must require resumption");
-    assert!(store
-        .list_prefix(&loonfs_objectstore::keys::gc_runs_prefix(&ns))
-        .await
-        .expect("scratch")
-        .is_empty());
-    let fresh = gc_namespace(&store, &ns, &config(), &other_host)
-        .await
-        .expect("new collection");
-    assert!(fresh.deleted.wal_segments > 0);
-    assert!(
-        store.head(&late_key).await.expect("head").is_none(),
-        "the next run may use its newer cutoff"
-    );
-}
-
-#[tokio::test]
-async fn overlapping_collectors_share_progress_and_finish_the_same_run() {
-    let dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(dir.path()).expect("store");
-    let ns = NamespaceId::parse("demo").expect("namespace");
-    let setup = context(1000);
-    add_bounded_gc_fixture(&store, &ns, &setup).await;
-    let now = context(
-        now_after_newest_object(&store, &ns, UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1).await,
-    );
-    let mut bounded = config();
-    bounded.max_steps = Some(1);
-    bounded.cursor = gc_namespace(&store, &ns, &bounded, &now)
-        .await
-        .expect("start")
-        .next_cursor;
-    let second_host = mutation_context("second-collector", now.now_ms + GRACE_MS);
-    for step in 0..2000 {
-        let before = super::run::load_run(&store, &ns)
-            .await
-            .expect("load")
-            .expect("run");
-        let (left, right) = tokio::join!(
-            gc_namespace(&store, &ns, &bounded, &now),
-            gc_namespace(&store, &ns, &bounded, &second_host)
-        );
-        let left = left.expect("first collector");
-        let right = right.expect("second collector");
-        let after = super::run::load_run(&store, &ns)
-            .await
-            .expect("load")
-            .expect("run");
-        assert_eq!(after.state.gc_run_id, before.state.gc_run_id);
-        assert!(after.state.step_no > before.state.step_no);
-        if matches!(after.state.phase, GcPhase::Complete {}) {
-            break;
-        }
-        bounded.cursor = right.next_cursor.or(left.next_cursor);
-        assert!(step < 1999, "concurrent marking must converge");
-    }
-    let view = load_current_metadata_view(&store, &ns)
-        .await
-        .expect("current view");
-    view.resolve_path("/docs/5.txt", AttributeInclusion::Omit)
-        .await
-        .expect("published file remains readable");
-}
-
-#[tokio::test]
-async fn a_paused_old_worker_cannot_advance_a_newer_run() {
-    let dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(dir.path()).expect("store");
-    let ns = NamespaceId::parse("demo").expect("namespace");
-    let setup = context(1000);
-    namespace_with_a_scan_worth_bounding(&store, &ns, &setup).await;
-    let now = context(now_after_newest_object(&store, &ns, GRACE_MS + 1).await);
-    let mut bounded = config();
-    bounded.max_steps = Some(1);
-    let first = gc_namespace(&store, &ns, &bounded, &now)
-        .await
-        .expect("start");
-    bounded.cursor = first.next_cursor;
-    let gated = BlockingStore::new(
-        LocalFsStore::new(dir.path()).expect("second store"),
-        KeyPredicate::prefix(metadata_manifest_prefix(&ns)),
-        OperationClass::Read,
-    );
-    gated.block_next();
-    let (old, new_run) = tokio::join!(gc_namespace(&gated, &ns, &bounded, &now), async {
-        gated.wait_until_blocked().await;
-        let mut finish = config();
-        finish.cursor.clone_from(&bounded.cursor);
-        gc_namespace(&store, &ns, &finish, &now)
-            .await
-            .expect("another host finishes the reserved run");
-        let mut start_next = config();
-        start_next.max_steps = Some(1);
-        gc_namespace(&store, &ns, &start_next, &now)
-            .await
-            .expect("reserve next run");
-        let new_run = super::run::load_run(&store, &ns)
-            .await
-            .expect("load")
-            .expect("run");
-        gated.release();
-        new_run.state
-    });
-    old.expect("stale worker settles its lost CAS");
-    assert_eq!(
-        super::run::load_run(&store, &ns)
-            .await
-            .expect("load")
-            .expect("run")
-            .state,
-        new_run
-    );
-    gc_namespace(&store, &ns, &config(), &now)
-        .await
-        .expect("finish new run and old scratch");
-    assert!(store
-        .list_prefix(&loonfs_objectstore::keys::gc_runs_prefix(&ns))
-        .await
-        .expect("scratch")
-        .is_empty());
-}
-
-#[tokio::test]
-async fn a_missing_completed_mark_page_stops_before_deleting_candidates() {
-    let dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(dir.path()).expect("store");
-    let ns = NamespaceId::parse("demo").expect("namespace");
-    let setup = context(1000);
-    namespace_with_a_scan_worth_bounding(&store, &ns, &setup).await;
-    let now = context(now_after_newest_object(&store, &ns, GRACE_MS + 1).await);
-    let mut bounded = config();
-    bounded.max_steps = Some(1);
-    loop {
-        bounded.cursor = gc_namespace(&store, &ns, &bounded, &now)
-            .await
-            .expect("mark")
-            .next_cursor;
-        let state = super::run::load_run(&store, &ns)
-            .await
-            .expect("load")
-            .expect("run")
-            .state;
-        if let GcPhase::Sweeping { table, .. } = state.phase {
-            assert!(table.page_count > 0);
-            let page_key =
-                loonfs_objectstore::keys::gc_mark_page(&ns, &state.gc_run_id, &table.table_id, 0);
-            store.delete(&page_key).await.expect("remove page");
-            break;
-        }
-    }
-    let before = namespace_keys(&store, &ns).await;
-    bounded.max_steps = None;
-    gc_namespace(&store, &ns, &bounded, &now)
-        .await
-        .expect_err("missing evidence is never an absent reference");
-    assert_eq!(namespace_keys(&store, &ns).await, before);
 }
 
 #[tokio::test]
@@ -4287,58 +3106,6 @@ async fn host_clock_error_advances_record_expiry_but_release_keeps_its_grace() {
 }
 
 #[tokio::test]
-async fn retirement_requires_deleted_roots_and_uses_the_resuming_invocation_clock() {
-    let directory = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("retirement").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    let bounded = GcConfig {
-        max_steps: Some(1),
-        ..config()
-    };
-    let started = gc_namespace(&store, &namespace_id, &bounded, &setup)
-        .await
-        .expect("reserve active roots");
-    delete_namespace(
-        &store,
-        &namespace_id,
-        DeleteNamespaceOptions::default(),
-        &setup,
-    )
-    .await
-    .expect("delete");
-    let resume = GcConfig {
-        cursor: started.next_cursor,
-        ..config()
-    };
-    let finished = gc_namespace(&store, &namespace_id, &resume, &context(GRACE_MS * 10))
-        .await
-        .expect("finish old run");
-    assert_eq!(finished.reclaim_after_ms, None);
-    let started = gc_namespace(&store, &namespace_id, &bounded, &context(GRACE_MS * 11))
-        .await
-        .expect("reserve deleted roots");
-    let resume = GcConfig {
-        cursor: started.next_cursor,
-        ..config()
-    };
-    let fresh = GRACE_MS * 100;
-    let finished = gc_namespace(&store, &namespace_id, &resume, &context(fresh))
-        .await
-        .expect("retire");
-    assert_eq!(finished.reclaim_after_ms, Some(fresh + GRACE_MS));
-    assert_eq!(finished.next_reclamation_at_ms, finished.reclaim_after_ms);
-    let finished = gc_namespace(&store, &namespace_id, &config(), &context(fresh + GRACE_MS))
-        .await
-        .expect("deadline reached");
-    assert_eq!(finished.reclaim_after_ms, Some(fresh + GRACE_MS));
-    assert_eq!(finished.next_reclamation_at_ms, None);
-}
-
-#[tokio::test]
 async fn competing_collectors_preserve_the_winning_retirement_deadline() {
     let directory = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(directory.path()).expect("store");
@@ -4385,7 +3152,7 @@ async fn competing_collectors_preserve_the_winning_retirement_deadline() {
 }
 
 #[tokio::test]
-async fn uncertain_retirement_reads_back_and_failed_retirement_saves_no_progress() {
+async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_further() {
     for landed in [false, true] {
         let directory = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(directory.path()).expect("store");
@@ -4402,21 +3169,6 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_saves_no_progress
         )
         .await
         .expect("delete");
-        let (mut state, _) = mark_state(&inner, &namespace_id, &setup)
-            .await
-            .expect("mark deleted roots");
-        if let GcPhase::Sweeping { family, .. } = &mut state.phase {
-            *family = GcCandidateFamily::Checkpoints;
-        }
-        let run_key = super::run::run_key(&namespace_id);
-        let bytes = Bytes::from(
-            loonfs_api::wire::control::encode_control_state(ControlObjectKind::GcRun, &state)
-                .expect("encode run"),
-        );
-        inner
-            .put_overwrite(&run_key, bytes.clone())
-            .await
-            .expect("save sweep");
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(wal_head(&namespace_id)),
@@ -4440,14 +3192,6 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_saves_no_progress
             landed.then_some(GRACE_MS * 2)
         );
         if !landed {
-            assert_eq!(
-                store
-                    .get(&run_key, None)
-                    .await
-                    .expect("run")
-                    .expect("run exists"),
-                bytes
-            );
             assert_eq!(store.counts().compare_and_swaps, 1);
         }
     }
@@ -4495,224 +3239,6 @@ async fn owned_content_keys<S: ObjectStore>(
         keys.push(key);
     }
     keys
-}
-
-#[tokio::test]
-async fn retired_owner_sweep_is_bounded_resumable_and_lists_again() {
-    let directory = tempdir().expect("tempdir");
-    let mut store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("a").expect("namespace");
-    let (content_store_id, now) = retired_content_namespace(&store, &namespace_id).await;
-    let keys = owned_content_keys(&store, &content_store_id, &namespace_id).await;
-    let sibling = NamespaceId::parse("ab").expect("sibling");
-    let sibling_keys = owned_content_keys(&store, &content_store_id, &sibling).await;
-    let prefix = loonfs_objectstore::keys::content_owner_prefix(&content_store_id, &namespace_id);
-    let unknown = format!("{prefix}unknown");
-    store
-        .put_if_absent(&unknown, Bytes::new())
-        .await
-        .expect("unknown key");
-    let early = gc_namespace(
-        &store,
-        &namespace_id,
-        &GcConfig {
-            max_steps: Some(1),
-            ..config()
-        },
-        &context(now.now_ms - 1),
-    )
-    .await
-    .expect("early run");
-    let early = gc_namespace(
-        &store,
-        &namespace_id,
-        &GcConfig {
-            cursor: early.next_cursor,
-            ..config()
-        },
-        &now,
-    )
-    .await
-    .expect("resume past deadline");
-    assert_eq!(early.next_reclamation_at_ms, Some(now.now_ms));
-    assert_eq!(early.deleted.retired_content_objects, 0);
-    let mut bounded = GcConfig {
-        max_steps: Some(1),
-        ..config()
-    };
-    let mut deleted = 0;
-    let mut retained = 0;
-    for call in 0..100 {
-        store.take();
-        let report = gc_namespace(&store, &namespace_id, &bounded, &now)
-            .await
-            .expect("bounded run");
-        assert!(store.counts().deletes <= 1);
-        assert!(store.counts().lists <= 1);
-        deleted += report.deleted.retired_content_objects;
-        retained += report.retained.unrecognized_key;
-        bounded.cursor = report.next_cursor;
-        if bounded.cursor.is_none() {
-            break;
-        }
-        store = RecordingStore::new(
-            LocalFsStore::new(directory.path()).expect("reopen store"),
-            KeyPredicate::any(),
-        );
-        assert!(call < 99, "bounded run must complete");
-    }
-    assert_eq!(deleted, keys.len() as u64);
-    assert_eq!(retained, 1);
-    assert_eq!(
-        store.list_prefix(&prefix).await.expect("owner prefix"),
-        std::slice::from_ref(&unknown)
-    );
-    for key in sibling_keys.iter().chain(
-        [
-            loonfs_objectstore::keys::wal_head(&namespace_id),
-            loonfs_objectstore::keys::content_store(&content_store_id),
-        ]
-        .iter(),
-    ) {
-        assert!(store.head(key).await.expect("head").is_some());
-    }
-    let late_id = loonfs_api::ContentId::parse(format!("con_{:032x}", 1)).expect("late id");
-    let late_key =
-        loonfs_objectstore::keys::content_blob(&content_store_id, &namespace_id, &late_id);
-    assert!(late_key < keys[0]);
-    store
-        .put_if_absent(&late_key, Bytes::from_static(b"late"))
-        .await
-        .expect("late object");
-    let report = gc_namespace(&store, &namespace_id, &config(), &now)
-        .await
-        .expect("next run");
-    assert_eq!(report.deleted.retired_content_objects, 1);
-    assert_eq!(
-        store.list_prefix(&prefix).await.expect("owner prefix"),
-        [unknown]
-    );
-}
-
-#[tokio::test]
-async fn retired_owner_delete_failure_retries_the_failed_key() {
-    let directory = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("retry").expect("namespace");
-    let (content_store_id, now) = retired_content_namespace(&inner, &namespace_id).await;
-    let keys = owned_content_keys(&inner, &content_store_id, &namespace_id).await;
-    let store = FailStore::new(
-        inner,
-        KeyPredicate::exact(keys[1].clone()),
-        OperationClass::Delete,
-        InjectedError::Transport("delete failed".to_owned()),
-    );
-    store.fail_next(1);
-    assert!(gc_namespace(&store, &namespace_id, &config(), &now)
-        .await
-        .is_err());
-    let state = super::run::load_run(&store, &namespace_id)
-        .await
-        .expect("load")
-        .expect("run")
-        .state;
-    assert!(
-        matches!(state.phase, GcPhase::Sweeping { family: GcCandidateFamily::OwnedContent, last_key: Some(ref key), .. } if key == &keys[0])
-    );
-    assert!(store.head(&keys[1]).await.expect("head").is_some());
-    let report = gc_namespace(&store, &namespace_id, &config(), &now)
-        .await
-        .expect("retry");
-    assert_eq!(report.deleted.retired_content_objects, 2);
-    for key in keys {
-        assert!(store.head(&key).await.expect("head").is_none());
-    }
-}
-
-#[tokio::test]
-async fn retired_owner_head_recheck_fails_without_writes() {
-    use loonfs_api::wire::control::{encode_control_state, NamespaceStatus};
-    for invalid in 0..5 {
-        let directory = tempdir().expect("tempdir");
-        let inner = LocalFsStore::new(directory.path()).expect("store");
-        let namespace_id = NamespaceId::parse("head-check").expect("namespace");
-        let (content_store_id, now) = retired_content_namespace(&inner, &namespace_id).await;
-        owned_content_keys(&inner, &content_store_id, &namespace_id).await;
-        let bounded = GcConfig {
-            max_steps: Some(1),
-            ..config()
-        };
-        for call in 0..100 {
-            gc_namespace(&inner, &namespace_id, &bounded, &now)
-                .await
-                .expect("advance");
-            let state = super::run::load_run(&inner, &namespace_id)
-                .await
-                .expect("load")
-                .expect("run")
-                .state;
-            if matches!(
-                state.phase,
-                GcPhase::Sweeping {
-                    family: GcCandidateFamily::OwnedContent,
-                    last_key: None,
-                    ..
-                }
-            ) {
-                break;
-            }
-            assert!(call < 99, "must reach owner family");
-        }
-        let mut head = crate::namespace::control::load_head_object(&inner, &namespace_id)
-            .await
-            .expect("head")
-            .state;
-        match invalid {
-            0 => head.content_store_id = ContentStoreId::generate(),
-            1 => head.status = NamespaceStatus::Active {},
-            2 => {
-                head.status = NamespaceStatus::Deleted {
-                    reclaim_after_ms: None,
-                }
-            }
-            3 => {
-                head.status = NamespaceStatus::Deleted {
-                    reclaim_after_ms: Some(now.now_ms + 1),
-                }
-            }
-            _ => {}
-        }
-        inner
-            .put_overwrite(
-                &wal_head(&namespace_id),
-                Bytes::from(
-                    encode_control_state(ControlObjectKind::WalHead, &head).expect("encode"),
-                ),
-            )
-            .await
-            .expect("replace head");
-        let failure = FailStore::new(
-            inner,
-            KeyPredicate::exact(wal_head(&namespace_id)),
-            OperationClass::Read,
-            InjectedError::Transport("head read failed".to_owned()),
-        );
-        if invalid == 4 {
-            failure.fail_next(1);
-        }
-        let store = RecordingStore::new(failure, KeyPredicate::any());
-        let error = gc_namespace(&store, &namespace_id, &config(), &now)
-            .await
-            .expect_err("reject invalid head");
-        if invalid < 4 {
-            assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
-        }
-        assert_eq!(store.counts().deletes, 0);
-        assert_eq!(store.counts().puts, 0);
-    }
 }
 
 #[tokio::test]
@@ -4852,4 +3378,289 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
             .state,
         current.state
     );
+}
+
+#[tokio::test]
+async fn bounded_calls_restart_and_finish_without_a_continuation() {
+    use loonfs_test_support::stores::RecordedOperation;
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("bounded").expect("namespace");
+    let store = RecordingStore::new(
+        MetadataMapStore::aged(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        ),
+        KeyPredicate::any(),
+    );
+    bootstrap_namespace(&store, &namespace_id, &context(1_000), false)
+        .await
+        .expect("bootstrap");
+    let keys: Vec<_> = (1..=3)
+        .map(|number| {
+            metadata_segment(
+                &namespace_id,
+                &loonfs_api::MetadataSegmentId::parse(format!("seg_{number:032x}"))
+                    .expect("segment"),
+            )
+        })
+        .collect();
+    for key in &keys {
+        store
+            .put_if_absent(key, Bytes::from_static(b"unused"))
+            .await
+            .expect("segment");
+    }
+    let bounded = GcConfig {
+        max_steps: Some(2),
+        ..config()
+    };
+    let clock = context(UNREFERENCED_SEGMENT_MIN_AGE_MS + 1);
+    store.reset();
+    let first = gc_namespace(&store, &namespace_id, &bounded, &clock)
+        .await
+        .expect("first call");
+    assert!(first.budget_exhausted);
+    assert_eq!(first.deleted.metadata_segments, 2);
+    assert_eq!(store.counts().deletes, 2);
+    assert_eq!(store.counts().puts, 0);
+    store.reset();
+    let second = gc_namespace(&store, &namespace_id, &bounded, &clock)
+        .await
+        .expect("second call");
+    assert!(!second.budget_exhausted);
+    assert_eq!(second.deleted.metadata_segments, 1);
+    assert_eq!(store.counts().deletes, 1);
+    assert!(store.snapshot().iter().any(|op| matches!(op, RecordedOperation::List { prefix } if prefix == &metadata_segment_prefix(&namespace_id))));
+}
+
+#[tokio::test]
+async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("concurrent").expect("namespace");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&inner, &namespace_id, "/one", "one", &setup).await;
+    let pin = create_checkpoint(&inner, &namespace_id, &setup)
+        .await
+        .expect("pin");
+    write_test_file(&inner, &namespace_id, "/two", "two", &setup).await;
+    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+        .await
+        .expect("flush");
+    let protected: BTreeSet<_> = inner
+        .list_prefix(&metadata_segment_prefix(&namespace_id))
+        .await
+        .expect("segments")
+        .into_iter()
+        .collect();
+    let old = metadata_segment(
+        &namespace_id,
+        &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+            .expect("segment"),
+    );
+    let young = metadata_segment(
+        &namespace_id,
+        &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000002")
+            .expect("segment"),
+    );
+    for key in [&old, &young] {
+        inner
+            .put_if_absent(key, Bytes::from_static(b"unused"))
+            .await
+            .expect("orphan");
+    }
+    let store = BlockingStore::new(
+        MetadataMapStore::aged(inner, KeyPredicate::exact(&old)),
+        KeyPredicate::exact(&old),
+        OperationClass::Delete,
+    );
+    store.block_next();
+    let clock = context(UNREFERENCED_SEGMENT_MIN_AGE_MS + 1);
+    let config = config();
+    let (first, second) = tokio::join!(
+        gc_namespace(&store, &namespace_id, &config, &clock),
+        async {
+            store.wait_until_blocked().await;
+            let result = gc_namespace(store.inner(), &namespace_id, &config, &clock).await;
+            store.release();
+            result
+        }
+    );
+    assert_eq!(first.expect("first collector").deleted.metadata_segments, 1);
+    assert_eq!(
+        second.expect("second collector").deleted.metadata_segments,
+        1
+    );
+    assert!(store.head(&old).await.expect("old segment").is_none());
+    assert!(store.head(&young).await.expect("young segment").is_some());
+    for key in protected {
+        assert!(store.head(&key).await.expect("protected segment").is_some());
+    }
+    assert!(store
+        .head(&metadata_manifest_object(&namespace_id, &pin.manifest_no))
+        .await
+        .expect("pin manifest")
+        .is_some());
+    stat_root(&store, &namespace_id).await;
+}
+
+#[tokio::test]
+async fn retirement_uses_the_complete_listing_and_the_calls_clock() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("retirement-clock").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let pin = create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+    delete_namespace(&store, &namespace_id, Default::default(), &setup)
+        .await
+        .expect("delete");
+    let released_at_ms = GRACE_MS * 3;
+    let released = gc_namespace(&store, &namespace_id, &config(), &context(released_at_ms))
+        .await
+        .expect("release pin");
+    assert_eq!(released.reclaim_after_ms, None);
+    assert_eq!(
+        checkpoint_lifecycle(&store, &namespace_id, &pin.checkpoint_id).await,
+        CheckpointStatus::Released { released_at_ms }
+    );
+    let within_grace = gc_namespace(
+        &store,
+        &namespace_id,
+        &config(),
+        &context(released_at_ms + GRACE_MS - 1),
+    )
+    .await
+    .expect("release grace");
+    assert_eq!(within_grace.reclaim_after_ms, None);
+    let clock = released_at_ms + GRACE_MS;
+    let stopped = gc_namespace(
+        &store,
+        &namespace_id,
+        &GcConfig {
+            max_steps: Some(1),
+            ..config()
+        },
+        &context(clock),
+    )
+    .await
+    .expect("bounded call before checkpoint cleanup");
+    assert!(stopped.budget_exhausted);
+    assert_eq!(stopped.reclaim_after_ms, None);
+    let retired = gc_namespace(&store, &namespace_id, &config(), &context(clock))
+        .await
+        .expect("retire");
+    assert_eq!(retired.reclaim_after_ms, Some(clock + GRACE_MS));
+    assert_eq!(retired.next_reclamation_at_ms, retired.reclaim_after_ms);
+}
+
+#[tokio::test]
+async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("owner-sweep").expect("namespace");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let (content_store_id, deadline) = retired_content_namespace(&inner, &namespace_id).await;
+    let keys = owned_content_keys(&inner, &content_store_id, &namespace_id).await;
+    let store = RecordingStore::new(
+        FailStore::new(
+            inner,
+            KeyPredicate::exact(&keys[0]),
+            OperationClass::Delete,
+            InjectedError::Transport("delete failed".to_owned()),
+        ),
+        KeyPredicate::any(),
+    );
+    let before = gc_namespace(
+        &store,
+        &namespace_id,
+        &config(),
+        &context(deadline.now_ms - 1),
+    )
+    .await
+    .expect("before deadline");
+    assert_eq!(before.deleted.retired_content_objects, 0);
+    assert_eq!(before.next_reclamation_at_ms, Some(deadline.now_ms));
+    store.inner().fail_next(1);
+    assert!(gc_namespace(&store, &namespace_id, &config(), &deadline)
+        .await
+        .is_err());
+    assert!(store.head(&keys[0]).await.expect("failed delete").is_some());
+    let bounded = GcConfig {
+        max_steps: Some(2),
+        ..config()
+    };
+    let first = gc_namespace(&store, &namespace_id, &bounded, &deadline)
+        .await
+        .expect("bounded owner sweep");
+    assert!(first.budget_exhausted);
+    assert_eq!(first.deleted.retired_content_objects, 2);
+    let second = gc_namespace(&store, &namespace_id, &bounded, &deadline)
+        .await
+        .expect("next owner sweep");
+    assert!(!second.budget_exhausted);
+    assert_eq!(second.deleted.retired_content_objects, 1);
+    store
+        .put_if_absent(&keys[0], Bytes::from_static(b"late write"))
+        .await
+        .expect("late content");
+    let late = gc_namespace(&store, &namespace_id, &bounded, &deadline)
+        .await
+        .expect("collect earlier key");
+    assert_eq!(late.deleted.retired_content_objects, 1);
+    assert!(store
+        .head(&wal_head(&namespace_id))
+        .await
+        .expect("tombstone")
+        .is_some());
+}
+
+#[tokio::test]
+async fn retired_owner_head_recheck_fails_without_writes() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("owner-head-recheck").expect("namespace");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let (content_store_id, deadline) = retired_content_namespace(&inner, &namespace_id).await;
+    let keys = owned_content_keys(&inner, &content_store_id, &namespace_id).await;
+    let store = RecordingStore::new(
+        BlockingStore::new(
+            FailStore::new(
+                inner,
+                KeyPredicate::exact(wal_head(&namespace_id)),
+                OperationClass::Read,
+                InjectedError::Transport("head recheck failed".to_owned()),
+            ),
+            KeyPredicate::exact(loonfs_objectstore::keys::upload_session_prefix(
+                &namespace_id,
+            )),
+            OperationClass::List,
+        ),
+        KeyPredicate::any(),
+    );
+    store.inner().block_next();
+    let config = config();
+    let (result, ()) = tokio::join!(
+        gc_namespace(&store, &namespace_id, &config, &deadline),
+        async {
+            store.inner().wait_until_blocked().await;
+            store.inner().inner().fail_next(1);
+            store.inner().release();
+        }
+    );
+    assert_eq!(
+        result.expect_err("head recheck fails").code(),
+        crate::error::ErrorCode::ServerError
+    );
+    assert_eq!(store.counts().deletes, 0);
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().compare_and_swaps, 0);
+    for key in keys {
+        assert!(store.head(&key).await.expect("owned content").is_some());
+    }
 }

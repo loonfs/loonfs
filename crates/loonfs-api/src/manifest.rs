@@ -6,8 +6,8 @@ use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
-    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo,
+    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName,
+    InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +57,8 @@ pub enum MetadataRowFamily {
     ActiveDeletions,
     /// Preserves commit idempotency evidence independently of retained WAL history.
     CommitReceipts,
+    /// Preserves evidence that content was published.
+    ContentPublications,
     /// Stores inode attribute revisions newest-first.
     ///
     /// Attributes are read only in this order, so the family has no secondary
@@ -80,19 +82,22 @@ pub enum MetadataFamilyGroup {
     ActiveDeletions,
     /// Commit receipts.
     CommitReceipts,
+    /// Preserves evidence that content was published.
+    ContentPublications,
     /// Attributes.
     Attributes,
 }
 
 impl MetadataFamilyGroup {
     /// Every family group in serialized declaration order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Bindings,
         Self::Revisions,
         Self::Inodes,
         Self::Tombstones,
         Self::ActiveDeletions,
         Self::CommitReceipts,
+        Self::ContentPublications,
         Self::Attributes,
     ];
 
@@ -105,6 +110,7 @@ impl MetadataFamilyGroup {
             Self::Tombstones => "tombstones",
             Self::ActiveDeletions => "active_deletions",
             Self::CommitReceipts => "commit_receipts",
+            Self::ContentPublications => "content_publications",
             Self::Attributes => "attributes",
         }
     }
@@ -122,6 +128,7 @@ impl MetadataFamilyGroup {
             Self::Tombstones => &[MetadataRowFamily::Tombstones],
             Self::ActiveDeletions => &[MetadataRowFamily::ActiveDeletions],
             Self::CommitReceipts => &[MetadataRowFamily::CommitReceipts],
+            Self::ContentPublications => &[MetadataRowFamily::ContentPublications],
             Self::Attributes => &[MetadataRowFamily::Attributes],
         }
     }
@@ -216,6 +223,8 @@ pub enum MetadataRow {
     ActiveDeletion(ActiveDeletionRecord),
     /// Preserves the evidence needed to answer a retried logical commit.
     CommitReceipt(CommitReceiptRecord),
+    /// Records a published content identity independently of its revisions.
+    ContentPublication(ContentPublicationRecord),
     /// Publishes one inode's complete attribute map at one revision.
     ///
     /// The row is whole state, not a change: a reader takes the newest row
@@ -344,6 +353,18 @@ impl ActiveDeletionRecord {
             self.action.sort_rank(),
         )
     }
+}
+
+/// Evidence retained at every retention floor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentPublicationRecord {
+    /// Stored directly in the row key and Bloom filter key.
+    pub content_id: ContentId,
+    /// Distinguishes later publications of the same content.
+    pub committed_seq: ChangeSeq,
+    /// First publishing delta when a commit uses this content more than once.
+    pub delta_index: u32,
 }
 
 /// One durable commit idempotency receipt.
@@ -488,6 +509,7 @@ impl MetadataRowFamily {
             Self::Tombstones => lookup_keys::TOMBSTONE_ROW_PREFIX,
             Self::ActiveDeletions => lookup_keys::ACTIVE_DELETION_ROW_PREFIX,
             Self::CommitReceipts => lookup_keys::COMMIT_RECEIPT_ROW_PREFIX,
+            Self::ContentPublications => lookup_keys::CONTENT_PUBLICATION_ROW_PREFIX,
             Self::Attributes => lookup_keys::ATTRIBUTE_ROW_PREFIX,
         }
     }
@@ -506,6 +528,7 @@ impl MetadataRow {
             Self::Tombstone(_) => MetadataRowFamily::Tombstones,
             Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
             Self::CommitReceipt(_) => MetadataRowFamily::CommitReceipts,
+            Self::ContentPublication(_) => MetadataRowFamily::ContentPublications,
             Self::AttributesRevision(_) => MetadataRowFamily::Attributes,
         })
     }
@@ -538,6 +561,7 @@ impl MetadataRow {
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::ContentPublications
                 | MetadataRowFamily::Attributes => None,
             }
             .expect("a direntry bind row should use a direntry bind family"),
@@ -566,6 +590,9 @@ impl MetadataRow {
             Self::CommitReceipt(record) => {
                 lookup_keys::commit_receipt_row_key(record.commit_id.as_str(), record.committed_seq)
             }
+            Self::ContentPublication(record) => {
+                lookup_keys::content_publication_row_key(&record.content_id, record.committed_seq)
+            }
             Self::AttributesRevision(record) => lookup_keys::attributes_row_key(
                 record.inode_id,
                 record.attributes_revision_no,
@@ -593,6 +620,7 @@ impl MetadataRow {
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::ContentPublications
                 | MetadataRowFamily::Attributes => None,
             }
             .expect("a direntry bind row should use a direntry bind family"),
@@ -606,6 +634,9 @@ impl MetadataRow {
             Self::ActiveDeletion(_) => self.row_key_for_family(family),
             Self::CommitReceipt(record) => {
                 lookup_keys::commit_receipt_probe(record.commit_id.as_str())
+            }
+            Self::ContentPublication(record) => {
+                lookup_keys::content_publication_probe(&record.content_id)
             }
             Self::AttributesRevision(record) => lookup_keys::attributes_probe(record.inode_id),
         }
@@ -624,7 +655,7 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 pub mod lookup_keys {
     use super::{hex_encode_row_key_component, TombstoneGeneration};
-    use crate::{AttributeRevisionNo, ChangeSeq, InodeId, RevisionNo};
+    use crate::{AttributeRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo};
 
     /// Prefix for inode row keys.
     pub const INODE_ROW_PREFIX: &str = "inode-";
@@ -636,6 +667,7 @@ pub mod lookup_keys {
     pub(super) const DIRENTRY_CHILD_BIND_ROW_PREFIX: &str = "direntry-child-bind-";
     pub(super) const DIRENTRY_UNBIND_ROW_PREFIX: &str = "direntry-unbind-";
     pub(super) const TOMBSTONE_ROW_PREFIX: &str = "tombstone-";
+    pub(super) const CONTENT_PUBLICATION_ROW_PREFIX: &str = "content-publication-";
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
     pub(super) const ATTRIBUTE_ROW_PREFIX: &str = "attribute-";
 
@@ -818,6 +850,25 @@ pub mod lookup_keys {
             root_inode_id,
             ACTIVE_DELETION_RANK_LISTED,
         ))
+    }
+
+    /// Selects all publications of one content identity in the Bloom filter.
+    pub fn content_publication_probe(content_id: &ContentId) -> String {
+        format!("{CONTENT_PUBLICATION_ROW_PREFIX}{content_id}")
+    }
+
+    /// Selects the rows for one content identity.
+    pub fn content_publication_prefix(content_id: &ContentId) -> String {
+        format!("{}-", content_publication_probe(content_id))
+    }
+
+    /// Orders publications by content identity and commit sequence.
+    pub fn content_publication_row_key(content_id: &ContentId, committed_seq: ChangeSeq) -> String {
+        format!(
+            "{}{:020}",
+            content_publication_prefix(content_id),
+            committed_seq.0
+        )
     }
 
     /// Builds the Bloom filter probe for one commit ID.
@@ -1243,7 +1294,7 @@ mod tests {
                 b"row key prefix sample",
             ),
         });
-        let rows: [(MetadataRowFamily, super::MetadataRow); 9] = [
+        let rows: [(MetadataRowFamily, super::MetadataRow); 10] = [
             (
                 MetadataRowFamily::Inodes,
                 super::MetadataRow::Inode(super::InodeRecord {
@@ -1271,6 +1322,15 @@ mod tests {
                 }),
             ),
             (MetadataRowFamily::Revisions, revision),
+            (
+                MetadataRowFamily::ContentPublications,
+                super::MetadataRow::ContentPublication(super::ContentPublicationRecord {
+                    content_id: crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                        .expect("valid content id"),
+                    committed_seq: ChangeSeq(12),
+                    delta_index: 3,
+                }),
+            ),
             (
                 MetadataRowFamily::Tombstones,
                 super::MetadataRow::Tombstone(super::SubtreeTombstoneRecord {

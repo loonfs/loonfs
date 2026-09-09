@@ -1214,42 +1214,46 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
 }
 
 #[tokio::test]
-async fn a_compaction_of_the_revisions_group_rewrites_every_row_it_reads() {
+async fn compaction_preserves_every_revision_and_publication_below_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     seed_bindings_workload(&store, &namespace_id).await;
-    let group = MetadataFamilyGroup::Revisions;
-    let before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    for group in [
+        MetadataFamilyGroup::Revisions,
+        MetadataFamilyGroup::ContentPublications,
+    ] {
+        let before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
-    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let Ok(result) = run_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        small_segment_policy(),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    else {
-        panic!("nothing cancelled this job");
-    };
-    assert_eq!(
-        result.rows_read, result.rows_written,
-        "a revisions rebuild drops nothing"
-    );
-    assert_eq!(
-        result.unbind_probes, 0,
-        "the revisions group has no bind rule, so it reads no unbind"
-    );
-    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+        let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
+        let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+        let Ok(result) = run_compaction(
+            &store,
+            &namespace_id,
+            &spec,
+            small_segment_policy(),
+            &MetadataCompactionCancellation::default(),
+        )
+        .await
+        else {
+            panic!("nothing cancelled this job");
+        };
+        assert_eq!(
+            result.rows_read, result.rows_written,
+            "a history rebuild drops nothing"
+        );
+        assert_eq!(
+            result.unbind_probes, 0,
+            "history rebuilds do not read unbinds"
+        );
+        publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
 
-    assert_eq!(
-        group_rows_of_current_manifest(&store, &namespace_id, group).await,
-        before,
-        "revision rows are durable history and are never dropped"
-    );
+        assert_eq!(
+            group_rows_of_current_manifest(&store, &namespace_id, group).await,
+            before,
+            "revision and publication rows are never dropped"
+        );
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -3198,7 +3202,6 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     let config = crate::gc::GcConfig {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
         max_steps: None,
-        ..crate::gc::GcConfig::default()
     };
     for age_ms in [
         UNREFERENCED_SEGMENT_MIN_AGE_MS,

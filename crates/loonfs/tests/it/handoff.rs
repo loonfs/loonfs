@@ -307,6 +307,7 @@ async fn an_orphan_wal_object_is_harmless() {
     )
     .await;
     put_file(&writer, &namespace_id, "/after-orphan.txt").await;
+    put_file(&writer, &namespace_id, "/after-boundary.txt").await;
     let maintenance = FsMaintenance::builder_with_store(store.clone())
         .actor_id("orphan-test-maintenance")
         .build()
@@ -320,6 +321,11 @@ async fn an_orphan_wal_object_is_harmless() {
         fold.wal_flush,
         WalFlushStepOutcome::Flushed { .. }
     ));
+
+    maintenance
+        .advance_retention_floor(&namespace_id)
+        .await
+        .expect("advance past the orphan position");
 
     let aged_store: SharedObjectStore = Arc::new(MetadataMapStore::aged(
         LocalFsStore::new(temp_dir.path()).expect("reopen local-fs store"),
@@ -350,6 +356,7 @@ async fn an_orphan_wal_object_is_harmless() {
         .is_none());
 
     let after_gc = BTreeSet::from([
+        "/after-boundary.txt".to_owned(),
         "/after-orphan.txt".to_owned(),
         "/before-orphan.txt".to_owned(),
     ]);

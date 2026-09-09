@@ -917,15 +917,10 @@ pub struct GcRequest {
     /// server's advertised safety floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Maximum durable GC work steps in this call; the default is 1024.
-    /// Even a budget of one saves progress through marking and sweeping.
-    /// This is not a limit on object-store requests or memory.
+    /// Maximum candidates that need a store request after the listing (an age
+    /// check, a record read, or a deletion); the default is 1024.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
-    /// The opaque `next_cursor` returned by an earlier call for this namespace.
-    /// Omitting it joins any active run; scan positions remain server-owned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
 }
 
 /// The candidates inspected but not deleted by one garbage-collection pass.
@@ -934,14 +929,12 @@ pub struct GcRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RetainedCandidates {
-    /// Candidates protected by reference marks or manifest discovery.
+    /// Candidates protected by current references or manifest discovery.
     pub referenced: u64,
     /// Unreachable candidates younger than the grace window by their provider timestamps.
     pub within_grace_window: u64,
     /// Unreachable candidates without provider timestamps.
     pub no_provider_timestamp: u64,
-    /// Candidates retained because root resolution failed.
-    pub degraded_roots: u64,
     /// Unrecognized keys retained from object families scanned by garbage collection.
     pub unrecognized_key: u64,
     /// Checkpoint records that could not be safely released or deleted.
@@ -1024,7 +1017,7 @@ impl ReleasedCheckpointCounts {
     }
 }
 
-/// The result of one mark-and-sweep garbage-collection pass.
+/// The result of one stateless garbage-collection call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GcResponse {
@@ -1038,16 +1031,8 @@ pub struct GcResponse {
     pub retained_candidates: u64,
     /// `retained_candidates` grouped by reason.
     pub retained: RetainedCandidates,
-    /// True when ambiguous roots suppressed manifest/segment deletion.
-    pub retention_degraded: bool,
-    /// Whether reference marking is unfinished, so content reclamation has not started.
-    pub content_reclamation_deferred: bool,
     /// Whether the pass reached `max_steps` before completion.
     pub budget_exhausted: bool,
-    /// The opaque run token for remaining marking, sweeping, or cleanup work.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub next_cursor: Option<String>,
     /// The earliest known future reclamation time observed by this pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -1067,10 +1052,7 @@ impl GcResponse {
             released_checkpoints: ReleasedCheckpointCounts::default(),
             retained_candidates: 0,
             retained: RetainedCandidates::default(),
-            retention_degraded: false,
-            content_reclamation_deferred: false,
             budget_exhausted: false,
-            next_cursor: None,
             next_reclamation_at_ms: None,
             reclaim_after_ms: None,
         }
@@ -1096,8 +1078,6 @@ pub enum RetainedReason {
     WithinGraceWindow,
     /// Counts into [`RetainedCandidates::no_provider_timestamp`].
     NoProviderTimestamp,
-    /// Counts into [`RetainedCandidates::degraded_roots`].
-    DegradedRoots,
     /// Counts into [`RetainedCandidates::unrecognized_key`].
     UnrecognizedKey,
     /// Counts into [`RetainedCandidates::checkpoint_not_releasable`].
@@ -1114,7 +1094,6 @@ impl RetainedReason {
             Self::Referenced => &mut retained.referenced,
             Self::WithinGraceWindow => &mut retained.within_grace_window,
             Self::NoProviderTimestamp => &mut retained.no_provider_timestamp,
-            Self::DegradedRoots => &mut retained.degraded_roots,
             Self::UnrecognizedKey => &mut retained.unrecognized_key,
             Self::CheckpointNotReleasable => &mut retained.checkpoint_not_releasable,
             Self::UploadSessionWindow => &mut retained.upload_session_window,
@@ -1125,12 +1104,11 @@ impl RetainedReason {
 
 impl RetainedCandidates {
     /// Returns every reason and count in a fixed order.
-    pub fn by_reason(&self) -> [(&'static str, u64); 8] {
+    pub fn by_reason(&self) -> [(&'static str, u64); 7] {
         let Self {
             referenced,
             within_grace_window,
             no_provider_timestamp,
-            degraded_roots,
             unrecognized_key,
             checkpoint_not_releasable,
             upload_session_window,
@@ -1140,7 +1118,6 @@ impl RetainedCandidates {
             ("referenced", referenced),
             ("within_grace_window", within_grace_window),
             ("no_provider_timestamp", no_provider_timestamp),
-            ("degraded_roots", degraded_roots),
             ("unrecognized_key", unrecognized_key),
             ("checkpoint_not_releasable", checkpoint_not_releasable),
             ("upload_session_window", upload_session_window),
@@ -1154,7 +1131,6 @@ impl RetainedCandidates {
             referenced,
             within_grace_window,
             no_provider_timestamp,
-            degraded_roots,
             unrecognized_key,
             checkpoint_not_releasable,
             upload_session_window,
@@ -1163,7 +1139,6 @@ impl RetainedCandidates {
         self.referenced += referenced;
         self.within_grace_window += within_grace_window;
         self.no_provider_timestamp += no_provider_timestamp;
-        self.degraded_roots += degraded_roots;
         self.unrecognized_key += unrecognized_key;
         self.checkpoint_not_releasable += checkpoint_not_releasable;
         self.upload_session_window += upload_session_window;
@@ -1209,7 +1184,7 @@ pub enum RunMaintenanceRequest {
     Metadata(MetadataMaintenanceRequest),
     /// Runs one full metadata compaction.
     MetadataCompaction(MetadataCompactionRequest),
-    /// Runs one bounded mark-and-sweep garbage-collection pass.
+    /// Collects aged, unreferenced objects.
     Gc(GcRequest),
     /// Advances the retention floor to the flushed manifest head.
     Retention(AdvanceRetentionRequest),
@@ -1281,7 +1256,7 @@ pub enum RunMaintenanceResponse {
     Metadata(MetadataMaintenanceResponse),
     /// Result of one full metadata compaction.
     MetadataCompaction(MetadataCompactionResponse),
-    /// Result of one bounded mark-and-sweep garbage-collection pass.
+    /// Counts and deadlines from one collection call.
     Gc(GcResponse),
     /// Result of advancing the retention floor.
     Retention(AdvanceRetentionResponse),
@@ -2198,13 +2173,11 @@ mod tests {
                 serde_json::json!({
                     "kind": "gc",
                     "max_steps": 10_000,
-                    "grace_window_ms": 600_000,
-                    "cursor": "..."
+                    "grace_window_ms": 600_000
                 }),
                 Some(RunMaintenanceRequest::Gc(GcRequest {
                     grace_window_ms: Some(600_000),
                     max_steps: Some(10_000),
-                    cursor: Some("...".to_owned()),
                 })),
             ),
             (

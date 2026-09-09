@@ -58,8 +58,6 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
                     summary.compacted_metadata_objects += 1;
                 }
                 DurableObjectFamily::CheckpointRecord
-                | DurableObjectFamily::GcRun
-                | DurableObjectFamily::GcMarkPage
                 | DurableObjectFamily::UploadSession
                 | DurableObjectFamily::ContentBlob
                 | DurableObjectFamily::ContentStore => {}

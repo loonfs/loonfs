@@ -3403,12 +3403,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "degraded_roots": {
-            "description": "Candidates retained because root resolution failed.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "no_provider_timestamp": {
             "description": "Unreachable candidates without provider timestamps.",
             "format": "int64",
@@ -3416,7 +3410,7 @@
             "type": "integer"
           },
           "referenced": {
-            "description": "Candidates protected by reference marks or manifest discovery.",
+            "description": "Candidates protected by current references or manifest discovery.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3450,7 +3444,6 @@
           "referenced",
           "within_grace_window",
           "no_provider_timestamp",
-          "degraded_roots",
           "unrecognized_key",
           "checkpoint_not_releasable",
           "upload_session_window",
@@ -3492,15 +3485,8 @@
         ]
       },
       "RunMaintenanceRequestGc": {
-        "description": "Runs one bounded mark-and-sweep garbage-collection pass.",
+        "description": "Collects aged, unreferenced objects.",
         "properties": {
-          "cursor": {
-            "description": "The opaque `next_cursor` returned by an earlier call for this namespace.\nOmitting it joins any active run; scan positions remain server-owned.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "grace_window_ms": {
             "description": "The minimum object age for deletion in milliseconds, which must meet the\nserver's advertised safety floor.",
             "format": "int64",
@@ -3517,7 +3503,7 @@
             "type": "string"
           },
           "max_steps": {
-            "description": "Maximum durable GC work steps in this call; the default is 1024.\nEven a budget of one saves progress through marking and sweeping.\nThis is not a limit on object-store requests or memory.",
+            "description": "Maximum candidates that need a store request after the listing (an age\ncheck, a record read, or a deletion); the default is 1024.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -3612,14 +3598,10 @@
         ]
       },
       "RunMaintenanceResponseGc": {
-        "description": "Result of one bounded mark-and-sweep garbage-collection pass.",
+        "description": "Counts and deadlines from one collection call.",
         "properties": {
           "budget_exhausted": {
             "description": "Whether the pass reached `max_steps` before completion.",
-            "type": "boolean"
-          },
-          "content_reclamation_deferred": {
-            "description": "Whether reference marking is unfinished, so content reclamation has not started.",
             "type": "boolean"
           },
           "deleted": {
@@ -3635,10 +3617,6 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the pass ran against."
-          },
-          "next_cursor": {
-            "description": "The opaque run token for remaining marking, sweeping, or cleanup work.",
-            "type": "string"
           },
           "next_reclamation_at_ms": {
             "description": "The earliest known future reclamation time observed by this pass.",
@@ -3665,10 +3643,6 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
-          },
-          "retention_degraded": {
-            "description": "True when ambiguous roots suppressed manifest/segment deletion.",
-            "type": "boolean"
           }
         },
         "required": [
@@ -3677,8 +3651,6 @@
           "released_checkpoints",
           "retained_candidates",
           "retained",
-          "retention_degraded",
-          "content_reclamation_deferred",
           "budget_exhausted",
           "kind"
         ],
@@ -5240,7 +5212,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call performs up to 1024 durable work steps unless `max_steps` says otherwise, and returns a cursor when work remains. Steps include marking, merging, and sweeping; the budget does not count object-store requests.",
+        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call reads current roots, then examines up to 1024 candidates unless `max_steps` says otherwise. It returns `budget_exhausted` when candidates remain. Every call lists from the start and keeps no continuation. Root discovery is outside the candidate budget.",
         "operationId": "run_maintenance",
         "parameters": [
           {

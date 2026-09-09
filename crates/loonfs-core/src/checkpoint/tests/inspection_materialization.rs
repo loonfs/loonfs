@@ -259,6 +259,9 @@ pub(crate) fn append_rows_to_metadata(
             MetadataRowFamily::ActiveDeletions => {
                 row_decode::active_deletion_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
+            MetadataRowFamily::ContentPublications => metadata_state.push_content_publication(
+                row_decode::content_publication_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
             MetadataRowFamily::CommitReceipts => metadata_state.push_commit_receipt(
                 row_decode::commit_receipt_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),

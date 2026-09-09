@@ -20,6 +20,7 @@ pub struct MetadataState {
     pub direntry_binds: Vec<DirentryBindRecord>,
     pub direntry_unbinds: Vec<DirentryUnbindRecord>,
     pub revisions: Vec<RevisionRecord>,
+    pub content_publications: Vec<ContentPublicationRecord>,
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     pub attribute_revisions: Vec<AttributeRevisionRecord>,
 }
@@ -56,6 +57,13 @@ pub struct DirentryUnbindRecord {
     pub bind_delta_index: u32,
     pub unbind_seq: ChangeSeq,
     pub unbind_delta_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentPublicationRecord {
+    pub content_id: loonfs_api::ContentId,
+    pub committed_seq: ChangeSeq,
+    pub delta_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +209,18 @@ impl MetadataState {
                     revision_no,
                     content_ref,
                 } => {
+                    if !metadata_state.content_publications.iter().any(|row| {
+                        row.content_id == content_ref.content_id
+                            && row.committed_seq == committed_seq
+                    }) {
+                        metadata_state
+                            .content_publications
+                            .push(ContentPublicationRecord {
+                                content_id: content_ref.content_id.clone(),
+                                committed_seq,
+                                delta_index: *delta_index,
+                            });
+                    }
                     metadata_state.revisions.push(RevisionRecord {
                         inode_id: *inode_id,
                         revision_no: *revision_no,

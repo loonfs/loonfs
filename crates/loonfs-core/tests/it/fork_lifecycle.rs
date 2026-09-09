@@ -1411,7 +1411,6 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
     .await
     .expect("gc a namespace with no root");
     assert_eq!(report.deleted.wal_segments, 0, "{report:?}");
-    assert!(!report.retention_degraded);
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/keep.txt")
             .await
@@ -1436,11 +1435,7 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
     let surviving = namespace_keys(&store, &namespace_id).await;
     assert_eq!(
         surviving,
-        vec![
-            loonfs_objectstore::keys::gc_run(&namespace_id),
-            hint(&namespace_id),
-            wal_head(&namespace_id)
-        ],
+        vec![hint(&namespace_id), wal_head(&namespace_id)],
         "reclamation leaves the tombstone and completed GC progress"
     );
     assert!(store

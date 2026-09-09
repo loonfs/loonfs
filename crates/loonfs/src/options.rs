@@ -75,7 +75,6 @@ pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
     GcConfig {
         grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
         max_steps: request.max_steps,
-        cursor: request.cursor,
     }
 }
 
@@ -168,7 +167,6 @@ mod tests {
     fn a_gc_request_translates_without_resolving_its_budget() {
         let explicit = gc_config_from_request(GcRequest::default());
         assert_eq!(explicit.max_steps, None);
-        assert_eq!(explicit.cursor, None);
     }
 
     #[test]
@@ -192,13 +190,11 @@ mod tests {
     }
 
     #[test]
-    fn gc_conversion_preserves_explicit_budget_and_cursor() {
+    fn gc_conversion_preserves_explicit_budget() {
         let gc = gc_config_from_request(GcRequest {
             max_steps: Some(7),
-            cursor: Some("opaque".to_owned()),
             ..GcRequest::default()
         });
         assert_eq!(gc.max_steps, Some(7));
-        assert_eq!(gc.cursor.as_deref(), Some("opaque"));
     }
 }

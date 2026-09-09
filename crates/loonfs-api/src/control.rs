@@ -27,20 +27,17 @@ pub enum ControlObjectKind {
     CheckpointRecord,
     /// Tracks staged content through upload completion or cleanup.
     UploadSession,
-    /// Coordinates bounded, resumable marking and sweeping.
-    GcRun,
     /// Identifies the content domain held by a backend.
     ContentStore,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::WalHead,
         Self::Hint,
         Self::CheckpointRecord,
         Self::UploadSession,
-        Self::GcRun,
         Self::ContentStore,
     ];
 
@@ -56,7 +53,6 @@ impl ControlObjectKind {
             Self::Hint => 1,
             Self::CheckpointRecord => 1,
             Self::UploadSession => 1,
-            Self::GcRun => 1,
             Self::ContentStore => 1,
         }
     }
@@ -68,7 +64,6 @@ impl ControlObjectKind {
             Self::Hint => "hint",
             Self::CheckpointRecord => "checkpoint_record",
             Self::UploadSession => "upload_session",
-            Self::GcRun => "gc_run",
             Self::ContentStore => "content_store",
         }
     }
