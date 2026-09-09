@@ -76,7 +76,7 @@ fn report(phase: &str, gets: &[RecordedGet], segments: &SegmentMap) {
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
             format!("segment:{section}")
-        } else if key.contains("/wal/segments/") {
+        } else if key.contains("/wal/") {
             "wal".to_owned()
         } else if key.contains("/manifests/") {
             "manifest".to_owned()

@@ -272,8 +272,8 @@ mod tests {
 
     use super::{mint_content_token, verify_content_token, CompletedUploadReceipt};
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+    use crate::namespace::state::NamespaceReadState;
     use loonfs_api::v0::ContentToken;
-    use loonfs_api::wire::control::HeadState;
     use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceId};
 
     const CONTENT_STORE: &str = "cs_00000000000000000000000000000001";
@@ -282,7 +282,7 @@ mod tests {
         namespace_id: NamespaceId,
         content_store: &str,
     ) -> VerifiedNamespaceCatalogEntry {
-        VerifiedNamespaceCatalogEntry::from_head(&HeadState::initial(
+        VerifiedNamespaceCatalogEntry::from_head(&NamespaceReadState::initial(
             namespace_id,
             ContentStoreId::parse(content_store).expect("content store id"),
             1_000,

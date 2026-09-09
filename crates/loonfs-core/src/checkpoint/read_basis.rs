@@ -7,7 +7,8 @@ use super::record::load_checkpoint_record;
 use super::scan::VerifiedMetadataSegments;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::MetadataBasis;
-use loonfs_api::wire::control::{CheckpointRecordState, CheckpointStatus, HeadState, ManifestRef};
+use crate::namespace::state::NamespaceReadState;
+use loonfs_api::wire::control::{CheckpointRecordState, CheckpointStatus, ManifestRef};
 use loonfs_api::{CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -22,7 +23,7 @@ pub(crate) struct PinnedCheckpointBasis<'a, S: ObjectStore + ?Sized> {
 #[derive(Debug, Clone)]
 pub struct CheckpointReadBasis {
     /// The namespace head as of the captured sequence.
-    pub head: HeadState,
+    pub head: NamespaceReadState,
     /// The pinned manifest checksum, used as the read-cache key.
     pub head_etag: String,
     /// The manifest the checkpoint pins.
@@ -70,7 +71,7 @@ pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore 
 pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    live_head: &HeadState,
+    live_head: &NamespaceReadState,
     checkpoint_id: &CheckpointId,
 ) -> Result<CheckpointReadBasis> {
     let record =
@@ -81,7 +82,7 @@ pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
 pub(crate) async fn load_checkpoint_read_basis_from_record<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    live_head: &HeadState,
+    live_head: &NamespaceReadState,
     record: CheckpointRecordState,
 ) -> Result<CheckpointReadBasis> {
     let PinnedCheckpointBasis { manifest, segments } =
@@ -90,7 +91,7 @@ pub(crate) async fn load_checkpoint_read_basis_from_record<S: ObjectStore + ?Siz
     Ok(CheckpointReadBasis {
         head: head_from_manifest(live_head, envelope),
         head_etag: envelope.payload_checksum().to_owned(),
-        basis: MetadataBasis::Manifest(manifest),
+        basis: MetadataBasis(manifest),
     })
 }
 

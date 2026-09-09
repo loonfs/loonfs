@@ -42,6 +42,16 @@ pub(super) fn validate_manifest(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
+    if payload.fork_basis.as_ref().is_some_and(|basis| {
+        basis.manifest.owner_namespace_id == payload.namespace_id
+            || basis.manifest.manifest_head_seq > payload.retention_floor_seq
+    }) {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: "fork provenance disagrees with namespace identity or retention floor"
+                .to_owned(),
+        });
+    }
     validate_manifest_materialization_ranges(object_key, payload)?;
     let runs = runs_in_materialization_order(payload);
     validate_one_base_run_per_family_group(object_key, &runs)?;
@@ -71,10 +81,25 @@ pub(super) fn validate_manifest_materialization_ranges(
         });
     }
 
-    if payload.runs.is_empty() {
+    if payload.retention_floor_wal_no > payload.last_folded_wal_no {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
-            message: "namespace manifest must reference at least one metadata file".to_owned(),
+            message: "WAL retention floor is beyond the folded number".to_owned(),
+        });
+    }
+    if payload.runs.is_empty() {
+        if payload.status.is_deleted()
+            || (payload.head_seq == ChangeSeq(0)
+                && payload.base_seq == ChangeSeq(0)
+                && payload.head_commit_id == loonfs_api::wire::control::genesis_commit_id()
+                && payload.next_inode_id == loonfs_api::FIRST_ALLOCATABLE_INODE_ID
+                && payload.next_run_no == RunNo(0))
+        {
+            return Ok(());
+        }
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: "an empty active manifest must describe genesis".to_owned(),
         });
     }
 
@@ -130,7 +155,7 @@ pub(super) fn validate_manifest_materialization_ranges(
             ),
         });
     }
-    if !saw_head_seq_run {
+    if !saw_head_seq_run && !payload.status.is_deleted() {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(

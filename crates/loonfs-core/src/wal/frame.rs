@@ -1,11 +1,11 @@
 //! WAL segment and chain framing types, shared by the writer, reader, and
 //! replay paths.
 
-use loonfs_api::wire::control::{HeadState, WalSegmentPointer};
+use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::{
     WalCommitDelta, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
 };
-use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WriterEpoch};
+use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use thiserror::Error;
@@ -44,13 +44,6 @@ pub enum WalSegmentError {
     },
     #[error("WAL segment summary does not match its records")]
     SegmentSummaryMismatch,
-    #[error(
-        "WAL segment `{object_key}` is missing its previous visible segment link before seq `{required_seq}`"
-    )]
-    BrokenChainLink {
-        object_key: String,
-        required_seq: ChangeSeq,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -58,14 +51,9 @@ pub(crate) struct WalChainLoadRequest<'a> {
     pub(crate) namespace_id: &'a NamespaceId,
     pub(crate) chain_base_seq: ChangeSeq,
     pub(crate) head_seq: ChangeSeq,
-    pub(crate) visible_tip: Option<WalSegmentPointer>,
-    pub(crate) stop_after_seq: Option<ChangeSeq>,
-    pub(crate) max_segment_fetches: Option<usize>,
-    /// The head's `recent_segments` accelerator, used only to prefetch the
-    /// replay gap concurrently. Chain links stay the sole history
-    /// authority: wrong or missing hints cost a fallback fetch, never
-    /// correctness.
-    pub(crate) recent_segments: &'a [WalSegmentPointer],
+    pub(crate) base_wal_no: WalNo,
+    pub(crate) tip_wal_no: WalNo,
+    pub(crate) writer_epoch: WriterEpoch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,10 +91,6 @@ impl ValidatedWalSegment {
         &self.envelope.payload().records
     }
 
-    pub(crate) fn pointer(&self) -> WalSegmentPointer {
-        self.envelope.pointer()
-    }
-
     pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {
         let namespace_id = &self.envelope.payload().namespace_id;
         let writer_epoch = self.envelope.payload().writer_epoch;
@@ -138,64 +122,27 @@ impl ValidatedWalChain {
         Self { segments }
     }
 
-    pub(crate) fn empty() -> Self {
-        Self {
-            segments: Vec::new(),
-        }
-    }
-
     pub(crate) fn segments(&self) -> &[ValidatedWalSegment] {
         &self.segments
-    }
-
-    pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {
-        self.segments
-            .iter()
-            .flat_map(ValidatedWalSegment::decoded_records)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WalChainLoadError {
-    #[error("invalid WAL chain seq range: base `{chain_base_seq}` is after head `{head_seq}`")]
-    InvalidSeqRange {
-        chain_base_seq: ChangeSeq,
-        head_seq: ChangeSeq,
-    },
-    #[error("missing visible WAL tip for namespace `{namespace_id}` at seq `{seq}`")]
-    MissingVisibleTip {
-        namespace_id: NamespaceId,
-        seq: ChangeSeq,
-    },
-    #[error("visible WAL tip ends at `{actual}`, expected head seq `{expected}`")]
-    TipEndSeqMismatch {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
-    },
     #[error("failed to read WAL object `{object_key}`: {message}")]
-    ReadWal { object_key: String, message: String },
+    ReadWal {
+        object_key: String,
+        message: String,
+        class: crate::error::StoreFailureClass,
+    },
     #[error("missing WAL object `{object_key}`")]
     MissingWalObject { object_key: String },
-    #[error("WAL pointer does not match segment payload for `{object_key}`")]
-    PointerMismatch { object_key: String },
-    #[error(
-        "WAL chain does not reach expected head seq: expected `{expected}`, actual `{actual}`"
-    )]
+    #[error("WAL number does not match object key `{object_key}`")]
+    NumberMismatch { object_key: String },
+    #[error("WAL does not reach head sequence: expected `{expected}`, actual `{actual}`")]
     HeadSeqMismatch {
         expected: ChangeSeq,
         actual: ChangeSeq,
-    },
-    #[error("WAL chain suffix does not cover requested cursor `{after_seq}`")]
-    CursorNotCovered { after_seq: ChangeSeq },
-    #[error(
-        "namespace head describes `{described_segments}` visible WAL tail segments reaching down \
-         to seq `{described_from_seq}`, which does not reach the tail boundary at seq \
-         `{boundary_seq}`"
-    )]
-    TailNotDescribedByHead {
-        boundary_seq: ChangeSeq,
-        described_segments: u64,
-        described_from_seq: ChangeSeq,
     },
     #[error("WAL replay validation failed: {0}")]
     Replay(#[from] WalSegmentError),
@@ -203,25 +150,19 @@ pub enum WalChainLoadError {
 
 impl WalChainLoadError {
     pub fn code(&self) -> loonfs_api::ErrorCode {
-        use loonfs_api::ErrorCode;
-
         match self {
-            Self::ReadWal { .. } => ErrorCode::ServerError,
-            Self::InvalidSeqRange { .. }
-            | Self::MissingVisibleTip { .. }
-            | Self::TipEndSeqMismatch { .. }
-            | Self::MissingWalObject { .. }
-            | Self::PointerMismatch { .. }
-            | Self::HeadSeqMismatch { .. }
-            | Self::CursorNotCovered { .. }
-            | Self::TailNotDescribedByHead { .. }
-            | Self::Replay(_) => ErrorCode::NamespaceCorrupt,
+            Self::ReadWal {
+                class: crate::error::StoreFailureClass::PermissionDenied,
+                ..
+            } => loonfs_api::ErrorCode::StoragePermissionDenied,
+            Self::ReadWal { .. } => loonfs_api::ErrorCode::ServerError,
+            _ => loonfs_api::ErrorCode::NamespaceCorrupt,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReplayedWalTail {
-    pub resulting_head: HeadState,
+    pub resulting_head: NamespaceReadState,
     pub resulting_metadata_state: crate::metadata::MetadataState,
 }

@@ -9,7 +9,7 @@ use crate::commit::{
 };
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
-use loonfs_api::wire::control::HeadState;
+use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 #[cfg(test)]
 use loonfs_api::AbsolutePath;
@@ -27,7 +27,7 @@ use loonfs_objectstore::ObjectStore;
 /// candidates observe earlier accepted candidates without cloning the whole
 /// namespace.
 pub(crate) struct PublishPlanningSession {
-    head: HeadState,
+    head: NamespaceReadState,
     inode_allocator: InodeAllocator,
     accepted_rows: MetadataState,
     /// Durable-layer lookups memoized across the whole batch attempt; the
@@ -37,7 +37,7 @@ pub(crate) struct PublishPlanningSession {
 }
 
 impl PublishPlanningSession {
-    pub(crate) fn new(head: &HeadState) -> Self {
+    pub(crate) fn new(head: &NamespaceReadState) -> Self {
         Self {
             head: head.clone(),
             inode_allocator: InodeAllocator::new(head.next_inode_id),

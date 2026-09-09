@@ -4,7 +4,6 @@ use loonfs::{
     CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
     NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use std::sync::Arc;
@@ -57,7 +56,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
 }
 
 #[tokio::test]
-async fn warm_reads_reuse_their_manifest_and_writes_refresh_the_retention_floor() {
+async fn warm_reads_and_writes_reuse_their_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -119,10 +118,7 @@ async fn warm_reads_reuse_their_manifest_and_writes_refresh_the_retention_floor(
     let repeats = manifest_gets(&recording.take_get_keys());
     assert_eq!(
         repeats,
-        vec![
-            metadata_manifest_object(&namespace_id, &loonfs_api::ManifestNo(1)),
-            metadata_manifest_object(&namespace_id, &loonfs_api::ManifestNo(2)),
-        ],
-        "a warm writer discovers the current retention floor"
+        Vec::<String>::new(),
+        "a warm writer reuses its manifest"
     );
 }

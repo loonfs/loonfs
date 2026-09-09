@@ -266,8 +266,8 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `content_too_large` | 413 | A request or proxied response exceeds its advertised size limit. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.completion_max_body_bytes`. For large reads, request a download grant when `filesystem.downloads.direct_get` is available. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
-| `namespace_not_found` | 404 | The namespace has no head, so it does not exist. |
-| `namespace_deleted` | 410 | The namespace's head records the terminal deleted status. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
+| `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
+| `namespace_deleted` | 410 | The namespace's current manifest records terminal deleted status. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
 | `snapshot_not_found` | 404 | The snapshot id names no checkpoint record. Refresh state or choose another snapshot. |
 | `snapshot_gone` | 410 | The snapshot record exists but is released or expired. The message names which terminal condition applies. |
 | `path_not_found` | 404 | No visible entry at the path. |
@@ -414,8 +414,8 @@ The writer surface has three stages:
 This split is deliberate:
 
 - content durability is not visibility;
-- WAL-segment durability is not visibility by itself; and
-- head advance is the visibility point.
+- put-if-absent of the next numbered WAL segment commits its records and
+  makes them visible.
 
 A commit request may therefore be rejected immediately, or tentatively
 accepted into a WAL batch, without yet being a committed or successful change.
@@ -435,7 +435,7 @@ upload session for the object it writes, exactly as a remote upload does: the
 session record lands before the bytes and completes after them. The opaque
 prepared value carries an admission deadline no later than the expiry of the
 last token the completed session could issue. Publication checks it at batch
-admission and immediately before the head swap, using the request clock plus
+admission and immediately before the numbered WAL put, using the request clock plus
 the elapsed time of the whole publication attempt. This is the same horizon
 that bounds remote upload tokens (section 6.3; format spec, "Garbage
 collection", rule 11), so content cannot
@@ -494,16 +494,16 @@ Inode-addressed moves and deletes require the token as `expected_binding_generat
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
-committed logical commit only after its WAL segment is durably written and the
-head update succeeds; a segment written before a failed head update is
-orphaned, and the request is not committed.
+committed logical commit when put-if-absent of the next WAL number succeeds.
+A failed precondition writes nothing; the loser discovers the new tip,
+re-plans, and retries.
 
-If the head update's outcome was never observed — a transport failure after
-the update was sent — the server reports `commit_outcome_unknown`: the commit
+If the WAL put's outcome was never observed — a transport failure after
+the put was sent — the server reports `commit_outcome_unknown`: the commit
 may already be visible. Section 5.2 defines how the caller resolves it.
 
 The server may publish multiple committed logical commits in one WAL segment
-and one head update, but it must preserve per-commit idempotency, ordering,
+put, but it must preserve per-commit idempotency, ordering,
 and change-feed identity.
 
 Annotations may be used to correlate multiple logical commits that belong to
@@ -547,7 +547,7 @@ Receipt resolution comes first: an identical landed request returns its receipt 
 Reusing that commit ID with different assertions returns `commit_id_reuse_conflict`.
 Assertions run in order before operations; the first failure returns its kind's error with zero-based `assertion_index`.
 A failed assertion reserves no sequence or inode and leaves the planning view unchanged.
-A retry after a lost head compare-and-swap evaluates assertions again against the new basis.
+A retry after a lost numbered WAL put evaluates assertions again against the new basis.
 Assertions are admission conditions, stored only through the fingerprint in WAL records and receipts, and never evaluated during replay.
 
 ### Actor attribution
@@ -997,7 +997,7 @@ saw part of the keyspace, and candidates that age out on their object
 timestamps carry no time here — so its absence is not a claim that nothing
 is owed.
 
-`reclaim_after_ms` is present only when the deleted head records retirement.
+`reclaim_after_ms` is present only when the deleted manifest records retirement.
 It is omitted for an active namespace or a deleted namespace still waiting on
 pins. A future deadline means the namespace is waiting on grace. Retirement
 is irrevocable and the deadline never changes. A call whose clock is before
@@ -1060,9 +1060,9 @@ reclamation, with no fixed completion time or guarantee of physical erasure.
 
 Dependent forks and retained checkpoints delay retirement. A complete
 post-deletion checkpoint sweep must retain no record before GC records
-`reclaim_after_ms` on the deleted head. A later call whose clock is at or after
+`reclaim_after_ms` on the deleted manifest. A later call whose clock is at or after
 that deadline lists and deletes recognized content objects under that
-namespace's owner prefix. It keeps the head, content-store descriptor, and
+namespace's owner prefix. It keeps the current manifest, content-store descriptor, and
 every other owner's prefix.
 
 Retention is coarse: a deleted ancestor keeps its entire owner prefix while
@@ -1083,7 +1083,7 @@ Run GC repeatedly, including after a pass finds an empty owner prefix. An
 already-issued upload capability can write an object after deletion, and a
 late write before a saved cursor is found by the next run. Continued late
 writes, grace windows, dependent forks, retained checkpoints, and maintenance
-not running can all delay complete reclamation. A deleted head fences commits
+not running can all delay complete reclamation. A deleted manifest refuses commits
 and new upload capabilities; it does not revoke capabilities already issued.
 
 The runtime schedules future work from `next_reclamation_at_ms`. LoonFS does
@@ -1400,23 +1400,18 @@ such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are
 only path parameter names for the same namespace id value; v0 does not accept
 or emit a namespace `name` alias.
 
-Create and fork both install one object — the namespace head — with a single
-conditional write (`format.md`, "Namespace creation and forks"), so they
+Create and fork install descriptor, hint, and manifest 1 in order. The
+conditional put of manifest 1 decides namespace existence (`format.md`, "Namespace creation and forks"), so they
 answer conflicts the same way. A create or fork that loses that write to
 another namespace answers `namespace_exists` (409). A create or fork against
 a deleted id answers `namespace_deleted` (410): the id is retired and never
 comes back. There is no partially created namespace, so there is no third
 answer and nothing to repair.
 
-A create whose first acknowledgment was lost answers `namespace_exists` on
-the retry, like any other lost race. Nothing durable can tell the two apart:
-a server publishes every caller's work under one writer label, so the
-head's writer block cannot prove which request wrote it, and answering
-success would tell two callers they each created the same namespace. The
-409 is still actionable, which is the point — the namespace it names is
-complete and usable, so a caller that does not care who created it reads it
-and proceeds. The previous protocol answered this case with a namespace that
-existed, could not be used, and needed an explicit repair.
+A new request after a lost creation acknowledgement returns
+`namespace_exists`, unless it explicitly allows an existing namespace.
+Read-back of the exact proposed manifest can resolve an ambiguous install
+within the original attempt.
 
 The examples below are representative, not exhaustive. Responses may gain
 fields within v0; clients must ignore JSON fields they do not recognize.
@@ -1448,6 +1443,13 @@ The `Namespace` object has exactly these fields:
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 
+Namespace status derives the live sequence from the manifest and numbered
+WAL tip. A cold read follows a lagging hint by probing forward. A missing
+hint reads as an absent namespace. Runtime freshness polls HEAD
+`hint.json`, which every acknowledged batch has already raised; the
+acknowledging runtime supplies read-your-writes state without a store
+request.
+
 The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` returns the
 namespace state plus storage details used by maintenance:
 
@@ -1456,8 +1458,8 @@ namespace state plus storage details used by maintenance:
 | `namespace_id` | Durable namespace id. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
-| `current_manifest_no` | Current manifest number; omitted until the namespace has a manifest. |
-| `wal_tail_segments` | Number of visible WAL segments after the current manifest. |
+| `current_manifest_no` | Current manifest number, present from namespace creation. |
+| `wal_tail_segments` | WAL tip minus the current manifest's folded number, including fences. |
 | `live_snapshots` | Number of snapshots that had not expired when diagnostics began. |
 | `live_checkpoints` | Number of active user checkpoints, including expired records awaiting collection. |
 
@@ -1475,8 +1477,8 @@ namespace state plus storage details used by maintenance:
 
 ### 6.3 `DELETE /v0/namespaces/{ns}`
 
-Deletion is a fenced, terminal head transition (`format.md`, "Tombstones and
-deletion"). It linearizes at the head swap: commits acknowledged before it
+Deletion is a fenced, terminal manifest publication (`format.md`, "Tombstones and
+deletion"). It linearizes at the manifest put: commits acknowledged before it
 stay committed; everything that observes the deleted namespace afterwards —
 reads, commits, forks, status, re-creation of the id — fails with
 `namespace_deleted` (410). Deleting an already-deleted namespace is also
@@ -1492,8 +1494,8 @@ checkpoints, grace windows, and maintenance not running can all delay
 reclamation. Continued writes through already-issued capabilities can also
 leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
 metadata, and checkpoint records. Once a complete post-deletion checkpoint
-sweep retains no record, it records retirement on the deleted head as a fixed
-`reclaim_after_ms`. The head survives permanently. Retirement itself deletes
+sweep retains no record, it records retirement on the deleted manifest as a fixed
+`reclaim_after_ms`. The current manifest survives permanently. Retirement itself deletes
 no content. A later GC call whose clock is at or after the deadline sweeps the
 namespace's owner prefix, including previously published content whose upload
 record is gone. A deleted ancestor retains its entire owner prefix while a
@@ -1906,7 +1908,7 @@ Five operations use inode IDs instead of paths. They let clients act on an entry
 ```
 
 A successful response is returned only after the underlying change is actually
-committed: the WAL segment is durable and the head has advanced. Every
+committed: the numbered WAL put succeeded. Every
 commit returns the same envelope (section 5.2).
 
 Representative response:

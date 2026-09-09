@@ -17,8 +17,7 @@ use crate::control_update::{
 };
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::FORK_CHECKPOINT_LEASE_MS;
-use crate::namespace::control::load_head_object;
-use crate::namespace::control_snapshot::resolve_retention_floor_seq;
+use crate::namespace::control_snapshot::load_control_snapshot;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
@@ -370,20 +369,11 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
 ) -> Result<CheckpointBasisVerification> {
-    let head = load_head_object(store, &record.namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .state;
-    // A checkpoint that verifies after the namespace tombstone could create
-    // a new durable dependency after an ancestor collector had already
-    // proved this namespace had none. The tombstone is terminal, so such a
-    // record cannot become a readable checkpoint and must not verify.
-    if head.status.is_deleted() {
+    let snapshot = load_control_snapshot(store, &record.namespace_id).await?;
+    if snapshot.head.state.status.is_deleted() {
         return Ok(CheckpointBasisVerification::Invalid);
     }
-    let floor_seq = resolve_retention_floor_seq(store, &head)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+    let floor_seq = snapshot.retention_floor_seq;
     if floor_seq > record.manifest.manifest_head_seq {
         return Ok(CheckpointBasisVerification::Invalid);
     }
@@ -423,7 +413,7 @@ mod tests {
     use super::*;
     use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, ManifestRef};
     use loonfs_api::{ChangeSeq, CommitId, ManifestNo};
-    use loonfs_objectstore::keys::wal_head;
+    use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::{tempdir, TempDir};
 
@@ -466,8 +456,7 @@ mod tests {
     #[tokio::test]
     async fn listed_loader_rejects_a_different_durable_family() {
         let (_directory, store) = local_store();
-        let object_key =
-            wal_head(&loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"));
+        let object_key = hint(&loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"));
 
         let error = load_checkpoint_record_at_key(&store, &object_key)
             .await

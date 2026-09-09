@@ -15,7 +15,7 @@ use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, RecoverableDeletion,
     ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
-use loonfs_api::wire::control::HeadState;
+use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{
@@ -128,7 +128,7 @@ impl<'a> InMemoryMetadataView<'a> {
 
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) fn from_loaded_head(
-        head: &'a HeadState,
+        head: &'a NamespaceReadState,
         segments: &'a VerifiedMetadataSegments<'store, S>,
         wal_tail_rows: &'a MetadataState,
     ) -> Self {

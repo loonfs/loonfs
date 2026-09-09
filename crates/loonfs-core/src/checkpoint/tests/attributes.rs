@@ -290,6 +290,14 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
 ) -> ManifestNo {
     let manifest_number = manifest_no;
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
+        content_store_id: loonfs_api::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+            .expect("content store"),
+        created_at_ms: 1_000,
+        fork_basis: None,
+        status: loonfs_api::wire::control::NamespaceStatus::Active {},
+        writer: None,
+        last_folded_wal_no: loonfs_api::WalNo(0),
+        retention_floor_wal_no: loonfs_api::WalNo(0),
         compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no,

@@ -11,22 +11,22 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control_snapshot::NamespaceControlSnapshot;
 use futures::StreamExt;
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, ManifestRef};
-use loonfs_api::{ChangeSeq, ContentStoreId, ManifestNo, NamespaceId};
+use loonfs_api::{ContentStoreId, ManifestNo, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key, wal_segment_prefix,
+    checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key,
 };
-use loonfs_objectstore::{keys::wal_segment_id_from_key, ObjectStore};
+use loonfs_objectstore::{keys::wal_no_from_key, ObjectStore};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct LiveSet {
     pub(super) content_store_id: ContentStoreId,
     pub(super) namespace_deleted: bool,
     pub(super) reclaim_after_ms: Option<u64>,
-    pub(super) discovery_start_manifest_no: Option<ManifestNo>,
+    pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
     pub(super) missing_basis_checkpoints: BTreeSet<String>,
     pub(super) checkpoints: Vec<String>,
-    first_live_wal_seq: Option<ChangeSeq>,
+    folded_and_floor_wal_no: Option<WalNo>,
 }
 
 impl LiveSet {
@@ -41,20 +41,18 @@ impl LiveSet {
             content_store_id: head.content_store_id.clone(),
             namespace_deleted: head.status.is_deleted(),
             reclaim_after_ms: head.status.reclaim_after_ms(),
-            discovery_start_manifest_no: snapshot
-                .root
-                .as_ref()
-                .map(|root| root.discovery_start_manifest_no),
+            discovery_start_manifest_no: snapshot.root.discovery_start_manifest_no,
             objects: BTreeSet::new(),
             missing_basis_checkpoints: BTreeSet::new(),
             checkpoints: Vec::new(),
-            first_live_wal_seq: None,
+            folded_and_floor_wal_no: (!head.status.is_deleted())
+                .then_some(head.last_folded_wal_no.min(head.retention_floor_wal_no)),
         };
         let mut manifests = BTreeMap::<String, Option<ManifestRef>>::new();
+        live.objects.insert(snapshot.root.object_key.clone());
         if !live.namespace_deleted {
-            if let Some(reference) = snapshot.basis().manifest() {
-                live.load_manifest(store, reference, &mut manifests).await?;
-            }
+            live.load_manifest(store, snapshot.basis().manifest(), &mut manifests)
+                .await?;
         }
         let prefix = checkpoint_prefix(namespace_id);
         let mut listing = store.list_prefix_stream(&prefix);
@@ -102,7 +100,6 @@ impl LiveSet {
             }
             live.checkpoints.push(key);
         }
-        live.load_wal(store, namespace_id, snapshot).await?;
         Ok(live)
     }
 
@@ -149,42 +146,9 @@ impl LiveSet {
         Ok(true)
     }
 
-    async fn load_wal<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        namespace_id: &NamespaceId,
-        snapshot: &NamespaceControlSnapshot,
-    ) -> Result<()> {
-        let prefix = wal_segment_prefix(namespace_id);
-        if self.namespace_deleted {
-            return Ok(());
-        }
-        let basis = snapshot.basis();
-        let manifest_head_seq = basis
-            .manifest()
-            .map_or(ChangeSeq(0), |manifest| manifest.manifest_head_seq);
-        let protected_floor = snapshot
-            .retention_floor_seq
-            .min(ChangeSeq(manifest_head_seq.0.saturating_add(1)));
-        let mut first_live = None;
-        let mut listing = store.list_prefix_stream(&prefix);
-        while let Some(key) = listing
-            .next()
-            .await
-            .transpose()
-            .map_err(|error| CoreError::store(&prefix, &error))?
-        {
-            if let Some(seq) = wal_start_seq(&key).filter(|seq| *seq <= protected_floor) {
-                first_live = Some(first_live.map_or(seq, |current: ChangeSeq| current.max(seq)));
-            }
-        }
-        self.first_live_wal_seq = Some(first_live.unwrap_or(protected_floor));
-        Ok(())
-    }
-
     pub(super) fn protects_wal(&self, key: &str) -> bool {
-        self.first_live_wal_seq
-            .is_some_and(|first_live| wal_start_seq(key).is_none_or(|seq| seq >= first_live))
+        self.folded_and_floor_wal_no
+            .is_some_and(|floor| wal_no_from_key(key).is_none_or(|number| number > floor))
     }
 
     pub(super) fn retired_content(&self, now_ms: u64) -> bool {
@@ -193,8 +157,4 @@ impl LiveSet {
                 .reclaim_after_ms
                 .is_some_and(|deadline| deadline <= now_ms)
     }
-}
-
-fn wal_start_seq(key: &str) -> Option<ChangeSeq> {
-    wal_segment_id_from_key(key).and_then(loonfs_api::wal_segment_id_start_seq)
 }

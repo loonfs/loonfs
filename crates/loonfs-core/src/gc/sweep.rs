@@ -101,16 +101,12 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         key: &str,
         deleted: fn(&mut DeletedObjectCounts) -> &mut u64,
     ) -> Result<bool> {
-        if family == CandidateFamily::Manifests && !self.live.namespace_deleted {
-            let number = loonfs_objectstore::layout::manifest_no_of(key);
-            if self
-                .live
-                .discovery_start_manifest_no
-                .is_none_or(|current| number.is_none_or(|number| number >= current))
-            {
-                self.report.retain(RetainedReason::Referenced);
-                return Ok(true);
-            }
+        if family == CandidateFamily::Manifests
+            && loonfs_objectstore::layout::manifest_no_of(key)
+                .is_some_and(|number| number >= self.live.discovery_start_manifest_no)
+        {
+            self.report.retain(RetainedReason::Referenced);
+            return Ok(true);
         }
         if self.live.objects.contains(key)
             || (family == CandidateFamily::WalSegments && self.live.protects_wal(key))
@@ -120,6 +116,30 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         }
         if !self.budget.try_charge() {
             return Ok(false);
+        }
+        if family == CandidateFamily::Manifests {
+            let successor = loonfs_objectstore::layout::manifest_no_of(key)
+                .and_then(|number| number.successor().ok());
+            if let Some(successor) = successor {
+                let successor_key = loonfs_objectstore::keys::metadata_manifest_object(
+                    self.namespace_id,
+                    &successor,
+                );
+                let age = grace_age(
+                    self.store,
+                    &successor_key,
+                    self.grace_window_ms,
+                    self.mutation.now_ms,
+                )
+                .await
+                .map_err(|error| CoreError::store(&successor_key, &error))?;
+                // A reader that loaded a lagging hint may still be fetching the
+                // predecessor while its successor is young.
+                if let Some(reason) = age.retained_reason() {
+                    self.report.retain(reason);
+                    return Ok(true);
+                }
+            }
         }
         // A compaction may publish output that is exactly the minimum age
         // old, so a segment must be strictly older before it goes.

@@ -227,12 +227,13 @@ fn runtime_cache_can_be_disabled() {
     )
     .expect("put file");
 
+    block_on(fs.writer.publisher().drain()).expect("finish hints");
     raw_store.reset_wal_get_count();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read should project WAL tail");
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should project WAL tail again");
-    assert_eq!(raw_store.wal_get_count(), 2);
+    assert_eq!(raw_store.wal_get_count(), 8);
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.wal_tail_projection_cache_hits, 0);
     assert_eq!(stats.wal_tail_projection_cache_misses, 0);
@@ -270,6 +271,7 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
         )
         .expect("put second file");
 
+    block_on(setup.writer.publisher().drain()).expect("finish hints");
     let fs = open_runtime_with(shared_store, "tail-count-budget", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
             max_cached_namespaces: 1,
@@ -289,7 +291,7 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
     fs.get_file_bytes_blocking(&first, "/file.txt")
         .expect("first tail projection reloads after eviction");
     let after_reload = fs.runtime_cache_stats();
-    assert_eq!(raw_store.wal_get_count(), 1);
+    assert_eq!(raw_store.wal_get_count(), 4);
     assert_eq!(after_reload.wal_tail_projection_cache_evictions, 2);
 }
 
@@ -316,16 +318,17 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     )
     .expect("put file");
 
+    block_on(fs.writer.publisher().drain()).expect("finish hints");
     raw_store.reset_wal_get_count();
     fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("first read projects oversized tail");
     fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("second read projects oversized tail again");
-    assert_eq!(raw_store.wal_get_count(), 2);
+    assert_eq!(raw_store.wal_get_count(), 4);
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.wal_tail_projection_cache_misses, 2);
     assert_eq!(stats.wal_tail_projection_cache_hits, 0);
-    assert_eq!(stats.wal_tail_projection_cache_uncacheable_count, 2);
+    assert_eq!(stats.wal_tail_projection_cache_uncacheable_count, 3);
     assert_eq!(stats.wal_tail_projection_cache_cached_rows, 0);
 }
 
@@ -488,17 +491,8 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
     .expect("put file");
     fs.create_checkpoint_blocking(&namespace_id)
         .expect("checkpoint");
-    // The checkpoint published the namespace's first manifest. One more
-    // write moves the head, so the next read resolves its anchor against
-    // that manifest instead of the genesis basis it had pinned.
-    fs.put_file_bytes_blocking(
-        &namespace_id,
-        "/docs/second.txt",
-        b"second",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("put second file");
-
+    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    let fs = runtime(temp_dir.path(), "materialized-reader");
     fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("first materialized stat");
     let after_first = fs.runtime_cache_stats();
@@ -786,6 +780,9 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put file");
+        fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
+            .expect("consume the published read state");
+        block_on(fs.writer.publisher().drain()).expect("finish hints");
         let calls_before = stored_blocks.call_count();
         let step = fs
             .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
@@ -795,6 +792,8 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
             calls_before,
             "a maintenance pass carries no segment cache, so it reaches neither cache tier"
         );
+        fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
+            .expect("read folded file outside the maintenance window");
         if upkeep(&step).reorganize == ReorganizeStepOutcome::UnitPublished {
             reorganized = true;
             break;

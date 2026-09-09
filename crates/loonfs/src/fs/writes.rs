@@ -797,7 +797,7 @@ pub(crate) struct EnginePublishResult {
 }
 
 /// Publishes already-classified candidates as one batch — one WAL
-/// segment, one head compare-and-swap — through the namespace
+/// segment, one numbered WAL put — through the namespace
 /// publisher's own commit engine, and settles the runtime state the
 /// batch produced: read caches, publish observer, maintenance.
 ///
@@ -834,13 +834,34 @@ pub(crate) async fn publish_batch_with_engine(
     // crates) exceed rustc's type-recursion depth.
     let mut publish =
         Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options)).await;
+    // A raise that finds a newer manifest in the hint has learned of a
+    // publication the engine never sees otherwise; both caches reload.
+    let mut manifest_moved = false;
+    if let Some(state) = &mut publish.resulting_read_state {
+        match writer
+            .discovery_hints
+            .raise(store, namespace_id, state.head.wal_no)
+            .await
+        {
+            Some(hint) if hint.state.manifest_no > state.basis.manifest_no() => {
+                manifest_moved = true;
+            }
+            Some(hint) => state.head_etag = hint.etag,
+            None => {}
+        }
+    }
+    if manifest_moved {
+        engine.invalidate_projection();
+    }
     {
         let _span = phase_span!(core, "batch_update_cache", namespace_id, batch_size).entered();
         match publish.resulting_read_state.take() {
             // A landed publish hands the caches exactly the state a
             // rebuild would recompute; use it instead of dropping.
-            Some(state) => core.seed_namespace_read_cache(namespace_id, state),
-            None => {
+            Some(state) if !manifest_moved => {
+                core.seed_namespace_read_cache(namespace_id, state);
+            }
+            _ => {
                 let runtime_results = publish
                     .results
                     .iter()

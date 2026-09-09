@@ -23,6 +23,41 @@ use loonfs_test_support::stores::{
 use std::path::Path;
 use std::sync::Arc;
 
+pub(crate) fn data_wal_put_for(
+    namespace_id: &NamespaceId,
+) -> impl Fn(&loonfs_test_support::stores::OperationContext<'_>) -> bool + Send + Sync + 'static {
+    let prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
+    move |operation| match operation.kind() {
+        loonfs_test_support::stores::OperationKind::Put {
+            bytes,
+            mode: loonfs_objectstore::PutMode::CreateIfAbsent,
+        } if operation.key().starts_with(&prefix) => {
+            loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(bytes)
+                .is_ok_and(|envelope| !envelope.payload().records.is_empty())
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn folded_manifest_put(
+    operation: &loonfs_test_support::stores::OperationContext<'_>,
+) -> bool {
+    match operation.kind() {
+        loonfs_test_support::stores::OperationKind::Put {
+            bytes,
+            mode: loonfs_objectstore::PutMode::CreateIfAbsent,
+        } if operation.key().contains("/manifests/") => {
+            loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes).is_ok_and(
+                |envelope| {
+                    envelope.payload().last_folded_wal_no > loonfs_api::WalNo(0)
+                        && !envelope.payload().status.is_deleted()
+                },
+            )
+        }
+        _ => false,
+    }
+}
+
 thread_local! {
     static BLOCKING_RUNTIME: tokio::runtime::Runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -662,7 +697,7 @@ impl RuntimeStoreProbe {
             Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
         let wal_gets = Arc::new(RecordingStore::new(
             inner,
-            KeyPredicate::prefix(format!("namespaces/{namespace_id}/wal/segments/")),
+            KeyPredicate::prefix(format!("namespaces/{namespace_id}/wal/")),
         ));
         let manifest_gets = Arc::new(RecordingStore::new(
             wal_gets.clone() as SharedObjectStore,
@@ -670,12 +705,12 @@ impl RuntimeStoreProbe {
         ));
         let head_gets = Arc::new(RecordingStore::new(
             manifest_gets.clone() as SharedObjectStore,
-            KeyPredicate::wal_head(namespace_id),
+            KeyPredicate::hint(namespace_id),
         ));
         let fail_head_cas = Arc::new(FailStore::new(
             head_gets.clone() as SharedObjectStore,
-            KeyPredicate::wal_head(namespace_id),
-            OperationClass::CompareAndSwap,
+            KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(namespace_id)),
+            OperationClass::PutCreateIfAbsent,
             InjectedError::PreconditionFailed,
         ));
         // Any conditional publication of the root: create-if-absent for a

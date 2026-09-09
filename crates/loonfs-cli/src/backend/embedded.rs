@@ -1474,7 +1474,7 @@ mod tests {
         append_wal_segments(
             store.as_ref(),
             &namespace,
-            loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS,
+            loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS - 1,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("debt-builder").expect("writer id"),
                 now_ms: 1_000,

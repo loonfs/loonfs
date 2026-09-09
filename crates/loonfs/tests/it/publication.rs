@@ -10,7 +10,7 @@ use loonfs::{
     PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::BlockingStore;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -41,10 +41,9 @@ struct ParkedPuts {
 /// that never existed cannot land.
 async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let namespace_id = NamespaceId::parse("parked").expect("valid namespace id");
-    let store_impl = Arc::new(BlockingStore::new(
+    let store_impl = Arc::new(BlockingStore::matching(
         LocalFsStore::new(temp_dir).expect("create local-fs store"),
-        KeyPredicate::wal_head(&namespace_id),
-        OperationClass::CompareAndSwap,
+        crate::common::data_wal_put_for(&namespace_id),
     ));
     let store: SharedObjectStore = store_impl.clone();
     let writer = Arc::new(

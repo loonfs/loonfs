@@ -14,7 +14,8 @@ use crate::commit::{
 };
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
-use loonfs_api::wire::control::{HeadState, NamespaceStatus, WriterBlock};
+use crate::namespace::state::NamespaceReadState;
+use loonfs_api::wire::control::{NamespaceStatus, WriterBlock};
 use loonfs_api::wire::{manifest::DeletedDirentry, wal::WalDelta};
 use loonfs_api::{
     next_public_ordinal, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
@@ -178,7 +179,7 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
 }
 
 struct TestValidationContext<'a> {
-    head: HeadState,
+    head: NamespaceReadState,
     metadata_state: &'a MetadataState,
 }
 
@@ -188,7 +189,7 @@ fn validation_context(
     next_inode_id: InodeId,
 ) -> TestValidationContext<'_> {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let head = HeadState {
+    let head = NamespaceReadState {
         content_store_id: loonfs_api::ContentStoreId::generate(),
         created_at_ms: 1_000,
         fork_basis: None,
@@ -201,8 +202,9 @@ fn validation_context(
             acquired_at_ms: 1_000,
         }),
         next_inode_id,
-        visible_wal_tip: None,
-        recent_segments: Vec::new(),
+        wal_no: loonfs_api::WalNo(0),
+        last_folded_wal_no: loonfs_api::WalNo(0),
+        retention_floor_wal_no: loonfs_api::WalNo(0),
         status: NamespaceStatus::Active {},
     };
     TestValidationContext {

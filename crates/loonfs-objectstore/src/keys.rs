@@ -2,11 +2,10 @@
 //!
 //! [durable object family]: ../../../docs/specs/format.md#12-durable-object-families
 
-use crate::layout::wal_segment_id_from_key as parse_wal_segment_id;
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
     CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceId, UploadId,
-    WalSegmentId,
+    WalNo,
 };
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
@@ -14,26 +13,19 @@ pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/")
 }
 
-/// Builds the authoritative WAL head key for one namespace.
-pub fn wal_head(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/wal/head.json")
+/// Builds the immutable object key for a numbered WAL segment.
+pub fn wal_segment(namespace_id: &NamespaceId, wal_no: &WalNo) -> String {
+    format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0)
 }
 
-/// Builds the immutable WAL object key for a segment identity.
-pub fn wal_segment(namespace_id: &NamespaceId, wal_segment_id: &WalSegmentId) -> String {
-    format!("namespaces/{namespace_id}/wal/segments/{wal_segment_id}.wal.zst")
-}
-
-/// Builds the listing prefix containing only WAL segment objects for one namespace.
+/// Builds the listing prefix for numbered WAL objects.
 pub fn wal_segment_prefix(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/wal/segments/")
+    format!("namespaces/{namespace_id}/wal/")
 }
 
-/// Extracts a segment identity from a current-format WAL object key.
-///
-/// Returns `None` for foreign or differently suffixed objects.
-pub fn wal_segment_id_from_key(key: &str) -> Option<&str> {
-    parse_wal_segment_id(key)
+/// Parses a WAL object number from a durable key.
+pub fn wal_no_from_key(key: &str) -> Option<WalNo> {
+    crate::layout::wal_no_of(key)
 }
 
 /// Builds the starting point for numbered manifest discovery.
@@ -119,14 +111,14 @@ pub fn content_blob(
 mod tests {
     use super::{
         checkpoint_record, content_blob, content_store, hint, metadata_manifest_object,
-        metadata_segment, metadata_segment_object_key, upload_session, wal_head, wal_segment,
-        wal_segment_id_from_key, wal_segment_prefix,
+        metadata_segment, metadata_segment_object_key, upload_session, wal_no_from_key,
+        wal_segment, wal_segment_prefix,
     };
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
         CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceId,
-        UploadId, WalSegmentId,
+        UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -155,10 +147,6 @@ mod tests {
 
     fn upload_id() -> UploadId {
         UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id")
-    }
-
-    fn wal_segment_id(value: &str) -> WalSegmentId {
-        WalSegmentId::parse(value).expect("valid WAL segment id")
     }
 
     #[test]
@@ -200,7 +188,7 @@ mod tests {
                 .replace("{owner_namespace_id}", "ns-1")
                 .replace("{source_namespace_id}", "ns-1")
                 .replace("{content_store_id}", "cs_00000000000000000000000000000001")
-                .replace("{start_seq:020}", &format!("{:020}", 42))
+                .replace("{wal_no:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
                 .replace("{manifest_no:020}", "00000000000000000400")
                 .replace("{checkpoint_id}", "chk_00000000000000000000000000000001")
@@ -218,15 +206,7 @@ mod tests {
                 "Content store descriptors",
                 content_store(&content_store_id()),
             ),
-            ("WAL head", wal_head(&namespace_id())),
-            (
-                "WAL segments",
-                wal_segment(
-                    &namespace_id(),
-                    &WalSegmentId::parse(format!("wal_{:020}-{}", 42, "0123456789abcdef"))
-                        .expect("valid WAL segment id"),
-                ),
-            ),
+            ("WAL segments", wal_segment(&namespace_id(), &WalNo(42))),
             (
                 "Namespace manifests",
                 metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
@@ -266,28 +246,15 @@ mod tests {
     }
 
     #[test]
-    fn listing_prefixes_match_their_keys_and_wal_segment_ids_parse_back() {
+    fn listing_prefixes_match_their_keys_and_wal_numbers_parse_back() {
+        assert_eq!(wal_segment_prefix(&namespace_id()), "namespaces/ns-1/wal/");
+        assert!(wal_segment(&namespace_id(), &WalNo(42))
+            .starts_with(&wal_segment_prefix(&namespace_id())));
         assert_eq!(
-            wal_segment_prefix(&namespace_id()),
-            "namespaces/ns-1/wal/segments/"
+            wal_no_from_key(&wal_segment(&namespace_id(), &WalNo(42))),
+            Some(WalNo(42))
         );
-        assert!(wal_segment(
-            &namespace_id(),
-            &wal_segment_id("wal_00000000000000000042-0123456789abcdef")
-        )
-        .starts_with(&wal_segment_prefix(&namespace_id())));
-        assert!(!wal_head(&namespace_id()).starts_with(&wal_segment_prefix(&namespace_id())));
-        assert_eq!(
-            wal_segment_id_from_key(&wal_segment(
-                &namespace_id(),
-                &wal_segment_id("wal_00000000000000000042-0123456789abcdef")
-            )),
-            Some("wal_00000000000000000042-0123456789abcdef")
-        );
-        assert_eq!(
-            wal_segment_id_from_key("namespaces/ns-1/wal/segments/random.tmp"),
-            None
-        );
+        assert_eq!(wal_no_from_key("namespaces/ns-1/wal/random.tmp"), None);
     }
 
     fn segment_descriptor() -> MetadataSegmentRef {

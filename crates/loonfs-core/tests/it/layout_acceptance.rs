@@ -13,7 +13,7 @@ use loonfs_core::publish::{
 };
 use loonfs_core::{gc_namespace, GcConfig};
 use loonfs_core::{BootstrapOptions, MutationContext, ResolvedUploadCompletion};
-use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
+use loonfs_objectstore::keys::wal_segment_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
@@ -155,7 +155,7 @@ async fn reads_commits_and_change_feed_never_list() {
 }
 
 #[tokio::test]
-async fn maintenance_never_touches_the_wal_head() {
+async fn maintenance_preserves_namespace_identity_and_writer() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -174,12 +174,10 @@ async fn maintenance_never_touches_the_wal_head() {
     )
     .await;
 
-    let head_key = wal_head(&namespace_id);
-    let before = store
-        .get_with_metadata(&head_key)
+    let before = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
         .await
-        .expect("read head")
-        .expect("head exists");
+        .expect("namespace state")
+        .state;
 
     engine
         .create_checkpoint("test-pin".to_owned(), None)
@@ -209,14 +207,17 @@ async fn maintenance_never_touches_the_wal_head() {
         .await
         .expect("second upload complete");
 
-    let after = store
-        .get_with_metadata(&head_key)
+    let after = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
         .await
-        .expect("read head")
-        .expect("head exists");
-    assert_eq!(after.bytes, before.bytes, "head bytes must be unchanged");
-    assert_eq!(
-        after.metadata.etag, before.metadata.etag,
-        "head object identity must be unchanged"
-    );
+        .expect("namespace state")
+        .state;
+    assert_eq!(after.namespace_id, before.namespace_id);
+    assert_eq!(after.content_store_id, before.content_store_id);
+    assert_eq!(after.created_at_ms, before.created_at_ms);
+    assert_eq!(after.fork_basis, before.fork_basis);
+    assert_eq!(after.writer_epoch, before.writer_epoch);
+    assert_eq!(after.writer, before.writer);
+    assert_eq!(after.seq, before.seq);
+    assert_eq!(after.head_commit_id, before.head_commit_id);
+    assert_eq!(after.next_inode_id, before.next_inode_id);
 }

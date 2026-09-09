@@ -208,7 +208,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         }
     );
     assert_eq!(first.checkpoint_seq, ChangeSeq(1));
-    assert_eq!(first.manifest_no, ManifestNo(1));
+    assert_eq!(first.manifest_no, ManifestNo(3));
     let listed = collect_checkpoints(&client, &namespace)
         .await
         .expect("list first checkpoint");

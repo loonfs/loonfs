@@ -833,7 +833,7 @@ mod tests {
 
     use super::LocalFsStore;
     use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
-    use crate::keys::{upload_session, wal_head};
+    use crate::keys::{hint, upload_session};
     use bytes::Bytes;
     use std::fs;
     use std::sync::Arc;
@@ -844,7 +844,7 @@ mod tests {
     async fn listing_tolerates_entries_that_vanish_mid_walk() {
         let temp_dir = test_dir("listing-races");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
             .await
@@ -855,8 +855,8 @@ mod tests {
         // removes an object, between enumeration and inspection: read_dir
         // listed the entry but the stat answers NotFound. Broken symlinks
         // reproduce that window deterministically.
-        let dir = temp_dir.path().join("namespaces/ns-1/wal");
-        std::os::unix::fs::symlink(dir.join("missing"), dir.join(".head.json.tmp-1-2"))
+        let dir = temp_dir.path().join("namespaces/ns-1");
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join(".hint.json.tmp-1-2"))
             .expect("dangling scratch entry");
         std::os::unix::fs::symlink(dir.join("missing"), dir.join("vanished.json"))
             .expect("dangling plain entry");
@@ -874,7 +874,7 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
 
         let answer = store
-            .head(&wal_head(
+            .head(&hint(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
             ))
             .await
@@ -892,7 +892,7 @@ mod tests {
         let temp_dir = test_dir("digest-vanished");
         let vanished = temp_dir.path().join("vanished.json");
 
-        let answer = LocalFsStore::read_for_digest("namespaces/ns-1/wal/head.json", &vanished)
+        let answer = LocalFsStore::read_for_digest("namespaces/ns-1/hint.json", &vanished)
             .await
             .expect("a vanished object is an answer, not an error");
         assert!(answer.is_none());
@@ -904,7 +904,7 @@ mod tests {
         let directory = temp_dir.path().join("dir");
         fs::create_dir(&directory).expect("create directory");
 
-        let error = LocalFsStore::read_for_digest("namespaces/ns-1/wal/head.json", &directory)
+        let error = LocalFsStore::read_for_digest("namespaces/ns-1/hint.json", &directory)
             .await
             .expect_err("reading a directory is not a missing object");
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
@@ -914,7 +914,7 @@ mod tests {
     async fn ranged_reads_answer_their_range_and_refuse_impossible_ones() {
         let temp_dir = test_dir("ranged-reads");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = wal_head(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
         let payload = Bytes::from_static(b"0123456789");
         store
             .put(&key, payload.clone(), PutMode::Overwrite)
@@ -959,9 +959,7 @@ mod tests {
         ));
         assert!(store
             .get(
-                &wal_head(
-                    &loonfs_api::NamespaceId::parse("ns-missing").expect("valid namespace id")
-                ),
+                &hint(&loonfs_api::NamespaceId::parse("ns-missing").expect("valid namespace id")),
                 range(0, 4)
             )
             .await
@@ -977,7 +975,7 @@ mod tests {
 
         let temp_dir = test_dir("atomic-replacement");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local fs store"));
-        let key = wal_head(
+        let key = hint(
             &loonfs_api::NamespaceId::parse("ns-atomic-replacement").expect("valid namespace id"),
         );
         store
@@ -1057,7 +1055,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compare_and_swap_is_safe_across_store_instances() {
         let temp_dir = test_dir("cross-instance-cas");
-        let key = wal_head(&loonfs_api::NamespaceId::parse("ns-cas").expect("valid namespace id"));
+        let key = hint(&loonfs_api::NamespaceId::parse("ns-cas").expect("valid namespace id"));
         let seed = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         seed.put(&key, Bytes::from_static(b"0"), PutMode::CreateIfAbsent)
             .await
@@ -1115,8 +1113,7 @@ mod tests {
     async fn listings_hide_scratch_files_and_reject_scratch_keys() {
         let temp_dir = test_dir("scratch");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key =
-            wal_head(&loonfs_api::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
+        let key = hint(&loonfs_api::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
             .await
@@ -1125,8 +1122,8 @@ mod tests {
         // The write above created the store lock; fake an in-flight temp
         // write next to the real object as well.
         assert!(temp_dir.path().join(super::STORE_LOCK_FILE_NAME).exists());
-        let wal_dir = temp_dir.path().join("namespaces/ns-scratch/wal");
-        fs::write(wal_dir.join(".head.json.tmp-123-456"), b"partial")
+        let namespace_dir = temp_dir.path().join("namespaces/ns-scratch");
+        fs::write(namespace_dir.join(".hint.json.tmp-123-456"), b"partial")
             .expect("write fake temp file");
 
         let keys = store.list_prefix("").await.expect("list all");

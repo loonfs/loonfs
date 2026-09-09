@@ -6,14 +6,13 @@ use crate::control_object::{
 };
 use crate::error::{CoreError, StoreFailureClass};
 use crate::limits::CONTENTION_RETRY_LIMIT;
-use crate::namespace::control::{load_head_object, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, HeadState, ProxiedStaging, UploadSessionMode,
+    encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
     UploadSessionRecordStatus, UploadSessionState,
 };
 use loonfs_api::{NamespaceId, UploadId};
-use loonfs_objectstore::keys::{upload_session, wal_head};
+use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 use thiserror::Error;
@@ -116,14 +115,6 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
     .await?
 }
 
-/// Replacement head state and the value returned after its CAS succeeds.
-/// An update that should not write must return an error instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HeadReplacement<T> {
-    pub(crate) next: Box<HeadState>,
-    pub(crate) outcome: T,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UploadSessionUpdate<T> {
     Noop(T),
@@ -135,18 +126,12 @@ pub(crate) enum UploadSessionUpdate<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum ControlUpdateError {
-    #[error(transparent)]
-    LoadHead(ControlObjectLoadError),
-    #[error("control object codec error for `{object_key}`: {message}")]
-    Codec { object_key: String, message: String },
     #[error("control object store error for `{object_key}`: {message}")]
     Store {
         object_key: String,
         message: String,
         class: StoreFailureClass,
     },
-    #[error("{}", crate::error::contention_message(object_key))]
-    RetryExhausted { object_key: String },
 }
 
 impl ControlUpdateError {
@@ -160,56 +145,6 @@ impl ControlUpdateError {
             class: StoreFailureClass::of(error),
         }
     }
-}
-
-/// Reads the head, asks `update` to build a replacement, and applies it with
-/// a CAS against the loaded ETag. CAS conflicts retry the complete
-/// read-update-CAS cycle. Errors returned by `update` are returned immediately,
-/// which prevents an invalid writer or stale manifest from being overwritten.
-pub(crate) async fn update_head<S, T, E, F>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    update: F,
-) -> Result<T, E>
-where
-    S: ObjectStore + ?Sized,
-    E: From<ControlUpdateError>,
-    F: Fn(&LoadedHeadObject) -> Result<HeadReplacement<T>, E>,
-{
-    let update = &update;
-    retry_while_contended(
-        || async move {
-            let loaded = load_head_object(store, namespace_id)
-                .await
-                .map_err(|error| E::from(ControlUpdateError::LoadHead(error)))?;
-            let HeadReplacement { next, outcome } = update(&loaded)?;
-            let encoded = encode_head(*next, &loaded.object_key).map_err(E::from)?;
-            match store
-                .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
-                .await
-            {
-                Ok(_) => Ok(CasAttempt::Settled(outcome)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
-                    E::from(ControlUpdateError::RetryExhausted {
-                        object_key: wal_head(namespace_id),
-                    }),
-                )),
-                Err(error @ ObjectStoreError::Transport { .. }) => {
-                    Ok(CasAttempt::Ambiguous(error, ()))
-                }
-                Err(error) => Err(E::from(ControlUpdateError::Store {
-                    object_key: loaded.object_key,
-                    message: error.public_message().into_owned(),
-                    class: StoreFailureClass::of(&error),
-                })),
-            }
-        },
-        |_, ()| async {
-            // Each attempt allocates a new epoch, so a later head cannot prove which write landed.
-            Ok(WriteEvidence::Unknown)
-        },
-    )
-    .await?
 }
 
 pub(crate) async fn update_upload_session<S, T, F, Fut>(
@@ -311,15 +246,6 @@ where
     }
 }
 
-fn encode_head(next: HeadState, object_key: &str) -> Result<Vec<u8>, ControlUpdateError> {
-    encode_control_state(ControlObjectKind::WalHead, &next).map_err(|err| {
-        ControlUpdateError::Codec {
-            object_key: object_key.to_owned(),
-            message: err.to_string(),
-        }
-    })
-}
-
 /// Reads an upload session without retaining its ETag. Use this for status
 /// checks and other operations that do not need to update the session.
 pub(crate) async fn load_upload_session_state<S: ObjectStore + ?Sized>(
@@ -362,30 +288,9 @@ async fn load_upload_session_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::ControlObjectKind;
-    use loonfs_api::NamespaceId;
-    use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
-    };
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
     use tempfile::tempdir;
-
-    async fn write_initial_head(store: &LocalFsStore, namespace_id: &NamespaceId) {
-        let envelope = HeadState::initial(
-            namespace_id.clone(),
-            loonfs_api::ContentStoreId::generate(),
-            1_000,
-        );
-        let bytes =
-            loonfs_api::wire::control::encode_control_state(ControlObjectKind::WalHead, &envelope)
-                .expect("head bytes");
-        store
-            .put_if_absent(&wal_head(namespace_id), Bytes::from(bytes))
-            .await
-            .expect("write head");
-    }
 
     #[tokio::test]
     async fn generated_id_create_recovers_when_the_first_write_lands_ambiguously() {
@@ -455,61 +360,5 @@ mod tests {
         .expect("contention attempts should not fail");
 
         assert_eq!(exhausted, Err(CONTENTION_RETRY_LIMIT - 1));
-    }
-
-    #[tokio::test]
-    async fn update_head_retries_cas_conflict_and_succeeds() {
-        let temp_dir = tempdir().expect("tempdir");
-        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_initial_head(&inner, &namespace_id).await;
-        let store = FailStore::new(
-            inner,
-            KeyPredicate::any(),
-            OperationClass::CompareAndSwap,
-            InjectedError::PreconditionFailed,
-        );
-        store.fail_next(1);
-
-        let outcome = update_head(&store, &namespace_id, |loaded| {
-            let mut next = loaded.state.clone();
-            next.seq.0 += 1;
-            Ok::<_, ControlUpdateError>(HeadReplacement {
-                next: Box::new(next),
-                outcome: "updated",
-            })
-        })
-        .await
-        .expect("retry update");
-
-        assert_eq!(outcome, "updated");
-        assert_eq!(store.remaining(), 0);
-    }
-
-    #[tokio::test]
-    async fn update_head_missing_etag_fails_without_retry() {
-        let temp_dir = tempdir().expect("tempdir");
-        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_initial_head(&inner, &namespace_id).await;
-        let store = MetadataMapStore::without_etag(inner, KeyPredicate::any());
-
-        let closure_called = AtomicBool::new(false);
-        let error = update_head(&store, &namespace_id, |loaded| {
-            closure_called.store(true, Ordering::SeqCst);
-            Ok::<_, ControlUpdateError>(HeadReplacement {
-                next: Box::new(loaded.state.clone()),
-                outcome: (),
-            })
-        })
-        .await
-        .expect_err("missing etag should fail");
-
-        assert!(matches!(
-            error,
-            ControlUpdateError::LoadHead(ControlObjectLoadError::Store { message, .. })
-                if message.contains("required control-object etag")
-        ));
-        assert!(!closure_called.load(Ordering::SeqCst));
     }
 }

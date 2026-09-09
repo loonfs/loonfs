@@ -11,10 +11,9 @@ use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::metadata::VisiblePathError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
-use crate::namespace::writer_epoch::WriterEpochAcquireError;
+use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalChainLoadError, WalSegmentError};
-use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
     ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, RevisionNo, UploadId,
     WriterEpoch, WriterId,
@@ -52,8 +51,6 @@ pub enum CoreError {
     VisiblePath(#[from] VisiblePathError),
     #[error(transparent)]
     DurableContent(#[from] DurableContentValidationError),
-    #[error(transparent)]
-    WriterEpoch(#[from] WriterEpochAcquireError),
     #[error("commit validation failed: {0}")]
     CommitValidation(#[from] CommitValidationError),
     #[error("WAL build failed: {0}")]
@@ -305,8 +302,8 @@ pub enum MetadataProjectionLoadError {
         "metadata projection head mismatch: expected current head `{expected:?}`, replayed `{actual:?}`"
     )]
     ReplayedHeadMismatch {
-        expected: Box<HeadState>,
-        actual: Box<HeadState>,
+        expected: Box<NamespaceReadState>,
+        actual: Box<NamespaceReadState>,
     },
 }
 
@@ -330,7 +327,7 @@ impl MetadataProjectionLoadError {
 impl From<NamespaceCatalogLoadError> for MetadataProjectionLoadError {
     fn from(value: NamespaceCatalogLoadError) -> Self {
         match value {
-            NamespaceCatalogLoadError::LoadHead(error) => Self::LoadHead(error),
+            NamespaceCatalogLoadError::LoadManifest(error) => Self::LoadHead(error),
         }
     }
 }
@@ -403,7 +400,6 @@ impl CoreError {
             CoreError::MetadataView(error) => error.code(),
             CoreError::VisiblePath(error) => error.code(),
             CoreError::DurableContent(error) => error.code(),
-            CoreError::WriterEpoch(error) => error.code(),
             CoreError::CommitValidation(error) => error.code(),
             CoreError::WalBuild(_) | CoreError::Codec { .. } | CoreError::Internal(_) => {
                 ErrorCode::ServerError
@@ -488,11 +484,9 @@ impl CoreError {
             CoreError::DurableContent(DurableContentValidationError::Store { message, .. }) => {
                 Some(std::borrow::Cow::Owned(message.clone()))
             }
-            CoreError::WriterEpoch(error) => writer_epoch_store_message(error),
-            CoreError::HeadPublish(
-                CommitHeadPublishError::OutcomeUnknown(message)
-                | CommitHeadPublishError::Store { message, .. },
-            ) => Some(std::borrow::Cow::Owned(message.clone())),
+            CoreError::HeadPublish(CommitHeadPublishError::OutcomeUnknown(message)) => {
+                Some(std::borrow::Cow::Owned(message.clone()))
+            }
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
                 Some(class.public_message())
             }
@@ -504,13 +498,8 @@ impl CoreError {
                 | DurableContentValidationError::ContentChecksumMismatch { .. },
             )
             | CoreError::HeadPublish(
-                CommitHeadPublishError::EmptyExpectedHeadEtag
-                | CommitHeadPublishError::SegmentDoesNotConnect { .. }
-                | CommitHeadPublishError::EmptyWalSegment
-                | CommitHeadPublishError::SeqOverflow
-                | CommitHeadPublishError::StaleHead
-                | CommitHeadPublishError::PublishBudgetExceeded { .. }
-                | CommitHeadPublishError::Codec { .. },
+                CommitHeadPublishError::StaleHead
+                | CommitHeadPublishError::PublishBudgetExceeded { .. },
             )
             | CoreError::MetadataView(_)
             | CoreError::VisiblePath(_)
@@ -667,16 +656,6 @@ fn control_object_store_message(
     }
 }
 
-fn writer_epoch_store_message(
-    error: &WriterEpochAcquireError,
-) -> Option<std::borrow::Cow<'static, str>> {
-    match error {
-        WriterEpochAcquireError::LoadHead(error) => control_object_store_message(error),
-        WriterEpochAcquireError::HeadWrite { class, .. } => Some(class.public_message()),
-        _ => None,
-    }
-}
-
 /// Describes a writer fencing event: the displaced epoch, the active epoch,
 /// and any available information about the active writer.
 ///
@@ -730,7 +709,6 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
     fn from(value: crate::control_update::ControlUpdateError) -> Self {
         use crate::control_update::ControlUpdateError;
         match value {
-            ControlUpdateError::LoadHead(error) => CoreError::ControlObjectLoad(error),
             ControlUpdateError::Store {
                 object_key,
                 message,
@@ -740,9 +718,6 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
                 message,
                 class,
             },
-            // Codec and retry exhaustion are non-store control-plane
-            // failures. Preserve their prefixed detail as an internal error.
-            other => CoreError::Internal(other.to_string()),
         }
     }
 }
@@ -755,9 +730,7 @@ mod tests {
     };
     use crate::commit_engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
-    use crate::control_update::ControlUpdateError;
     use crate::namespace::catalog::NamespaceCatalogLoadError;
-    use crate::namespace::writer_epoch::WriterEpochAcquireError;
     use crate::namespace::BootstrapNamespaceError;
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
@@ -979,15 +952,15 @@ mod tests {
     #[test]
     fn store_failures_classify_to_their_wire_codes() {
         let denied = ObjectStoreError::PermissionDenied {
-            object_key: "namespaces/demo/wal/head.json".to_owned(),
+            object_key: "namespaces/demo/hint.json".to_owned(),
             message: "AccessDenied: bucket policy".to_owned(),
         };
-        let error = CoreError::store("namespaces/demo/wal/head.json", &denied);
+        let error = CoreError::store("namespaces/demo/hint.json", &denied);
         assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
         assert_eq!(error.kind(), ErrorKind::StoragePermissionDenied);
 
-        let transport = ObjectStoreError::transport("namespaces/demo/wal/head.json", "timed out");
-        let error = CoreError::store("namespaces/demo/wal/head.json", &transport);
+        let transport = ObjectStoreError::transport("namespaces/demo/hint.json", "timed out");
+        let error = CoreError::store("namespaces/demo/hint.json", &transport);
         assert_eq!(error.code(), ErrorCode::ServerError);
 
         let invalid_range = ObjectStoreError::InvalidRange {
@@ -1000,22 +973,20 @@ mod tests {
     #[test]
     fn control_object_permission_failure_survives_every_head_wrapper() {
         let denied = ControlObjectLoadError::Store {
-            object_key: "namespaces/demo/wal/head.json".to_owned(),
+            object_key: "namespaces/demo/hint.json".to_owned(),
             message: "permission denied: bucket policy".to_owned(),
             class: StoreFailureClass::PermissionDenied,
         };
 
         let core_wrappers = [
             CoreError::ControlObjectLoad(denied.clone()),
-            CoreError::WriterEpoch(WriterEpochAcquireError::LoadHead(denied.clone())),
-            CoreError::from(NamespaceCatalogLoadError::LoadHead(denied.clone())),
-            CoreError::from(ControlUpdateError::LoadHead(denied.clone())),
+            CoreError::from(NamespaceCatalogLoadError::LoadManifest(denied.clone())),
         ];
         for error in core_wrappers {
             assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
         }
         assert_eq!(
-            BootstrapNamespaceError::Head(denied).code(),
+            BootstrapNamespaceError::Core(CoreError::ControlObjectLoad(denied)).code(),
             ErrorCode::StoragePermissionDenied
         );
     }

@@ -57,18 +57,6 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         self.store
     }
 
-    /// Genesis has no manifest and no durable metadata rows to scan.
-    pub(crate) fn empty(store: &'a S) -> Self {
-        Self {
-            store,
-            segment_cache: None,
-            manifest_object_key: String::new(),
-            manifest: None,
-            scan_runs: Arc::new(Vec::new()),
-            block_memo: SessionBlockMemo::default(),
-        }
-    }
-
     pub(super) fn from_runs(
         store: &'a S,
         segment_cache: &'a MetadataSegmentCache,

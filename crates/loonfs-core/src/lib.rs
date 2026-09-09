@@ -132,8 +132,10 @@ pub mod control {
     };
     pub use crate::namespace::control::{
         load_namespace_checkpoint_record_control, load_namespace_current_manifest,
-        load_namespace_head_control, load_namespace_read_anchor, CurrentManifest, LoadedManifest,
+        load_namespace_head_control, load_namespace_read_anchor, raise_namespace_hint,
+        CurrentManifest, LoadedHint, LoadedManifest,
     };
+    pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::MetadataBasis;
 }
 

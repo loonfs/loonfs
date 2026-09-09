@@ -7,7 +7,8 @@ use super::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, HeadState};
+use crate::namespace::state::NamespaceReadState;
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
 use loonfs_api::{Checkpoint, CheckpointId, NamespaceId, ReleaseSnapshotResponse};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -16,7 +17,7 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 pub async fn load_snapshot_read_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    live_head: &HeadState,
+    live_head: &NamespaceReadState,
     snapshot_id: &CheckpointId,
     now_ms: u64,
 ) -> Result<CheckpointReadBasis> {

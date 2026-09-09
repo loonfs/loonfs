@@ -1,6 +1,4 @@
-//! Namespace forking: installs a target namespace whose head points at a
-//! fork-owned source checkpoint, sharing content bytes and reading the
-//! source's metadata until the target flushes its own.
+//! Fork installation copies pinned source runs into target manifest 1.
 
 use crate::checkpoint::record::{release_checkpoint_record, renew_fork_checkpoint_for_install};
 use crate::checkpoint::{
@@ -11,11 +9,9 @@ use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::{FORK_CHECKPOINT_LEASE_MS, FORK_INSTALL_MARGIN_MS};
-use crate::namespace::bootstrap::{install_namespace_head, NamespaceHeadInstall};
+use crate::namespace::bootstrap::{install_namespace_manifest, NamespaceInstall};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_api::wire::control::{
-    CheckpointOwner, ForkBasis, HeadState, NamespaceStatus, WriterBlock,
-};
+use loonfs_api::wire::control::{CheckpointOwner, ForkBasis, NamespaceStatus};
 use loonfs_api::{CheckpointId, Namespace, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 
@@ -56,33 +52,30 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
-    let source_head = crate::namespace::control::load_head_object(store, source_namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?
-        .state;
+    crate::checkpoint::ensure_manifest_reference_matches(
+        "fork checkpoint",
+        &source_record.manifest,
+        &source_manifest,
+    )?;
     let fork_basis = ForkBasis {
         manifest: source_record.manifest.clone(),
         source_checkpoint_id: source_record.checkpoint_id.clone(),
     };
     let fork_seq = fork_basis.manifest.manifest_head_seq;
 
-    // The target shares content bytes and starts from the source manifest.
-    let head = HeadState {
+    let manifest = loonfs_api::wire::manifest::NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
-        content_store_id: source_head.content_store_id.clone(),
         created_at_ms: context.now_ms,
         fork_basis: Some(fork_basis),
-        seq: fork_seq,
-        head_commit_id: source_record.head_commit_id.clone(),
+        manifest_no: loonfs_api::ManifestNo(1),
+        retention_floor_seq: fork_seq,
+        retention_floor_wal_no: loonfs_api::WalNo(0),
+        last_folded_wal_no: loonfs_api::WalNo(0),
         writer_epoch: WriterEpoch(0),
-        writer: Some(WriterBlock {
-            writer_id: context.writer_id.clone(),
-            acquired_at_ms: context.now_ms,
-        }),
-        next_inode_id: source_manifest.payload().next_inode_id,
-        visible_wal_tip: None,
-        recent_segments: Vec::new(),
+        writer: None,
+        compactor_epoch: 0,
         status: NamespaceStatus::Active {},
+        ..source_manifest.payload().clone()
     };
     // Renew before creating the target so this races safely with GC release.
     let checkpoint_expires_at_ms = renew_fork_checkpoint_for_install(
@@ -95,24 +88,23 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
     )
     .await?;
-    let install_started_at_ms = context
-        .now_ms
-        .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms));
-    if checkpoint_expires_at_ms <= install_started_at_ms.saturating_add(FORK_INSTALL_MARGIN_MS) {
-        return Err(CoreError::CheckpointUnavailable(format!(
-            "fork of `{source_namespace_id}` into `{new_namespace_id}` cannot install before its \
-             source checkpoint `{}` expires",
-            source_record.checkpoint_id
-        )));
-    }
-    match install_namespace_head(store, new_namespace_id, &head).await? {
-        NamespaceHeadInstall::Landed => {}
-        NamespaceHeadInstall::Exists => {
+    match install_namespace_manifest(store, &manifest, || {
+        let install_started_at_ms = context.now_ms.saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms));
+        if checkpoint_expires_at_ms <= install_started_at_ms.saturating_add(FORK_INSTALL_MARGIN_MS) {
+            return Err(CoreError::CheckpointUnavailable(format!(
+                "fork of `{source_namespace_id}` into `{new_namespace_id}` cannot install before source checkpoint `{}` expires",
+                source_record.checkpoint_id
+            )));
+        }
+        Ok(())
+    }).await? {
+        NamespaceInstall::Landed => {}
+        NamespaceInstall::Exists => {
             return Err(CoreError::NamespaceExists {
                 namespace_id: new_namespace_id.clone(),
             })
         }
-        NamespaceHeadInstall::Deleted => {
+        NamespaceInstall::Deleted => {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: new_namespace_id.clone(),
             })

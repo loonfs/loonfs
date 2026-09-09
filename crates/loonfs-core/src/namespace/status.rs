@@ -1,10 +1,8 @@
 //! Reads namespace state and storage diagnostics.
 
-use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control_snapshot::{load_control_snapshot, load_head_and_retention_floor};
-use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
-use loonfs_api::wire::control::HeadState;
+use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -28,10 +26,9 @@ pub struct NamespaceStorageDiagnostics {
 
 /// Namespace head state needed for storage diagnostics.
 struct LoadedHeadBasis {
-    head: HeadState,
+    head: NamespaceReadState,
     current_manifest_no: Option<ManifestNo>,
     /// Sequence the basis manifest covers; the visible tail sits above it.
-    basis_head_seq: ChangeSeq,
     retention_floor_seq: ChangeSeq,
 }
 
@@ -46,20 +43,10 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     let retention_floor_seq = snapshot.retention_floor_seq;
     let head = snapshot.head.state;
     super::control::ensure_namespace_live(&head)?;
-    // An unflushed fork measures its WAL tail from the fork point.
-    let (current_manifest_no, basis_head_seq) = match basis.manifest() {
-        Some(manifest) => (
-            basis
-                .is_owned_by(expected_namespace_id)
-                .then_some(manifest.manifest_no),
-            manifest.manifest_head_seq,
-        ),
-        None => (None, ChangeSeq(0)),
-    };
+    let current_manifest_no = Some(basis.manifest_no());
     Ok(LoadedHeadBasis {
         head,
         current_manifest_no,
-        basis_head_seq,
         retention_floor_seq,
     })
 }
@@ -81,28 +68,12 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Loads storage diagnostics for a live namespace.
-///
-/// The head stores enough recent segment IDs to count the visible WAL tail
-/// without reading segment bodies. This returns an error if those IDs do not
-/// cover the full tail. WAL readers validate the full chain separately.
 pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceStorageDiagnostics> {
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
-    let wal_tail_segments = count_visible_wal_tail_segments(&WalChainLoadRequest {
-        namespace_id: expected_namespace_id,
-        chain_base_seq: loaded.basis_head_seq,
-        head_seq: loaded.head.seq,
-        visible_tip: loaded.head.visible_wal_tip.clone(),
-        stop_after_seq: None,
-        max_segment_fetches: None,
-        recent_segments: &loaded.head.recent_segments,
-    })
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-    })?;
+    let wal_tail_segments = loaded.head.wal_no.0 - loaded.head.last_folded_wal_no.0;
     Ok(NamespaceStorageDiagnostics {
         namespace_id: loaded.head.namespace_id,
         head_seq: loaded.head.seq,
@@ -112,10 +83,6 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Returns the head sequence and whether the namespace has WAL data to flush.
-///
-/// Unlike [`load_namespace_diagnostics`], this does not count WAL segments.
-/// It can therefore be used to repair a head whose segment hints are incomplete.
 pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
@@ -123,7 +90,7 @@ pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
     Ok(NamespaceFlushBasis {
         head_seq: loaded.head.seq,
-        has_unflushed_wal_tail: loaded.basis_head_seq < loaded.head.seq,
+        has_unflushed_wal_tail: loaded.head.last_folded_wal_no < loaded.head.wal_no,
     })
 }
 

@@ -54,30 +54,6 @@ const _: () = assert!(
     0 < CHECKPOINT_AT_WAL_SEGMENTS && CHECKPOINT_AT_WAL_SEGMENTS < MAX_UNFLUSHED_WAL_SEGMENTS
 );
 
-/// Segment pointers the head carries as a replay accelerator, newest first
-/// and always including the tip. Sized so the head describes the whole
-/// legal unflushed tail rather than to keep the head small: a full list
-/// encodes to roughly 68 KiB at realistic identifier lengths and 107 KiB at
-/// the worst case the grammars allow.
-pub(crate) use loonfs_api::wire::control::RECENT_SEGMENTS_LIMIT;
-
-/// The head-coverage inequality, shared by the compile-time assertion below
-/// and the test that proves the assertion has teeth.
-const fn covers_every_unflushed_segment(pointers: usize) -> bool {
-    pointers >= MAX_UNFLUSHED_WAL_SEGMENTS as usize
-}
-
-// A reader that wants a segment the head does not name walks predecessor
-// links to reach it, one round trip per segment, so an accelerator shorter
-// than the tail the rejection bound admits is a latency cliff the write
-// path can legally produce. The two constants have to move together, and
-// that is an inequality rather than a judgement call, so it is checked
-// where a broken derivation is a compile error instead of a test failure.
-const _: () = assert!(
-    covers_every_unflushed_segment(RECENT_SEGMENTS_LIMIT),
-    "the head must describe every legal unflushed WAL segment"
-);
-
 /// Provider operation deadline, in milliseconds (`loonfs-objectstore`
 /// consumes it across every retry of one single-request operation).
 /// Multipart transfers of large immutable payloads carry no
@@ -95,10 +71,7 @@ pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = PROVIDER_OPERATION_DEADLINE.as_m
 /// deadline gates starting an attempt rather than preempting one.
 pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = PROVIDER_ATTEMPT_TIMEOUT.as_millis() as u64;
 
-/// Self-enforced budget between starting a WAL segment PUT and initiating
-/// the head compare-and-swap. Overrunning it abandons the segment instead of
-/// publishing a stale-timed one. Local monotonic elapsed time only — never a
-/// validity input (format spec, "WAL head").
+/// Maximum elapsed time from observing a tip to initiating its next numbered put.
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
 
 /// Self-enforced budget between writing a checkpoint record and completing
@@ -297,17 +270,6 @@ mod tests {
         // 7 days of re-minting + 1 hour of receipt life + 20.5 minutes of
         // publication.
         assert_eq!(CONTENT_RECLAMATION_GRACE_MS, 608_400_000 + 1_230_000);
-    }
-
-    #[test]
-    fn the_head_coverage_floor_rejects_a_list_one_segment_short() {
-        assert!(covers_every_unflushed_segment(RECENT_SEGMENTS_LIMIT));
-        assert!(covers_every_unflushed_segment(
-            MAX_UNFLUSHED_WAL_SEGMENTS as usize
-        ));
-        assert!(!covers_every_unflushed_segment(
-            MAX_UNFLUSHED_WAL_SEGMENTS as usize - 1
-        ));
     }
 
     #[test]

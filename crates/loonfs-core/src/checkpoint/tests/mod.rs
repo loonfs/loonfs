@@ -50,7 +50,7 @@ use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{load_current_manifest, load_head_object};
-use crate::namespace::status::load_namespace_diagnostics;
+use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
 use crate::protocol::list_changes_after;
@@ -66,7 +66,6 @@ use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataRow,
     MetadataRowFamily as ApiMetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
@@ -82,7 +81,6 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
-    wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -99,7 +97,7 @@ use tempfile::tempdir;
 async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> crate::error::Result<(HeadState, MetadataState)> {
+) -> crate::error::Result<(NamespaceReadState, MetadataState)> {
     let projection = super::flush::load_root_projection(store, namespace_id).await?;
     let mut metadata_state = MetadataStateBuilder::default();
     for family in CHECKPOINT_ROW_FAMILIES {
@@ -192,16 +190,11 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
 
 #[derive(Debug)]
 pub(crate) struct CurrentProjection {
-    pub(crate) head: HeadState,
+    pub(crate) head: NamespaceReadState,
     pub(crate) root: crate::namespace::control::CurrentManifest,
     pub(crate) metadata_state: MetadataState,
 }
 
-/// Creates a namespace and publishes its first manifest.
-///
-/// Creation itself writes only the head; these tests are about manifest,
-/// root, and floor mechanics, so they start from a namespace that has
-/// flushed once — the durable shape the tests were written against.
 async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -215,6 +208,9 @@ async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         allow_existing,
     )
     .await?;
+    acquire_writer_epoch(store, namespace_id, context)
+        .await
+        .expect("acquire fixture writer");
     flush::flush_wal(store, namespace_id, context)
         .await
         .expect("publish the first manifest");
@@ -784,7 +780,7 @@ use super::runs::delta_run_count;
 // author arbitrary layouts without driving the full checkpoint pipeline.
 #[cfg(test)]
 pub(crate) struct ManifestMetadataSource<'a> {
-    pub(crate) head: &'a HeadState,
+    pub(crate) head: &'a NamespaceReadState,
     pub(crate) basis_manifest_no: Option<ManifestNo>,
     pub(crate) retention_floor_seq: ChangeSeq,
     pub(crate) metadata_state: &'a MetadataState,
@@ -889,6 +885,13 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     };
 
     encode_namespace_manifest_json(NamespaceManifestPayload {
+        content_store_id: head.content_store_id.clone(),
+        created_at_ms: head.created_at_ms,
+        fork_basis: head.fork_basis.clone(),
+        status: head.status,
+        writer: head.writer.clone(),
+        last_folded_wal_no: head.wal_no,
+        retention_floor_wal_no: head.retention_floor_wal_no,
         compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no,

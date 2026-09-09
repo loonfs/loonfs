@@ -377,14 +377,11 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
     assert_eq!(
         store
-            .list_prefix(&format!(
-                "namespaces/{}/wal/segments/",
-                namespace_id.as_str()
-            ))
+            .list_prefix(&format!("namespaces/{}/wal/", namespace_id.as_str()))
             .await
             .expect("list wal")
             .len(),
-        1
+        3
     );
     assert!(store
         .head(&current_manifest_key(&store, &namespace_id).await)
@@ -570,8 +567,9 @@ async fn retention_floor_advancement_preserves_writer_identity() {
         .head;
 
     assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
-    // Floor advancement never touches the head.
-    assert_eq!(after, before);
+    let mut expected = before;
+    expected.retention_floor_wal_no = expected.last_folded_wal_no;
+    assert_eq!(after, expected);
 }
 
 /// Reads the files one checkpoint pins, or the error that says it no longer
@@ -974,26 +972,12 @@ async fn checkpoint_verification_rejects_a_deleted_namespace() {
         .expect("checkpoint exists")
         .state;
 
-    let loaded_head = load_head_object(&store, &namespace_id)
+    let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
         .await
-        .expect("load head");
-    let mut deleted_head = loaded_head.state;
-    deleted_head.status = loonfs_api::wire::control::NamespaceStatus::Deleted {
-        reclaim_after_ms: None,
-    };
-    let encoded = loonfs_api::wire::control::encode_control_state(
-        loonfs_api::wire::control::ControlObjectKind::WalHead,
-        &deleted_head,
-    )
-    .expect("encode deleted head");
-    store
-        .compare_and_swap(
-            &loaded_head.object_key,
-            &loaded_head.etag,
-            Bytes::from(encoded),
-        )
+        .expect("writer");
+    crate::namespace::delete::delete_namespace(&store, &namespace_id, Default::default(), acquired)
         .await
-        .expect("install deleted head");
+        .expect("delete");
 
     let verified = super::record::verify_checkpoint_basis(&store, &record)
         .await
@@ -1182,22 +1166,31 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let boundary = usize::try_from(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS)
         .expect("the write-stop bound fits a segment count");
 
-    // Stop one short, so the next publish is the one that reaches the bound.
-    for round in 0..boundary - 1 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            b"body\n",
-            &context,
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let tail_options = PublishTailOptions::default();
+    for round in 0..boundary - 2 {
+        let request = CommitRequest::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
             None,
-        )
-        .await
-        .expect("write within backpressure window");
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse(format!("/file-{round}")).expect("path"),
+                parents: false,
+            },
+        );
+        engine
+            .publish_batch(
+                &store,
+                vec![CommitCandidate::new(request)],
+                &context,
+                &tail_options,
+            )
+            .await
+            .results
+            .remove(0)
+            .expect("write within backpressure window");
     }
-    assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary - 1);
-
-    let head_key = wal_head(&namespace_id);
+    let head_key = hint(&namespace_id);
     let segment_prefix = wal_segment_prefix(&namespace_id);
     let store = RecordingStore::new(
         store,
@@ -1212,8 +1205,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             parents: false,
         },
     );
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    let tail_options = PublishTailOptions::default();
     let original = engine
         .publish_batch(
             &store,
@@ -1226,7 +1217,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         .pop()
         .expect("one result")
         .expect("the publish that lands exactly at the bound is still admitted");
-    assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary);
+    assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary + 1);
     store.reset();
 
     let replay = engine
@@ -1318,30 +1309,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         "no head swap at the bound"
     );
 
-    // The whole legal tail is named by the tip plus its predecessor hints,
-    // so no reader has to discover a key by walking an unhinted link.
-    let head = load_head_object(&store, &namespace_id)
-        .await
-        .expect("read head")
-        .state;
-    assert_eq!(head.recent_segments.len(), boundary - 1);
-    let described_tail = head
-        .visible_wal_tip
-        .iter()
-        .chain(head.recent_segments.iter())
-        .collect::<Vec<_>>();
-    assert_eq!(described_tail.len(), boundary);
-    for pair in described_tail.windows(2) {
-        let [newer, older] = pair else {
-            panic!("windows(2) yields pairs")
-        };
-        assert_eq!(
-            older.end_seq.0 + 1,
-            newer.start_seq.0,
-            "hints must be newest-first and gap-free"
-        );
-    }
-
     // Reads never gate: the change feed still serves the whole tail.
     let changes = list_changes_after(
         &store,
@@ -1353,7 +1320,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     .expect("list changes");
     assert_eq!(
         changes.through_seq,
-        ChangeSeq(u64::try_from(boundary).expect("one commit per segment"))
+        ChangeSeq(u64::try_from(boundary - 1).expect("data segments"))
     );
 }
 
@@ -2304,7 +2271,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         )
         .await
         .expect("grow the base");
-        if index % 64 == 63 {
+        if index % 32 == 31 {
             create_checkpoint(&store, &namespace_id, &context)
                 .await
                 .expect("bound the WAL tail");

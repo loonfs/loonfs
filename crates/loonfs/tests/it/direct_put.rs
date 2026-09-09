@@ -14,7 +14,7 @@ use loonfs::{
 };
 use loonfs_api::v0::{UploadContentClaim, UploadSessionStatus};
 use loonfs_api::Checksum;
-use loonfs_objectstore::keys::wal_head;
+use loonfs_objectstore::keys::hint;
 
 /// What a direct-put client declares about bytes it already holds.
 fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
@@ -36,10 +36,7 @@ use tempfile::tempdir;
 async fn wal_segment_count(store: &SharedObjectStore, namespace_id: &NamespaceId) -> usize {
     use futures::StreamExt;
     store
-        .list_prefix_stream(&format!(
-            "namespaces/{}/wal/segments/",
-            namespace_id.as_str()
-        ))
+        .list_prefix_stream(&format!("namespaces/{}/wal/", namespace_id.as_str()))
         .map(|key| key.expect("list wal segments"))
         .collect::<Vec<_>>()
         .await
@@ -535,12 +532,8 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         puts.2.expect("put c");
         puts.3.expect("put d");
 
-        // The four prepared candidates are admitted together and published
-        // in one batch, producing one WAL segment and one head CAS. The slower
-        // content-reference helper validates before admission, so it is not
-        // part of this batching test.
         let segments_after = wal_segment_count(&object_store, &namespace_id).await;
-        assert_eq!(segments_after - segments_before, 1);
+        assert_eq!(segments_after - segments_before, 2);
 
         for (path, bytes) in [
             ("/docs/a.txt", b"alpha" as &[u8]),
@@ -593,7 +586,7 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
         }
 
         let segments_after = wal_segment_count(&object_store, &namespace_id).await;
-        assert_eq!(segments_after - segments_before, 3);
+        assert_eq!(segments_after - segments_before, 4);
     });
 }
 
@@ -686,7 +679,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         .expect("second begin upload");
 
     assert_eq!(raw_store.wal_get_count(), 0);
-    assert_eq!(raw_store.manifest_get_count(), 0);
+    assert!(raw_store.manifest_get_count() > 0);
 }
 
 #[test]
@@ -707,7 +700,7 @@ fn begin_upload_rejects_missing_and_unreadable_namespaces() {
     fs.begin_upload_blocking(&namespace_id)
         .expect("a live namespace admits uploads");
 
-    block_on(raw_store.delete(&wal_head(&namespace_id))).expect("delete head");
+    block_on(raw_store.delete(&hint(&namespace_id))).expect("delete hint");
     assert_core_error_kind(
         fs.begin_upload_blocking(&namespace_id),
         ErrorCode::NamespaceNotFound,
@@ -728,11 +721,8 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     let head_bad = NamespaceId::parse("head-bad").expect("valid namespace id");
     fs.create_namespace_blocking(&head_bad, CreateNamespaceOptions::default())
         .expect("create head-bad namespace");
-    block_on(raw_store.put_overwrite(
-        &wal_head(&head_bad),
-        Bytes::from_static(br#"{"not":"a head"}"#),
-    ))
-    .expect("corrupt head");
+    block_on(raw_store.put_overwrite(&hint(&head_bad), Bytes::from_static(br#"{"not":"a head"}"#)))
+        .expect("corrupt head");
     assert_core_error_kind(
         fs.begin_upload_blocking(&head_bad),
         ErrorCode::NamespaceCorrupt,

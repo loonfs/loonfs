@@ -13,9 +13,12 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             KeyPredicate::manifest(&namespace_id),
         ));
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false)
+        crate::namespace::bootstrap::bootstrap_namespace(&store, &namespace_id, &context, false)
             .await
             .expect("bootstrap");
+        crate::namespace::writer_epoch::acquire_writer_epoch(&store, &namespace_id, &context)
+            .await
+            .expect("acquire");
         let current = load_current_manifest(&store, &namespace_id)
             .await
             .expect("current");
@@ -24,8 +27,39 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         payload.manifest_no = predecessor.successor().expect("next number");
         let first = encode_manifest(payload.clone()).expect("candidate");
         if newer_head {
-            write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
+            let session = Arc::new(std::sync::Mutex::new(
+                crate::commit_engine::WriterSessionState::Acquired(
+                    loonfs_api::wire::control::AcquiredWriter {
+                        writer_id: context.writer_id.clone(),
+                        writer_epoch: current.envelope.payload().writer_epoch,
+                    },
+                ),
+            ));
+            let mut engine = crate::commit_engine::NamespaceCommitEngine::new(namespace_id.clone())
+                .writer_session(session);
+            engine
+                .publish_batch(
+                    &store,
+                    vec![crate::commit_engine::CommitCandidate::new(
+                        crate::path::write::CommitRequest {
+                            commit_id: loonfs_api::CommitId::generate(),
+                            actor: loonfs_test_support::ids::test_actor(),
+                            message: None,
+                            assertions: Vec::new(),
+                            operations: vec![
+                                crate::path::write::FilesystemOperation::CreateDirectory {
+                                    path: loonfs_api::AbsolutePath::parse("/file").expect("path"),
+                                    parents: false,
+                                },
+                            ],
+                        },
+                    )],
+                    &context,
+                    &crate::protocol::PublishTailOptions::default(),
+                )
                 .await
+                .results
+                .remove(0)
                 .expect("write");
             let projection = load_current_projection(&store, &namespace_id)
                 .await
@@ -78,7 +112,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
             .await
             .expect("list for assertion");
-        assert_eq!(keys.len(), 2);
+        assert_eq!(keys.len(), 3);
         if newer_head {
             assert!(matches!(
                 losing,
@@ -107,7 +141,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
 }
 
 #[tokio::test]
-async fn a_lagging_hint_probes_forward_and_a_missing_hint_fails_closed() {
+async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = RecordingStore::new(
@@ -115,7 +149,7 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_fails_closed() {
         KeyPredicate::any(),
     );
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    crate::namespace::bootstrap::bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
     write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
@@ -127,10 +161,11 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_fails_closed() {
     let expected = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current");
-    for manifest_no in [ManifestNo(0), ManifestNo(1)] {
+    for manifest_no in [ManifestNo(1), ManifestNo(2)] {
         let bytes = encode_control_state(
             ControlObjectKind::Hint,
             &HintState {
+                wal_no: loonfs_api::WalNo(0),
                 namespace_id: namespace_id.clone(),
                 manifest_no,
             },
@@ -163,7 +198,7 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_fails_closed() {
         .await
         .err()
         .expect("missing hint");
-    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+    assert_eq!(error.code(), ErrorCode::NamespaceNotFound);
     assert_eq!(store.counts().puts, 0);
 }
 
@@ -176,7 +211,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         KeyPredicate::any(),
     );
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    crate::namespace::bootstrap::bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
     write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
@@ -193,14 +228,15 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         .await
         .expect("advance");
     assert_eq!(store.counts().create_if_absent_puts, 1);
-    assert_eq!(store.counts().overwrite_puts, 1);
-    assert_eq!(store.counts().compare_and_swaps, 0);
+    assert_eq!(store.counts().overwrite_puts, 0);
+    assert_eq!(store.counts().compare_and_swaps, 1);
     let after = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current");
     let mut expected = before.envelope.into_payload();
     expected.manifest_no = expected.manifest_no.successor().expect("next");
     expected.retention_floor_seq = expected.head_seq;
+    expected.retention_floor_wal_no = expected.last_folded_wal_no;
     assert_eq!(after.envelope.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, expected.head_seq);
     let (_, writer_floor) =
@@ -222,7 +258,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false)
+        crate::namespace::bootstrap::bootstrap_namespace(&store, &namespace_id, &context, false)
             .await
             .expect("bootstrap");
         let current = load_current_manifest(&store, &namespace_id)
@@ -273,7 +309,7 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    crate::namespace::bootstrap::bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
     write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
@@ -366,11 +402,11 @@ async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&inner, &namespace_id, &context, false)
+    crate::namespace::bootstrap::bootstrap_namespace(&inner, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
     let stale_head = inner
-        .get_with_metadata(&wal_head(&namespace_id))
+        .get_with_metadata(&hint(&namespace_id))
         .await
         .expect("read bootstrap head")
         .expect("bootstrap head exists");
@@ -391,7 +427,7 @@ async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
 
     let store = StaleObjectOnceStore {
         inner,
-        key: wal_head(&namespace_id),
+        key: hint(&namespace_id),
         stale: std::sync::Mutex::new(Some(stale_head)),
     };
     let projection = load_current_projection(&store, &namespace_id)
@@ -409,11 +445,11 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&inner, &namespace_id, &context, false)
+    crate::namespace::bootstrap::bootstrap_namespace(&inner, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
     let stale_head = inner
-        .get_with_metadata(&wal_head(&namespace_id))
+        .get_with_metadata(&hint(&namespace_id))
         .await
         .expect("read bootstrap head")
         .expect("bootstrap head exists");
@@ -437,7 +473,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
 
     let status_store = StaleObjectOnceStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("status store"),
-        key: wal_head(&namespace_id),
+        key: hint(&namespace_id),
         stale: std::sync::Mutex::new(Some(stale_head.clone())),
     };
     let namespace = crate::namespace::status::load_namespace(&status_store, &namespace_id)
@@ -448,7 +484,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
 
     let feed_store = StaleObjectOnceStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("change-feed store"),
-        key: wal_head(&namespace_id),
+        key: hint(&namespace_id),
         stale: std::sync::Mutex::new(Some(stale_head)),
     };
     let changes = list_changes_after(

@@ -8,7 +8,7 @@ use loonfs::{
     NamespaceSessionState, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::BlockingStore;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -66,10 +66,9 @@ async fn concurrent_opens_create_one_namespace_session() {
 async fn close_refuses_late_work_and_drains_admitted_commits() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("close-drain").expect("namespace id");
-    let blocking = Arc::new(BlockingStore::new(
+    let blocking = Arc::new(BlockingStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("create store"),
-        KeyPredicate::wal_head(&namespace_id),
-        OperationClass::CompareAndSwap,
+        crate::common::data_wal_put_for(&namespace_id),
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = writer(store, "close-drain").await;
@@ -140,10 +139,9 @@ async fn closing_session_holds_capacity_and_shutdown_waits_for_it() {
     let temp_dir = tempdir().expect("tempdir");
     let first = NamespaceId::parse("closing-capacity-one").expect("namespace id");
     let second = NamespaceId::parse("closing-capacity-two").expect("namespace id");
-    let blocking = Arc::new(BlockingStore::new(
+    let blocking = Arc::new(BlockingStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("create store"),
-        KeyPredicate::wal_head(&first),
-        OperationClass::CompareAndSwap,
+        crate::common::data_wal_put_for(&first),
     ));
     let store: SharedObjectStore = blocking.clone();
     let setup = writer(store.clone(), "closing-capacity-setup").await;

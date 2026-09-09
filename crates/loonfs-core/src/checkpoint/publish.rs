@@ -2,9 +2,7 @@
 
 use crate::control_update::{settle_control_write, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::{
-    load_current_manifest_if_present, update_manifest_hint, CurrentManifest,
-};
+use crate::namespace::control::{load_current_manifest_if_present, raise_hint, CurrentManifest};
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::ManifestRef;
@@ -16,14 +14,14 @@ use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ManifestPublicationOutcome {
+pub(crate) enum ManifestPublicationOutcome {
     Installable,
     Published(CurrentManifest),
     CoveredByCurrent(CurrentManifest),
     PredecessorChanged(CurrentManifest),
 }
 
-pub(super) fn encode_manifest(
+pub(crate) fn encode_manifest(
     payload: NamespaceManifestPayload,
 ) -> Result<NamespaceManifestEnvelope> {
     let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
@@ -42,7 +40,7 @@ pub(super) fn encode_manifest(
     skip_all,
     fields(phase = "publish_manifest", key_class = "namespace_manifest")
 )]
-pub(super) async fn publish_manifest<S: ObjectStore + ?Sized>(
+pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest: &NamespaceManifestEnvelope,
@@ -53,12 +51,18 @@ pub(super) async fn publish_manifest<S: ObjectStore + ?Sized>(
     let candidate = CurrentManifest {
         manifest: manifest_ref_for(namespace_id, manifest),
         retention_floor_seq: manifest.payload().retention_floor_seq,
+        last_folded_wal_no: manifest.payload().last_folded_wal_no,
         compactor_epoch: manifest.payload().compactor_epoch,
     };
     let current = load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     if let Some(current) = &current {
+        if manifest.payload().writer_epoch < current.envelope.payload().writer_epoch {
+            return Ok(ManifestPublicationOutcome::PredecessorChanged(
+                current.state.clone(),
+            ));
+        }
         match classify_current(&current.state, &candidate, expected_predecessor) {
             ManifestPublicationOutcome::Installable => {}
             outcome => return Ok(outcome),
@@ -75,6 +79,21 @@ pub(super) async fn publish_manifest<S: ObjectStore + ?Sized>(
         })
     {
         return Err(CoreError::Internal(format!("manifest `{}` is not a legal successor of `{predecessor_no}` in namespace `{namespace_id}`", candidate.manifest.manifest_no)));
+    }
+    if let Some(current) = &current {
+        current
+            .envelope
+            .payload()
+            .ensure_successor_identity(manifest.payload())
+            .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
+        if manifest.payload().last_folded_wal_no < current.envelope.payload().last_folded_wal_no
+            || manifest.payload().retention_floor_wal_no
+                < current.envelope.payload().retention_floor_wal_no
+        {
+            return Err(CoreError::NamespaceCorrupt(
+                "manifest lowers a WAL counter".to_owned(),
+            ));
+        }
     }
     let object_key = metadata_manifest_object(namespace_id, &candidate.manifest.manifest_no);
     let (_, bytes) = encode_namespace_manifest_json(manifest.payload().clone())
@@ -115,8 +134,14 @@ pub(super) async fn publish_manifest<S: ObjectStore + ?Sized>(
             <= crate::limits::METADATA_PUBLICATION_BUDGET_MS
     {
         // Publication is already durable; a failed hint update cannot undo it.
-        if let Err(error) =
-            update_manifest_hint(store, namespace_id, candidate.manifest.manifest_no).await
+        if let Err(error) = raise_hint(
+            store,
+            namespace_id,
+            candidate.manifest.manifest_no,
+            manifest.payload().last_folded_wal_no,
+            None,
+        )
+        .await
         {
             tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
         }
@@ -133,9 +158,10 @@ fn classify_current(
         ManifestPublicationOutcome::Published(current.clone())
     } else if current.compactor_epoch > candidate.compactor_epoch {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
-    } else if current.manifest.manifest_head_seq > candidate.manifest.manifest_head_seq
-        || (current.manifest.manifest_head_seq == candidate.manifest.manifest_head_seq
-            && current.manifest.manifest_no >= candidate.manifest.manifest_no)
+    } else if current.last_folded_wal_no >= candidate.last_folded_wal_no
+        && (current.manifest.manifest_head_seq > candidate.manifest.manifest_head_seq
+            || (current.manifest.manifest_head_seq == candidate.manifest.manifest_head_seq
+                && current.manifest.manifest_no >= candidate.manifest.manifest_no))
     {
         ManifestPublicationOutcome::CoveredByCurrent(current.clone())
     } else if Some(current.manifest.manifest_no) == expected_predecessor {
@@ -159,7 +185,7 @@ async fn classify_current_manifest<S: ObjectStore + ?Sized>(
         }))
 }
 
-pub(super) fn manifest_ref_for(
+pub(crate) fn manifest_ref_for(
     namespace_id: &NamespaceId,
     manifest: &NamespaceManifestEnvelope,
 ) -> ManifestRef {

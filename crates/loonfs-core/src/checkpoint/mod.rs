@@ -19,7 +19,7 @@ mod flush;
 mod frozen_floor;
 mod list;
 mod load;
-mod publish;
+pub(crate) mod publish;
 mod read_basis;
 pub(crate) mod record;
 mod release;

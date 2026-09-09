@@ -1,5 +1,5 @@
 //! Batch publication: admitted mutation candidates become one WAL segment
-//! plus one head compare-and-swap, with outcomes fanned back to every
+//! plus one numbered WAL put, with outcomes fanned back to every
 //! candidate slot.
 
 use super::candidates::{
@@ -9,24 +9,20 @@ use super::candidates::{
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
-    materialize_commit, prepare_commit_head_publish, publish_commit_head,
-    wal_payload_from_materialized_commit, CommitHeadPublishError, MaterializedCommit,
-    PreparedCommitHeadPublish,
+    materialize_commit, publish_wal, wal_payload_from_materialized_commit, CommitHeadPublishError,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
-use crate::error::{CoreError, Result, StoreFailureClass};
+use crate::error::{CoreError, Result};
 use crate::limits::WAL_PUBLISH_BUDGET_MS;
+use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::time::MonotonicTimer;
-use crate::wal::{prepare_wal_segment, PreparedWalSegment};
-use bytes::Bytes;
+use crate::wal::prepare_wal_segment;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
-use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::keys::wal_segment;
-use loonfs_objectstore::{ImmutableWriteError, ObjectMetadata, ObjectStore};
+use loonfs_objectstore::ObjectStore;
 use tracing::Instrument;
 
 #[derive(Debug, Clone)]
@@ -48,13 +44,10 @@ pub(crate) enum PublishViewEffect {
     /// The batch may have left durable state the loaded projection does not
     /// account for, so that projection must be dropped.
     Invalidated,
-    /// The head advanced past one new WAL segment. `head_etag` is absent
-    /// when the store's compare-and-swap acknowledgement carried none: the
-    /// head still advanced, but the projection cannot be re-anchored to it.
     Advanced {
         records: Vec<WalCommitPayload>,
-        head: HeadState,
-        head_etag: Option<String>,
+        head: NamespaceReadState,
+        head_etag: String,
     },
 }
 
@@ -87,6 +80,12 @@ impl BatchOutcomeSlot {
     }
 }
 
+pub(crate) struct PublicationClock<'a> {
+    pub(crate) timer: &'a dyn MonotonicTimer,
+    pub(crate) attempt_started_ms: u64,
+    pub(crate) tip_observed_ms: u64,
+}
+
 pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
@@ -95,8 +94,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     candidates: &[CommitCandidate],
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
-    timer: &dyn MonotonicTimer,
-    attempt_started_ms: u64,
+    clock: PublicationClock<'_>,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(Vec::new());
@@ -195,42 +193,39 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if accepted_commits.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(finish_batch_outcomes(&slots));
     }
-    let accepted_count = u64::try_from(accepted_commits.len()).unwrap_or(u64::MAX);
-    let put_started_ms = timer.monotonic_now_ms();
-    let wal = match write_batch_wal_segment(
-        store,
-        namespace_id,
-        view,
-        &accepted_commits,
-        batch_size,
-        accepted_count,
-    )
-    .await
-    {
-        Ok(wal) => wal,
-        Err(error) => return abort_batch(slots, &error),
-    };
-
-    let last_plan = &accepted_commits
-        .last()
-        .expect("accepted records should be non-empty")
-        .commit;
-    let head_publish = match prepare_commit_head_publish(&view.head, last_plan, &wal) {
-        Ok(value) => value,
+    let wal_no = match view.head.wal_no.successor() {
+        Ok(number) => number,
         Err(error) => {
-            let error = CoreError::Internal(format!("head publish preparation failed: {error}"));
-            return abort_batch(slots, &error);
+            return abort_batch(slots, &CoreError::Internal(format!("WAL number {error}")))
         }
     };
-    let elapsed_ms = timer.monotonic_now_ms().saturating_sub(put_started_ms);
-    if elapsed_ms > WAL_PUBLISH_BUDGET_MS {
-        let error = CoreError::HeadPublish(CommitHeadPublishError::PublishBudgetExceeded {
-            elapsed_ms,
-            budget_ms: WAL_PUBLISH_BUDGET_MS,
-        });
-        return abort_batch(slots, &error);
-    }
-    let elapsed_ms = timer.monotonic_now_ms().saturating_sub(attempt_started_ms);
+    let wal = match prepare_wal_segment(
+        namespace_id.clone(),
+        view.acquired_writer.writer_epoch,
+        wal_no,
+        &accepted_commits,
+    ) {
+        Ok(wal) => wal,
+        Err(error) => {
+            return abort_batch(
+                slots,
+                &CoreError::Internal(format!("WAL build failed: {error}")),
+            )
+        }
+    };
+    let last_plan = &accepted_commits
+        .last()
+        .expect("accepted commits should be nonempty")
+        .commit;
+    let resulting_head = NamespaceReadState {
+        seq: wal.envelope().payload().end_seq,
+        head_commit_id: last_plan.commit_id.clone(),
+        next_inode_id: wal.envelope().payload().next_inode_id,
+        wal_no,
+        ..view.head.clone()
+    };
+    let now_ms = clock.timer.monotonic_now_ms();
+    let elapsed_ms = now_ms.saturating_sub(clock.attempt_started_ms);
     let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
         return abort_batch(
             slots,
@@ -249,18 +244,20 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             }
         }
     }
-    let head_etag = match cas_batch_head(
-        store,
-        &view.head_etag,
-        &head_publish,
-        batch_size,
-        accepted_count,
-    )
-    .await
-    {
-        Ok(metadata) => metadata.etag,
-        Err(error) => return abort_batch(slots, &error),
-    };
+    let tip_age_ms = now_ms.saturating_sub(clock.tip_observed_ms);
+    if tip_age_ms > WAL_PUBLISH_BUDGET_MS {
+        return abort_batch(
+            slots,
+            &CoreError::HeadPublish(CommitHeadPublishError::PublishBudgetExceeded {
+                elapsed_ms: tip_age_ms,
+                budget_ms: WAL_PUBLISH_BUDGET_MS,
+            }),
+        );
+    }
+    if let Err(error) = publish_wal(store, &wal).await {
+        return abort_batch(slots, &error);
+    }
+    let head_etag = view.head_etag.clone();
 
     let wal_records = wal.envelope().payload().records.clone();
     assert_eq!(
@@ -289,7 +286,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Advanced {
             records: wal_records,
-            head: head_publish.resulting_head,
+            head: resulting_head,
             head_etag,
         },
     }
@@ -305,94 +302,6 @@ fn abort_batch(
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Invalidated,
     }
-}
-
-/// Writes the accepted records as one durable WAL segment.
-async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    view: &PublishMetadataView<'_, S>,
-    records: &[MaterializedCommit],
-    batch_size: u64,
-    accepted_count: u64,
-) -> Result<PreparedWalSegment> {
-    let span = tracing::debug_span!(
-        "loonfs.phase",
-        phase = "batch_write_wal",
-        batch_size,
-        accepted_count,
-        wal_segment_count = 1_u64,
-        key_class = "wal_segment",
-        result = tracing::field::Empty
-    );
-    let result = async {
-        let wal = prepare_wal_segment(
-            namespace_id.clone(),
-            view.acquired_writer.writer_epoch,
-            view.head.visible_wal_tip.clone(),
-            records,
-        )
-        .map_err(|error| CoreError::Internal(format!("wal build failed: {error}")))?;
-        let object_key = wal_segment(
-            &wal.envelope().payload().namespace_id,
-            &wal.envelope().payload().segment_id,
-        );
-        store
-            .put_immutable_verified(&object_key, Bytes::copy_from_slice(wal.as_bytes()))
-            .await
-            .map_err(wal_immutable_write_error)?;
-        Ok(wal)
-    }
-    .instrument(span.clone())
-    .await;
-    span.record("result", if result.is_ok() { "ok" } else { "error" });
-    result
-}
-
-fn wal_immutable_write_error(error: ImmutableWriteError) -> CoreError {
-    let fallback_object_key = error.object_key().to_owned();
-    match error {
-        ImmutableWriteError::DifferentObject { object_key } => CoreError::NamespaceCorrupt(
-            format!("immutable WAL segment `{object_key}` already exists with different bytes"),
-        ),
-        ImmutableWriteError::Transport { object_key, source } => {
-            let message = source.public_message().into_owned();
-            let class = StoreFailureClass::of(&source);
-            CoreError::WalWrite {
-                object_key,
-                message,
-                class,
-            }
-        }
-        error => CoreError::WalWrite {
-            object_key: fallback_object_key,
-            message: error.to_string(),
-            class: StoreFailureClass::Other,
-        },
-    }
-}
-
-/// Advances the namespace head past the new WAL segment by compare-and-swap.
-async fn cas_batch_head<S: ObjectStore + ?Sized>(
-    store: &S,
-    head_etag: &str,
-    head_publish: &PreparedCommitHeadPublish,
-    batch_size: u64,
-    accepted_count: u64,
-) -> Result<ObjectMetadata> {
-    let span = tracing::debug_span!(
-        "loonfs.phase",
-        phase = "batch_cas_head",
-        batch_size,
-        accepted_count,
-        key_class = "namespace_head",
-        result = tracing::field::Empty
-    );
-    let result = publish_commit_head(store, head_etag, head_publish)
-        .instrument(span.clone())
-        .await;
-    span.record("result", if result.is_ok() { "ok" } else { "error" });
-    result.map_err(CoreError::from)
 }
 
 /// Before the first accepted commit, admission uses durable state only.
@@ -455,7 +364,7 @@ mod tests {
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::time::StdMonotonicTimer;
     use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
-    use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
+    use loonfs_objectstore::keys::{hint, wal_segment_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use tempfile::tempdir;
@@ -486,7 +395,7 @@ mod tests {
         .await
         .expect("load publish view");
 
-        let head_key = wal_head(&namespace_id);
+        let head_key = hint(&namespace_id);
         let head_before = store
             .get(&head_key, None)
             .await
@@ -515,8 +424,11 @@ mod tests {
             &[candidate],
             &context,
             &view,
-            &StdMonotonicTimer::default(),
-            0,
+            PublicationClock {
+                timer: &StdMonotonicTimer::default(),
+                attempt_started_ms: 0,
+                tip_observed_ms: 0,
+            },
         )
         .await;
 

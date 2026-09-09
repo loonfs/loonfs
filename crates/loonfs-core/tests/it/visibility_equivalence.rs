@@ -41,9 +41,23 @@ impl VisibilityHarness {
             .bootstrap_namespace(BootstrapOptions::default())
             .await
             .expect("bootstrap namespace");
-        // Publish the namespace's first manifest up front, so each flush a
-        // scenario performs adds exactly one delta run to it.
-        engine.flush_wal().await.expect("publish first manifest");
+        let results = engine
+            .publish_namespace_commits_batch(vec![CommitCandidate::new(CommitRequest::single(
+                CommitId::parse("acquire-for-base").expect("commit id"),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/").expect("root"),
+                    parents: false,
+                },
+            ))])
+            .await
+            .expect("acquire writer");
+        assert!(results[0].is_err());
+        engine
+            .flush_wal()
+            .await
+            .expect("fold the acquisition fence into a base run");
         Self {
             _temp_dir: temp_dir,
             store,

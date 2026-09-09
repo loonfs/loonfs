@@ -120,15 +120,19 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         &namespace_id,
         &completed.prepared.content_ref().content_id,
     );
-    let head_before = load_head_object(&store, &namespace_id)
-        .await
-        .expect("head")
-        .state;
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let timer = Arc::new(PublicationTimer::default());
     let mut engine =
         NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+    engine
+        .session_writer_epoch(&store, &setup)
+        .await
+        .expect("acquire writer");
+    let head_before = load_head_object(&store, &namespace_id)
+        .await
+        .expect("head")
+        .state;
     store.block_next();
     let options = PublishTailOptions::default();
     let publish = engine.publish_batch(
@@ -174,7 +178,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .expect("head")
         .state;
     assert_eq!(head_after.seq, head_before.seq);
-    assert_eq!(head_after.visible_wal_tip, head_before.visible_wal_tip);
+    assert_eq!(head_after.wal_no, head_before.wal_no);
     assert_eq!(
         store
             .list_prefix(&wal_segment_prefix(&namespace_id))
@@ -186,7 +190,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
 }
 
 #[tokio::test]
-async fn content_expiring_during_wal_write_aborts_the_unpublished_batch() {
+async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = BlockingStore::new(
@@ -233,15 +237,18 @@ async fn content_expiring_during_wal_write_aborts_the_unpublished_batch() {
         store.release();
     };
     let (result, ()) = futures::join!(publish, advance);
-    for result in &result.results[..3] {
-        assert_eq!(
-            result
-                .as_ref()
-                .expect_err("unpublished batch must fail")
-                .code(),
-            loonfs_api::ErrorCode::ContentNotPrepared
-        );
-    }
+    assert_eq!(
+        result.results[0].as_ref().expect("primary").committed_seq,
+        ChangeSeq(2)
+    );
+    assert_eq!(
+        result.results[0].as_ref().expect("primary"),
+        result.results[1].as_ref().expect("alias")
+    );
+    assert_eq!(
+        result.results[2].as_ref().expect("later").committed_seq,
+        ChangeSeq(3)
+    );
     assert_eq!(
         result.results[3].as_ref().expect("independent replay"),
         &original
@@ -250,28 +257,28 @@ async fn content_expiring_during_wal_write_aborts_the_unpublished_batch() {
         .await
         .expect("head")
         .state;
-    assert_eq!(head_after, head_before);
+    assert_eq!(head_after.seq, ChangeSeq(3));
+    assert_eq!(
+        head_after.wal_no,
+        head_before.wal_no.successor().expect("next")
+    );
     assert_eq!(
         store
             .list_prefix(&wal_segment_prefix(&namespace_id))
             .await
             .expect("WAL segments")
             .len(),
-        2
+        3
     );
     drop(engine);
     let reopened = crate::path::read::load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("reopen namespace");
     for path in ["/content", "/later"] {
-        assert_eq!(
-            reopened
-                .resolve_path(path, loonfs_api::AttributeInclusion::Omit)
-                .await
-                .expect_err("orphan operation must be absent")
-                .code(),
-            loonfs_api::ErrorCode::PathNotFound
-        );
+        reopened
+            .resolve_path(path, loonfs_api::AttributeInclusion::Omit)
+            .await
+            .expect("committed path");
     }
     reopened
         .resolve_path("/original", loonfs_api::AttributeInclusion::Omit)

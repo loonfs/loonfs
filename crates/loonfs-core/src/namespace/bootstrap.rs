@@ -1,19 +1,22 @@
-//! Namespace creation: a content-domain descriptor followed by a conditional head write.
+//! Installs manifest 1 after the content descriptor and discovery hint.
 
 use crate::context::MutationContext;
-use crate::control_object::ControlObjectLoadError;
-use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
-use crate::error::{CoreError, StoreFailureClass};
+use crate::error::CoreError;
 use crate::metadata::{InodeRecord, MetadataState};
-use crate::namespace::control::load_head_object;
+use crate::namespace::control::{
+    load_current_manifest, load_current_manifest_if_present, load_discovered_manifest,
+};
+use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, ContentStoreState, ControlObjectKind, HeadState, WriterBlock,
+    encode_control_state, ContentStoreState, ControlObjectKind, HintState,
 };
+use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestPayload};
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, Namespace, NamespaceId, ROOT_INODE_ID,
+    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, ManifestNo, Namespace, NamespaceId, WalNo,
+    ROOT_INODE_ID,
 };
-use loonfs_objectstore::keys::{content_store, wal_head};
+use loonfs_objectstore::keys::{content_store, hint, metadata_manifest_object};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
@@ -23,13 +26,6 @@ pub enum BootstrapNamespaceError {
     NamespaceAlreadyExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted and its id is retired")]
     NamespaceDeleted { namespace_id: NamespaceId },
-    #[error(transparent)]
-    Head(#[from] ControlObjectLoadError),
-    /// A failure inside the installation protocol shared with fork — the
-    /// head write itself, or engine plumbing such as assembling the
-    /// mutation context. The wire code delegates to
-    /// [`CoreError::code`](crate::Error::code), so store failures keep
-    /// their failure class.
     #[error(transparent)]
     Core(#[from] CoreError),
 }
@@ -44,11 +40,6 @@ impl BootstrapNamespaceError {
         match self {
             BootstrapNamespaceError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
             BootstrapNamespaceError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-            BootstrapNamespaceError::Head(ControlObjectLoadError::Store {
-                class: StoreFailureClass::PermissionDenied,
-                ..
-            }) => ErrorCode::StoragePermissionDenied,
-            BootstrapNamespaceError::Head(error) => error.code(),
             BootstrapNamespaceError::Core(error) => error.code(),
         }
     }
@@ -60,17 +51,13 @@ impl BootstrapNamespaceError {
         match self {
             BootstrapNamespaceError::Core(error) => error.details(),
             BootstrapNamespaceError::NamespaceAlreadyExists { .. }
-            | BootstrapNamespaceError::NamespaceDeleted { .. }
-            | BootstrapNamespaceError::Head(_) => None,
+            | BootstrapNamespaceError::NamespaceDeleted { .. } => None,
         }
     }
 
     /// Returns a safe message when bootstrap failed in the object store.
     pub fn object_store_public_message(&self) -> Option<std::borrow::Cow<'static, str>> {
         match self {
-            BootstrapNamespaceError::Head(ControlObjectLoadError::Store { class, .. }) => {
-                Some(class.public_message())
-            }
             BootstrapNamespaceError::Core(error) => error.object_store_public_message(),
             _ => None,
         }
@@ -83,207 +70,119 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     allow_existing: bool,
 ) -> Result<Namespace, BootstrapNamespaceError> {
-    // Avoid creating an unreferenced descriptor for an already-taken id.
-    // Absence here is only a hint: the conditional head write still decides
-    // which concurrent creator wins.
-    match load_head_object(store, namespace_id).await {
-        Ok(existing) => {
-            if existing.state.status.is_deleted() {
-                return Err(BootstrapNamespaceError::NamespaceDeleted {
-                    namespace_id: namespace_id.clone(),
-                });
-            }
-            if !allow_existing {
-                return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
-                    namespace_id: namespace_id.clone(),
-                });
-            }
-            return crate::namespace::status::load_namespace(store, namespace_id)
-                .await
-                .map_err(BootstrapNamespaceError::Core);
-        }
-        Err(ControlObjectLoadError::MissingObject { .. }) => {}
-        Err(error) => return Err(BootstrapNamespaceError::Head(error)),
-    }
-
-    let mut head = HeadState::initial(
+    let manifest = NamespaceManifestPayload::initial(
         namespace_id.clone(),
         ContentStoreId::generate(),
         context.now_ms,
     );
-    head.writer = Some(WriterBlock {
-        writer_id: context.writer_id.clone(),
-        acquired_at_ms: context.now_ms,
-    });
-
-    let object_key = content_store(&head.content_store_id);
-    let descriptor = ContentStoreState {
-        content_store_id: head.content_store_id.clone(),
-        created_at_ms: context.now_ms,
-    };
-    let bytes =
-        encode_control_state(ControlObjectKind::ContentStore, &descriptor).map_err(|error| {
-            CoreError::Codec {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-            }
-        })?;
-    store
-        .put_if_absent(&object_key, Bytes::from(bytes))
-        .await
-        .map_err(|error| match error {
-            ObjectStoreError::PreconditionFailed { .. } => CoreError::Internal(format!(
-                "content store descriptor `{object_key}` already exists under a freshly minted identity"
-            )),
-            error => CoreError::store(&object_key, &error),
-        })?;
-
-    match install_namespace_head(store, namespace_id, &head).await? {
-        NamespaceHeadInstall::Landed => {}
-        // Whoever wrote the head owns the id. A caller retrying after a
-        // lost acknowledgment gets the same answer as a caller who lost the
-        // race outright, and the namespace it names is complete and usable
-        // either way. `allow_existing` means "create it if it is not there",
-        // including on a retry.
-        NamespaceHeadInstall::Exists if allow_existing => {}
-        NamespaceHeadInstall::Exists => {
+    match install_namespace_manifest(store, &manifest, || Ok(())).await? {
+        NamespaceInstall::Landed => {}
+        NamespaceInstall::Exists if allow_existing => {}
+        NamespaceInstall::Exists => {
             return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
                 namespace_id: namespace_id.clone(),
             })
         }
-        NamespaceHeadInstall::Deleted => {
+        NamespaceInstall::Deleted => {
             return Err(BootstrapNamespaceError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             })
         }
     }
-
-    crate::namespace::status::load_namespace(store, namespace_id)
+    super::status::load_namespace(store, namespace_id)
         .await
-        .map_err(BootstrapNamespaceError::Core)
+        .map_err(Into::into)
 }
 
-/// How one namespace-installing conditional write resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NamespaceHeadInstall {
-    /// This attempt's write created the namespace.
+pub(super) enum NamespaceInstall {
     Landed,
-    /// A namespace already owns the id.
     Exists,
-    /// The id is retired by a deletion tombstone.
     Deleted,
 }
 
-/// Installs a complete namespace head with one conditional create.
-///
-/// A confirmed precondition failure is a plain conflict. The stored head is
-/// read only to distinguish an active namespace from a deleted id.
-///
-/// A transport failure may leave the write unacknowledged. In that case, the
-/// stored head's immutable `namespace_id`, `content_store_id`, `created_at_ms`,
-/// and `fork_basis` fields decide whether this attempt's write landed. A create
-/// mints a fresh `content_store_id`, so the comparison distinguishes its head
-/// from one installed by a concurrent create even when both use the same writer
-/// session.
-pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
+pub(super) async fn install_namespace_manifest<
+    S: ObjectStore + ?Sized,
+    F: Fn() -> Result<(), CoreError>,
+>(
     store: &S,
-    namespace_id: &NamespaceId,
-    head: &HeadState,
-) -> Result<NamespaceHeadInstall, CoreError> {
-    let hint_key = loonfs_objectstore::keys::hint(namespace_id);
-    let hint_bytes = encode_control_state(
-        ControlObjectKind::Hint,
-        &loonfs_api::wire::control::HintState {
-            namespace_id: namespace_id.clone(),
-            manifest_no: loonfs_api::ManifestNo(0),
-        },
-    )
-    .map_err(|error| CoreError::Codec {
-        object_key: hint_key.clone(),
-        message: error.to_string(),
-    })?;
-    match store
-        .put_if_absent(&hint_key, Bytes::from(hint_bytes))
-        .await
-    {
-        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
-        Err(error) => return Err(CoreError::store(&hint_key, &error)),
+    manifest: &NamespaceManifestPayload,
+    validate_install: F,
+) -> Result<NamespaceInstall, CoreError> {
+    let timer = StdMonotonicTimer::default();
+    let started_ms = timer.monotonic_now_ms();
+    let namespace_id = &manifest.namespace_id;
+    if let Some(current) = load_current_manifest_if_present(store, namespace_id).await? {
+        return Ok(if current.envelope.payload().status.is_deleted() {
+            NamespaceInstall::Deleted
+        } else {
+            NamespaceInstall::Exists
+        });
     }
-    let object_key = wal_head(namespace_id);
-    let bytes = encode_control_state(ControlObjectKind::WalHead, head).map_err(|error| {
-        CoreError::Codec {
-            object_key: object_key.clone(),
+    validate_install()?;
+    let descriptor_key = content_store(&manifest.content_store_id);
+    let descriptor = ContentStoreState {
+        content_store_id: manifest.content_store_id.clone(),
+        created_at_ms: manifest.created_at_ms,
+    };
+    let hint_key = hint(namespace_id);
+    let hint = HintState {
+        namespace_id: namespace_id.clone(),
+        manifest_no: ManifestNo(1),
+        wal_no: WalNo(0),
+    };
+    let descriptor_bytes = encode_control_state(ControlObjectKind::ContentStore, &descriptor)
+        .map_err(|error| CoreError::Codec {
+            object_key: descriptor_key.clone(),
             message: error.to_string(),
+        })?;
+    let hint_bytes =
+        encode_control_state(ControlObjectKind::Hint, &hint).map_err(|error| CoreError::Codec {
+            object_key: hint_key.clone(),
+            message: error.to_string(),
+        })?;
+    let manifest_key = metadata_manifest_object(namespace_id, &ManifestNo(1));
+    let bytes = encode_namespace_manifest_json(manifest.clone())
+        .map_err(|error| CoreError::Codec {
+            object_key: manifest_key.clone(),
+            message: error.to_string(),
+        })?
+        .into_bytes();
+    for (key, bytes) in [(descriptor_key, descriptor_bytes), (hint_key, hint_bytes)] {
+        match store.put_if_absent(&key, Bytes::from(bytes)).await {
+            Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
+            Err(error) => return Err(CoreError::store(&key, &error)),
         }
-    })?;
-    retry_while_contended(
-        || async {
-            match store
-                .put_if_absent(&object_key, Bytes::copy_from_slice(&bytes))
-                .await
+    }
+    crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
+    validate_install()?;
+    match store.put_if_absent(&manifest_key, Bytes::from(bytes)).await {
+        Ok(_) => Ok(NamespaceInstall::Landed),
+        Err(
+            error @ (ObjectStoreError::PreconditionFailed { .. }
+            | ObjectStoreError::Transport { .. }),
+        ) => {
+            let Some(installed) =
+                load_discovered_manifest(store, namespace_id, ManifestNo(1)).await?
+            else {
+                return Err(CoreError::store(&manifest_key, &error));
+            };
+            let current = load_current_manifest(store, namespace_id).await?;
+            if current.envelope.payload().status.is_deleted() {
+                return Ok(NamespaceInstall::Deleted);
+            }
+            if matches!(error, ObjectStoreError::Transport { .. })
+                && installed.envelope.payload() == manifest
             {
-                Ok(_) => Ok(CasAttempt::Settled(NamespaceHeadInstall::Landed)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => {
-                    let existing = load_head_object(store, namespace_id)
-                        .await
-                        .map_err(CoreError::ControlObjectLoad)?
-                        .state;
-                    let outcome = if existing.status.is_deleted() {
-                        NamespaceHeadInstall::Deleted
-                    } else {
-                        NamespaceHeadInstall::Exists
-                    };
-                    Ok(CasAttempt::Settled(outcome))
-                }
-                Err(error @ ObjectStoreError::Transport { .. }) => {
-                    Ok(CasAttempt::Ambiguous(error, ()))
-                }
-                Err(error) => Err(CoreError::store(&object_key, &error)),
+                Ok(NamespaceInstall::Landed)
+            } else {
+                Ok(NamespaceInstall::Exists)
             }
-        },
-        |error, ()| {
-            let failed = CoreError::store(&object_key, error);
-            async move {
-                match load_head_object(store, namespace_id).await {
-                    Ok(loaded) => Ok(WriteEvidence::Landed(classify_ambiguous_namespace_install(
-                        head,
-                        &loaded.state,
-                    ))),
-                    Err(ControlObjectLoadError::MissingObject { .. }) => {
-                        Ok(WriteEvidence::Lost(failed))
-                    }
-                    Err(error) => Err(CoreError::ControlObjectLoad(error)),
-                }
-            }
-        },
-    )
-    .await?
-}
-
-/// Classifies the authoritative head after an ambiguous conditional create.
-///
-/// Deleted namespace ids stay retired. Otherwise the proposed head owns the
-/// result only when all immutable identity fields survived in the loaded
-/// head. Mutable fields may already have advanced after the create landed.
-fn classify_ambiguous_namespace_install(
-    proposed: &HeadState,
-    existing: &HeadState,
-) -> NamespaceHeadInstall {
-    if existing.status.is_deleted() {
-        return NamespaceHeadInstall::Deleted;
-    }
-    if proposed.ensure_successor_identity(existing).is_ok() {
-        NamespaceHeadInstall::Landed
-    } else {
-        NamespaceHeadInstall::Exists
+        }
+        Err(error) => Err(CoreError::store(&manifest_key, &error)),
     }
 }
 
-/// The built-in genesis metadata state: the root directory inode, and
-/// nothing else.
-///
-/// A created namespace materializes no manifest, so this is synthesized at
-/// read time as its basis until the first flush publishes one.
 pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
     MetadataState::from_rows(
         vec![InodeRecord {
@@ -302,66 +201,4 @@ pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
         Vec::new(),
         Vec::new(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use loonfs_api::wire::control::NamespaceStatus;
-    use loonfs_api::{CommitId, WriterEpoch};
-
-    fn namespace(value: &str) -> NamespaceId {
-        NamespaceId::parse(value).expect("valid namespace id")
-    }
-
-    fn proposed_head() -> HeadState {
-        HeadState::initial(
-            namespace("demo"),
-            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("valid content store id"),
-            1_000,
-        )
-    }
-
-    #[test]
-    fn ambiguous_install_recognizes_its_identity_after_mutable_head_fields_advance() {
-        let proposed = proposed_head();
-        let mut advanced = proposed.clone();
-        advanced.seq = ChangeSeq(1);
-        advanced.head_commit_id =
-            CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id");
-        advanced.writer_epoch = WriterEpoch(1);
-
-        assert_eq!(
-            classify_ambiguous_namespace_install(&proposed, &advanced),
-            NamespaceHeadInstall::Landed
-        );
-    }
-
-    #[test]
-    fn ambiguous_install_does_not_adopt_a_foreign_namespace_identity() {
-        let proposed = proposed_head();
-        let mut foreign = proposed.clone();
-        foreign.content_store_id = ContentStoreId::parse("cs_fedcba9876543210fedcba9876543210")
-            .expect("valid content store id");
-
-        assert_eq!(
-            classify_ambiguous_namespace_install(&proposed, &foreign),
-            NamespaceHeadInstall::Exists
-        );
-    }
-
-    #[test]
-    fn ambiguous_install_never_revives_a_deleted_namespace_id() {
-        let proposed = proposed_head();
-        let mut deleted = proposed.clone();
-        deleted.status = NamespaceStatus::Deleted {
-            reclaim_after_ms: None,
-        };
-
-        assert_eq!(
-            classify_ambiguous_namespace_install(&proposed, &deleted),
-            NamespaceHeadInstall::Deleted
-        );
-    }
 }

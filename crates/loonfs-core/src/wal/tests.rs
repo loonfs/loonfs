@@ -1,1250 +1,171 @@
-//! Behavior tests for WAL segment preparation and validated chain loading.
+//! Numbered WAL verification and fence reclamation contracts.
 
-#![allow(clippy::panic)]
-
-use super::reader::RECENT_SEGMENT_PREFETCH_CONCURRENCY;
-use super::*;
-use crate::commit::{
-    materialize_commit, wal_payload_from_materialized_commit, CommitFingerprint, CommitPlan,
-    MaterializedCommit, ValidatedOp,
+use crate::namespace::{
+    bootstrap::bootstrap_namespace, control::load_current_manifest,
+    writer_epoch::acquire_writer_epoch,
 };
-use bytes::Bytes;
-use loonfs_api::wire::control::WalSegmentPointer;
-use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentPayload};
-use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WalSegmentId, WriterEpoch};
-use loonfs_objectstore::keys::{wal_segment, wal_segment_prefix};
-use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::stores::{
-    ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
-};
-use std::borrow::Cow;
-use tempfile::tempdir;
+use crate::path::read::load_current_metadata_view;
+use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd};
+use loonfs_api::{ChangeSeq, ErrorCode, InodeId, NamespaceId, WalNo, WriterEpoch, WriterId};
+use loonfs_objectstore::{keys::wal_segment, local_fs_store::LocalFsStore, ObjectStore};
+use loonfs_test_support::stores::{KeyPredicate, MetadataMapStore};
 
-async fn load_complete_wal_chain<S: ObjectStore + ?Sized>(
-    store: &S,
-    request: WalChainLoadRequest<'_>,
-) -> Result<ValidatedWalChain, WalChainLoadError> {
-    Ok(load_wal_chain(store, request).await?.into_complete())
-}
-
-fn test_fingerprint() -> CommitFingerprint {
-    serde_json::from_str(r#""v2:sha256:test""#).expect("fingerprint")
+fn context(now_ms: u64) -> crate::MutationContext {
+    crate::MutationContext {
+        writer_id: WriterId::parse("writer").expect("writer"),
+        now_ms,
+    }
 }
 
 #[tokio::test]
-async fn build_wal_record_payload_matches_segment_record_payload() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let plan = CommitPlan {
-        namespace_id: namespace_id.clone(),
-        commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        message: Some("create docs".to_owned()),
-        semantic_identity: test_fingerprint(),
-        apply_after_seq: ChangeSeq(0),
-        assigned_seq: ChangeSeq(1),
-        validated_ops: vec![ValidatedOp::CreateDir {
-            op_index: 0,
-            parent_inode_id: InodeId(1),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-            name_key: NameKey::parse("docs").expect("valid name key"),
-            child_inode_id: InodeId(2),
-            create_inode_delta_index: 0,
-            bind_delta_index: 1,
-        }],
-        resulting_next_inode_id: InodeId(3),
-    };
-    let record = materialize_commit(plan, 4_200);
-
-    let segment = prepare_wal_segment(
-        namespace_id,
-        WriterEpoch(1),
-        None,
-        std::slice::from_ref(&record),
-    )
-    .expect("prepare wal segment");
-    let payload = wal_payload_from_materialized_commit(&record);
-
-    assert_eq!(payload, segment.envelope().payload().records[0]);
-}
-
-#[tokio::test]
-async fn prepared_wal_segments_use_unique_segment_ids_and_derived_object_keys() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let record = materialized_create_directory(
-        &namespace_id,
-        "c_wal_unique",
-        "docs",
-        ChangeSeq(0),
-        ChangeSeq(1),
-    );
-
-    let first = prepare_wal_segment(
-        namespace_id.clone(),
-        WriterEpoch(1),
-        None,
-        std::slice::from_ref(&record),
-    )
-    .expect("prepare first wal segment");
-    let second = prepare_wal_segment(
-        namespace_id,
-        WriterEpoch(1),
-        None,
-        std::slice::from_ref(&record),
-    )
-    .expect("prepare second wal segment");
-
-    let first_id = &first.envelope().payload().segment_id;
-    let second_id = &second.envelope().payload().segment_id;
-    assert_ne!(first_id, second_id);
-    assert_ne!(prepared_segment_key(&first), prepared_segment_key(&second));
-    WalSegmentId::parse(first_id.as_str()).expect("first segment id shape");
-    WalSegmentId::parse(second_id.as_str()).expect("second segment id shape");
-}
-
-#[test]
-fn wal_segment_namespace_mismatch_names_record_and_segment_values() {
-    let record_namespace = NamespaceId::parse("record").expect("valid namespace id");
-    let segment_namespace = NamespaceId::parse("segment").expect("valid namespace id");
-    let record = materialized_create_directory(
-        &record_namespace,
-        "c_wal_namespace_mismatch",
-        "docs",
-        ChangeSeq(0),
-        ChangeSeq(1),
-    );
-
-    let error = prepare_wal_segment(segment_namespace.clone(), WriterEpoch(1), None, &[record])
-        .expect_err("namespace mismatch should fail");
-
-    let message = error.to_string();
-    assert!(
-        message.contains(record_namespace.as_str()),
-        "the error names the record namespace: {message}"
-    );
-    assert!(
-        message.contains(segment_namespace.as_str()),
-        "the error names the segment namespace: {message}"
-    );
-}
-
-#[tokio::test]
-async fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let segment = write_create_directory_segment(
-        &store,
-        &namespace_id,
-        None,
-        "c_wal_chain_a",
-        "alpha",
-        ChangeSeq(0),
-        ChangeSeq(1),
-    )
-    .await;
-
-    let chain = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(1),
-            visible_tip: Some(segment.envelope().pointer()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &[],
-        },
-    )
-    .await
-    .expect("load valid chain");
-
-    assert_eq!(chain.segments().len(), 1);
-    assert_eq!(chain.segments()[0].records()[0].seq, ChangeSeq(1));
-}
-
-#[test]
-fn canonical_replay_advances_head_and_applies_metadata_rows() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let commit = materialized_create_directory(
-        &namespace_id,
-        "c_wal_replay",
-        "docs",
-        ChangeSeq(0),
-        ChangeSeq(1),
-    );
-    let segment = prepare_wal_segment(
-        namespace_id.clone(),
-        WriterEpoch(1),
-        None,
-        std::slice::from_ref(&commit),
-    )
-    .expect("prepare wal segment");
-    let mut base_head = loonfs_api::wire::control::HeadState::initial(
-        namespace_id.clone(),
-        loonfs_api::ContentStoreId::generate(),
-        1_000,
-    );
-    base_head.writer_epoch = WriterEpoch(1);
-    let record = segment
-        .envelope()
-        .payload()
-        .records
-        .first()
-        .expect("wal record");
-
-    let replayed = replay::replay_wal_records(
-        &base_head,
-        &crate::metadata::MetadataState::default(),
-        Some(WriterEpoch(1)),
-        [DecodedWalRecord {
-            namespace_id: &namespace_id,
-            seq: record.seq,
-            writer_epoch: segment.envelope().payload().writer_epoch,
-            commit_id: &record.commit_id,
-            committed_by: &record.committed_by,
-            committed_at_ms: record.committed_at_ms,
-            semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
-            message: record.message.as_deref(),
-            deltas: Cow::Borrowed(&record.deltas),
-        }],
-    )
-    .expect("replay wal records");
-
-    assert_eq!(replayed.resulting_head.seq, ChangeSeq(1));
-    assert_eq!(replayed.resulting_head.head_commit_id, record.commit_id);
-    assert_eq!(replayed.resulting_head.next_inode_id, InodeId(3));
-    assert!(replayed
-        .resulting_metadata_state
-        .inode_at_seq(InodeId(2), replayed.resulting_metadata_state.indexed_seq())
-        .is_some());
-    assert!(replayed
-        .resulting_metadata_state
-        .find_commit_receipt(&record.commit_id)
-        .is_some());
-}
-
-#[test]
-fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let commit = materialized_create_directory(
-        &namespace_id,
-        "c_wal_replay_epoch",
-        "docs",
-        ChangeSeq(0),
-        ChangeSeq(1),
-    );
-    let segment = prepare_wal_segment(
-        namespace_id.clone(),
-        WriterEpoch(2),
-        None,
-        std::slice::from_ref(&commit),
-    )
-    .expect("prepare wal segment");
-    let mut base_head = loonfs_api::wire::control::HeadState::initial(
-        namespace_id.clone(),
-        loonfs_api::ContentStoreId::generate(),
-        1_000,
-    );
-    base_head.writer_epoch = WriterEpoch(1);
-    let record = segment
-        .envelope()
-        .payload()
-        .records
-        .first()
-        .expect("wal record");
-
-    let error = replay::replay_wal_records(
-        &base_head,
-        &crate::metadata::MetadataState::default(),
-        Some(WriterEpoch(1)),
-        [DecodedWalRecord {
-            namespace_id: &namespace_id,
-            seq: record.seq,
-            writer_epoch: segment.envelope().payload().writer_epoch,
-            commit_id: &record.commit_id,
-            committed_by: &record.committed_by,
-            committed_at_ms: record.committed_at_ms,
-            semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
-            message: record.message.as_deref(),
-            deltas: Cow::Borrowed(&record.deltas),
-        }],
-    )
-    .expect_err("future writer epoch should fail");
-
-    assert_eq!(
-        error,
-        WalSegmentError::WriterEpochMismatch {
-            expected_max: WriterEpoch(1),
-            actual: WriterEpoch(2),
-        }
-    );
-}
-
-#[tokio::test]
-async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let first = write_create_directory_segment(
-        &store,
-        &namespace_id,
-        None,
-        "c_wal_suffix_a",
-        "alpha",
-        ChangeSeq(0),
-        ChangeSeq(1),
-    )
-    .await;
-    let second = write_create_directory_segment(
-        &store,
-        &namespace_id,
-        Some(first.envelope().pointer()),
-        "c_wal_suffix_b",
-        "beta",
-        ChangeSeq(1),
-        ChangeSeq(2),
-    )
-    .await;
-
-    let chain = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(2),
-            visible_tip: Some(second.envelope().pointer()),
-            stop_after_seq: Some(ChangeSeq(1)),
-            max_segment_fetches: None,
-            recent_segments: &[],
-        },
-    )
-    .await
-    .expect("load suffix chain");
-
-    assert_eq!(chain.segments().len(), 1);
-    assert_eq!(chain.segments()[0].records()[0].seq, ChangeSeq(2));
-}
-
-#[tokio::test]
-async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let segment = write_create_directory_segment(
-        &store,
-        &namespace_id,
-        None,
-        "c_wal_broken_link",
-        "docs",
-        ChangeSeq(1),
-        ChangeSeq(2),
-    )
-    .await;
-
-    let error = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(2),
-            visible_tip: Some(segment.envelope().pointer()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &[],
-        },
-    )
-    .await
-    .expect_err("missing previous segment link should fail");
-
-    let message = error.to_string();
-    assert!(
-        message.contains(segment.envelope().payload().segment_id.as_str()),
-        "the error names the segment: {message}"
-    );
-    assert!(
-        message.contains("`0`"),
-        "the error names the boundary seq: {message}"
-    );
-}
-
-#[tokio::test]
-async fn validated_wal_chain_rejects_corrupt_visible_segments() {
-    assert_wal_chain_corruption_rejected(|payload, pointer| {
-        payload.namespace_id = NamespaceId::parse("other").expect("valid namespace id");
-        *pointer = pointer_for_payload(payload);
-    })
-    .await;
-    assert_wal_chain_corruption_rejected(|payload, _pointer| {
-        payload.segment_id = WalSegmentId::parse("wal_00000000000000000001-bbbbbbbbbbbbbbbb")
-            .expect("valid segment id");
-    })
-    .await;
-    assert_wal_chain_corruption_rejected(|_payload, pointer| {
-        pointer.payload_checksum = "sha256:not-the-payload".to_owned();
-    })
-    .await;
-    assert_wal_chain_corruption_rejected(|payload, pointer| {
-        payload.records.clear();
-        *pointer = pointer_for_payload(payload);
-    })
-    .await;
-    assert_wal_chain_corruption_rejected(|payload, pointer| {
-        payload.end_seq = ChangeSeq(2);
-        *pointer = pointer_for_payload(payload);
-    })
-    .await;
-    assert_wal_chain_corruption_rejected(|payload, pointer| {
-        let mut skipped = payload.records[0].clone();
-        skipped.seq = ChangeSeq(3);
-        payload.records.push(skipped);
-        payload.end_seq = ChangeSeq(3);
-        *pointer = pointer_for_payload(payload);
-    })
-    .await;
-    assert_wal_chain_corruption_rejected(|payload, pointer| {
-        payload.base_head_seq = ChangeSeq(1);
-        payload.start_seq = ChangeSeq(2);
-        payload.end_seq = ChangeSeq(2);
-        payload.records[0].seq = ChangeSeq(2);
-        // Keep the id consistent so this test reaches the chain validation.
-        payload.segment_id = WalSegmentId::parse("wal_00000000000000000002-cccccccccccccccc")
-            .expect("valid segment id");
-        *pointer = pointer_for_payload(payload);
-    })
-    .await;
-}
-
-fn materialized_create_directory(
-    namespace_id: &NamespaceId,
-    commit_id: &str,
-    display_name: &str,
-    apply_after_seq: ChangeSeq,
-    assigned_seq: ChangeSeq,
-) -> MaterializedCommit {
-    let plan = CommitPlan {
-        namespace_id: namespace_id.clone(),
-        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
-        writer_epoch: WriterEpoch(1),
-        message: None,
-        semantic_identity: test_fingerprint(),
-        apply_after_seq,
-        assigned_seq,
-        validated_ops: vec![ValidatedOp::CreateDir {
-            op_index: 0,
-            parent_inode_id: InodeId(1),
-            display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
-                .expect("derived name key"),
-            child_inode_id: InodeId(2),
-            create_inode_delta_index: 0,
-            bind_delta_index: 1,
-        }],
-        resulting_next_inode_id: InodeId(3),
-    };
-    materialize_commit(plan, 4_200)
-}
-
-fn pointer_for_payload(payload: &WalSegmentPayload) -> WalSegmentPointer {
-    encode_wal_segment_envelope_zstd(payload.clone())
-        .expect("encode WAL pointer")
-        .envelope()
-        .pointer()
-}
-
-async fn assert_wal_chain_corruption_rejected(
-    corrupt: impl FnOnce(&mut WalSegmentPayload, &mut WalSegmentPointer),
-) {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let segment = prepare_wal_segment(
-        namespace_id.clone(),
-        WriterEpoch(1),
-        None,
-        &[materialized_create_directory(
-            &namespace_id,
-            "c_wal_corrupt",
-            "docs",
-            ChangeSeq(0),
-            ChangeSeq(1),
-        )],
-    )
-    .expect("prepare wal segment");
-    let mut pointer = segment.envelope().pointer();
-    let mut payload = segment.into_envelope().into_payload();
-
-    corrupt(&mut payload, &mut pointer);
-
-    let encoded = encode_wal_segment_envelope_zstd(payload)
-        .expect("encode corrupted envelope")
-        .into_bytes();
-    let object_key = wal_segment(&namespace_id, &pointer.segment_id);
-    store
-        .put_if_absent(&object_key, Bytes::from(encoded))
+async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summaries() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("verification").expect("namespace");
+    bootstrap_namespace(&store, &namespace_id, &context(1_000), false)
         .await
-        .expect("write corrupted wal segment");
-
-    load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: pointer.end_seq,
-            visible_tip: Some(pointer),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &[],
-        },
-    )
-    .await
-    .expect_err("corrupted WAL chain should be rejected");
-}
-
-#[tokio::test]
-async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let first = write_create_directory_segment(
-        &store,
-        &namespace_id,
-        None,
-        "c_wal_hint_a",
-        "alpha",
-        ChangeSeq(0),
-        ChangeSeq(1),
-    )
-    .await;
-    let second = write_create_directory_segment(
-        &store,
-        &namespace_id,
-        Some(first.envelope().pointer()),
-        "c_wal_hint_b",
-        "beta",
-        ChangeSeq(1),
-        ChangeSeq(2),
-    )
-    .await;
-    let unhinted = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(2),
-            visible_tip: Some(second.envelope().pointer()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &[],
-        },
-    )
-    .await
-    .expect("unhinted chain");
-
-    // Accurate predecessor hints prefetch the gap together with the tip.
-    let accurate = [first.envelope().pointer()];
-    let hinted = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(2),
-            visible_tip: Some(second.envelope().pointer()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &accurate,
-        },
-    )
-    .await
-    .expect("hinted chain");
-    assert_eq!(hinted.segments(), unhinted.segments());
-
-    // Garbage hints (missing objects, lying seq ranges) cost fallback
-    // fetches, never correctness: chain links stay the authority.
-    let mut lying_tip = second.envelope().pointer();
-    lying_tip.end_seq = ChangeSeq(999);
-    let missing_segment_id =
-        WalSegmentId::parse("wal_00000000000000000001-00000000deadbeef").expect("valid segment id");
-    let garbage = [
-        WalSegmentPointer {
-            segment_id: missing_segment_id,
-            start_seq: ChangeSeq(1),
-            end_seq: ChangeSeq(1),
-            payload_checksum: "sha256:absent".to_owned(),
-        },
-        lying_tip,
-    ];
-    let survived = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(2),
-            visible_tip: Some(second.envelope().pointer()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &garbage,
-        },
-    )
-    .await
-    .expect("chain despite garbage hints");
-    assert_eq!(survived.segments(), unhinted.segments());
-}
-
-/// Writes a chain of `length` linked segments and returns their pointers,
-/// oldest first.
-async fn write_linked_chain(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    length: u64,
-) -> Vec<WalSegmentPointer> {
-    let mut pointers: Vec<WalSegmentPointer> = Vec::new();
-    for index in 0..length {
-        let segment = write_create_directory_segment(
-            store,
-            namespace_id,
-            pointers.last().cloned(),
-            &format!("c_wal_bounded_{index:02}"),
-            &format!("dir-{index:02}"),
-            ChangeSeq(index),
-            ChangeSeq(index + 1),
-        )
-        .await;
-        pointers.push(segment.envelope().pointer());
-    }
-    pointers
-}
-
-#[tokio::test]
-async fn a_bounded_chain_load_stops_at_its_fetch_limit() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let pointers = write_linked_chain(store.inner(), &namespace_id, 5).await;
-    let tip = pointers.last().expect("a chain was written").clone();
-
-    // No hints, so every body comes from the serial walk down the links.
-    store.reset();
-    let bounded = load_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(5),
-            visible_tip: Some(tip.clone()),
-            stop_after_seq: None,
-            max_segment_fetches: Some(2),
-            recent_segments: &[],
-        },
-    )
-    .await
-    .expect("bounded chain load");
-    match bounded {
-        WalChainLoad::Complete { .. } => panic!("a five-segment chain does not fit in two fetches"),
-        WalChainLoad::LimitReached { requests_issued } => assert_eq!(requests_issued, 2),
-    }
-    assert_eq!(
-        store.count(OperationClass::Get),
-        2,
-        "the walk reads no more bodies than the limit allows"
-    );
-
-    // A hint list longer than the limit is cut down to what the limit
-    // covers rather than refused. The prefetch takes the newest hints,
-    // which is where the walk starts, and the walk stops once the limit is
-    // spent — reporting what it spent, not zero.
-    let mut newest_first = pointers.clone();
-    newest_first.reverse();
-    store.reset();
-    let hinted = load_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(5),
-            visible_tip: Some(tip.clone()),
-            stop_after_seq: None,
-            max_segment_fetches: Some(2),
-            recent_segments: &newest_first[1..],
-        },
-    )
-    .await
-    .expect("bounded hinted load");
-    match hinted {
-        WalChainLoad::Complete { .. } => panic!("five hints do not fit in two fetches"),
-        WalChainLoad::LimitReached { requests_issued } => assert_eq!(requests_issued, 2),
-    }
-    assert_eq!(
-        store.count(OperationClass::Get),
-        2,
-        "the prefetch issued the requests the limit allows, not none and not five"
-    );
-}
-
-#[tokio::test]
-async fn a_limit_that_covers_the_chain_loads_all_of_it() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let pointers = write_linked_chain(store.inner(), &namespace_id, 5).await;
-    let tip = pointers.last().expect("a chain was written").clone();
-    let request = |recent: &'static [WalSegmentPointer], max_segment_fetches| WalChainLoadRequest {
-        namespace_id: &namespace_id,
-        chain_base_seq: ChangeSeq(0),
-        head_seq: ChangeSeq(5),
-        visible_tip: Some(tip.clone()),
-        stop_after_seq: None,
-        max_segment_fetches,
-        recent_segments: recent,
-    };
-    let unbounded = load_complete_wal_chain(&store, request(&[], None))
-        .await
-        .expect("unbounded chain");
-
-    store.reset();
-    let bounded = load_wal_chain(&store, request(&[], Some(5)))
-        .await
-        .expect("bounded chain load");
-    match bounded {
-        WalChainLoad::Complete {
-            chain,
-            requests_issued,
-        } => {
-            assert_eq!(chain.segments(), unbounded.segments());
-            assert_eq!(requests_issued, 5);
-        }
-        WalChainLoad::LimitReached { requests_issued } => {
-            panic!("a five-segment chain fits in five fetches, not {requests_issued}")
-        }
-    }
-    assert_eq!(store.count(OperationClass::Get), 5);
-}
-
-#[tokio::test]
-async fn a_failed_prefetch_costs_its_own_request_and_the_walk_loads_the_chain() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let pointers = write_linked_chain(&inner, &namespace_id, 3).await;
-    let tip = pointers.last().expect("a chain was written").clone();
-    let mut newest_first = pointers.clone();
-    newest_first.reverse();
-
-    // The prefetch completes before the walk fetches anything, so arming
-    // one failure per hint fails every prefetch request and leaves the
-    // walk's own fetches to succeed.
-    let failing = FailStore::new(
-        inner,
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
-        OperationClass::Get,
-        InjectedError::Transport("the store is flaky".to_owned()),
-    );
-    failing.fail_next(newest_first.len());
-    let store = RecordingStore::new(failing, KeyPredicate::any());
-
-    let loaded = load_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(3),
-            visible_tip: Some(tip),
-            stop_after_seq: None,
-            max_segment_fetches: Some(16),
-            recent_segments: &newest_first[1..],
-        },
-    )
-    .await
-    .expect("the walk fetches what the prefetch could not deliver");
-
-    let issued = store.count(OperationClass::Get);
-    assert_eq!(
-        issued, 6,
-        "three failed prefetch requests and three walk fetches"
-    );
-    match loaded {
-        WalChainLoad::Complete {
-            chain,
-            requests_issued,
-        } => {
-            assert_eq!(chain.segments().len(), 3);
-            assert_eq!(
-                requests_issued, issued,
-                "the load reports the requests it issued"
-            );
-        }
-        WalChainLoad::LimitReached { requests_issued } => {
-            panic!("three segments fit in sixteen requests, not {requests_issued}")
-        }
-    }
-}
-
-#[tokio::test]
-async fn failed_prefetch_requests_count_against_the_limit() {
-    let temp_dir = tempdir().expect("tempdir");
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let pointers = write_linked_chain(&inner, &namespace_id, 3).await;
-    let tip = pointers.last().expect("a chain was written").clone();
-    let mut newest_first = pointers.clone();
-    newest_first.reverse();
-
-    let failing = FailStore::new(
-        inner,
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
-        OperationClass::Get,
-        InjectedError::Transport("the store is flaky".to_owned()),
-    );
-    failing.fail_all();
-    let store = RecordingStore::new(failing, KeyPredicate::any());
-
-    let loaded = load_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(3),
-            visible_tip: Some(tip),
-            stop_after_seq: None,
-            max_segment_fetches: Some(3),
-            recent_segments: &newest_first[1..],
-        },
-    )
-    .await
-    .expect("a load whose limit the failures spent");
-
-    match loaded {
-        WalChainLoad::Complete { .. } => panic!("no body was ever delivered"),
-        WalChainLoad::LimitReached { requests_issued } => assert_eq!(requests_issued, 3),
-    }
-    assert_eq!(
-        store.count(OperationClass::Get),
-        3,
-        "the limit bounds prefetch requests exactly as it bounds walk fetches"
-    );
-}
-
-async fn write_create_directory_segment(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    prev_visible_segment: Option<WalSegmentPointer>,
-    commit_id: &str,
-    display_name: &str,
-    apply_after_seq: ChangeSeq,
-    assigned_seq: ChangeSeq,
-) -> PreparedWalSegment {
-    let segment = prepare_wal_segment(
-        namespace_id.clone(),
-        WriterEpoch(1),
-        prev_visible_segment,
-        &[materialized_create_directory(
-            namespace_id,
-            commit_id,
-            display_name,
-            apply_after_seq,
-            assigned_seq,
-        )],
-    )
-    .expect("prepare wal segment");
-    let object_key = prepared_segment_key(&segment);
-    store
-        .put_if_absent(&object_key, Bytes::copy_from_slice(segment.as_bytes()))
-        .await
-        .expect("write wal segment");
-    segment
-}
-
-fn prepared_segment_key(segment: &PreparedWalSegment) -> String {
-    wal_segment(
-        &segment.envelope().payload().namespace_id,
-        &segment.envelope().payload().segment_id,
-    )
-}
-
-fn prepared_create_directory_segment(
-    namespace_id: &NamespaceId,
-    prev_visible_segment: Option<WalSegmentPointer>,
-    commit_id: &str,
-    display_name: &str,
-    apply_after_seq: ChangeSeq,
-    assigned_seq: ChangeSeq,
-) -> PreparedWalSegment {
-    prepare_wal_segment(
-        namespace_id.clone(),
-        WriterEpoch(1),
-        prev_visible_segment,
-        &[materialized_create_directory(
-            namespace_id,
-            commit_id,
-            display_name,
-            apply_after_seq,
-            assigned_seq,
-        )],
-    )
-    .expect("prepare wal segment")
-}
-
-/// Prepares a linked chain of `len` single-commit segments covering seqs
-/// `1..=len`, without writing any of them to a store.
-fn prepared_unstored_chain(namespace_id: &NamespaceId, len: u64) -> Vec<PreparedWalSegment> {
-    let mut chain: Vec<PreparedWalSegment> = Vec::new();
-    for seq in 1..=len {
-        let prev = chain.last().map(|segment| segment.envelope().pointer());
-        chain.push(prepared_create_directory_segment(
-            namespace_id,
-            prev,
-            &format!("c_count_{seq}"),
-            &format!("dir-{seq}"),
-            ChangeSeq(seq - 1),
-            ChangeSeq(seq),
-        ));
-    }
-    chain
-}
-
-fn newest_first_pointers(chain: &[PreparedWalSegment]) -> Vec<WalSegmentPointer> {
-    chain
-        .iter()
-        .rev()
-        .map(|segment| segment.envelope().pointer())
-        .collect()
-}
-
-async fn store_chain<S: ObjectStore + ?Sized>(store: &S, chain: &[PreparedWalSegment]) {
-    for segment in chain {
-        let object_key = prepared_segment_key(segment);
-        store
-            .put_if_absent(&object_key, Bytes::copy_from_slice(segment.as_bytes()))
+        .expect("create");
+    for _ in 0..2 {
+        acquire_writer_epoch(&store, &namespace_id, &context(1_000))
             .await
-            .expect("write wal segment");
+            .expect("fence");
     }
-}
-
-fn tail_count_request<'a>(
-    namespace_id: &'a NamespaceId,
-    chain_base_seq: ChangeSeq,
-    head_seq: ChangeSeq,
-    hints: &'a [WalSegmentPointer],
-) -> WalChainLoadRequest<'a> {
-    WalChainLoadRequest {
-        namespace_id,
-        chain_base_seq,
-        head_seq,
-        visible_tip: hints.first().cloned(),
-        stop_after_seq: None,
-        max_segment_fetches: None,
-        recent_segments: hints.get(1..).unwrap_or_default(),
+    let key = wal_segment(&namespace_id, &WalNo(2));
+    let original = decode_wal_segment_envelope_zstd(
+        &store.get(&key, None).await.expect("get").expect("fence"),
+    )
+    .expect("decode");
+    for changed in 0..5 {
+        let mut payload = original.payload().clone();
+        match changed {
+            0 => payload.wal_no = WalNo(1),
+            1 => payload.writer_epoch = WriterEpoch(0),
+            2 => payload.writer_epoch = WriterEpoch(3),
+            3 => payload.end_seq = ChangeSeq(1),
+            _ => payload.next_inode_id = InodeId(3),
+        }
+        let bytes = encode_wal_segment_envelope_zstd(payload)
+            .expect("encode")
+            .into_bytes();
+        store
+            .put_overwrite(&key, bytes.into())
+            .await
+            .expect("corrupt fixture");
+        let error = load_current_metadata_view(&store, &namespace_id)
+            .await
+            .err()
+            .expect("corruption");
+        assert_eq!(
+            error.code(),
+            ErrorCode::NamespaceCorrupt,
+            "case {changed}: {error}"
+        );
     }
-}
-
-#[test]
-fn tail_count_from_contiguous_hints_covers_the_longest_legal_tail() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let boundary = crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
-    let chain = prepared_unstored_chain(&namespace_id, boundary);
-    let hints = newest_first_pointers(&chain);
-
-    let count = count_visible_wal_tail_segments(&tail_count_request(
-        &namespace_id,
-        ChangeSeq(0),
-        ChangeSeq(boundary),
-        &hints,
-    ))
-    .expect("count from pointers");
-    assert_eq!(count, boundary);
-
-    // A manifest boundary inside the hinted window is honored: only the
-    // segments above it are tail.
-    let count = count_visible_wal_tail_segments(&tail_count_request(
-        &namespace_id,
-        ChangeSeq(boundary - 1),
-        ChangeSeq(boundary),
-        &hints,
-    ))
-    .expect("count above interior boundary");
-    assert_eq!(count, 1);
-
-    // An empty tail costs nothing and consults nothing.
-    let count = count_visible_wal_tail_segments(&tail_count_request(
-        &namespace_id,
-        ChangeSeq(boundary),
-        ChangeSeq(boundary),
-        &hints,
-    ))
-    .expect("count of empty tail");
-    assert_eq!(count, 0);
-}
-
-#[test]
-fn tail_count_at_genesis_is_zero_without_tip_or_hints() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let count = count_visible_wal_tail_segments(&WalChainLoadRequest {
-        namespace_id: &namespace_id,
-        chain_base_seq: ChangeSeq(0),
-        head_seq: ChangeSeq(0),
-        visible_tip: None,
-        stop_after_seq: None,
-        max_segment_fetches: None,
-        recent_segments: &[],
-    })
-    .expect("count genesis tail");
-
-    assert_eq!(count, 0);
-}
-
-#[test]
-fn tail_count_rejects_a_head_that_does_not_describe_its_tail() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let chain = prepared_unstored_chain(&namespace_id, 4);
-    let pointers = newest_first_pointers(&chain);
-    let head_seq = ChangeSeq(4);
-
-    // A run that stops short of the basis boundary.
-    let error = count_visible_wal_tail_segments(&tail_count_request(
-        &namespace_id,
-        ChangeSeq(0),
-        head_seq,
-        &pointers[..2],
-    ))
-    .expect_err("a short run must not be walked");
-    assert_eq!(
-        error,
-        WalChainLoadError::TailNotDescribedByHead {
-            boundary_seq: ChangeSeq(0),
-            described_segments: 2,
-            described_from_seq: ChangeSeq(3),
-        }
-    );
-
-    // A run with a hole in it: nothing below the hole is described.
-    let discontiguous = [
-        pointers[0].clone(),
-        pointers[2].clone(),
-        pointers[3].clone(),
-    ];
-    let error = count_visible_wal_tail_segments(&tail_count_request(
-        &namespace_id,
-        ChangeSeq(0),
-        head_seq,
-        &discontiguous,
-    ))
-    .expect_err("a discontiguous run must not be walked");
-    assert!(matches!(
-        error,
-        WalChainLoadError::TailNotDescribedByHead {
-            described_segments: 1,
-            ..
-        }
-    ));
 }
 
 #[tokio::test]
-async fn tail_count_and_chain_load_agree_where_the_head_describes_the_tail() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let chain = prepared_unstored_chain(&namespace_id, 3);
-    store_chain(&store, &chain).await;
-    let pointers = newest_first_pointers(&chain);
-
-    let request = tail_count_request(&namespace_id, ChangeSeq(0), ChangeSeq(3), &pointers);
-    let count = count_visible_wal_tail_segments(&request).expect("count tail");
-    let loaded = load_complete_wal_chain(&store, request)
+async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("fences").expect("namespace");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
-        .expect("load chain");
-    assert_eq!(count as usize, loaded.segments().len());
-    assert_eq!(count, 3);
-
-    let unhinted = WalChainLoadRequest {
-        recent_segments: &[],
-        ..tail_count_request(&namespace_id, ChangeSeq(0), ChangeSeq(3), &pointers)
+        .expect("create");
+    acquire_writer_epoch(&store, &namespace_id, &setup)
+        .await
+        .expect("first fence");
+    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+        .await
+        .expect("fold fence");
+    crate::checkpoint::advance_retention_floor(&store, &namespace_id, &setup)
+        .await
+        .expect("advance WAL floor at sequence zero");
+    acquire_writer_epoch(&store, &namespace_id, &setup)
+        .await
+        .expect("second fence");
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("manifest");
+    assert_eq!(current.envelope.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.envelope.payload().last_folded_wal_no, WalNo(1));
+    assert_eq!(current.envelope.payload().retention_floor_wal_no, WalNo(1));
+    let config = crate::gc::GcConfig {
+        grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
+        max_steps: None,
     };
-    count_visible_wal_tail_segments(&unhinted)
-        .expect_err("an unhinted head describes no tail to count");
-    let loaded = load_complete_wal_chain(&store, unhinted)
+    let aged = context(config.grace_window_ms + 1);
+    let report = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
         .await
-        .expect("replay still walks the links");
-    assert_eq!(loaded.segments().len(), 3);
-}
-
-#[tokio::test]
-async fn chain_load_walks_predecessor_links_past_the_hinted_window() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let chain = prepared_unstored_chain(&namespace_id, 3);
-    store_chain(&store, &chain).await;
-    let pointers = newest_first_pointers(&chain);
-    let short_window = &pointers[..2];
-
-    let loaded = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(3),
-            visible_tip: Some(pointers[0].clone()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &short_window[1..],
-        },
-    )
-    .await
-    .expect("load past the hinted window");
-
-    assert_eq!(loaded.segments().len(), 3);
-    assert_eq!(loaded.segments()[0].records()[0].seq, ChangeSeq(1));
-}
-
-#[tokio::test]
-async fn boundary_length_replay_fetches_every_segment_once_in_bounded_waves() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = ConcurrencyWatchStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
-    );
-    let segments =
-        usize::try_from(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS).expect("a segment count");
-    assert!(
-        segments > RECENT_SEGMENT_PREFETCH_CONCURRENCY,
-        "a tail inside one wave would not pin the wave's width"
-    );
-    let chain = prepared_unstored_chain(&namespace_id, crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS);
-    store_chain(&store, &chain).await;
-    let hints = newest_first_pointers(&chain);
-
-    let loaded = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS),
-            visible_tip: Some(hints[0].clone()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &hints[1..],
-        },
-    )
-    .await
-    .expect("load the whole legal tail");
-
-    assert_eq!(loaded.segments().len(), segments);
-    let reads = store.reads();
-    assert_eq!(
-        reads.total, segments,
-        "every segment came from the prefetch; the walk re-fetched none"
-    );
-    assert_eq!(reads.peak_in_flight, RECENT_SEGMENT_PREFETCH_CONCURRENCY);
-}
-
-#[tokio::test]
-async fn prefetch_fetches_only_the_segments_the_gap_intersects() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
-    );
-    let chain = prepared_unstored_chain(&namespace_id, 5);
-    store_chain(&store, &chain).await;
-    let hints = newest_first_pointers(&chain);
-    store.reset();
-
-    let loaded = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(5),
-            visible_tip: Some(hints[0].clone()),
-            stop_after_seq: Some(ChangeSeq(3)),
-            max_segment_fetches: None,
-            recent_segments: &hints[1..],
-        },
-    )
-    .await
-    .expect("load the newest two segments");
-
-    assert_eq!(loaded.segments().len(), 2);
-    let mut fetched = store.take_get_keys();
-    fetched.sort();
-    let mut expected = vec![
-        prepared_segment_key(&chain[3]),
-        prepared_segment_key(&chain[4]),
-    ];
-    expected.sort();
-    assert_eq!(fetched, expected);
-}
-
-#[tokio::test]
-async fn a_corrupt_segment_inside_the_hinted_set_is_still_rejected() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let chain = prepared_unstored_chain(&namespace_id, 3);
-    store_chain(&store, &chain).await;
-    // Rewrite the middle segment's body at its own key: it decodes, but its
-    // payload no longer matches the checksum its successor's chain link
-    // recorded.
-    let mut tampered = chain[1].envelope().payload().clone();
-    tampered.records[0].committed_at_ms += 1;
-    let tampered_key = prepared_segment_key(&chain[1]);
-    store
-        .put_overwrite(
-            &tampered_key,
-            Bytes::from(
-                encode_wal_segment_envelope_zstd(tampered)
-                    .expect("encode tampered")
-                    .into_bytes(),
-            ),
-        )
+        .expect("collect");
+    assert_eq!(report.deleted.wal_segments, 1);
+    assert!(store
+        .head(&wal_segment(&namespace_id, &WalNo(1)))
         .await
-        .expect("overwrite middle wal segment");
-    let hints = newest_first_pointers(&chain);
+        .expect("first")
+        .is_none());
+    assert!(store
+        .head(&wal_segment(&namespace_id, &WalNo(2)))
+        .await
+        .expect("second")
+        .is_some());
+    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+        .await
+        .expect("fold second fence");
+    let retained = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
+        .await
+        .expect("floor retains");
+    assert_eq!(retained.deleted.wal_segments, 0);
+    crate::checkpoint::advance_retention_floor(&store, &namespace_id, &setup)
+        .await
+        .expect("advance second floor");
+    let reclaimed = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
+        .await
+        .expect("reclaim second fence");
+    assert_eq!(reclaimed.deleted.wal_segments, 1);
+    load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("genesis remains readable");
+}
 
-    let hinted = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(3),
-            visible_tip: Some(hints[0].clone()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &hints[1..],
-        },
-    )
-    .await
-    .expect_err("a prefetched corrupt segment must be rejected");
-    let serial = load_complete_wal_chain(
-        &store,
-        WalChainLoadRequest {
-            namespace_id: &namespace_id,
-            chain_base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(3),
-            visible_tip: Some(hints[0].clone()),
-            stop_after_seq: None,
-            max_segment_fetches: None,
-            recent_segments: &[],
-        },
-    )
-    .await
-    .expect_err("the serial path rejects it too");
-
-    assert_eq!(
-        hinted,
-        WalChainLoadError::PointerMismatch {
-            object_key: tampered_key,
+#[tokio::test]
+async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
+    use loonfs_test_support::stores::{BlockingStore, OperationClass};
+    let directory = tempfile::tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("flush-race").expect("namespace");
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(loonfs_objectstore::keys::metadata_manifest_object(
+            &namespace_id,
+            &loonfs_api::ManifestNo(3),
+        )),
+        OperationClass::PutCreateIfAbsent,
+    );
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("create");
+    acquire_writer_epoch(&store, &namespace_id, &setup)
+        .await
+        .expect("first fence");
+    store.block_next();
+    let (flushed, acquired) = futures::join!(
+        crate::checkpoint::flush_wal(&store, &namespace_id, &setup),
+        async {
+            store.wait_until_blocked().await;
+            let acquired = acquire_writer_epoch(store.inner(), &namespace_id, &setup).await;
+            store.release();
+            acquired
         }
     );
-    assert_eq!(hinted, serial);
+    acquired.expect("second fence");
+    flushed.expect("flush retries");
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("manifest");
+    assert_eq!(current.envelope.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.envelope.payload().last_folded_wal_no, WalNo(2));
 }

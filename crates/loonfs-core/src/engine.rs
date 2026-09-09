@@ -8,6 +8,7 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::state::NamespaceReadState;
 use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{
@@ -28,7 +29,7 @@ use loonfs_api::v0::{
     BeginUploadResponse, CommitResponse, ListChangesResponse, UploadContentResponse, UploadMode,
     UploadPartChecksumClaim, UploadSession,
 };
-use loonfs_api::wire::control::{CheckpointOwner, HeadState};
+use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, ContentRef,
@@ -49,7 +50,7 @@ use std::sync::Arc;
 /// higher-level `loonfs` reader handles instead.
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
-    pub head: HeadState,
+    pub head: NamespaceReadState,
     pub head_etag: String,
     /// Metadata basis referenced by the pinned head. This is the namespace's own
     /// root after one is published, or its genesis or fork basis before then.
@@ -541,7 +542,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Publishes already-classified mutation candidates as one batch: one WAL
-    /// segment, one head compare-and-swap, one result per candidate in order.
+    /// segment, one numbered WAL put, one result per candidate in order.
     pub async fn publish_namespace_commits_batch(
         &self,
         candidates: Vec<CommitCandidate>,
