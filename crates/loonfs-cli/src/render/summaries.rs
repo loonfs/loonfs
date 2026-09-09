@@ -238,19 +238,6 @@ fn push_top_retention_reason(summary: &mut String, response: &GcResponse) {
     }
 }
 
-pub(crate) fn gc_pass_line(pass: &GcResponse) -> String {
-    let deleted: u64 = gc_deleted_counts(&pass.deleted)
-        .iter()
-        .map(|(_, count)| count)
-        .sum();
-    let mut line = format!("{deleted} deleted, {} retained", pass.retained_candidates);
-    push_top_retention_reason(&mut line, pass);
-    if let Some(at_ms) = pass.next_reclamation_at_ms {
-        line.push_str(&format!("; next reclaimable at {}", format_utc_ms(at_ms)));
-    }
-    line
-}
-
 pub(super) fn gc_summary(report: &GcResponse) -> String {
     let deleted = gc_deleted_counts(&report.deleted)
         .into_iter()
@@ -267,9 +254,6 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
             "; released {} fork checkpoints",
             report.released_checkpoints.fork
         ));
-    }
-    if report.budget_exhausted {
-        summary.push_str("; stopped on --max-steps before the pass finished");
     }
     if let Some(deadline) = report.reclaim_after_ms {
         // A future retirement deadline always contributes to the run's earliest deadline.

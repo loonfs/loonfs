@@ -832,14 +832,14 @@ A maintenance run body names exactly one job with `kind`:
 | --- | --- | --- |
 | `metadata` | Optional `max_wal_tail_segments` | `wal_flush` and `reorganize` outcomes |
 | `metadata_compaction` | None | `compaction`, tagged by `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
-| `gc` | Optional `grace_window_ms` and `max_steps` | The collection result |
+| `gc` | Optional `grace_window_ms` | The collection result |
 | `retention` | None | `retention_floor_seq` |
 
 The response carries the same `kind`, the addressed `namespace_id`, and that
 job's result. None of the jobs creates a checkpoint record.
 
 ```json
-{"kind":"gc","max_steps":1024}
+{"kind":"gc"}
 ```
 
 Races and supersessions are outcomes, not errors.
@@ -866,14 +866,14 @@ byte, and segment counts. `cancelled` means the caller cancelled the job.
 or all publication attempts lost. `fenced` means another process advanced
 the manifest's compactor epoch. These last three outcomes publish no manifest.
 
-For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window and `max_steps` limits candidates per family in one call. A grace window below the derived safety floor or a zero budget returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace (format spec, section 6.4, rule 11).
+For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace (format spec, section 6.4, rule 11).
 
 Responses contain counts for that call. Concurrent calls can overlap deletion
 attempts, so these counts are operational summaries. No collection state is
 saved between calls.
 
-GC defaults `max_steps` to 1024 per family. Each request runs one stateless call.
-`GcRequest` accepts `grace_window_ms` and `max_steps`. It has no cursor.
+Each GC request runs one complete stateless pass.
+`GcRequest` accepts `grace_window_ms`. It has no cursor.
 Nothing sweeps unless `gc` is present.
 
 The retention floor bounds incremental replay only. File revision history
@@ -994,10 +994,9 @@ plus the grace window, an aborted session's grace, or a completed session's
 derived content-reclamation grace, or the retired namespace's
 `reclaim_after_ms`. A scheduler reads it to decide when to
 run the namespace again rather than tracking upload deadlines itself. It
-describes only what this pass examined. A call with `budget_exhausted`
-saw part of the keyspace, and candidates that age out on their object
-timestamps carry no time here — so its absence is not a claim that nothing
-is owed.
+describes only what this pass examined. Candidates that age out on their
+object timestamps carry no time here, so its absence does not mean that
+nothing remains to collect.
 
 `reclaim_after_ms` is present only when the deleted manifest records retirement.
 It is omitted for an active namespace or a deleted namespace still waiting on
@@ -1007,19 +1006,12 @@ the deadline reports it through `next_reclamation_at_ms`. Retirement itself
 deletes no content.
 
 Every call reads current durable roots and uses one fixed clock. It keeps
-its live set in memory and writes no collection progress. Pin, metadata
-segment, and upload session sweeps
-start at a key derived from the call clock and wrap to the beginning.
-Numbered families and the complete pin listing for root discovery start at
-the beginning. Each family has its own `max_steps` budget. Exhausting one
-family continues with the next; `budget_exhausted` means at least one family
-stopped with candidates remaining. A scheduler calls again with a new clock
-and no continuation. A stopped pin family prevents namespace retirement.
-The budget counts candidates that need a store request after the listing:
-an age check, a record read, or a deletion. A candidate the live set
-retains costs nothing, so referenced objects never exhaust the budget.
-Root discovery and its listings are not charged. Root read failures fail
-the call before sweeping.
+its live set in memory and writes no collection progress. Every family lists
+from the beginning and sweeps to the end. Root discovery reads a separate
+complete pin listing. A retained pin, an unrecognized pin key, or an uncertain
+pin load prevents namespace retirement. A candidate the live set retains
+needs no further store request. Other candidates require an age check, a
+record read, or a deletion. Root read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`,

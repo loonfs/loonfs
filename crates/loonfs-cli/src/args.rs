@@ -1414,10 +1414,6 @@ pub(crate) struct MaintenanceGcArgs {
     /// omitted).
     #[arg(long)]
     pub grace_window_ms: Option<u64>,
-    /// Inspect at most this many candidates and return after one call.
-    /// Omit to repeat while cleanup makes progress and candidates remain.
-    #[arg(long)]
-    pub max_steps: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -1893,24 +1889,6 @@ mod tests {
     fn max_matches_is_removed_and_changes_uses_after_to_resume() {
         assert!(Cli::try_parse_from(["loonfs", "grep", "x", "--max-matches", "1"]).is_err());
         assert!(Cli::try_parse_from(["loonfs", "changes", "--cursor", "opaque"]).is_err());
-    }
-
-    #[test]
-    fn namespace_gc_budget_uses_candidate_steps() {
-        let cli = Cli::try_parse_from(["loonfs", "maintenance", "gc", "--max-steps", "7"])
-            .expect("namespace GC arguments");
-        assert!(matches!(
-            cli.command,
-            Command::Maintenance {
-                command: MaintenanceCommand::Gc(MaintenanceGcArgs {
-                    max_steps: Some(7),
-                    ..
-                }),
-            }
-        ));
-        assert!(
-            Cli::try_parse_from(["loonfs", "maintenance", "gc", "--max-objects", "7",]).is_err()
-        );
     }
 
     #[test]

@@ -341,18 +341,11 @@ Maintenance
     Advance the retention floor. This removes change-feed replay history
     below the flushed manifest head but does not remove file revisions.
 
-  loonfs maintenance gc [--grace-window-ms <ms>] [--max-steps <n>]
-    Collect aged, unreferenced objects. Each call reads current roots and
-    rotates the listing start for pins, metadata segments, and uploads using
-    the call clock. Numbered families list from the start. --max-steps bounds
-    candidates per family that need a store request (an age check, a record
-    read, or a deletion) and returns after one call. When one family exhausts
-    its budget, collection continues with the next. Without --max-steps, the
-    command repeats while calls reclaim objects or release checkpoints and
-    candidates remain.
+  loonfs maintenance gc [--grace-window-ms <ms>]
+    Run one complete pass and print its report. Each call reads current roots,
+    lists every family from the beginning, and sweeps it to the end.
     --grace-window-ms protects objects younger than the window.
-    Repeated calls report progress on standard error; --json includes every
-    retention reason and budget_exhausted when work remains.
+    --json includes every retention reason.
     Repeated GC runs reclaim a deleted namespace's own content once it retires,
     with deleted.content_objects counting completed-session reclamation and
     deleted.retired_content_objects counting owner-prefix deletion attempts.

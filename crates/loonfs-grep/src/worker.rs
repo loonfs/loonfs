@@ -10,6 +10,7 @@ use crate::cache::{GrepBlockCache, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
 use crate::codec::{
     extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
 };
+use crate::gc_budget::{GcBudget, DEFAULT_GC_MAX_STEPS};
 use crate::gc_cursor::{GcCursorKeyspace, NamespaceGcCursor};
 use crate::index_read::{load_data_block, load_index_block};
 use crate::keyspace::{grep_prefix, manifest_key, parse_key, root_key, segment_key, GrepKeyKind};
@@ -26,9 +27,8 @@ use futures::StreamExt as _;
 use loonfs::{
     delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
     select_next_iterator, write_segments_in_waves, CheckpointFilesPageCursor, CoreError,
-    CreateCheckpointOptions, FsMaintenance, FsReader, GraceAge, PassBudget, RuntimeError,
-    SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, DEFAULT_GC_MAX_STEPS,
-    GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    CreateCheckpointOptions, FsMaintenance, FsReader, GraceAge, RuntimeError, SegmentBlockLoader,
+    SegmentRowIterator, StoreFailureClass, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
@@ -1262,9 +1262,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             None => NamespaceGcCursor::initial(namespace_id, GrepGcKeyspace {}),
         };
         let mut report = GrepGcReport::default();
-        // Each object read is one work step for grep collection. Use the shared
-        // default work budget when the caller does not supply a read limit.
-        let mut budget = PassBudget::new(Some(request.max_objects.unwrap_or(DEFAULT_GC_MAX_STEPS)));
+        let mut budget = GcBudget::new(request.max_objects.unwrap_or(DEFAULT_GC_MAX_STEPS));
         let reads = self.reads(namespace_id);
         // Liveness is decided once per pass and refreshed in bounded chunks
         // below. This first read is charged like any other.
@@ -1334,7 +1332,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         live_set: &mut GrepLiveSet,
         key: &str,
         now_ms: u64,
-        budget: &mut PassBudget,
+        budget: &mut GcBudget,
         report: &mut GrepGcReport,
     ) -> Result<bool> {
         if !live_set
@@ -1580,7 +1578,7 @@ impl GrepLiveSet {
         namespace_id: &NamespaceId,
         reads: &NamespaceReads<'_>,
         liveness: NamespaceLiveness,
-        budget: &mut PassBudget,
+        budget: &mut GcBudget,
     ) -> bool {
         if self.decided_since_load >= GREP_REVERIFY_CHUNK {
             self.live.clear();

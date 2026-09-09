@@ -25,9 +25,7 @@ use human::human_success;
 #[cfg(test)]
 use json::json_success;
 pub(crate) use json::{json_error, render_parse_error};
-pub(crate) use summaries::{
-    gc_pass_line, store_probe_summary_line, store_probe_verdict, StoreProbeVerdict,
-};
+pub(crate) use summaries::{store_probe_summary_line, store_probe_verdict, StoreProbeVerdict};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
@@ -707,7 +705,7 @@ mod tests {
     }
     #[test]
     fn gc_summaries_report_counts_retention_and_namespace_retirement() {
-        use super::summaries::{gc_pass_line, gc_summary};
+        use super::summaries::gc_summary;
         use loonfs_api::{GcResponse, RetainedReason};
 
         let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
@@ -721,23 +719,6 @@ mod tests {
         }
         pass.retain(RetainedReason::UploadSessionWindow);
         pass.next_reclamation_at_ms = Some(1_700_000_000_000);
-
-        let line = gc_pass_line(&pass);
-        assert!(
-            line.contains("13 deleted, 5 retained; mostly within_grace_window: 4"),
-            "every deleted family counts: {line}"
-        );
-        assert!(
-            line.contains("next reclaimable at 2023-11-14 22:13:20Z"),
-            "{line}"
-        );
-
-        let quiet = gc_pass_line(&GcResponse::empty(
-            NamespaceId::parse("demo").expect("namespace id"),
-        ));
-        assert!(quiet.contains("0 deleted, 0 retained"), "{quiet}");
-        assert!(!quiet.contains("mostly"), "{quiet}");
-        assert!(!quiet.contains("next reclaimable"), "{quiet}");
 
         let summary = gc_summary(&pass);
         assert!(

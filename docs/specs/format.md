@@ -2212,23 +2212,11 @@ have a current manifest, which remains their permanent tombstone.
 
 The collector writes no run object, reference table, phase, or cursor. It
 builds its live set in memory from the current manifest and pin keys alone.
-Each family has a fresh `max_steps` budget for candidates that need a store
-request after listing: an age check, a record read, or a deletion. A
-candidate the live set retains costs nothing. Exhausting one family's budget
-stops that family and continues with the next. `budget_exhausted` is true
-when any family stops with candidates remaining. Root reads and their
-listings are not charged as sweep steps.
-
-Manifests and WAL list from the start. Pins, metadata segments, and upload
-sessions start after a key derived from `context.now_ms`. Its shape is the
-lowest valid key in the family with the random part replaced by lowercase
-hex from a hash of the clock. The pin's manifest number is
-`1 + hash mod current_manifest_no`. Each sweep lists from that key to the
-end, then from the beginning up to that key, excluding keys at or after it
-on the second listing. Different clocks change the starting position, so
-repeated bounded calls can reach every key without saved progress. The
-complete pin listing used to identify roots always starts at the beginning;
-only sweep order rotates. Retired content lists from the start.
+Each call runs one complete pass. Every family lists from the beginning and
+sweeps to the end. Candidates retained by the live set need no further
+store request. Other candidates require an age check, a record read, or a
+deletion. The complete pin listing used to identify roots is separate from
+the pin sweep.
 
 Core GC never recognizes or deletes objects under `extensions/`. Grep owns
 its own collector. Concurrent namespace collectors independently read roots
@@ -2323,7 +2311,7 @@ concurrent publications under these rules:
    number in the complete `pins/` key listing. No pin body is read to build
    this set. Each listed pin protects its manifest and every segment in its
    runs for the whole call, even if the call deletes that pin. Pin bodies
-   are read only for deletion decisions, bounded by `max_steps`.
+   are read only for deletion decisions.
    A pin naming an absent manifest is corruption; the error names the pin
    key. An unreadable or invalid manifest fails before sweeping. There is
    no missing-basis sweep.
@@ -2470,8 +2458,6 @@ concurrent publications under these rules:
     call must observe a deleted manifest without `reclaim_after_ms`. Retirement
     waits until no encountered pin remains. A retained pin, an unrecognized
     key, or an uncertain pin load prevents retirement.
-    A pin family stopped before finishing cleanup prevents retirement.
-    Exhausting another family's budget does not prevent retirement.
 
     At the end of the checkpoints family, GC re-reads the manifest and
     publishes the next manifest, preserving deleted status and adding this deadline:

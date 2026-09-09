@@ -917,10 +917,6 @@ pub struct GcRequest {
     /// server's advertised safety floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Maximum candidates per family that need a store request after the listing (an age
-    /// check, a record read, or a deletion); the default is 1024.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_steps: Option<u64>,
 }
 
 /// The candidates inspected but not deleted by one garbage-collection pass.
@@ -1027,8 +1023,6 @@ pub struct GcResponse {
     pub retained_candidates: u64,
     /// `retained_candidates` grouped by reason.
     pub retained: RetainedCandidates,
-    /// Whether the pass reached `max_steps` before completion.
-    pub budget_exhausted: bool,
     /// The earliest known future reclamation time observed by this pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -1048,7 +1042,6 @@ impl GcResponse {
             released_checkpoints: ReleasedCheckpointCounts::default(),
             retained_candidates: 0,
             retained: RetainedCandidates::default(),
-            budget_exhausted: false,
             next_reclamation_at_ms: None,
             reclaim_after_ms: None,
         }
@@ -2168,12 +2161,10 @@ mod tests {
             (
                 serde_json::json!({
                     "kind": "gc",
-                    "max_steps": 10_000,
                     "grace_window_ms": 600_000
                 }),
                 Some(RunMaintenanceRequest::Gc(GcRequest {
                     grace_window_ms: Some(600_000),
-                    max_steps: Some(10_000),
                 })),
             ),
             (
@@ -2184,6 +2175,7 @@ mod tests {
             (serde_json::json!({"kind": "nope"}), None),
             (serde_json::json!({"kind": "gc", "bogus": 1}), None),
             (serde_json::json!({"kind": "gc", "max_objects": 1}), None),
+            (serde_json::json!({"kind": "gc", "max_steps": 1}), None),
             (serde_json::json!({"kind": "retention", "bogus": 1}), None),
             (
                 serde_json::json!({"kind": "metadata_compaction", "bogus": 1}),

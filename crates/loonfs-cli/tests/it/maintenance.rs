@@ -1170,28 +1170,10 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         );
         assert!(retained.contains_key("checkpoint_not_releasable"));
 
-        // A run that took one pass says nothing on the way: its summary on
-        // standard output is the whole report.
         let quiet_gc = harness.run(&["maintenance", "gc", "--profile", profile]);
         assert_success(&quiet_gc);
         assert!(stdout_string(&quiet_gc).starts_with("gc for demo:"));
         assert!(!stderr_string(&quiet_gc).contains("pass 1:"));
-
-        for _ in 0..2 {
-            let bounded = harness.run(&[
-                "--json",
-                "maintenance",
-                "gc",
-                "--max-steps",
-                "1",
-                "--profile",
-                profile,
-            ]);
-            assert_success(&bounded);
-            let data = json_data(&bounded);
-            assert_eq!(data["budget_exhausted"], true);
-            assert!(data.get("next_cursor").is_none());
-        }
 
         // Maintenance failures surface the registry code in both modes.
         let missing = harness.run(&[

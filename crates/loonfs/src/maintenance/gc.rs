@@ -27,7 +27,7 @@ pub(crate) fn completed_upload_reclaim_at_ms(completion_observed_at_ms: u64) -> 
         .saturating_add(GC_SAFETY_MARGIN_MS)
 }
 
-/// Runs one bounded garbage-collection pass.
+/// Runs one complete garbage-collection pass.
 pub struct GarbageCollectionJob {
     maintenance: FsMaintenance,
 }
@@ -107,8 +107,6 @@ fn gc_run_result(gc: GcResponse) -> MaintenanceRunReport {
 fn gc_conclusion(gc: &GcResponse) -> MaintenanceConclusion {
     if reclaimed_anything(gc) {
         MaintenanceConclusion::Progressed
-    } else if gc.budget_exhausted {
-        MaintenanceConclusion::Blocked
     } else {
         MaintenanceConclusion::Idle
     }
@@ -119,9 +117,23 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
         || gc.deleted.metadata_segments > 0
         || gc.deleted.manifests > 0
         || gc.deleted.checkpoint_records > 0
+        || gc.deleted.content_objects > 0
         || gc.deleted.upload_sessions > 0
         || gc.deleted.retired_content_objects > 0
         || gc.released_checkpoints.fork > 0
         || gc.released_checkpoints.expired > 0
         || gc.released_checkpoints.snapshot > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pass_is_idle_until_it_reclaims_content() {
+        let mut report = GcResponse::empty(NamespaceId::parse("demo").expect("namespace"));
+        assert_eq!(gc_conclusion(&report), MaintenanceConclusion::Idle);
+        report.deleted.content_objects = 1;
+        assert_eq!(gc_conclusion(&report), MaintenanceConclusion::Progressed);
+    }
 }

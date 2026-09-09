@@ -79,9 +79,8 @@ pub use loonfs_core::cache::{
     StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 pub use loonfs_core::limits::{
-    DEFAULT_GC_MAX_STEPS, DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS,
-    GC_MIN_GRACE_WINDOW_MS, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST,
-    METADATA_PUBLICATION_BUDGET_MS,
+    DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST, METADATA_PUBLICATION_BUDGET_MS,
 };
 pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
@@ -90,7 +89,7 @@ pub use loonfs_core::{
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState,
     DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig,
     GraceAge, MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError,
-    PassBudget, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, WriterFence,
+    SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, WriterFence,
     CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};

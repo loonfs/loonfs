@@ -17,6 +17,7 @@ mod cache;
 pub mod codec;
 mod config;
 mod error;
+mod gc_budget;
 mod gc_cursor;
 mod index_read;
 pub mod keyspace;
