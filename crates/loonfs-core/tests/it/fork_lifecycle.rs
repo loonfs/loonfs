@@ -27,7 +27,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+    RecordedOperation, RecordingStore,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -67,9 +68,12 @@ async fn listed_names<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn snapshot_fork_keeps_its_tree_after_snapshot_release_and_source_gc() {
+async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_snapshot_release() {
     let directory = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(directory.path()).expect("store");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::metadata_segment(),
+    );
     let context = mutation_context();
     let source = namespace_id("source");
     let target = namespace_id("target");
@@ -97,6 +101,33 @@ async fn snapshot_fork_keeps_its_tree_after_snapshot_release_and_source_gc() {
     )
     .await
     .expect("advance source");
+    engine.flush_wal().await.expect("flush current source");
+    let floor = engine
+        .advance_retention_floor()
+        .await
+        .expect("advance floor");
+    assert!(floor.retention_floor_seq > snapshot.checkpoint_seq);
+    let mut compacted = false;
+    for _ in 0..16 {
+        let report = engine
+            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
+            .await
+            .expect("compact source");
+        match report.outcome {
+            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => compacted = true,
+            other => panic!("expected bounded compaction, got {other:?}"),
+        }
+    }
+    assert!(compacted);
+    let mut aged = context.clone();
+    aged.now_ms = u64::MAX / 4;
+    let collected =
+        loonfs_core::gc_namespace(&store, &source, &loonfs_core::GcConfig::default(), &aged)
+            .await
+            .expect("collect source before fork");
+    assert!(!collected.budget_exhausted);
+    assert!(collected.deleted.metadata_segments > 0);
     let fork = engine
         .fork_namespace(&target, Some(&snapshot.checkpoint_id))
         .await
@@ -128,11 +159,6 @@ async fn snapshot_fork_keeps_its_tree_after_snapshot_release_and_source_gc() {
         .release_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("release snapshot");
-    engine
-        .create_checkpoint("current".to_owned(), None)
-        .await
-        .expect("flush current source");
-    let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     loonfs_core::gc_namespace(&store, &source, &loonfs_core::GcConfig::default(), &aged)
         .await
@@ -195,11 +221,7 @@ async fn snapshot_release_during_fork_releases_the_attempt_without_installing_a_
     let directory = tempdir().expect("tempdir");
     let source = namespace_id("source");
     let target = namespace_id("target");
-    let store = loonfs_test_support::stores::BlockingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(format!("namespaces/{source}/pins/")),
-        OperationClass::PutCreateIfAbsent,
-    );
+    let store = LocalFsStore::new(directory.path()).expect("store");
     let context = mutation_context();
     seed_source_namespace_for_fork(&store, &source, &context).await;
     let engine = namespace_engine(&store, &source, &context);
@@ -207,15 +229,39 @@ async fn snapshot_release_during_fork_releases_the_attempt_without_installing_a_
         .create_snapshot("basis".to_owned(), u64::MAX / 2)
         .await
         .expect("snapshot");
+    let store = BlockingStore::new(
+        BlockingStore::new(
+            store,
+            KeyPredicate::exact(loonfs_objectstore::keys::checkpoint_record(
+                &source,
+                &snapshot.checkpoint_id,
+            )),
+            OperationClass::Read,
+        ),
+        KeyPredicate::prefix(loonfs_objectstore::keys::checkpoint_prefix(&source)),
+        OperationClass::PutCreateIfAbsent,
+    );
+    let engine = namespace_engine(&store, &source, &context);
     store.block_next();
     let forking = engine.fork_namespace(&target, Some(&snapshot.checkpoint_id));
     let releasing = async {
         store.wait_until_blocked().await;
-        engine
+        store.inner().block_next();
+        store.release();
+        store.inner().wait_until_blocked().await;
+        assert_eq!(
+            store
+                .list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(&source))
+                .await
+                .expect("durable pins")
+                .len(),
+            2
+        );
+        namespace_engine(store.inner().inner(), &source, &context)
             .release_snapshot(&snapshot.checkpoint_id)
             .await
-            .expect("release snapshot during fork write");
-        store.release();
+            .expect("release snapshot after fork pin is durable");
+        store.inner().release();
     };
     let (result, ()) = tokio::join!(forking, releasing);
     assert_eq!(

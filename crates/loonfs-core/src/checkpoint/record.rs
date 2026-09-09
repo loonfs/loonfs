@@ -1,4 +1,4 @@
-//! Pin creation, point reads, deletion, and floor verification.
+//! Pin creation, point reads, deletion, and manifest verification.
 
 use crate::control_object::{
     expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
@@ -145,9 +145,12 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     record: &CheckpointRecordState,
 ) -> Result<CheckpointBasisVerification> {
     let manifest = load_current_manifest(store, &record.namespace_id).await?;
+    let pinned = record.manifest();
     Ok(
         if manifest.envelope.payload().status.is_deleted()
             || manifest.state.retention_floor_seq > record.manifest_head_seq
+            || manifest.state.manifest.manifest_no != pinned.manifest_no
+            || manifest.state.manifest.manifest_payload_checksum != pinned.manifest_payload_checksum
         {
             CheckpointBasisVerification::Invalid
         } else {

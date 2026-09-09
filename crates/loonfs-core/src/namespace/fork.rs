@@ -1,17 +1,19 @@
 //! Fork installation copies pinned source runs into target manifest 1.
 
-use crate::checkpoint::record::release_checkpoint_record;
+use crate::checkpoint::record::{release_checkpoint_record, write_checkpoint_record};
 use crate::checkpoint::{
-    classify_live_snapshot, create_checkpoint, create_checkpoint_at_basis, load_checkpoint_record,
+    classify_live_snapshot, create_checkpoint, load_checkpoint_record,
     load_namespace_manifest_envelope,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::FORK_INSTALL_BUDGET_MS;
+use crate::limits::{CHECKPOINT_VERIFY_BUDGET_MS, FORK_INSTALL_BUDGET_MS};
 use crate::namespace::bootstrap::{install_namespace_manifest, NamespaceInstall};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_api::wire::control::{CheckpointOwner, ForkBasis, NamespaceStatus};
+use loonfs_api::wire::control::{
+    CheckpointOwner, CheckpointRecordState, ForkBasis, NamespaceStatus,
+};
 use loonfs_api::{CheckpointId, Namespace, NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 
@@ -27,13 +29,11 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let owner = CheckpointOwner::Fork {
         target_namespace_id: new_namespace_id.clone(),
     };
-    let checkpoint = if let Some(snapshot_id) = snapshot_id {
+    let source_record = if let Some(snapshot_id) = snapshot_id {
         create_snapshot_fork_checkpoint(store, source_namespace_id, snapshot_id, owner, context)
             .await?
     } else {
-        create_checkpoint(store, source_namespace_id, owner, context).await?
-    };
-    let source_record =
+        let checkpoint = create_checkpoint(store, source_namespace_id, owner, context).await?;
         load_checkpoint_record(store, source_namespace_id, &checkpoint.checkpoint_id)
             .await?
             .ok_or_else(|| {
@@ -42,7 +42,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
                     checkpoint.checkpoint_id
                 ))
             })?
-            .state;
+            .state
+    };
     let source_manifest = load_namespace_manifest_envelope(
         store,
         source_namespace_id,
@@ -105,7 +106,7 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
     snapshot_id: &CheckpointId,
     owner: CheckpointOwner,
     context: &MutationContext,
-) -> Result<loonfs_api::Checkpoint> {
+) -> Result<CheckpointRecordState> {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     let snapshot = classify_live_snapshot(
@@ -116,35 +117,53 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
         context.now_ms,
     )?
     .state;
-    let checkpoint = create_checkpoint_at_basis(
+    let record = CheckpointRecordState {
+        pin_id: CheckpointId::generate(snapshot.manifest_no),
+        created_at_ms: context.now_ms,
+        owner,
+        ..snapshot
+    };
+    write_checkpoint_record(store, &record).await?;
+    let rechecked = verify_snapshot_fork_basis(
         store,
         source_namespace_id,
-        owner,
-        snapshot.manifest(),
-        snapshot.head_commit_id,
-        context,
+        snapshot_id,
+        context.now_ms,
+        &timer,
+        started_ms,
     )
-    .await?;
-    let rechecked = load_checkpoint_record(store, source_namespace_id, snapshot_id)
-        .await
-        .and_then(|record| {
-            classify_live_snapshot(
-                record,
-                snapshot_id,
-                context
-                    .now_ms
-                    .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
-            )
-        });
+    .await;
     if let Err(error) = rechecked {
-        release_checkpoint_record(store, source_namespace_id, &checkpoint.checkpoint_id).await?;
-        return Err(match error {
-            CoreError::SnapshotNotFound { .. } => CoreError::SnapshotGone {
-                snapshot_id: snapshot_id.clone(),
-                reason: "released".to_owned(),
-            },
-            error => error,
-        });
+        release_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
+        return Err(error);
     }
-    Ok(checkpoint)
+    if timer.monotonic_now_ms().saturating_sub(started_ms) > CHECKPOINT_VERIFY_BUDGET_MS {
+        release_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
+        return Err(CoreError::CheckpointUnavailable(
+            "snapshot fork verification exceeded its budget".to_owned(),
+        ));
+    }
+    Ok(record)
+}
+
+async fn verify_snapshot_fork_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    source_namespace_id: &NamespaceId,
+    snapshot_id: &CheckpointId,
+    now_ms: u64,
+    timer: &dyn MonotonicTimer,
+    started_ms: u64,
+) -> Result<()> {
+    let snapshot = load_checkpoint_record(store, source_namespace_id, snapshot_id)
+        .await?
+        .ok_or_else(|| CoreError::SnapshotGone {
+            snapshot_id: snapshot_id.clone(),
+            reason: "released".to_owned(),
+        })?;
+    classify_live_snapshot(
+        Some(snapshot),
+        snapshot_id,
+        now_ms.saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
+    )?;
+    Ok(())
 }
