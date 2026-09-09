@@ -177,8 +177,7 @@ namespaces by id until LoonFS has a scalable namespace catalog/index design.
 
 The capability document describes a *deployment*. What is materialized on
 *data* — for example, whether a derived index is ready for a namespace — lives
-in the owning extension's keyspace (`format.md`, "Extension-owned
-materialization"), not in the namespace manifest.
+in the owning extension's keyspace ([format: extensions](format.md#124-extensions)), not in the namespace manifest.
 
 A successful data-dependent operation requires both halves: the deployment
 advertises the serving capability here, and the namespace's metadata shows
@@ -690,8 +689,7 @@ a node without the namespace's open session fails with `writer_session_closed`.
 A node holds a bounded number of sessions and refuses to open one beyond that
 limit with `writer_capacity_exceeded`.
 
-The standard mutation operations are defined in `format.md` ("Standard
-mutation operations"). `POST /commits` (section 6.8) exposes those operations
+The standard mutation operations are defined in [the format specification](format.md#66-operations-and-wal-deltas). `POST /commits` (section 6.8) exposes those operations
 over HTTP. The same identity, durability, and visibility rules apply to every
 API that implements them.
 
@@ -805,7 +803,7 @@ Its response carries `namespace_id`, `deleted_segments`,
 `deleted_other_objects`, `namespace_reaped`, and `retained_candidates`.
 Unreadable or invalid roots fail before deletion. A tombstoned or absent
 namespace has its aged grep prefix reaped. The retention and age rules are
-in format section 4.2.2.
+in [the grep format](format.md#appendix-d-grep-extension-format).
 
 The status, enable, and disable routes all return one flat grep index object:
 `namespace_id`, lifecycle fields tagged by `status`, `next_run_no`, and
@@ -874,7 +872,7 @@ byte, and segment counts. `cancelled` means the caller cancelled the job.
 or all publication attempts lost. `fenced` means another process advanced
 the manifest's compactor epoch. These last three outcomes publish no manifest.
 
-For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace (format spec, section 6.4, rule 11).
+For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
 
 Responses contain counts for that call. Concurrent calls can overlap deletion
 attempts, so these counts are operational summaries. No collection state is
@@ -1411,7 +1409,7 @@ only path parameter names for the same namespace id value; v0 does not accept
 or emit a namespace `name` alias.
 
 Create and fork install descriptor, hint, and manifest 1 in order. The
-conditional put of manifest 1 decides namespace existence (`format.md`, "Namespace creation and forks"), so they
+conditional put of manifest 1 decides namespace existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)), so they
 answer conflicts the same way. A create or fork that loses that write to
 another namespace answers `namespace_exists` (409). A create or fork against
 a deleted id answers `namespace_deleted` (410): the id is retired and never
@@ -1497,8 +1495,7 @@ namespace state plus storage details used by maintenance:
 
 ### 6.3 `DELETE /v0/namespaces/{ns}`
 
-Deletion is a fenced, terminal manifest publication (`format.md`, "Tombstones and
-deletion"). It linearizes at the manifest put: commits acknowledged before it
+Deletion is a fenced, terminal manifest publication ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it
 stay committed; everything that observes the deleted namespace afterwards —
 reads, commits, forks, status, re-creation of the id — fails with
 `namespace_deleted` (410). Deleting an already-deleted namespace is also
@@ -1528,7 +1525,7 @@ physical versions under bucket versioning or retention locks.
 
 The optional `expected_head_seq` query parameter deletes only if the head is
 still at that sequence, failing with `stale_head` otherwise — the same
-race-explicit pattern preconditions give file mutations. That rejection
+precondition pattern used for file mutations. That rejection
 reports both sequences, in the message and as `expected_head_seq` and
 `actual_head_seq` details, so a caller that still means to delete can retry
 against the sequence it found.
@@ -1540,7 +1537,7 @@ against the sequence it found.
 }
 ```
 
-An unacknowledged request was never committed. The reference server resolves
+A commit can succeed without its acknowledgement reaching the caller. Deletion does not retroactively change that outcome. The reference server resolves
 its queue in admission order — requests admitted before the delete publish first, requests admitted
 after it fail with `namespace_deleted`, and nothing is rejected for a delete
 that ends up failing its precondition.
@@ -1548,7 +1545,7 @@ that ends up failing its precondition.
 ### 6.4 `GET /filesystem/entry` and `GET /inodes/{inode_id}`
 
 The response is one authoritative path entry. Enum values are snake_case per
-the durable naming rules (`format.md`, "Durable naming conventions").
+the durable naming rules ([format: field conventions](format.md#121-field-conventions)).
 
 ```json
 {
@@ -1703,8 +1700,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
 Lists the namespace's recoverable deletions, oldest deletion first — ascending
 by `(deletion_seq, inode_id)` — paged with the standard `limit`/`cursor`
 pattern (the cursor is an ordering resume like every other). The listing is a
-range scan over the derived active-deletions family (format spec, section
-2.5), so a page costs the page rather than the namespace's deletion history.
+range scan over the derived active-deletions family ([format: file deletion](format.md#16-file-and-subtree-deletion)), so a page costs the page rather than the namespace's deletion history.
 Those rows represent current state and are not removed when the retention floor advances. Each entry includes the inode id and deletion sequence required by `undelete`, plus `deleted_by`, `deleted_at_ms`, and the removed `deleted_binding`. Nested deletions remain separate entries, and recovering an outer deletion does not remove an inner deletion from the list.
 
 ```json
@@ -2135,7 +2131,7 @@ content was staged. Publication never downloads an arbitrary external ref to
 rescue a missing proof.
 
 A session is `open`, then `completed` or `aborted`, and both of those are
-final (format spec, section 3.10). What that means at the API:
+final ([format: upload sessions](format.md#51-upload-sessions)). What that means at the API:
 
 - `GET /uploads/{upload_id}`, `POST /uploads/{upload_id}/complete`, and
   `POST /uploads/{upload_id}/abort` all return one flat upload-session object.
@@ -2237,8 +2233,7 @@ one for bytes that never move again, so **a lost commit response costs one
 request, never a retransfer**. Re-minting stops a fixed window after
 completion, after which the status read reports the session without a token;
 by then the content is either referenced by committed metadata, which
-protects it on its own, or reclaimable (format spec, "Garbage collection",
-rule 11). A client that receives an expired or otherwise rejected receipt
+protects it on its own, or reclaimable ([format: upload cleanup](format.md#116-upload-session-cleanup)). A client that receives an expired or otherwise rejected receipt
 re-reads the session and commits again with the fresh one.
 
 Representative begin-upload response:
@@ -2575,7 +2570,7 @@ Representative response:
 
 The pattern uses the Rust `regex` crate's dialect (no backreferences or
 lookaround), compiled line-anchored: `^` and `$` match line boundaries. The server plans required grams from the pattern, intersects
-the namespace's grep index (format spec, "Gram index segments"), scans
+the namespace's grep index ([grep format](format.md#appendix-d-grep-extension-format)), scans
 revisions committed after `built_through_seq` exhaustively, and verifies
 every candidate against the real pattern, so index staleness affects cost,
 never answers. Matches order by `(inode_id, byte_offset)` and one match is
@@ -2617,7 +2612,7 @@ includes the restored subtree.
 
 The `path_prefix` value is a complete absolute path, not a partial textual
 segment prefix. The server resolves it using the name-key folding rule
-(format spec, section 2.3.1), then limits results to descendants of that
+([format: names and paths](format.md#14-names-and-paths)), then limits results to descendants of that
 inode. It must therefore
 use the same canonical spelling as any other path. A scope that does not exist
 answers `path_not_found`; an
@@ -2672,8 +2667,7 @@ A conforming server must:
    `hint.json`, plus the visible WAL segment chain, replayed as
    logical commits; checkpoints pin manifest versions for retention, stable
    reads, restore, and forks;
-8. fold sibling names into name keys by the v0 rule (`format.md`, section
-   2.3.1);
+8. fold sibling names into name keys by the v0 rule ([format: names and paths](format.md#14-names-and-paths));
 9. keep control-plane sessions and any implementation-specific coordinators
    out of namespace history and the change feed;
 10. preserve per-commit idempotency, ordering, and change-feed identity even

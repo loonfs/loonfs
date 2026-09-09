@@ -112,7 +112,7 @@ impl RetentionOperator {
 ///
 /// A commit ID is idempotent only while its receipt is retained. After a
 /// receipt below the floor is removed, retrying that commit ID creates a new
-/// mutation (format spec, section 3.3).
+/// mutation (format spec, section 6.5).
 fn keep_receipt(row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
     match &row {
         MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {

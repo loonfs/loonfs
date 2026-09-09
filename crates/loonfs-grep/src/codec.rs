@@ -1,7 +1,7 @@
 //! Gram tokenizer and durable segment codecs for LoonFS grep.
 //!
 //! The frozen tokenizer, posting-batch, and row-key grammar is specified in
-//! [`docs/specs/format.md` section 4.2.2](../../../docs/specs/format.md#422-grep-hints-manifests-and-gram-index-segments).
+//! [`docs/specs/format.md` Appendix D](../../../docs/specs/format.md#appendix-d-grep-extension-format).
 
 use loonfs_api::wire::sst_blocks::{read_varint, write_varint, SstBlockCodecError};
 use loonfs_api::{InodeId, RevisionNo};

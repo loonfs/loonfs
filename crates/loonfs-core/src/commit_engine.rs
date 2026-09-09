@@ -408,11 +408,11 @@ impl NamespaceCommitEngine {
     }
 
     /// Deletes the namespace using this writer session (format spec,
-    /// "Tombstones and deletion").
+    /// "Deleting a namespace").
     ///
-    /// Deletion advances the head, so it uses the same writer-session checks as
+    /// Deletion publishes a new manifest with the same writer-session checks as
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
-    /// and a takeover detected during the tombstone CAS permanently fences the
+    /// and a takeover detected during manifest publication permanently fences the
     /// session.
     pub async fn delete_namespace<S: ObjectStore + ?Sized>(
         &mut self,

@@ -1,9 +1,9 @@
 //! One source of truth for publication, verification, provider, and
 //! garbage-collection timing bounds.
 //!
-//! The GC grace window's safety proof (format spec, "Garbage collection",
-//! rule 1) is an inequality over these constants: every publication measures
-//! itself against a budget here and refuses to publish its root once the
+//! The GC grace window's safety proof (format spec, Appendix C) is an
+//! inequality over these constants: every publication measures itself
+//! against a budget here and refuses to publish its root once the
 //! budget is spent, provider operations consume one deadline across retries,
 //! and the minimum grace window is derived — not tuned — from those bounds
 //! plus a margin for clock error and scheduling delay. Callers may configure
@@ -63,7 +63,7 @@ const _: () = assert!(
 /// whole-operation clock — their parts are individually time- and
 /// retry-bounded — which leaves the floor derivation below untouched:
 /// every object it times (WAL segments inside the publish budget,
-/// checkpoint records, the root compare-and-swap) is a small control
+/// checkpoint records, and numbered manifests) is a small control
 /// object on the single-request path, and publications self-enforce their
 /// budgets by local monotonic elapsed time regardless of provider deadlines.
 pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = PROVIDER_OPERATION_DEADLINE.as_millis() as u64;

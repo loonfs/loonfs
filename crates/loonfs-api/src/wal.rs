@@ -19,7 +19,7 @@ pub const WAL_FORMAT_VERSION: u32 = 1;
 
 /// Identifies the durable payload family carried by a WAL envelope.
 ///
-/// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
+/// See [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
@@ -38,7 +38,7 @@ impl WalEnvelopeKind {
 
 /// Records one replayable metadata mutation materialized from a semantic commit operation.
 ///
-/// See [standard mutation operations](../../../docs/specs/format.md#35-standard-mutation-operations).
+/// See [standard mutation operations](../../../docs/specs/format.md#66-operations-and-wal-deltas).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WalDelta {
@@ -136,7 +136,7 @@ pub enum WalDelta {
 
 /// Associates a materialized WAL delta with the semantic operation that produced it.
 ///
-/// See [logical commits](../../../docs/specs/format.md#33-logical-commits-sequence-numbers-and-visibility).
+/// See [logical commits](../../../docs/specs/format.md#12-commits-and-revisions).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalCommitDelta {
@@ -148,7 +148,7 @@ pub struct WalCommitDelta {
 
 /// Carries one accepted logical commit inside a WAL segment.
 ///
-/// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
+/// See [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalCommitPayload {
@@ -174,7 +174,7 @@ pub struct WalCommitPayload {
 
 /// Carries the namespace-specific chain metadata and commits stored in one WAL object.
 ///
-/// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
+/// See [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalSegmentPayload {
@@ -188,7 +188,7 @@ pub struct WalSegmentPayload {
     pub writer_epoch: WriterEpoch,
     /// Head sequence the writer materialized against before adding these records.
     pub base_head_seq: ChangeSeq,
-    /// Sequence of the first record, and the position encoded into `segment_id`.
+    /// Sequence of the first record, or the unchanged head sequence for a fence.
     pub start_seq: ChangeSeq,
     /// Visible sequence after this segment, unchanged for a fence.
     pub end_seq: ChangeSeq,
@@ -252,9 +252,8 @@ pub fn encode_wal_segment_envelope_zstd(
 /// Decodes and verifies a durable zstd-compressed WAL segment envelope.
 ///
 /// Decoding fails for invalid compression or CBOR, the wrong kind or version,
-/// a checksum mismatch, or an invalid payload. A payload whose `segment_id`
-/// does not encode its `start_seq` is one of those invalid payloads. See
-/// [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
+/// a checksum mismatch, or an invalid payload. See
+/// [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
 pub fn decode_wal_segment_envelope_zstd(
     bytes: &[u8],
 ) -> Result<WalSegmentEnvelope, EnvelopeCodecError> {

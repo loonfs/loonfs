@@ -14,7 +14,7 @@ use std::num::NonZeroU64;
 
 /// Selects one independently versioned control-object family.
 ///
-/// See [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
+/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlObjectKind {
@@ -84,7 +84,7 @@ pub struct ContentStoreState {
 pub struct HintState {
     /// Namespace whose manifest collection is probed.
     pub namespace_id: NamespaceId,
-    /// First number to read; zero starts before the first manifest.
+    /// Positive manifest number from which discovery begins.
     pub manifest_no: ManifestNo,
     /// Highest acknowledged WAL number known to the publisher.
     pub wal_no: crate::WalNo,
@@ -95,7 +95,7 @@ pub struct HintState {
 /// Durable objects embed this shape under `manifest`. It identifies the
 /// manifest and provides the checksum required to verify it.
 ///
-/// See [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
+/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestRef {
@@ -148,7 +148,7 @@ impl CheckpointOwner {
     }
 }
 
-/// A pin stored under `pins/`; see format specification section 1.7.
+/// A pin stored under `pins/`; see format specification section 8.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointRecordState {
@@ -196,7 +196,7 @@ pub struct WriterBlock {
 
 /// Captures the writer identity and fencing epoch a session must retain while publishing.
 ///
-/// See [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
+/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcquiredWriter {
     /// Stable writer label copied into the manifest's writer block.
@@ -423,7 +423,7 @@ impl std::fmt::Display for UploadSessionRecordStatus {
 /// The tagged mode and status variants permit only valid field
 /// combinations.
 ///
-/// See [upload before publish](../../../docs/specs/format.md#242-upload-before-publish).
+/// See [upload before publish](../../../docs/specs/format.md#5-uploading-content).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UploadSessionState {
     /// Namespace authorized to consume the staged content.
@@ -638,7 +638,7 @@ pub fn encode_control_state<T: Serialize>(
 ///
 /// Decoding fails for invalid JSON, an unknown or mismatched kind, an
 /// unsupported family version, a checksum mismatch, or an invalid `T`. See
-/// [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
+/// [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
 pub fn decode_control_object<T>(
     bytes: &[u8],
     expected_kind: ControlObjectKind,

@@ -28,7 +28,7 @@ Every pass reads durable roots before deletion. Manifests use contiguous
 numbers and put-if-absent publication. `hint.json` starts forward discovery
 and may lag. Queries validate a cached manifest with one HEAD of its
 successor. The durable layout and collection rules are in
-[format section 4.2.2](../../docs/specs/format.md#422-grep-hints-manifests-and-gram-index-segments).
+[grep format](../../docs/specs/format.md#appendix-d-grep-extension-format).
 
 `GrepWorkerConfig` controls how much work one step may perform. A server reads
 these values from its `[grep]` table:

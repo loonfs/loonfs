@@ -1,227 +1,116 @@
-# Streaming Compaction for Large Metadata Family Groups
+# Metadata streaming compaction
 
-Status: accepted
+LoonFS stores metadata in immutable runs. WAL folds add delta runs; compaction merges selected runs into a more efficient layout. An ordinary maintenance pass limits its input by run count, decoded rows, and decoded bytes. Once an eligible window exceeds those limits, it needs streaming execution.
 
-## Summary
+Both paths use the same merge and retention rules. A streaming job processes the selected window incrementally, writes segments as they fill, and publishes the completed output in one numbered manifest. Readers continue using the earlier file set until that publication succeeds.
 
-LoonFS stores namespace metadata in immutable runs. The oldest data is stored in a base run, and flushes add newer delta runs. Routine maintenance merges complete runs within a fixed per-step budget, but a family group can eventually become larger than that budget. Once this happens, ordinary maintenance can reduce the number of delta runs but cannot rebuild the base run or apply retention across the complete group.
+The [storage format](../specs/format.md#10-retention-and-compaction) defines the durable requirements. This document explains planning, resource use, and the execution tradeoffs.
 
-This design adds a background streaming compaction for oversized metadata family groups. The job reads a fixed snapshot of the selected runs and captures a retention floor, which is the sequence number below which obsolete history may be removed. It applies that floor throughout the job, writes output segments directly under the namespace segment prefix, and publishes the result with one manifest update. Readers continue using the existing manifest until that final update succeeds.
+## Selecting a window
 
-Metadata output uses the same incremental writer for WAL folds and compaction.
-Rows are encoded as they arrive; completed data blocks are compressed immediately.
-Each family rolls a segment at 8 MiB of decoded data or 65,536 rows. The last row
-may cross the byte target, and a row larger than an injected target is written as
-one segment. Output therefore stays proportional to the byte target plus one row,
-with bounded row-count overhead for filters and indexes. Flushes upload segments
-sequentially within each family, trading some upload concurrency for smaller buffers.
-Both execution paths select at most eight runs. Each family iterator advances through one run's segments sequentially, so decoded input buffering is bounded by fan-in rather than total history.
+Compaction works on family groups. Directory binds, the child-binding index, and unbinds form one group because their retention decisions must remain consistent. Other groups contain one family.
 
-## Problem
+For each group, the planner considers the base first and then delta runs from oldest to newest. It selects a contiguous window of at most eight runs. It never steps over an unselected run in the middle of that window.
 
-Metadata reorganization works on family groups because some families must remain consistent with related indexes. For example, bindings must be processed with the child-binding index. File revisions use a single family ordered newest first within each inode.
+Under the automatic size-tiered policy, a window is eligible when its oldest run is at most 8 MiB, or the newer runs in that window total at least one quarter of the oldest run's stored bytes. The rule applies to both bases and large deltas. Stored bytes come from the manifest's block handles; decoded bytes separately bound execution within an ordinary step.
 
-Each maintenance pass limits the number of runs, decoded rows, and decoded bytes that it may process. The decoded-row limit is currently 131,072 rows. A bottom-anchored merge cannot run when its selected family group exceeds these limits.
+If an eligible prefix fits the step budgets, the bounded path executes it. Otherwise a streaming job processes the selected window. An ineligible group does not prevent another group from being selected.
 
-Merges above the base can continue reducing delta-run count, but they cannot apply retention safely. Retention decisions may depend on rows stored in the base, so rows can only be removed by a bottom-anchored merge, meaning a merge whose selected input begins with the oldest run in the group. Without another compaction path, the base remains unchanged and obsolete history continues to accumulate.
+| Policy or bound | Behavior |
+| --- | --- |
+| `SizeTiered` | Wait for enough newer data before rewriting a large oldest run. |
+| `CompactImmediately` | Bypass the size threshold for explicit compaction. |
+| Eight-run limit | Applies to bounded and streaming execution, including explicit requests. |
+| Ordinary step budgets | At most 131,072 decoded rows and 64 MiB of decoded data-block input. |
 
-## Goals
+A large backlog can require several publications. Explicit compaction performs one window per call. Automatic size-tiering reduces repeated base rewrites, but obsolete metadata can remain until enough newer data accumulates or an operator requests compaction.
 
-- Compact a metadata family group even when its complete input exceeds a normal maintenance-step budget.
-- Keep intermediate output invisible to readers.
-- Apply one retention floor consistently across the complete job.
-- Preserve runs created after the job starts.
-- Bound input buffering, fetch concurrency, decoded-block caching, output buffering, and retention working memory.
-- Ensure that a group starts compaction even when new delta runs arrive continuously.
-- Avoid rebuilding a large base after every small batch of delta runs.
-- Allow cancellation without publishing a partial result.
-- Prevent garbage collection from deleting output that belongs to an active job.
-- Reclaim unreferenced output after failed, cancelled, abandoned, or fenced jobs.
+## Placement and retention
 
-## Non-goals
+A merge's location determines both its output tier and whether it can remove rows.
 
-- Durable resume after a process restart.
-- Changes to the metadata segment format.
-- Configurable process-wide concurrency. The `metadata_compaction` job uses a fixed limit of two concurrent runs.
+| Selected window | Output | Retention |
+| --- | --- | --- |
+| Starts at the group's oldest run | Base run stamped at the captured manifest head sequence | May remove rows under the family retention rules. |
+| Starts above the oldest run | Delta run stamped at its newest input sequence | Retains all input rows. |
 
-## One engine, two orchestrations
-
-Both reorganization paths merge with the same code. A maintenance pass runs it synchronously over the window its budgets selected, and a background job runs it over a selected window that exceeds the step's row or byte budget. The merge itself does not know which one is driving it: it reads sorted iterators, applies the retention operators, writes segments, and reports what it wrote. Rows are dropped when, and only when, the merge placement is base-tier, which is the same rule that decides the output level.
-
-A step-contained merge is bounded by its input budgets and publishes inside
-the step that ran it. A background job may run for hours. It uses a process
-permit, a monotonic time bound, and input verification before publication.
-Both paths write direct segment objects and require the claimed compactor
-epoch at publication.
-
-One thing inside the merge follows the same split, and only one: how a reverse bind row is resolved. The two resource contracts genuinely differ there, and the section on reverse-index resolution below says how. Everything else — iteration, retention, segment writing, index parity, and what the merge reports — is the same code for both.
-
-## Compaction flow
-
-Normal bounded merges remain the preferred path. Streaming compaction is selected when an eligible window exceeds the step's row or byte budget. Both paths have the same eight-run input limit.
-
-The complete operation has five stages:
-
-1. Capture an immutable compaction specification containing a generated job ID, the family group, selected input runs, output identity, and retention floor.
-2. Claim the namespace compactor epoch once per runtime, open sorted iterators over the selected runs, and merge their rows in key order.
-3. Apply retention and write completed output at `namespaces/{namespace_id}/segments/{segment_id}.sst.zst` with fresh generated ids.
-4. Check the elapsed time bound, reload the current manifest, and confirm the epoch and selected inputs.
-5. Publish the next manifest number with the selected inputs replaced by the completed output.
-
-The epoch claim preserves the current file set. Output becomes visible only at final publication. A crash, cancellation, or validation failure leaves the visible metadata state intact. A later maintenance pass may start another job.
+A group has at most one base run. A merge starting at the oldest run replaces the existing base when present. A higher window cannot safely remove rows because an excluded older run may contain the other half of a binding or removal pair.
 
 ```text
-fixed input runs -> sorted iterators -> retention -> output segments
+Before                         After merging the newest two runs
 
-current manifest + verified inputs + output -> one manifest publication
+delta 3 ──┐                    new delta (same placement as delta 3)
+delta 2 ──┘                    delta 1
+delta 1                        base
+base
 ```
 
-## Merge placement
+A delta-only window needs at least two runs to reduce run count. A lone oldest delta can be promoted to establish a base. Runs outside the selected window remain referenced without being rewritten.
 
-Output placement depends on the position of the selected merge window:
+The captured retention floor applies throughout the merge. Revisions, content-publication rows, inodes, and tombstones are retained. Receipts below the floor can be removed. Attributes retain the newest state at or below the floor and all newer states. Cancelled active-deletion pairs can be removed together. Bindings and their child index must apply the same generation-retention decisions. The full rules are in the format specification.
 
-- A window that begins with the oldest run produces a base-tier run. Retention may remove rows because the input contains the complete retained history for the group.
-- A window above the oldest run produces a delta-tier run at the sequence of its newest input. Every input row is preserved because the base may contain related history.
+## Reading and writing incrementally
 
-Both cases are represented by `MergePlacement`, which provides the output level, output sequence, and retention eligibility together. Keeping these values in one type prevents invalid combinations.
+The merge reads sorted iterators over the selected runs and produces rows in family key order. Each iterator advances through one run's segments sequentially. Input fan-in is bounded by eight runs rather than total history.
 
-Manifest validation enforces the resulting layout:
+The output writer closes data blocks near 64 KiB decoded and segments near 8 MiB decoded or 65,536 rows. A final row can exceed a byte target, and one oversized row is never split. Filters and indexes also consume memory, so these targets are not a universal fixed-memory guarantee independent of row size.
 
-- A family group has at most one base-tier run.
-- Segment indexes for one family and run start at zero and contain no gaps or duplicates.
-- Segment key ranges are strictly ordered and do not overlap.
+Both paths bound decoded input buffering, concurrent fetches, cached blocks, and output buffers. Family-specific retention operators hold a fixed number of fields and at most one complete row. One inode's long attribute history or one name's many binding generations therefore need not be retained as a complete group in memory.
 
-## Planning and scheduling
+```text
+selected immutable runs
+          │
+          v
+sorted iterators → family retention → completed segment objects
+                                              │
+                                              v
+                              validate inputs, epoch, and elapsed time
+                                              │
+                                              v
+                                  publish next numbered manifest
+```
 
-Planning produces either a bounded merge or a `MetadataCompactionSpec`. The compaction specification records the job ID, family group, exact input descriptors, output identity, and retention floor. These values do not change during the job.
+Output uses fresh IDs under `namespaces/{namespace_id}/segments/`. Published descriptors reference those objects in place. There is no copy from a staging prefix.
 
-The planner uses stored object bytes from the manifest's block handles. These measure the data that a rewrite must read and write; decoded bytes separately limit the work of a synchronous step. No scheduling counters are stored in the manifest.
+## Resolving the child index
 
-For each family group, candidates are ordered base first and then oldest delta first. The planner chooses the oldest eligible contiguous window of at most eight runs. A window is eligible when its oldest run is at most 8 MiB, or newer runs in the window total at least one quarter of that oldest run's stored bytes. The same rule applies to bases and large deltas. A delta-only window must contain at least two runs; a lone oldest delta may be promoted to establish a base.
+A child-binding row is ordered by child inode, while the unbind retiring that generation is ordered by parent and name. They do not arrive together in one sorted stream. Both execution paths use the same retention rule, but prepare the required evidence differently.
 
-The planner tries to execute an eligible prefix within the step's row, byte, and run budgets. If none fits, a streaming job executes the selected window. A large backlog therefore takes several publications; no background job opens an unbounded number of input streams. Windows never cross an unselected gap, and only a window beginning at the group's oldest run may apply retention. An ineligible group cannot prevent another group from being selected.
+A bounded merge collects below-floor unbound generation identities while scanning the forward binding and unbind rows. The child-index pass consults that set. Its size is bounded by the selected window's row and byte budgets, and it avoids additional object reads for each child row.
 
-`MetadataCompactionPolicy::SizeTiered` is the automatic policy. `CompactImmediately` bypasses size thresholds for an explicit request, while retaining the input limit. Explicit compaction performs one window per call and may require repeated calls to drain a backlog. Small workloads consolidate promptly. For large workloads, delaying a base rewrite reduces write amplification but leaves obsolete metadata until enough newer data accumulates or an operator requests compaction.
+A streaming job cannot retain a set that grows with an arbitrarily large window. It instead uses Bloom-filtered point lookups against the captured input, with a bounded decoded-block cache. This can cost additional reads, especially when the relevant unbind blocks exceed the cache and child order differs substantially from parent order.
 
-The bounded pass reports `compaction_required`; the `metadata_compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order. Concurrent groups share the runtime's epoch claim. Runner shutdown cancels running jobs.
+The distinction preserves each path's resource contract: the ordinary step reads its bounded window without an extra lookup per reverse row, while streaming execution can process a larger window without retaining every generation identity.
 
-Runs published after the snapshot was captured are not part of the compaction input. Final publication preserves those runs.
+## Validating a merge
 
-## Streaming executor
+Every metadata row key identifies one logical row. Input keys must be strictly increasing within the merged family stream. A duplicate is rejected even if retention would otherwise remove it, including a duplicate split across segments or runs.
 
-This is the engine both paths run. Each family is read through a sorted iterator over its selected runs. A k-way merge selects the next row in family key order. Completed output segments are written as soon as they reach the normal segment target size. Both paths write directly to the namespace segment collection. A descriptor derives its key from the owner namespace and segment id.
+The parent-and-name binding output and child-binding output must contain equivalent bind rows. The merge compares order-independent digests before publication. This check is separate from duplicate detection: the same duplicate in both families could leave their digests equal.
 
-The following resources have explicit limits, and they bound both paths:
+Manifest validation also requires dense zero-based segment indexes, ordered non-overlapping key ranges within each run's family, unique run numbers below `next_run_no`, and at most one base per group.
 
-- At most eight input runs, with two decoded blocks per iterator and at most two families in a retention cluster.
-- Decoded input blocks held by each iterator.
-- Concurrent object-store fetches.
-- The decoded-block cache used by reverse-index point lookups.
-- Buffered output rows for each family.
-- State held by each retention operator.
+## Publication authority and collection
 
-Retention is implemented by family-specific streaming operators. Each operator keeps a fixed number of fields and at most one complete row. Memory use therefore does not increase with the total family-group size, one inode's attribute history, or the number of binding generations associated with one name.
+Before its first eligible compaction, a runtime publishes a manifest with an incremented `compactor_epoch` and otherwise unchanged state. Clones and concurrent family groups share that claim. A newer runtime claim fences earlier compactors; a fenced runtime does not automatically claim the role again.
 
-## Retention and index consistency
+Before every output publication, the job reloads the current manifest and checks:
 
-Retention uses the floor captured in the compaction specification. The same floor applies to every input row, even when the namespace advances while the job is running.
+- Its epoch still matches the manifest.
+- Every selected input descriptor is present and unchanged.
+- Its monotonic publication budget has not expired.
+- Merge and index validation succeeded.
 
-Rows are processed as follows:
+The new manifest replaces only the selected inputs and preserves newer or unrelated runs. Put-if-absent at the next number decides publication. If another publisher wins, the job reloads and retries while its inputs, epoch, and time bound still permit it.
 
-- Revisions, inodes, and tombstones pass through without removal.
-- Receipt rows are evaluated independently against the retention floor.
-- Attribute rows arrive newest first for each inode. The operator tracks whether it has retained the newest row at or below the floor and detects repeated revision numbers without retaining the complete history.
-- Active-deletion rows are ordered so a removal marker arrives before the row it removes. One flag is enough to remove the pair together.
-- Forward binding rows are grouped by binding generation. The operator holds at most one bind row until the matching unbind rows arrive, and it retains one generation identity to validate the parent-and-name slot.
-- Reverse child-binding rows are resolved against the same below-floor unbound generations, reached by one of two routes because their key order differs from the forward binding family. The next section says which route and why.
+Unreferenced segments are collectable only when their provider age is strictly greater than 24 hours. A streaming job must initiate publication within 23 hours, 39 minutes, and 30 seconds, reserving the minimum GC grace inside that day. The remaining interval covers provider operations, clock error, and scheduling allowance. Bounded merges use the ordinary 15-minute metadata publication budget.
 
-The child-binding index must remain equivalent to the parent-and-name binding family. The executor computes order-independent digests for the canonical and index rows selected for output, and a mismatch fails the merge before publication. This is the only index-parity check either path makes. It covers the rows a merge wrote rather than the rows it read, so it states that the two families dropped in lockstep and not only that their inputs matched.
+A changed epoch returns `fenced`. Changed inputs or an exceeded streaming bound return `abandoned`. None of these outcomes publishes a partial replacement. Unreferenced output follows the same age rule whether the job failed, was cancelled, or was superseded by another publication.
 
-Every metadata row key identifies one row, and nothing downstream re-establishes that: reads concatenate runs rather than deduplicating them, and the segment writer rejects a descending key but not a repeated one. The executor therefore holds the last input row key it saw for each family and requires the next one to be strictly greater. An equal key is namespace corruption and names the family and the key; a smaller key is an internal error against the merge itself. The check runs over the merge's input, so it sees a duplicate that retention would have dropped, one split across two runs, and one split across two segments. It is separate from the digests and catches a different fault: a duplicate present in both families of an index pair leaves both multisets equal, so the digests pass it.
+## Scheduling and restart
 
-The executor reports its peak retained-row count. Resource tests use heavily reused inodes and binding slots to verify that this value remains constant.
+A bounded pass reports `compaction_required` when streaming execution is needed. The built-in `metadata_compaction` job defaults to two concurrent runs; an embedding application can change the process-local limit through `MetadataCompactionJob::max_concurrent`.
 
-## Reverse-index resolution
+Shutdown cancels jobs during reads, retention, writing, and finalization. A replacement process plans from the current manifest rather than resuming partial output. The repeated I/O is the cost of keeping core compaction progress out of the durable format.
 
-A reverse child-binding row is keyed by child while the unbind that retires its binding is keyed by parent, so no grouping of the merged stream holds the two together. Both paths decide such a row with the same rule against the same set of below-floor unbound generations. They build that set differently, because their resource contracts differ.
-
-A background job reads the unbinds of one binding out of its snapshot, one bloom-filtered point lookup per reverse row at or below the floor, behind a bounded decoded-block cache. A job has no bound on the total rows in its selected runs, so it must not hold a set that grows with that group.
-
-A merge inside a maintenance pass collects the below-floor unbound generations while the forward binding cluster streams the unbind family, and the reverse cluster consults that set. The set holds one generation identity per below-floor unbind row in the window, so it is capped by the same row and decoded-byte budgets that capped the window, and it costs no reads at all.
-
-The step does not use point lookups because their cost is not bounded by those budgets. The lookups are one per reverse row, and each becomes a separate round trip once the cache can no longer hold the window's unbind family. The step's row budget admits about 43,000 unbind rows in a bindings window, so that family reaches the 16 MiB cache at roughly 380 bytes a row, which is an ordinary name length; the decoded-byte budget is four times the cache and allows more still.
-
-Measured on a window whose unbind family just fills the cache, with the reverse index walking it out of order, 65,536 reverse rows cost 27,427 data-block reads and 309 MB transferred against 16 MB of priced input. Doubling the family to twice the cache doubled it again: 131,072 reverse rows, 54,819 data-block reads, 707 MB. The cost per reverse row does not settle, because each row is decided on its own.
-
-The same 65,536-row window resolved from the collected set costs 386 data-block reads and 3.7 MB, which is the window read once. The collected set is also the smaller resident structure: one generation identity per below-floor unbind is well under the 16 MiB cache it replaces.
-
-Step budgets therefore price the selected logical input, and a step-contained merge reads exactly that: each selected segment's index once and its data once. Reverse resolution adds no store work to it.
-
-## Compactor epochs and garbage collection
-
-Every manifest carries `compactor_epoch`. Before its first eligible compaction,
-a maintenance runtime claims the namespace by publishing the next manifest
-number with an incremented epoch and otherwise identical content. Clones share
-that claim. Another runtime can claim a newer epoch and fence earlier jobs.
-A fenced runtime does not automatically reclaim the role.
-
-GC builds the live segment set from the manifests protected in that call. An unlisted
-segment becomes eligible only after 24 hours of provider age. This applies to
-both failed output and replaced runs, independently of the call's grace window.
-
-Streaming jobs measure monotonic elapsed time from before their first output.
-They abandon publication after `UNREFERENCED_SEGMENT_MIN_AGE_MS -
-GC_MIN_GRACE_WINDOW_MS`, currently 23 hours, 39 minutes, and 30 seconds. The
-reserved grace floor covers publication, provider time, clock error, and
-scheduling delay. A crashed job leaves objects that age out by the same rule.
-
-## Finalization
-
-Finalization checks elapsed monotonic time and reloads the current manifest. A changed compactor epoch returns a fenced outcome without a manifest write. Publication is otherwise allowed only when every selected input descriptor is still present and unchanged and canonical-family and secondary-index validation succeeded.
-
-The new manifest removes exactly the selected input descriptors, adds the output descriptors, and preserves every newer or unrelated run.
-
-Publication uses put-if-absent at the next manifest number. If an unrelated publication wins, finalization checks its time bound, reloads the manifest, confirms the epoch, and retries. If any selected input changed, the compaction result is abandoned because it no longer represents the current snapshot.
-
-## Cancellation and recovery
-
-The executor checks a cancellation token during input processing, object-store work, retention processing, and output writing. Graceful shutdown requests cancellation before waiting for background tasks to drain.
-
-Cancellation and epoch fencing never publish a partial result. A process restart does not resume completed segments; maintenance starts a new compaction from the current manifest. This repeats work but does not require durable progress state in the namespace manifest.
-
-## Maintenance results and observability
-
-The maintenance API reports `compaction_required` when a bounded pass plans a streaming compaction and publishes nothing for that group. The `metadata_compaction` job performs the work.
-
-An explicit `FsMaintenance::compact_metadata` call reports whether no work was needed, a bounded merge published, a streaming compaction published, or the attempt was abandoned, cancelled, or fenced.
-
-Lifecycle logging covers job selection, start, progress, publication, cancellation, abandonment, fencing, and failure. Progress records include the namespace, family group, input-run count, rows processed, output-segment count, peak retention rows, elapsed time, and final outcome.
-
-## Validation
-
-The implementation is validated with the following tests:
-
-- Compare a background job's output with a synchronous merge in a maintenance pass over the same snapshot. Both run the same engine, so this test guards the orchestration split rather than two merge implementations.
-- Confirm that a step-contained merge holds the same bounded input blocks, fetch width, and retention state the background job holds.
-- Confirm that a step-contained merge reads each selected segment's index once and its data once, and makes no reverse-index lookup, while a background job over the same window makes one lookup per reverse row the floor covers.
-- Reject a row key repeated in both families of a secondary-index pair, on both paths, without publishing.
-- Confirm that new runs published during execution survive finalization.
-- Confirm that changed input causes abandonment without publication.
-- Count next-number publication attempts when two groups publish concurrently.
-- Cancel jobs during reading, retention, writing, and finalization and verify that readers continue using the original manifest.
-- Fence a job after another runtime claims a newer compactor epoch and verify zero publication writes.
-- Advance the injected timer beyond the bound and verify abandonment with zero publication writes.
-- Retain failed output through the segment minimum age, then reclaim it.
-- Verify that a runtime shares one claim across concurrent calls and skips claims when no compaction is needed.
-- Exercise continuous delta creation and verify that size-based selection eventually merges an eligible base within the eight-run fan-in limit.
-- Verify that explicit compaction bypasses the size ratio and automatic trigger while preserving the fan-in limit.
-- Process large attribute histories and heavily reused binding slots while holding at most one row in retention state.
-- Reject canonical-family and secondary-index mismatches before publication.
-- Reject a metadata family whose merge input repeats a row key.
-- Verify that published descriptors reference direct segment keys.
-
-## Deferred work
-
-Durable resume may be added later if measured restart cost justifies the additional state. Resume state would be owned by the compactor and would record completed segment boundaries without changing the reader-visible namespace manifest.
-
-The built-in job defaults to two concurrent compactions per process; `MetadataCompactionJob::max_concurrent` sets another limit. Concurrent groups publish through the same namespace epoch and next-number path.
+Retaining progress across process restarts would require a separate resume protocol. It is not implied by the immutable segments left by an interrupted job.

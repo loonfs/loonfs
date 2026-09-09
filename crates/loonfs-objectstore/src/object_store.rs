@@ -358,7 +358,7 @@ pub(crate) async fn collect_stream(mut body: ByteStream) -> Result<Bytes> {
 /// Defines the provider-independent durability and consistency boundary LoonFS relies on.
 ///
 /// Implementations must satisfy the
-/// [required guarantees](../../../docs/specs/format.md#11-required-guarantees).
+/// [required guarantees](../../../docs/specs/format.md#31-required-operations).
 ///
 /// Direct reads are read-after-write consistent for each key. Prefix listings
 /// may lag behind direct reads.

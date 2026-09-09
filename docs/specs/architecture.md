@@ -1,115 +1,83 @@
-# LoonFS Architecture Overview
+# LoonFS architecture
 
-## 1. Major parts
+LoonFS stores file bytes and filesystem metadata in object storage. The metadata describes directory bindings, file revisions, retained views, and committed changes. A reader can recover the filesystem without the process that originally wrote it.
 
-| Part | Role |
+## Stored state
+
+The main objects have separate roles:
+
+| Object | Role |
 | --- | --- |
-| **Object store** | Holds every durable object: content-store blobs, namespace WAL segments, namespace manifests, descriptors, checkpoint records, and small control objects. |
-| **Authoritative runtime** | Resolves paths, validates mutations, writes logical commits into WAL segments, advances heads, serves reads, and issues capabilities for upload or download. |
-| **Clients** | Use either direct filesystem operations or the lower-level upload, commit, and change-feed model. |
-| **Access-control service** | Evaluates ACLs and shares, then authorizes LoonFS operations. This may be part of the authoritative runtime in a simple deployment. |
-| **Background workers** | Publish namespace manifests, create checkpoint records, advance retention safely, clean up expired control objects, and reclaim unreachable content. |
+| Numbered namespace manifest | Records namespace identity, lifecycle, writer authority, materialized metadata runs, and retention floors. |
+| Numbered WAL object | Publishes logical commits or a writer fence after the materialized boundary. |
+| Hint | Records a starting point for forward discovery of manifests and WAL. |
+| Pin record | Retains one manifest for a user, snapshot, or fork. |
+| Metadata segment | Stores sorted rows in independently readable blocks. |
+| Content object | Stores the complete bytes of a file revision. |
 
-The embedded runtime exposes `FsReader`, `FsWriter`, and `FsMaintenance` handles.
-Snapshot listing is an `FsReader` operation; snapshot create, extend, and release are `FsWriter` operations.
-`FsWriter::open_namespace` and `FsWriter::close_namespace` control its namespace writer sessions.
+Creating the next numbered WAL object commits its records. Creating the next numbered manifest publishes a new materialized file set or control-state change. Each publication uses put-if-absent, so competing attempts at one number cannot both succeed.
 
-Namespaces and content stores are separate durable domains. A namespace owns filesystem metadata and history; a content store owns immutable file bytes. A namespace descriptor references exactly one content store, but that reference is not lifecycle ownership. Forked namespaces share the source namespace's content store while keeping independent future metadata history. Fork provenance and GC pins may record source-owned immutable files needed by the fork.
+The hint may lag either publication stream. Readers load the hinted objects and probe forward; they do not treat the hint as the current state. The [format specification](format.md#2-objects-and-references) defines the complete layout and stored fields.
 
-## 2. Data plane, metadata plane, and control plane
+## Writing a file
 
-| Plane | Purpose | Examples | Namespace-visible history? |
-| --- | --- | --- | --- |
-| **Data plane** | Stores and serves file bytes. | Whole-file content objects and download streams. | No, by itself. |
-| **Metadata plane** | Defines the filesystem's durable truth. | WAL segments, namespace head, manifests, checkpoints, inode and direntry state. | Yes. |
-| **Control plane** | Coordinates multi-request work and authorization. | Upload sessions. | No. |
+A write stores and verifies content before publishing its metadata:
 
-Two rules follow from this split:
+```text
+create upload session → transfer bytes → verify and complete upload
+                                                   │
+                                                   v
+                                  validate metadata and content proof
+                                                   │
+                                                   v
+                                    create next numbered WAL object
+                                                   │
+                                             file committed
+```
 
-1. The metadata plane is authoritative for filesystem state.
-2. Control-plane objects may be durable, but they do not advance namespace `seq` and do not appear in the change feed.
+Completing an upload does not change a file. The later WAL put commits the mutation. Several requests can share one WAL object, but each accepted request has its own sequence and commit ID.
 
-Control-plane state should still be durable when losing it on restart would violate correctness, restart safety, or promised resumability.
+A writer acquires an epoch through a manifest publication, then writes a zero-record WAL fence. Another session can acquire a newer epoch; the earlier session must stop once fenced. Writer authority uses epochs and conditional writes, without a writer lease.
 
-## 3. Client usage patterns
+A lost response can hide a successful commit. Clients reconcile an uncertain outcome with the original commit ID and request. Re-uploading first creates a different content identity and can turn an otherwise valid retry into conflicting commit-ID reuse.
 
-A client pattern is defined by the protocol surface a client uses, not by what the client is: a CLI, desktop app, or service may implement several. (API groups — `filesystem/v0`, `maintenance/v0` — are a different concept; see `api.md`.)
+## Reading a file
 
-| Client pattern | Primary surface | Typical state |
-| --- | --- | --- |
-| **Path-oriented client** | Filesystem operations such as `ls`, `stat`, `get`, `put`, `mv`, and `cp` | Often little or no durable local state beyond transient request context. |
-| **Batch-writing client** | Staged upload, commit ids, multi-operation commits, and change cursors | Durable retry state for in-flight uploads and requests, but not necessarily a full local projection. |
-| **Sync client** | Change feed plus durable local projection, with optional writes | Durable local state, cursors, and restart-safe reconciliation state. |
-| **Operator or admin client** | Recovery, inspection, repair, and low-level operations | Implementation-specific. |
+A reader discovers the current manifest and WAL tip. It reads the manifest's runs and replays the required WAL objects after the folded boundary. A new namespace's manifest represents the built-in root directory; a fork's own manifest lists its inherited runs from installation.
 
+```text
+current manifest → listed metadata runs ──┐
+                                         ├─> view at one sequence
+later numbered WAL → committed changes ──┘            │
+                                                     v
+                                       path → inode → revision → content
+```
 
-## 4. Operation classes
+A path is resolved through directory bindings. A file revision contains the original owner namespace, content ID, size, and checksum. The reading namespace's manifest provides the content-store ID. Inherited content can therefore be read without fetching its owner's manifest or walking the fork ancestry.
 
-Most core operations fall into one of two classes.
+Directory listings use committed metadata for names and file sizes. They do not download every file. Content reads verify the complete size and checksum. Missing or corrupt required recovery objects fail the read; an available earlier file set is not a substitute.
 
-| Class | Typical examples | Server-side state |
-| --- | --- | --- |
-| **One-shot** | `ls`, `stat`, `get <file>`, `put <small file>`, `cp <file>` on one service | Usually none after the request completes. |
-| **Client-driven long-running** | recursive `get`, resumable `put`, recursive `put`, recursive `cp` realized as several commits | Resumable puts may use an upload session. Other orchestration remains client-side. |
+Warm readers probe the next WAL number and periodically check for a successor manifest. The default manifest interval is one second, so a cached active view can remain usable until that check observes a namespace deletion. Local caches affect read cost and freshness within the defined interval; they are not durable recovery state.
 
-Implementations may additionally expose coordinator-specific helpers for recursive workflows or admin work, but those helpers are outside the interoperable core model.
+## Forks and retained views
 
-Control objects and implementation-specific helpers never create a second history model.
+A fork creates and verifies a source pin, then installs its own manifest 1 with the pinned run references. It copies neither content nor metadata segments. Its later commits belong to independent history.
 
-## 5. Maintenance
+The target can continue referencing ancestor-owned content and segments. A target-owned manifest does not mean those dependencies have been copied locally. The source pin remains until the target has retired and released it.
 
-A maintenance job reloads durable state and performs one run for one namespace. A
-`MaintenanceRegistry` holds jobs and can execute assignments without a writer or
-scheduler. Jobs never schedule work.
+User checkpoints and snapshots use the same pin representation with different owner rules. Snapshot reads require an unexpired record; a user pin remains readable while it exists. Explicit release deletes the record. Collection retains every manifest named by its complete pin listing, including expired records that have not yet been collected.
 
-A `MaintenanceRunner` is an optional in-process scheduler over a registry. It
-owns coalescing by `{job, namespace}`, invocation permits, retry backoff,
-not-before deadlines, process-local continuations, reconciliation probes, and
-shutdown. Only admitted keys are reconciled.
+## Maintenance and deletion
 
-Writers emit best-effort maintenance hints. Observers must return without
-blocking; bounded relays drop hints when full. A lost, duplicate, or late hint
-only delays work because durable state, probes, and the change feed recover it.
-A run may request one follow-up job for the same namespace, which the runner
-coalesces like any other nudge.
+| Operation | Effect |
+| --- | --- |
+| Flush | Materializes the WAL tail into segments and publishes the next manifest. |
+| Compaction | Merges selected runs and applies eligible row-retention rules while preserving retained views. |
+| Retention advance | Explicitly advances sequence and WAL floors after verifying the materialized basis. |
+| Garbage collection | Completes one pass over eligible objects using fresh roots and an in-memory live set. |
 
-### Step results
+A file deletion records a recoverable subtree tombstone. A namespace deletion publishes terminal deleted status in its next manifest. Neither immediately removes shared content.
 
-Each maintenance run returns one of these results:
+After a complete pin sweep retains no dependency, collection can establish a fixed retirement deadline. Later passes can sweep that namespace's owned content after the deadline and release its source pin. The current deleted manifest remains permanently to prevent ID reuse.
 
-| Result | Meaning | Runner action |
-| --- | --- | --- |
-| `progressed` | Durable state changed. | Queue another run after other waiting work. |
-| `idle` | No work is currently available. | Wait for another hint or reconciliation probe. |
-| `blocked` | Work exists but cannot proceed under the current policy or budget. | Wait for a hint, deadline, or reconciliation probe. |
-| `superseded` | Another writer won the compare-and-swap race. | Read the new state and try again. |
-| `not_enabled` | This job is not enabled for the namespace. | Stop tracking the key. |
-
-A run may also return a continuation cursor and the earliest time its next work
-can begin. Continuations are process-local, so every job can restart from
-durable state.
-
-### Jobs and admission policy
-
-| Job | Run | Admission |
-| --- | --- | --- |
-| `metadata` | Flush a due WAL tail found by its own run and merge one bounded reorganization unit. | When a writer's fold attempt ends, whatever its outcome, and during reconciliation or an explicit run. |
-| `metadata_compaction` | Run one streaming metadata compaction under its configured permit limit (two by default). | Follow-up from `metadata`. |
-| `gc` | Perform one bounded mark-and-sweep pass. | At reclamation deadlines. |
-| `grep_index` | Build or reorganize one bounded unit of the grep index. | After publication on hosts configured to maintain the index. |
-| `grep_gc` | Inspect one bounded part of a namespace's grep objects. | Explicit assignment. |
-| retention (*not a job*) | Advance the retention floor. | Explicit request. |
-
-A live writer folds the WAL tails of namespaces it publishes to under one writer-wide concurrency
-bound. The `metadata` job runs after each fold attempt ends, whatever its outcome, so it reorganizes
-after a successful fold and retries a failed one. It also flushes a due tail found by reconciliation
-or an explicit run; a publication hint does not start a flush.
-
-### Hosts
-
-| Host | Composition | Coverage |
-| --- | --- | --- |
-| **Server** | Writer, shared-core maintenance handle, registry, and optional local runner. | Namespaces admitted by hints or explicit nudges. |
-| **Embedded process** | Writer, shared-core maintenance handle, registry, relay, and local runner. | Namespaces written by the process. |
-| **`loonfs maintenance loop`** | Registry execution with process-local continuations. | Namespaces passed with `--namespaces`. |
-| **Worker with no writer** | Standalone maintenance handle and registry; scheduler optional. | Assigned namespaces. |
+Hosts choose when maintenance runs and which namespaces it covers. The storage protocols determine what each operation can publish or delete. Derived extensions such as grep have separate manifests and collection rules; core collection never sweeps their objects.

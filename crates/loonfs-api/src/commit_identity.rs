@@ -1,5 +1,5 @@
 //! Generates stable fingerprints for filesystem mutations (format spec,
-//! "Commit identity fingerprints"). A fingerprint lets LoonFS determine
+//! "Semantic commit fingerprints"). A fingerprint lets LoonFS determine
 //! whether two requests that use the same commit ID describe the same
 //! mutation.
 //!
@@ -58,8 +58,8 @@ fn fingerprint_bytes(bytes: &[u8]) -> CommitFingerprint {
 
 /// Canonical preimage for one operation inside a mutation fingerprint.
 ///
-/// The serde representation is durable contract (format spec, "Commit
-/// identity fingerprints"): the same normalized request must fingerprint
+/// The serde representation is durable contract (format spec, "Semantic
+/// commit fingerprints"): the same normalized request must fingerprint
 /// identically across releases. A pinned-value test below fails if the
 /// encoding drifts.
 ///

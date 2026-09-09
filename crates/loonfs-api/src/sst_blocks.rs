@@ -143,7 +143,7 @@ pub struct SegmentFilter {
 
 /// Describes a violation encountered while building or validating an SST section.
 ///
-/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
+/// See [metadata segments](../../../docs/specs/format.md#a7-block-segment-encoding).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SstBlockCodecError {

@@ -1,7 +1,7 @@
 //! How a display name folds into the name key directory lookups compare on.
 //!
 //! The fixed data versions and evolution rule are in `docs/specs/format.md`,
-//! section 2.3.1. Admission and lookup share this implementation.
+//! section 1.4. Admission and lookup share this implementation.
 
 use icu_casemap::CaseMapper;
 use icu_normalizer::ComposingNormalizer;
