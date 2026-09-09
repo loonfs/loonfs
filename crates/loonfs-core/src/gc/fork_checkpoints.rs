@@ -55,7 +55,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
         return Ok(MissingBasisCheckpointSweep::Retained);
     }
-    let manifest_key = metadata_manifest_object(namespace_id, &record.manifest.manifest_object_id);
+    let manifest_key = metadata_manifest_object(namespace_id, &record.manifest.manifest_no);
     if store
         .head(&manifest_key)
         .await

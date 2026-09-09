@@ -266,48 +266,39 @@ fn corrupt(message: &str) -> CoreError {
 
 fn validate_entry(entry: &GcMarkEntry) -> Result<()> {
     use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
-    let valid =
-        match &entry.value {
-            GcMarkValue::Object {} => entry
-                .key
-                .strip_prefix("object/")
-                .is_some_and(|key| loonfs_objectstore::layout::parse_object_key(key).is_some()),
-            GcMarkValue::Manifest { manifest } => {
-                entry.key
-                    == format!(
-                        "object/{}",
-                        metadata_manifest_object(
-                            &manifest.owner_namespace_id,
-                            &manifest.manifest_object_id
-                        )
-                    )
-            }
-            GcMarkValue::Content {} => entry
-                .key
-                .strip_prefix("content/")
-                .is_some_and(|id| loonfs_api::ContentId::parse(id).is_ok()),
-            GcMarkValue::RevisionSegment { segment, .. } => {
-                entry.key == format!("revision/{}", metadata_segment_object_key(segment))
-                    && segment.family == loonfs_api::wire::manifest::MetadataRowFamily::Revisions
-            }
-            GcMarkValue::MissingBasisCheckpoint {} => {
-                entry.key.strip_prefix("missing-basis/").is_some_and(|key| {
-                    loonfs_objectstore::layout::parse_object_key(key).is_some_and(|parsed| {
-                        parsed.family()
-                            == loonfs_objectstore::layout::DurableObjectFamily::CheckpointRecord
-                    })
+    let valid = match &entry.value {
+        GcMarkValue::Object {} => entry
+            .key
+            .strip_prefix("object/")
+            .is_some_and(|key| loonfs_objectstore::layout::parse_object_key(key).is_some()),
+        GcMarkValue::Manifest { manifest } => {
+            entry.key
+                == format!(
+                    "object/{}",
+                    metadata_manifest_object(&manifest.owner_namespace_id, &manifest.manifest_no)
+                )
+        }
+        GcMarkValue::Content {} => entry
+            .key
+            .strip_prefix("content/")
+            .is_some_and(|id| loonfs_api::ContentId::parse(id).is_ok()),
+        GcMarkValue::RevisionSegment { segment, .. } => {
+            entry.key == format!("revision/{}", metadata_segment_object_key(segment))
+                && segment.family == loonfs_api::wire::manifest::MetadataRowFamily::Revisions
+        }
+        GcMarkValue::MissingBasisCheckpoint {} => {
+            entry.key.strip_prefix("missing-basis/").is_some_and(|key| {
+                loonfs_objectstore::layout::parse_object_key(key).is_some_and(|parsed| {
+                    parsed.family()
+                        == loonfs_objectstore::layout::DurableObjectFamily::CheckpointRecord
                 })
-            }
-            GcMarkValue::MissingManifest {} => entry
-                .key
-                .strip_prefix("missing-manifest/")
-                .is_some_and(|key| {
-                    matches!(
-                        loonfs_objectstore::layout::manifest_object_id_of(key),
-                        Some(Ok(_))
-                    )
-                }),
-        };
+            })
+        }
+        GcMarkValue::MissingManifest {} => entry
+            .key
+            .strip_prefix("missing-manifest/")
+            .is_some_and(|key| loonfs_objectstore::layout::manifest_no_of(key).is_some()),
+    };
     if !valid {
         return Err(corrupt("GC mark key disagrees with its value"));
     }

@@ -339,7 +339,7 @@ mod tests {
         let object_key = wal_head(&namespace_id);
         let (_, bytes) = encoded_head(&namespace_id);
         let mut document: Value = serde_json::from_slice(&bytes).expect("envelope json");
-        document["kind"] = Value::String(ControlObjectKind::WalFloor.as_str().to_owned());
+        document["kind"] = Value::String(ControlObjectKind::Hint.as_str().to_owned());
         write_bytes(
             &store,
             &object_key,

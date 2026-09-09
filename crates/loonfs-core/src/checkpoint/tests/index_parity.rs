@@ -135,11 +135,8 @@ pub(super) async fn overwrite_manifest(
     namespace_id: &NamespaceId,
     manifest: NamespaceManifestEnvelope,
 ) {
-    let manifest_key =
-        metadata_manifest_object(namespace_id, &manifest.payload().manifest_object_id);
-    let manifest_no = manifest.payload().manifest_no;
-    let manifest_object_id = manifest.payload().manifest_object_id.clone();
-    let (updated_manifest, manifest_bytes) =
+    let manifest_key = metadata_manifest_object(namespace_id, &manifest.payload().manifest_no);
+    let (_updated_manifest, manifest_bytes) =
         encode_namespace_manifest_json(manifest.into_payload())
             .expect("updated manifest")
             .into_parts();
@@ -147,29 +144,6 @@ pub(super) async fn overwrite_manifest(
         .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
         .await
         .expect("overwrite manifest");
-    // Keep the tampered manifest consistent with the root's checksum pin, as
-    // a well-formed-but-divergent publisher would: the point of these tests
-    // is the deeper row-level guards, not the checksum pin.
-    let loaded_root = load_metadata_root_object(store, namespace_id)
-        .await
-        .expect("read root");
-    if loaded_root.state.manifest.manifest_no == manifest_no {
-        let mut root = loaded_root.state;
-        root.manifest.manifest_object_id = manifest_object_id;
-        root.manifest.manifest_payload_checksum = updated_manifest.payload_checksum().to_owned();
-        let bytes = loonfs_api::wire::control::encode_control_state(
-            loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-            &root,
-        )
-        .expect("root bytes");
-        store
-            .put_overwrite(
-                &loonfs_objectstore::keys::metadata_root(namespace_id),
-                Bytes::from(bytes),
-            )
-            .await
-            .expect("overwrite root");
-    }
 }
 
 /// Republishes a payload under a fresh manifest number and loads it back, so a
@@ -181,15 +155,15 @@ async fn load_perturbed_manifest(
     id_offset: u64,
 ) -> Result<(), ManifestLoadError> {
     payload.manifest_no = ManifestNo(payload.manifest_no.0 + id_offset);
-    payload.manifest_object_id = ManifestObjectId::generate(payload.manifest_no);
-    let manifest_object_id = payload.manifest_object_id.clone();
+    payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
+    let manifest_number = payload.manifest_no;
     let envelope = encode_namespace_manifest_json(payload)
         .expect("perturbed manifest envelope")
         .into_envelope();
     write_namespace_manifest(store, envelope.payload().clone())
         .await
         .expect("write perturbed manifest");
-    load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
+    load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
         .await
         .map(|_| ())
 }
@@ -262,9 +236,9 @@ async fn current_manifest(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
 ) -> NamespaceManifestEnvelope {
-    let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
+    let manifest_number = current_manifest_number(store, namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
             .await
             .expect("load the current manifest's segments");
     segments.manifest().clone()
@@ -560,7 +534,7 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryChildBinds)
         .expect("child-bind index descriptor");
     descriptor.row_count += 1;
-    let manifest_object_id = payload.manifest_object_id.clone();
+    let manifest_number = payload.manifest_no;
     overwrite_manifest(
         &store,
         &namespace_id,
@@ -570,8 +544,7 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
     )
     .await;
 
-    match load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
-        .await
+    match load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number).await
     {
         Err(ManifestLoadError::RunManifestMismatch { .. }) => {}
         Err(other) => panic!("expected run manifest mismatch, got {other:?}"),
@@ -626,7 +599,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     // is what binds the manifest to the object's exact bytes.
     descriptor.index_block.crc32c ^= 0xffff_ffff;
 
-    let manifest_key = metadata_manifest_object(&namespace_id, &payload.manifest_object_id);
+    let manifest_key = metadata_manifest_object(&namespace_id, &payload.manifest_no);
     let manifest_no = payload.manifest_no;
     let manifest_bytes = encode_namespace_manifest_json(payload)
         .expect("updated manifest")
@@ -871,7 +844,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     )
     .await;
 
-    let manifest_key = metadata_manifest_object(&namespace_id, &payload.manifest_object_id);
+    let manifest_key = metadata_manifest_object(&namespace_id, &payload.manifest_no);
     let manifest_no = payload.manifest_no;
     let manifest_bytes = encode_namespace_manifest_json(payload)
         .expect("updated manifest")
@@ -884,77 +857,6 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     assert_child_index_mismatch(
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
     );
-}
-
-#[tokio::test]
-async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    let first = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("first checkpoint");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/second.txt",
-        b"second\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write second");
-
-    let materialization_before = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("materialization");
-    let orphan_manifest = build_namespace_manifest_from_metadata_state(
-        &store,
-        &namespace_id,
-        ManifestMetadataSource {
-            head: &materialization_before.head,
-            basis_manifest_no: Some(materialization_before.root.manifest.manifest_no),
-            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-            metadata_state: &materialization_before.metadata_state,
-        },
-        MetadataLsmPolicy::default(),
-        ManifestNo(2),
-    )
-    .await
-    .expect("build orphan manifest");
-    write_namespace_manifest(&store, orphan_manifest.payload().clone())
-        .await
-        .expect("write orphan manifest");
-
-    let materialization_after = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("materialization");
-    assert_eq!(
-        materialization_after.root.manifest.manifest_no,
-        first.manifest_no
-    );
-    assert_eq!(
-        materialization_after.head.seq,
-        orphan_manifest.payload().head_seq
-    );
-    assert!(metadata_states_equivalent(
-        &materialization_before.metadata_state,
-        &materialization_after.metadata_state
-    ));
 }
 
 #[tokio::test]
@@ -1049,9 +951,9 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     )
     .await;
 
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
             .await
             .expect("the rewritten manifest should load");
     for row in &inode_rows {
@@ -1089,9 +991,9 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
             .await
             .expect("load segments");
     let payload = segments.manifest().payload().clone();

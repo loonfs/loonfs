@@ -12,7 +12,7 @@ use crate::protocol::{
     begin_upload, complete_upload, upload_content, CompletedUpload, ResolvedUploadCompletion,
 };
 use loonfs_api::{AbsolutePath, ContentStoreId, DestinationBehavior, WriterId};
-use loonfs_objectstore::keys::{content_blob, metadata_root, wal_segment_prefix};
+use loonfs_objectstore::keys::{content_blob, hint, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,7 +107,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(metadata_root(&namespace_id)),
+        KeyPredicate::exact(hint(&namespace_id)),
         OperationClass::Read,
     );
     let setup = context(1_000);

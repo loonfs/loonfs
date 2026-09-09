@@ -29,11 +29,10 @@ const STEP_EVERY_BATCHES: usize = 33;
 type SegmentMap = BTreeMap<String, (String, RunTier, u64, u64)>;
 
 async fn segment_map(store: &SharedObjectStore, namespace_id: &NamespaceId) -> SegmentMap {
-    let root = loonfs_core::control::load_namespace_metadata_root_control(store, namespace_id)
+    let root = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
         .await
         .expect("load metadata root");
-    let manifest_key =
-        metadata_manifest_object(namespace_id, &root.state.manifest.manifest_object_id);
+    let manifest_key = metadata_manifest_object(namespace_id, &root.state.manifest.manifest_no);
     let bytes = store
         .get(&manifest_key, None)
         .await

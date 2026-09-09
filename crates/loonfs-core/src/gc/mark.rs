@@ -14,15 +14,10 @@ use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
 use loonfs_api::wire::gc::*;
 use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{
-    manifest_object_id_manifest_no, ChangeSeq, ContentId, GcMarkTableId, ManifestObjectId,
-    NamespaceId,
-};
+use loonfs_api::{ChangeSeq, ContentId, GcMarkTableId, ManifestNo, NamespaceId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix,
-    metadata_segment_object_key,
+    checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key,
 };
-use loonfs_objectstore::layout::manifest_object_id_of;
 use loonfs_objectstore::ObjectStore;
 
 pub(super) fn object(key: &str) -> GcMarkEntry {
@@ -92,7 +87,7 @@ async fn manifest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     tables: &mut MarkTables<'_, S>,
     work: &mut GcMarkWork,
-    id: &ManifestObjectId,
+    id: &ManifestNo,
     expected: Option<&loonfs_api::wire::control::ManifestRef>,
     entries: &mut Vec<GcMarkEntry>,
 ) -> Result<Option<ChangeSeq>> {
@@ -133,7 +128,6 @@ async fn manifest<S: ObjectStore + ?Sized>(
     let reference = loonfs_api::wire::control::ManifestRef {
         owner_namespace_id: namespace_id.clone(),
         manifest_no: payload.manifest_no,
-        manifest_object_id: id.clone(),
         manifest_head_seq: payload.head_seq,
         manifest_payload_checksum: envelope.payload_checksum().to_owned(),
     };
@@ -164,35 +158,12 @@ async fn manifest<S: ObjectStore + ?Sized>(
     Ok(Some(payload.head_seq))
 }
 
-fn select_anchor(work: &mut GcMarkWork, range: Option<GcManifestRange>, candidate_seen: bool) {
-    match range {
-        Some(range) => {
-            work.roots.anchor = GcReferenceAnchor::Manifest {
-                head_seq: ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER),
-            };
-            work.source = GcMarkSource::AnchorManifests {
-                range,
-                last_key: None,
-            };
-        }
-        None => {
-            work.roots.anchor = if candidate_seen {
-                GcReferenceAnchor::Missing {}
-            } else {
-                GcReferenceAnchor::NotNeeded {}
-            };
-            work.source = GcMarkSource::Wal {};
-        }
-    }
-}
-
 pub(super) async fn step<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     tables: &mut MarkTables<'_, S>,
     work: &mut GcMarkWork,
     scan: &mut Scan,
-    grace_window_ms: u64,
     context: &MutationContext,
 ) -> Result<Option<GcMarkTable>> {
     if work.index.merge.is_some() {
@@ -208,7 +179,7 @@ pub(super) async fn step<S: ObjectStore + ?Sized>(
                     namespace_id,
                     tables,
                     work,
-                    &root.manifest_object_id,
+                    &root.manifest_no,
                     Some(&root),
                     &mut entries,
                 )
@@ -250,28 +221,28 @@ pub(super) async fn step<S: ObjectStore + ?Sized>(
                             ForkCheckpointReachability::Reclaimable
                         ),
                     };
-                    let protects = !work.roots.namespace_deleted
-                        || (!candidate && matches!(record.owner, CheckpointOwner::Fork { .. }));
-                    if protects {
+                    if !candidate {
                         let present = manifest(
                             store,
                             namespace_id,
                             tables,
                             work,
-                            &record.manifest.manifest_object_id,
+                            &record.manifest.manifest_no,
                             Some(&record.manifest),
                             &mut entries,
                         )
                         .await?
                         .is_some();
-                        if !candidate {
+                        if !work.roots.namespace_deleted
+                            || matches!(record.owner, CheckpointOwner::Fork { .. })
+                        {
                             entries.push(object(&key));
-                            if !present && !work.roots.degraded {
-                                entries.push(GcMarkEntry {
-                                    key: format!("missing-basis/{key}"),
-                                    value: GcMarkValue::MissingBasisCheckpoint {},
-                                });
-                            }
+                        }
+                        if !present && !work.roots.degraded {
+                            entries.push(GcMarkEntry {
+                                key: format!("missing-basis/{key}"),
+                                value: GcMarkValue::MissingBasisCheckpoint {},
+                            });
                         }
                     }
                 }
@@ -279,101 +250,7 @@ pub(super) async fn step<S: ObjectStore + ?Sized>(
                     last_key: Some(key),
                 };
             } else {
-                work.source = if work.roots.namespace_deleted {
-                    GcMarkSource::Wal {}
-                } else {
-                    GcMarkSource::AnchorDiscovery {
-                        last_key: None,
-                        candidate_seen: false,
-                        current: None,
-                        aged: None,
-                    }
-                };
-            }
-        }
-        GcMarkSource::AnchorDiscovery {
-            last_key,
-            mut candidate_seen,
-            mut current,
-            mut aged,
-        } => {
-            let prefix = metadata_manifest_prefix(namespace_id);
-            match scan.next(store, &prefix, last_key.as_deref()).await? {
-                None => select_anchor(work, current.or(aged), candidate_seen),
-                Some(key) => {
-                    if let Some(Ok(id)) = manifest_object_id_of(&key) {
-                        candidate_seen = true;
-                        let manifest_no = manifest_object_id_manifest_no(id.as_str())
-                            .expect("parsed manifest generation");
-                        if current
-                            .as_ref()
-                            .is_some_and(|range| range.manifest_no != manifest_no)
-                        {
-                            aged = current.take();
-                        }
-                        if let Some(metadata) = store
-                            .head(&key)
-                            .await
-                            .map_err(|error| CoreError::store(&key, &error))?
-                        {
-                            if !metadata.last_modified_ms.is_some_and(|stamp| {
-                                context.now_ms.saturating_sub(stamp) >= grace_window_ms
-                            }) {
-                                select_anchor(work, aged, candidate_seen);
-                                return Ok(None);
-                            }
-                            match &mut current {
-                                Some(range) => range.last_key.clone_from(&key),
-                                None => {
-                                    current = Some(GcManifestRange {
-                                        manifest_no,
-                                        first_key: key.clone(),
-                                        last_key: key.clone(),
-                                    })
-                                }
-                            }
-                        }
-                    }
-                    work.source = GcMarkSource::AnchorDiscovery {
-                        last_key: Some(key),
-                        candidate_seen,
-                        current,
-                        aged,
-                    };
-                }
-            }
-        }
-        GcMarkSource::AnchorManifests { range, last_key } => {
-            let next = match last_key.as_deref() {
-                None => Some(range.first_key.clone()),
-                Some(key) if key == range.last_key => None,
-                Some(key) => {
-                    scan.next(store, &metadata_manifest_prefix(namespace_id), Some(key))
-                        .await?
-                }
-            };
-            match next.filter(|key| key <= &range.last_key) {
-                Some(key) => {
-                    if let Some(Ok(id)) = manifest_object_id_of(&key) {
-                        match manifest(store, namespace_id, tables, work, &id, None, &mut entries)
-                            .await?
-                        {
-                            Some(seq) => {
-                                if let GcReferenceAnchor::Manifest { head_seq } =
-                                    &mut work.roots.anchor
-                                {
-                                    *head_seq = (*head_seq).min(seq);
-                                }
-                            }
-                            None => work.roots.anchor = GcReferenceAnchor::Missing {},
-                        }
-                    }
-                    work.source = GcMarkSource::AnchorManifests {
-                        range,
-                        last_key: Some(key),
-                    };
-                }
-                None => work.source = GcMarkSource::Wal {},
+                work.source = GcMarkSource::Wal {};
             }
         }
         GcMarkSource::Wal {} => {

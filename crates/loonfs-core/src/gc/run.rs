@@ -280,9 +280,22 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
         let scan = &mut self.scan;
         match &mut state.phase {
             GcPhase::Starting {} => {
-                let snapshot = load_control_snapshot(store, namespace_id)
+                let loaded_head = crate::namespace::control::load_head_object(store, namespace_id)
                     .await
                     .map_err(CoreError::ControlObjectLoad)?;
+                let snapshot = if loaded_head.state.status.is_deleted() {
+                    crate::namespace::control_snapshot::NamespaceControlSnapshot {
+                        retention_floor_seq: crate::namespace::basis::namespace_birth_seq(
+                            &loaded_head.state,
+                        ),
+                        head: loaded_head,
+                        root: None,
+                    }
+                } else {
+                    load_control_snapshot(store, namespace_id)
+                        .await
+                        .map_err(CoreError::ControlObjectLoad)?
+                };
                 let head = &snapshot.head.state;
                 let deleted = head.status.is_deleted();
                 let basis = snapshot.basis();
@@ -309,7 +322,10 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                             namespace_deleted: deleted,
                             reclaim_after_ms: head.status.reclaim_after_ms(),
                             degraded: false,
-                            anchor: GcReferenceAnchor::NotNeeded {},
+                            discovery_start_manifest_no: snapshot
+                                .root
+                                .as_ref()
+                                .map(|loaded| loaded.discovery_start_manifest_no),
                         },
                         index: GcMarkIndex::default(),
                         source: GcMarkSource::Root { manifest: root },
@@ -319,16 +335,8 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                 };
             }
             GcPhase::Marking { work } => {
-                if let Some(objects) = mark::step(
-                    store,
-                    namespace_id,
-                    tables,
-                    work,
-                    scan,
-                    state.grace_window_ms,
-                    context,
-                )
-                .await?
+                if let Some(objects) =
+                    mark::step(store, namespace_id, tables, work, scan, context).await?
                 {
                     state.phase = GcPhase::Revisions {
                         roots: work.roots.clone(),

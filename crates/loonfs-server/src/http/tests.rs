@@ -139,7 +139,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "next_reclamation_at_ms",
     "next_run_no",
     "no_provider_timestamp",
-    "no_reference_manifest",
     "no_replace",
     "not_idempotent",
     "not_needed",

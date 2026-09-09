@@ -666,7 +666,7 @@ impl RuntimeStoreProbe {
         ));
         let manifest_gets = Arc::new(RecordingStore::new(
             wal_gets.clone() as SharedObjectStore,
-            KeyPredicate::prefix(format!("namespaces/{namespace_id}/metadata/manifests/")),
+            KeyPredicate::prefix(format!("namespaces/{namespace_id}/manifests/")),
         ));
         let head_gets = Arc::new(RecordingStore::new(
             manifest_gets.clone() as SharedObjectStore,
@@ -682,7 +682,7 @@ impl RuntimeStoreProbe {
         // namespace that has never flushed, compare-and-swap after that.
         let fail_root_cas = Arc::new(FailStore::new(
             fail_head_cas.clone() as SharedObjectStore,
-            KeyPredicate::metadata_root(namespace_id),
+            KeyPredicate::manifest(namespace_id),
             OperationClass::Put,
             InjectedError::PreconditionFailed,
         ));

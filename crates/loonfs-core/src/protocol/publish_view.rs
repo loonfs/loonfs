@@ -328,22 +328,13 @@ mod tests {
     use super::*;
     use crate::namespace::bootstrap::bootstrap_metadata_state;
     use loonfs_api::wire::control::ManifestRef;
-    use loonfs_api::ManifestObjectId;
     use loonfs_test_support::ids::namespace_id;
 
-    fn manifest_basis(
-        owner: &str,
-        manifest_no: u64,
-        object_nonce: &str,
-        checksum: &str,
-    ) -> MetadataBasis {
+    fn manifest_basis(owner: &str, manifest_no: u64, checksum: &str) -> MetadataBasis {
         MetadataBasis::Manifest(ManifestRef {
             owner_namespace_id: namespace_id(owner),
             manifest_no: loonfs_api::ManifestNo(manifest_no),
-            manifest_object_id: ManifestObjectId::parse(format!(
-                "man_{manifest_no:020}-{object_nonce}"
-            ))
-            .expect("valid manifest object id"),
+
             manifest_head_seq: ChangeSeq(manifest_no),
             manifest_payload_checksum: checksum.to_owned(),
         })
@@ -396,7 +387,7 @@ mod tests {
             "fork-target",
             9,
             "head-etag-a",
-            manifest_basis("fork-source", 4, "0123456789abcdef", "sha256:basis-a"),
+            manifest_basis("fork-source", 4, "sha256:basis-a"),
             7,
         );
         let projection = projection(key.clone());
@@ -410,7 +401,7 @@ mod tests {
                     "other-target",
                     9,
                     "head-etag-a",
-                    manifest_basis("fork-source", 4, "0123456789abcdef", "sha256:basis-a"),
+                    manifest_basis("fork-source", 4, "sha256:basis-a"),
                     7,
                 ),
             ),
@@ -420,7 +411,7 @@ mod tests {
                     "fork-target",
                     10,
                     "head-etag-a",
-                    manifest_basis("fork-source", 4, "0123456789abcdef", "sha256:basis-a"),
+                    manifest_basis("fork-source", 4, "sha256:basis-a"),
                     7,
                 ),
             ),
@@ -430,7 +421,7 @@ mod tests {
                     "fork-target",
                     9,
                     "head-etag-b",
-                    manifest_basis("fork-source", 4, "0123456789abcdef", "sha256:basis-a"),
+                    manifest_basis("fork-source", 4, "sha256:basis-a"),
                     7,
                 ),
             ),
@@ -444,7 +435,7 @@ mod tests {
                     "fork-target",
                     9,
                     "head-etag-a",
-                    manifest_basis("other-source", 4, "0123456789abcdef", "sha256:basis-a"),
+                    manifest_basis("other-source", 4, "sha256:basis-a"),
                     7,
                 ),
             ),
@@ -454,17 +445,7 @@ mod tests {
                     "fork-target",
                     9,
                     "head-etag-a",
-                    manifest_basis("fork-source", 5, "0123456789abcdef", "sha256:basis-a"),
-                    7,
-                ),
-            ),
-            (
-                "manifest object identity",
-                projection_key(
-                    "fork-target",
-                    9,
-                    "head-etag-a",
-                    manifest_basis("fork-source", 4, "fedcba9876543210", "sha256:basis-a"),
+                    manifest_basis("fork-source", 5, "sha256:basis-a"),
                     7,
                 ),
             ),
@@ -474,7 +455,7 @@ mod tests {
                     "fork-target",
                     9,
                     "head-etag-a",
-                    manifest_basis("fork-source", 4, "0123456789abcdef", "sha256:basis-b"),
+                    manifest_basis("fork-source", 4, "sha256:basis-b"),
                     7,
                 ),
             ),
@@ -484,7 +465,7 @@ mod tests {
                     "fork-target",
                     9,
                     "head-etag-a",
-                    manifest_basis("fork-source", 4, "0123456789abcdef", "sha256:basis-a"),
+                    manifest_basis("fork-source", 4, "sha256:basis-a"),
                     8,
                 ),
             ),
@@ -504,7 +485,7 @@ mod tests {
             "fork-target",
             9,
             "head-etag-a",
-            manifest_basis("fork-source", 4, "0123456789abcdef", "sha256:basis-a"),
+            manifest_basis("fork-source", 4, "sha256:basis-a"),
             7,
         );
         let mut projection = projection(key.clone());

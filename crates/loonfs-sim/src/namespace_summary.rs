@@ -45,7 +45,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
             }
             summary.namespace_objects += 1;
             match parsed.family() {
-                DurableObjectFamily::WalHead => {
+                DurableObjectFamily::WalHead | DurableObjectFamily::Hint => {
                     summary.control_objects += 1;
                 }
                 DurableObjectFamily::WalSegment => {
@@ -58,9 +58,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
                 | DurableObjectFamily::MetadataCompactionStaging => {
                     summary.compacted_metadata_objects += 1;
                 }
-                DurableObjectFamily::WalFloor
-                | DurableObjectFamily::MetadataRoot
-                | DurableObjectFamily::CheckpointRecord
+                DurableObjectFamily::CheckpointRecord
                 | DurableObjectFamily::CompactionOutputProtection
                 | DurableObjectFamily::GcRun
                 | DurableObjectFamily::GcMarkPage

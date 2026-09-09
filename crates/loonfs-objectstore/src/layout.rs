@@ -1,6 +1,6 @@
 //! The durable key grammar: object families and key classification.
 
-use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, MetadataFamilyGroup, UploadId};
+use loonfs_api::{ManifestNo, MetadataFamilyGroup, UploadId};
 
 /// One family in the [durable object key grammar].
 ///
@@ -9,12 +9,10 @@ use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, MetadataFamilyGro
 pub enum DurableObjectFamily {
     /// Classifies the mutable visibility and fencing head.
     WalHead,
-    /// Classifies the mutable retained-history floor.
-    WalFloor,
     /// Classifies an immutable segment in a namespace's WAL chain.
     WalSegment,
-    /// Classifies the mutable materialized metadata pointer.
-    MetadataRoot,
+    /// Starts forward discovery of namespace manifests.
+    Hint,
     /// Classifies an immutable namespace-manifest candidate.
     MetadataManifest,
     /// Classifies an immutable metadata segment.
@@ -96,9 +94,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "wal", "head.json"] => {
             Some(parsed(DurableObjectFamily::WalHead, Some(namespace), None))
         }
-        ["namespaces", namespace, "wal", "floor.json"] => {
-            Some(parsed(DurableObjectFamily::WalFloor, Some(namespace), None))
-        }
         ["namespaces", namespace, "wal", "segments", segment] => {
             segment.strip_suffix(".wal.zst").map(|identifier| {
                 parsed(
@@ -108,13 +103,11 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
-        ["namespaces", namespace, "metadata", "root.json"] => Some(parsed(
-            DurableObjectFamily::MetadataRoot,
-            Some(namespace),
-            None,
-        )),
-        ["namespaces", namespace, "metadata", "manifests", manifest] => {
-            manifest.strip_suffix(".manifest.json").map(|identifier| {
+        ["namespaces", namespace, "hint.json"] => {
+            Some(parsed(DurableObjectFamily::Hint, Some(namespace), None))
+        }
+        ["namespaces", namespace, "manifests", manifest] => {
+            manifest.strip_suffix(".json").map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataManifest,
                     Some(namespace),
@@ -186,14 +179,17 @@ pub(crate) fn wal_segment_id_from_key(key: &str) -> Option<&str> {
         .and_then(|parsed| parsed.identifier())
 }
 
-/// Extracts and validates a manifest object identity from its durable key.
-pub fn manifest_object_id_of(
-    key: &str,
-) -> Option<Result<ManifestObjectId, GeneratedIdValidationError>> {
-    parse_object_key(key)
-        .filter(|parsed| parsed.family() == DurableObjectFamily::MetadataManifest)
-        .and_then(|parsed| parsed.identifier())
-        .map(ManifestObjectId::parse)
+/// Extracts a manifest number from its twenty-digit durable name.
+pub fn manifest_no_of(key: &str) -> Option<ManifestNo> {
+    let parsed = parse_object_key(key)?;
+    if parsed.family() != DurableObjectFamily::MetadataManifest {
+        return None;
+    }
+    let number = parsed.identifier()?;
+    if number.len() != 20 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    ManifestNo::parse(number.parse().ok()?).ok()
 }
 
 /// Extracts and validates an upload identity from its durable key.
@@ -239,13 +235,13 @@ fn parsed<'a>(
 mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        checkpoint_record, content_blob, content_owner_prefix, content_store,
+        checkpoint_record, content_blob, content_owner_prefix, content_store, hint,
         metadata_compaction_lease, metadata_compaction_segment, metadata_manifest_object,
-        metadata_root, metadata_segment, metadata_segment_prefix, upload_session, wal_floor,
-        wal_head, wal_segment, wal_segment_prefix,
+        metadata_segment, metadata_segment_prefix, upload_session, wal_head, wal_segment,
+        wal_segment_prefix,
     };
     use loonfs_api::{
-        CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
+        CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataCompactionId,
         MetadataFamilyGroup, MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
@@ -254,9 +250,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
         let wal_segment_id = WalSegmentId::parse("wal_00000000000000000001-0123456789abcdef")
             .expect("WAL segment id");
-        let manifest_object_id =
-            ManifestObjectId::parse("man_00000000000000000400-0123456789abcdef")
-                .expect("manifest object id");
+        let manifest_object_id = ManifestNo(400);
         let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000000000001")
             .expect("metadata segment id");
         let compaction_id = MetadataCompactionId::parse("cmp_00000000000000000000000000000001")
@@ -276,24 +270,15 @@ mod tests {
             ),
             (wal_head(&namespace_id), DurableObjectFamily::WalHead, None),
             (
-                wal_floor(&namespace_id),
-                DurableObjectFamily::WalFloor,
-                None,
-            ),
-            (
                 wal_segment(&namespace_id, &wal_segment_id),
                 DurableObjectFamily::WalSegment,
                 Some(wal_segment_id.as_str()),
             ),
-            (
-                metadata_root(&namespace_id),
-                DurableObjectFamily::MetadataRoot,
-                None,
-            ),
+            (hint(&namespace_id), DurableObjectFamily::Hint, None),
             (
                 metadata_manifest_object(&namespace_id, &manifest_object_id),
                 DurableObjectFamily::MetadataManifest,
-                Some(manifest_object_id.as_str()),
+                Some("00000000000000000400"),
             ),
             (
                 metadata_segment(&namespace_id, &metadata_segment_id),
@@ -380,7 +365,6 @@ mod tests {
         assert!(!staged.starts_with(&metadata_segment_prefix(&namespace_id)));
         let wal_segments = wal_segment_prefix(&namespace_id);
         assert!(!wal_head(&namespace_id).starts_with(&wal_segments));
-        assert!(!wal_floor(&namespace_id).starts_with(&wal_segments));
     }
 
     #[test]

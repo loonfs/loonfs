@@ -9,8 +9,8 @@ use crate::layout::{
 };
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
-    CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
-    MetadataFamilyGroup, MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
+    CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataCompactionId, MetadataFamilyGroup,
+    MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
 };
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
@@ -21,11 +21,6 @@ pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
 /// Builds the authoritative WAL head key for one namespace.
 pub fn wal_head(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/wal/head.json")
-}
-
-/// Builds the retained-history floor key for one namespace.
-pub fn wal_floor(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/wal/floor.json")
 }
 
 /// Builds the immutable WAL object key for a segment identity.
@@ -45,14 +40,14 @@ pub fn wal_segment_id_from_key(key: &str) -> Option<&str> {
     parse_wal_segment_id(key)
 }
 
-/// Builds the materialized metadata-root key for one namespace.
-pub fn metadata_root(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/metadata/root.json")
+/// Builds the starting point for numbered manifest discovery.
+pub fn hint(namespace_id: &NamespaceId) -> String {
+    format!("namespaces/{namespace_id}/hint.json")
 }
 
-/// Builds the listing prefix containing namespace-manifest candidates.
+/// Builds the listing prefix containing numbered namespace manifests.
 pub fn metadata_manifest_prefix(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/metadata/manifests/")
+    format!("namespaces/{namespace_id}/manifests/")
 }
 
 /// Builds the listing prefix containing metadata segment objects owned by one namespace.
@@ -60,12 +55,12 @@ pub fn metadata_segment_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/metadata/segments/")
 }
 
-/// Builds the immutable manifest key for one speculative manifest identity.
-pub fn metadata_manifest_object(
-    namespace_id: &NamespaceId,
-    manifest_object_id: &ManifestObjectId,
-) -> String {
-    format!("namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json")
+/// Builds the immutable manifest key for one namespace manifest number.
+pub fn metadata_manifest_object(namespace_id: &NamespaceId, manifest_no: &ManifestNo) -> String {
+    format!(
+        "namespaces/{namespace_id}/manifests/{:020}.json",
+        manifest_no.0
+    )
 }
 
 /// Builds the immutable metadata segment key for one segment identity.
@@ -206,16 +201,16 @@ pub fn gc_mark_page(
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, content_store, metadata_compaction_lease,
+        checkpoint_record, content_blob, content_store, hint, metadata_compaction_lease,
         metadata_compaction_output_protection, metadata_compaction_prefix,
-        metadata_compaction_segment, metadata_manifest_object, metadata_root, metadata_segment,
-        metadata_segment_object_key, upload_session, wal_floor, wal_head, wal_segment,
+        metadata_compaction_segment, metadata_manifest_object, metadata_segment,
+        metadata_segment_object_key, upload_session, wal_head, wal_segment,
         wal_segment_id_from_key, wal_segment_prefix,
     };
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
-        CheckpointId, ContentId, ContentStoreId, ManifestObjectId, MetadataCompactionId,
+        CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataCompactionId,
         MetadataFamilyGroup, MetadataSegmentId, NamespaceId, UploadId, WalSegmentId,
     };
 
@@ -297,10 +292,7 @@ mod tests {
                 .replace("{content_store_id}", "cs_00000000000000000000000000000001")
                 .replace("{start_seq:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
-                .replace(
-                    "{manifest_object_id}",
-                    "man_00000000000000000400-0123456789abcdef",
-                )
+                .replace("{manifest_no:020}", "00000000000000000400")
                 .replace("{checkpoint_id}", "chk_00000000000000000000000000000001")
                 .replace("{job_id}", "cmp_00000000000000000000000000000001")
                 .replace("{group}", "bindings")
@@ -330,11 +322,7 @@ mod tests {
             ),
             (
                 "Namespace manifests",
-                metadata_manifest_object(
-                    &namespace_id(),
-                    &ManifestObjectId::parse("man_00000000000000000400-0123456789abcdef")
-                        .expect("valid manifest object id"),
-                ),
+                metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
             ),
             (
                 "Checkpoint records",
@@ -364,8 +352,7 @@ mod tests {
                 "Upload sessions",
                 upload_session(&namespace_id(), &upload_id()),
             ),
-            ("Metadata root", metadata_root(&namespace_id())),
-            ("WAL floor", wal_floor(&namespace_id())),
+            ("Hint", hint(&namespace_id())),
             ("GC run", super::gc_run(&namespace_id())),
             (
                 "GC mark pages",
@@ -411,7 +398,6 @@ mod tests {
         )
         .starts_with(&wal_segment_prefix(&namespace_id())));
         assert!(!wal_head(&namespace_id()).starts_with(&wal_segment_prefix(&namespace_id())));
-        assert!(!wal_floor(&namespace_id()).starts_with(&wal_segment_prefix(&namespace_id())));
         assert_eq!(
             wal_segment_id_from_key(&wal_segment(
                 &namespace_id(),

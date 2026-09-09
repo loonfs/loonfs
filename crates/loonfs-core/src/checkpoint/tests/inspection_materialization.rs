@@ -19,14 +19,11 @@ use super::super::validate::{
 };
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use futures::future::try_join_all;
-use loonfs_api::manifest_object_id_manifest_no;
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
-use loonfs_api::{ChangeSeq, ManifestNo, ManifestObjectId, NamespaceId};
-use loonfs_objectstore::keys::{
-    metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
-};
+use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::ObjectStore;
 
 #[cfg(test)]
@@ -35,51 +32,12 @@ pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore 
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
 ) -> Result<ManifestMaterializationForInspection, ManifestLoadError> {
-    let manifest_object_id =
-        manifest_object_id_for_manifest_no(store, namespace_id, manifest_no).await?;
-    load_manifest_materialization_for_inspection_if_present(
-        store,
-        namespace_id,
-        &manifest_object_id,
-    )
-    .await?
-    .ok_or_else(|| ManifestLoadError::MissingManifest {
-        object_key: metadata_manifest_object(namespace_id, &manifest_object_id),
-    })
-}
-
-#[cfg(test)]
-async fn manifest_object_id_for_manifest_no<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    manifest_no: ManifestNo,
-) -> Result<ManifestObjectId, ManifestLoadError> {
-    let prefix = metadata_manifest_prefix(namespace_id);
-    let keys =
-        store
-            .list_prefix(&prefix)
-            .await
-            .map_err(|error| ManifestLoadError::ReadManifest {
-                object_key: prefix.clone(),
-                message: error.to_string(),
-            })?;
-    for key in keys {
-        let Some(file_name) = key.rsplit('/').next() else {
-            continue;
-        };
-        let Some(raw_id) = file_name.strip_suffix(".manifest.json") else {
-            continue;
-        };
-        let Ok(object_id) = ManifestObjectId::parse(raw_id) else {
-            continue;
-        };
-        if manifest_object_id_manifest_no(object_id.as_str()) == Some(manifest_no) {
-            return Ok(object_id);
-        }
-    }
-    Err(ManifestLoadError::MissingManifest {
-        object_key: format!("{prefix}man_{:020}-*.manifest.json", manifest_no.0),
-    })
+    let manifest_number = manifest_no;
+    load_manifest_materialization_for_inspection_if_present(store, namespace_id, &manifest_number)
+        .await?
+        .ok_or_else(|| ManifestLoadError::MissingManifest {
+            object_key: metadata_manifest_object(namespace_id, &manifest_number),
+        })
 }
 
 #[cfg(test)]
@@ -88,13 +46,13 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
 >(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_object_id: &ManifestObjectId,
+    manifest_number: &ManifestNo,
 ) -> Result<Option<ManifestMaterializationForInspection>, ManifestLoadError> {
-    let manifest_key = metadata_manifest_object(namespace_id, manifest_object_id);
+    let manifest_key = metadata_manifest_object(namespace_id, manifest_number);
     let manifest = load_namespace_manifest_envelope_if_present(
         store,
         namespace_id,
-        manifest_object_id,
+        manifest_number,
         &manifest_key,
     )
     .await?;

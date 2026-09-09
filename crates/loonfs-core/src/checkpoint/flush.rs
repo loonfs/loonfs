@@ -1,18 +1,10 @@
-//! Flushes the visible WAL tail into metadata segments, publishes a manifest
-//! for the current head, and advances `metadata/root.json` by compare-and-swap.
-//! This does not create a checkpoint record.
-//!
-//! This is the latest-state maintenance path: superseded manifests become
-//! garbage-collection candidates once nothing pins them. Pinning a manifest
-//! version for retention is a separate concern layered on top by
-//! [`create`](super::create).
+//! Flushes the visible WAL tail and publishes the next manifest number.
 
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::MetadataSegmentCache;
 use super::load::load_basis_metadata_segments;
 use super::publish::{
-    manifest_ref_for, manifest_write_failure, publish_metadata_root, write_namespace_manifest,
-    ManifestPublicationOutcome,
+    encode_manifest, manifest_ref_for, publish_manifest, ManifestPublicationOutcome,
 };
 use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
@@ -26,7 +18,7 @@ use crate::error::Result;
 use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{metadata_basis_without_root, MetadataBasis};
-use crate::namespace::control::load_metadata_root_object_if_present;
+use crate::namespace::control::load_current_manifest_if_present;
 use crate::namespace::control_snapshot::{load_control_snapshot, resolve_retention_floor_seq};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
@@ -35,8 +27,8 @@ use crate::wal::{
 use loonfs_api::wire::control::{HeadState, ManifestRef};
 use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_api::{
-    ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo, ManifestObjectId,
-    NamespaceId, RunNo, MAX_PUBLIC_INTEGER,
+    ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo, NamespaceId, RunNo,
+    MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -52,7 +44,7 @@ pub(super) struct FlushedBasis {
     pub(super) head_commit_id: CommitId,
     /// Head sequence the attempt targeted.
     pub(super) target_head_seq: ChangeSeq,
-    /// Manifest referenced by `metadata/root.json` after the attempt.
+    /// Current manifest after the attempt.
     pub(super) root_after_manifest_no: ManifestNo,
     /// Sequence covered by `root_after_manifest_no`.
     pub(super) root_after_head_seq: ChangeSeq,
@@ -68,12 +60,7 @@ pub(super) enum TryFlushWal {
     RaceLost,
 }
 
-/// Flushes the visible WAL tail into metadata segments and advances
-/// `metadata/root.json` to a manifest covering the current head.
-///
-/// The WAL delta lands as one new delta run when the root lags the head; the
-/// manifest publishes and the root advances. No checkpoint record is
-/// created. Returns `StaleHead` when every attempt lost the root race.
+/// Flushes the visible WAL tail into segments and publishes the next manifest.
 pub(crate) async fn flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -110,8 +97,8 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
 /// One flush attempt against one fresh projection.
 ///
 /// The metadata publication budget covers this attempt end to end: the
-/// measurement starts before any segment object is written and gates the root
-/// compare-and-swap, so an over-budget build aborts with only unreachable
+/// measurement starts before any segment object is written and gates the manifest
+/// put-if-absent, so an over-budget build aborts with only unreachable
 /// immutable outputs behind it.
 pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
@@ -132,12 +119,16 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &RootProjection<'_, S>,
-    context: &MutationContext,
+    _context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<TryFlushWal> {
     let publication_started_ms = timer.monotonic_now_ms();
     let head_seq = projection.head.seq;
-    let basis_manifest_no = projection.basis.manifest_no();
+    let basis_manifest_no = if projection.basis.is_owned_by(namespace_id) {
+        projection.basis.manifest_no()
+    } else {
+        ManifestNo(0)
+    };
     // Only a manifest this namespace published can already cover the head.
     // A genesis or fork basis must be materialized here even at an
     // unchanged head, because the namespace owns no manifest yet and a
@@ -157,29 +148,14 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         })));
     }
 
-    // One generated object id, one write. The generated id ends in 16 random
-    // hex characters, so the key is this attempt's alone and a conflict under
-    // it is corruption rather than contention.
     let manifest_no = next_manifest_no_after(basis_manifest_no)?;
-    let manifest = build_namespace_manifest_for_projection(
-        store,
-        namespace_id,
-        projection,
-        manifest_no,
-        ManifestObjectId::generate(manifest_no),
-    )
-    .await?;
-    let manifest = write_namespace_manifest(store, manifest)
-        .await
-        .map_err(manifest_write_failure)?;
-    // The publication budget gates the root compare-and-swap: past it, the
-    // written segments and manifest may have aged into the GC grace window,
-    // so this attempt must abort without publishing (format spec, "Garbage
-    // collection", rule 1). The orphans are reclaimed by a later pass.
+    let manifest =
+        build_namespace_manifest_for_projection(store, namespace_id, projection, manifest_no)
+            .await?;
+    let manifest = encode_manifest(manifest)?;
+    // Written segments may outlive the GC grace if publication exceeds its budget.
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
-    // Advance the root. If another publisher updates it first, this attempt's
-    // manifest remains valid but unreferenced.
-    let (outcome, root_after_manifest_no, root_after_head_seq) = match publish_metadata_root(
+    let (outcome, current) = match publish_manifest(
         store,
         namespace_id,
         &manifest,
@@ -188,25 +164,17 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
                 .manifest_segments
                 .manifest()
                 .payload()
-                .manifest_object_id
-                .clone()
+                .manifest_no
         }),
-        context.now_ms,
+        timer,
+        publication_started_ms,
     )
     .await?
     {
-        ManifestPublicationOutcome::Published(_) => (
-            FlushWalOutcome::Published,
-            manifest.payload().manifest_no,
-            manifest.payload().head_seq,
-        ),
-        // The candidate's head sequence is this flush's target, so a root
-        // that covers the candidate covers the target too.
-        ManifestPublicationOutcome::CoveredByCurrent(current) => (
-            FlushWalOutcome::RootAdvanced,
-            current.manifest.manifest_no,
-            current.manifest.manifest_head_seq,
-        ),
+        ManifestPublicationOutcome::Published(current) => (FlushWalOutcome::Published, current),
+        ManifestPublicationOutcome::CoveredByCurrent(current) => {
+            (FlushWalOutcome::RootAdvanced, current)
+        }
         // A same-sequence reorganization can replace the predecessor without
         // covering the newer WAL head. That root safely wins, but it has not
         // satisfied the flush: reload its runs, replay the tail, try again.
@@ -215,12 +183,29 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         }
         ManifestPublicationOutcome::Installable => return Ok(TryFlushWal::RaceLost),
     };
+    let head_commit_id = if current.manifest == manifest_ref_for(namespace_id, &manifest) {
+        manifest.payload().head_commit_id.clone()
+    } else {
+        let winner = super::load::load_namespace_manifest_envelope(
+            store,
+            namespace_id,
+            &current.manifest.manifest_no,
+        )
+        .await
+        .map_err(MetadataProjectionLoadError::ManifestLoad)?;
+        super::load::ensure_manifest_reference_matches(
+            "published manifest",
+            &current.manifest,
+            &winner,
+        )?;
+        winner.payload().head_commit_id.clone()
+    };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
-        manifest: manifest_ref_for(namespace_id, &manifest),
-        head_commit_id: projection.head.head_commit_id.clone(),
+        root_after_manifest_no: current.manifest.manifest_no,
+        root_after_head_seq: current.manifest.manifest_head_seq,
+        manifest: current.manifest,
+        head_commit_id,
         target_head_seq: head_seq,
-        root_after_manifest_no,
-        root_after_head_seq,
         outcome,
     })))
 }
@@ -243,7 +228,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         snapshot.head.created_at_ms,
     )
     .await?;
-    let current_root = load_metadata_root_object_if_present(store, namespace_id)
+    let current_root = load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     let current_basis = current_root.map_or_else(
@@ -369,7 +354,7 @@ pub fn next_run_no_after(current: RunNo) -> Result<RunNo> {
         .map_err(|error| CoreError::Internal(format!("run number {error}")))
 }
 
-/// Refuses to initiate a root compare-and-swap once the publication budget
+/// Refuses to initiate a manifest put-if-absent once the publication budget
 /// is spent (format spec, "Garbage collection", rule 1).
 pub fn ensure_metadata_publication_budget(
     timer: &dyn MonotonicTimer,
@@ -386,7 +371,7 @@ pub fn ensure_metadata_publication_budget(
         namespace_id = namespace_id.as_str(),
         elapsed_ms,
         budget_ms = METADATA_PUBLICATION_BUDGET_MS,
-        "metadata publication overran its budget; aborting before the root compare-and-swap",
+        "metadata publication overran its budget; aborting before the manifest put-if-absent",
     );
     Err(CoreError::MetadataPublicationBudgetExceeded {
         elapsed_ms,
@@ -399,7 +384,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     projection: &RootProjection<'_, S>,
     manifest_no: ManifestNo,
-    manifest_object_id: ManifestObjectId,
 ) -> Result<NamespaceManifestPayload> {
     let head_seq = projection.head.seq;
     // A WAL flush keeps existing runs and writes the WAL delta as one new delta
@@ -460,7 +444,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     Ok(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no,
-        manifest_object_id,
         head_seq,
         head_commit_id: projection.head.head_commit_id.clone(),
         base_seq,

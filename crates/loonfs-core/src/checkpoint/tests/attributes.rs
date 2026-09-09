@@ -287,12 +287,12 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
     manifest_no: ManifestNo,
     head_seq: ChangeSeq,
     segments: Vec<MetadataSegmentRef>,
-) -> ManifestObjectId {
-    let manifest_object_id = ManifestObjectId::generate(manifest_no);
+) -> ManifestNo {
+    let manifest_number = manifest_no;
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         manifest_no,
-        manifest_object_id: manifest_object_id.clone(),
+
         head_seq,
         head_commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("commit id"),
         base_seq: head_seq,
@@ -312,7 +312,7 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
     write_namespace_manifest(store, manifest.payload().clone())
         .await
         .expect("write manifest");
-    manifest_object_id
+    manifest_number
 }
 
 #[tokio::test]

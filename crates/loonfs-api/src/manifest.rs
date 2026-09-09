@@ -7,8 +7,8 @@ use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
     AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    InodeKind, ManifestNo, ManifestObjectId, MetadataCompactionId, MetadataSegmentId, NameKey,
-    NamespaceId, RevisionNo, RunNo,
+    InodeKind, ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey, NamespaceId,
+    RevisionNo, RunNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -919,8 +919,6 @@ pub struct NamespaceManifestPayload {
     pub namespace_id: NamespaceId,
     /// Monotonic logical manifest position selected by the namespace root.
     pub manifest_no: ManifestNo,
-    /// Unique id for this candidate at `manifest_no`.
-    pub manifest_object_id: ManifestObjectId,
     /// Greatest namespace sequence materialized by the referenced file set.
     pub head_seq: ChangeSeq,
     /// Commit id assigned to `head_seq`, used to validate agreement with the head.
@@ -977,8 +975,8 @@ mod tests {
         MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
     use crate::{
-        ChangeSeq, CommitId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
-        MetadataSegmentId, NameKey, NamespaceId, RunNo, WriterEpoch,
+        ChangeSeq, CommitId, InodeId, ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey,
+        NamespaceId, RunNo, WriterEpoch,
     };
 
     fn row_commit_id() -> CommitId {
@@ -1037,10 +1035,7 @@ mod tests {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
-            manifest_object_id: ManifestObjectId::parse(
-                "man_00000000000000000010-0123456789abcdef",
-            )
-            .expect("valid manifest object id"),
+
             head_seq: ChangeSeq(10),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
                 .expect("commit id"),
@@ -1077,10 +1072,7 @@ mod tests {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
-            manifest_object_id: ManifestObjectId::parse(
-                "man_00000000000000000012-0123456789abcdef",
-            )
-            .expect("valid manifest object id"),
+
             head_seq: ChangeSeq(12),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000002")
                 .expect("commit id"),
@@ -1130,10 +1122,7 @@ mod tests {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(14),
-            manifest_object_id: ManifestObjectId::parse(
-                "man_00000000000000000014-0123456789abcdef",
-            )
-            .expect("valid manifest object id"),
+
             head_seq: ChangeSeq(14),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000003")
                 .expect("commit id"),

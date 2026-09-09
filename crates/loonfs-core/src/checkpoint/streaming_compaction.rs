@@ -26,16 +26,15 @@ use super::frozen_floor::{
     BindingIdentity,
 };
 use super::load::load_manifest_segments;
-use super::publish::{publish_metadata_root, ManifestPublicationOutcome};
+use super::publish::{publish_manifest, ManifestPublicationOutcome};
 use super::reorganize::{
-    group_run_descriptors, write_replacement_manifest, MergePlacement, ReplacementOutput,
+    build_replacement_manifest, group_run_descriptors, MergePlacement, ReplacementOutput,
 };
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
 use super::scan::{Readahead, VerifiedMetadataSegments};
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::control::load_metadata_root_object_if_present;
-use crate::time::current_time_ms;
+use crate::namespace::control::load_current_manifest_if_present;
 use crate::time::StdMonotonicTimer;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
@@ -63,8 +62,8 @@ const PROGRESS_ROW_INTERVAL: u64 = 1_000_000;
 
 /// Publication attempts one finalization makes before giving up.
 ///
-/// Only an unrelated publication landing between the reload and the root
-/// compare-and-swap costs an attempt, and the reload is what the next attempt
+/// Only an unrelated publication landing between the reload and the manifest
+/// put-if-absent costs an attempt, and the reload is what the next attempt
 /// takes the race against. A namespace publishing fast enough to win four in
 /// a row is one where re-running the job later is the better answer than
 /// spinning here, and re-running is always safe.
@@ -498,8 +497,7 @@ fn log_metadata_compaction_outcome(
 /// changes to the job's input abandon the output.
 ///
 /// The publication budget starts during finalization rather than at the start
-/// of the potentially long rebuild. Each attempt uses a current wall-clock
-/// timestamp so `updated_at_ms` cannot move backward.
+/// of the potentially long rebuild. Each attempt reloads the current manifest.
 pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -526,7 +524,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             return Ok(MetadataCompactionJobOutcome::Fenced);
         }
         let publication_started_ms = timer.monotonic_now_ms();
-        let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
+        let Some(root) = load_current_manifest_if_present(store, namespace_id)
             .await
             .map_err(CoreError::ControlObjectLoad)?
             .map(|loaded| loaded.state)
@@ -556,8 +554,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
                 (!run.segments.is_empty()).then_some(run)
             })
             .collect();
-        let manifest = write_replacement_manifest(
-            store,
+        let manifest = build_replacement_manifest(
             namespace_id,
             previous,
             surviving,
@@ -566,8 +563,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
                 placement: spec.placement,
             },
             spec.frozen_floor_seq(),
-        )
-        .await?;
+        )?;
 
         lease.protect_output(store).await?;
 
@@ -577,12 +573,13 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             return Ok(MetadataCompactionJobOutcome::Cancelled);
         }
         ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
-        let published = publish_metadata_root(
+        let published = publish_manifest(
             store,
             namespace_id,
             &manifest,
-            Some(root.manifest.manifest_object_id.clone()),
-            current_time_ms()?,
+            Some(root.manifest.manifest_no),
+            timer,
+            publication_started_ms,
         )
         .await?;
         drop(segments);
@@ -625,7 +622,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<Option<VerifiedMetadataSegments<'a, S>>> {
-    let Some(root) = load_metadata_root_object_if_present(store, namespace_id)
+    let Some(root) = load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .map(|loaded| loaded.state)

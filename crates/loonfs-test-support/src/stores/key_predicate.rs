@@ -1,7 +1,7 @@
 //! Reusable key predicates for object-store wrappers.
 
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::keys::{metadata_root, wal_head};
+use loonfs_objectstore::keys::{hint, metadata_manifest_prefix, wal_head};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use std::fmt;
 use std::sync::Arc;
@@ -59,9 +59,14 @@ impl KeyPredicate {
         Self::exact(wal_head(namespace_id))
     }
 
-    /// Selects the metadata root key for the given namespace.
-    pub fn metadata_root(namespace_id: &NamespaceId) -> Self {
-        Self::exact(metadata_root(namespace_id))
+    /// Selects the manifest discovery hint key for the given namespace.
+    pub fn hint(namespace_id: &NamespaceId) -> Self {
+        Self::exact(hint(namespace_id))
+    }
+
+    /// Selects every numbered manifest in the namespace.
+    pub fn manifest(namespace_id: &NamespaceId) -> Self {
+        Self::prefix(metadata_manifest_prefix(namespace_id))
     }
 
     pub(crate) fn matches(&self, key: &str) -> bool {

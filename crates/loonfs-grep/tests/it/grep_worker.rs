@@ -1910,7 +1910,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .expect("a fork target has a basis manifest");
     let manifest_key = metadata_manifest_object(
         &target_basis.manifest.owner_namespace_id,
-        &target_basis.manifest.manifest_object_id,
+        &target_basis.manifest.manifest_no,
     );
     let manifest_bytes = store
         .get(&manifest_key, None)
@@ -2358,10 +2358,9 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
     assert_eq!(
         listed_prefixes,
         vec![
-            // Marking lists the records it roots from, then the manifests
-            // it ages to find its reference manifest.
+            // Marking lists the records it roots from; the current manifest
+            // is discovered through the hint, never by listing.
             checkpoint_prefix(&live_namespace),
-            metadata_manifest_prefix(&live_namespace),
             wal_segment_prefix(&live_namespace),
             metadata_segment_prefix(&live_namespace),
             metadata_compaction_prefix(&live_namespace),

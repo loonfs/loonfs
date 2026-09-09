@@ -69,14 +69,14 @@ impl MetadataBasis {
     }
 
     /// Whether the basis is a manifest this namespace itself published, so
-    /// its own `metadata/root.json` exists.
+    /// it has published an owned manifest.
     pub fn is_owned_by(&self, namespace_id: &NamespaceId) -> bool {
         self.manifest()
             .is_some_and(|manifest| manifest.owner_namespace_id == *namespace_id)
     }
 }
 
-/// Resolves the basis of a namespace whose `metadata/root.json` is absent:
+/// Resolves the basis before the namespace publishes its first manifest:
 /// the built-in genesis state, or the fork source's manifest the head
 /// authorizes.
 pub(crate) fn metadata_basis_without_root(head: &HeadState) -> MetadataBasis {

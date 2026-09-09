@@ -928,7 +928,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Flushes the visible WAL tail and advances `metadata/root.json` to a
+    /// Flushes the visible WAL tail and publishes a
     /// manifest covering the current head.
     ///
     /// This is the latest-state maintenance operation: it absorbs the visible

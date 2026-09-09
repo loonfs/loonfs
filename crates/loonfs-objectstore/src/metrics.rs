@@ -744,14 +744,13 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::ContentBlob => KeyClass::Content,
         DurableObjectFamily::WalHead => KeyClass::NamespaceHead,
         DurableObjectFamily::WalSegment => KeyClass::WalSegment,
-        DurableObjectFamily::MetadataManifest | DurableObjectFamily::MetadataRoot => {
+        DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
             KeyClass::NamespaceManifest
         }
         DurableObjectFamily::MetadataSegment | DurableObjectFamily::MetadataCompactionStaging => {
             KeyClass::MetadataSegment
         }
         DurableObjectFamily::CheckpointRecord
-        | DurableObjectFamily::WalFloor
         | DurableObjectFamily::MetadataCompactionLease
         | DurableObjectFamily::CompactionOutputProtection
         | DurableObjectFamily::GcRun

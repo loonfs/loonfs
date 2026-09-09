@@ -10,7 +10,7 @@ use loonfs_objectstore::keys::{
     checkpoint_prefix, content_owner_prefix, metadata_compaction_prefix, metadata_manifest_prefix,
     metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
 };
-use loonfs_objectstore::layout::manifest_object_id_of;
+use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +42,7 @@ impl CandidateFamilyExt for CandidateFamily {
                 DurableObjectFamily::MetadataCompactionStaging
                     | DurableObjectFamily::CompactionOutputProtection
             ),
-            Self::Manifests => matches!(manifest_object_id_of(key), Some(Ok(_))),
+            Self::Manifests => manifest_no_of(key).is_some(),
             Self::Checkpoints => family == DurableObjectFamily::CheckpointRecord,
             Self::UploadSessions => family == DurableObjectFamily::UploadSession,
             Self::OwnedContent => family == DurableObjectFamily::ContentBlob,
@@ -171,7 +171,7 @@ mod tests {
                     namespace_deleted: false,
                     reclaim_after_ms: None,
                     degraded: false,
-                    anchor: loonfs_api::wire::gc::GcReferenceAnchor::NotNeeded {},
+                    discovery_start_manifest_no: None,
                 },
             )
         }

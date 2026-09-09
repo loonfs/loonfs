@@ -146,7 +146,7 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                     "one family group needs the metadata_compaction job"
                 }
                 ReorganizeStepOutcome::RootAdvanced => {
-                    "another publisher moved the metadata root, so the reorganize published nothing"
+                    "another publisher advanced the manifest number, so reorganization published nothing"
                 }
             }
         ),

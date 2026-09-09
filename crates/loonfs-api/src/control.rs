@@ -1,12 +1,12 @@
-//! Durable control-object shapes: the head, metadata root, WAL floor,
+//! Durable control-object shapes: the head and discovery hint,
 //! checkpoint records, upload sessions, and their envelopes (format spec,
 //! "Control objects").
 
 use crate::envelope::EnvelopeCodecError;
 use crate::{
     wal_segment_id_start_seq, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId,
-    ContentRef, ContentStoreId, InodeId, ManifestNo, ManifestObjectId, MetadataCompactionId,
-    MetadataFamilyGroup, NamespaceId, UploadId, WalSegmentId,
+    ContentRef, ContentStoreId, InodeId, ManifestNo, MetadataCompactionId, MetadataFamilyGroup,
+    NamespaceId, UploadId, WalSegmentId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -22,10 +22,8 @@ use std::num::NonZeroU64;
 pub enum ControlObjectKind {
     /// Carries the sole live-visibility and writer-fencing authority.
     WalHead,
-    /// Records the earliest sequence for which incremental history is retained.
-    WalFloor,
-    /// Points to the best known materialized metadata manifest.
-    MetadataRoot,
+    /// Starts forward discovery of numbered manifests.
+    Hint,
     /// Pins a manifest basis for a user or fork lifecycle.
     CheckpointRecord,
     /// Tracks staged content through upload completion or cleanup.
@@ -43,10 +41,9 @@ pub enum ControlObjectKind {
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 8] = [
         Self::WalHead,
-        Self::WalFloor,
-        Self::MetadataRoot,
+        Self::Hint,
         Self::CheckpointRecord,
         Self::UploadSession,
         Self::CompactionLease,
@@ -64,8 +61,7 @@ impl ControlObjectKind {
     pub const fn format_version(self) -> u32 {
         match self {
             Self::WalHead => 2,
-            Self::WalFloor => 1,
-            Self::MetadataRoot => 1,
+            Self::Hint => 1,
             Self::CheckpointRecord => 1,
             Self::UploadSession => 1,
             Self::CompactionLease => 3,
@@ -79,8 +75,7 @@ impl ControlObjectKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::WalHead => "wal_head",
-            Self::WalFloor => "wal_floor",
-            Self::MetadataRoot => "metadata_root",
+            Self::Hint => "hint",
             Self::CheckpointRecord => "checkpoint_record",
             Self::UploadSession => "upload_session",
             Self::CompactionLease => "compaction_lease",
@@ -106,22 +101,14 @@ pub struct ContentStoreState {
     pub created_at_ms: u64,
 }
 
-/// Earliest sequence for which incremental WAL history is retained.
-///
-/// The floor advances monotonically by compare-and-swap and does not control
-/// live visibility. Missing or unverifiable floor state must retain more
-/// history. Objects below the floor are only deletion candidates; garbage
-/// collection still revalidates them before removal.
+/// Starts manifest discovery without selecting the current version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WalFloorState {
-    /// Namespace whose retained history this floor bounds.
+pub struct HintState {
+    /// Namespace whose manifest collection is probed.
     pub namespace_id: NamespaceId,
-    /// Earliest sequence at which incremental replay remains promised.
-    pub floor_seq: ChangeSeq,
-    /// Unix-millisecond stamp of the successful floor update, for
-    /// observability only and never an ordering or validity input.
-    pub updated_at_ms: u64,
+    /// First number to read; zero starts before the first manifest.
+    pub manifest_no: ManifestNo,
 }
 
 /// One reference to a namespace manifest.
@@ -137,30 +124,10 @@ pub struct ManifestRef {
     pub owner_namespace_id: NamespaceId,
     /// Monotonic logical position of the referenced manifest.
     pub manifest_no: ManifestNo,
-    /// Immutable object selected at `manifest_no`.
-    pub manifest_object_id: ManifestObjectId,
     /// Greatest owner-namespace sequence the referenced manifest materializes.
     pub manifest_head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub manifest_payload_checksum: String,
-}
-
-/// Cold pointer to the best known materialized metadata root.
-///
-/// Manifest publication compare-and-swaps this object, never the WAL head,
-/// so head watchers see only commits. Updates are monotonic in
-/// `manifest.manifest_head_seq`; a same-seq replacement may reference a
-/// different manifest (pure compaction), and a lower-seq replacement no-ops.
-/// This object never defines live visibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MetadataRootState {
-    /// Namespace whose materialized file set this root selects.
-    pub namespace_id: NamespaceId,
-    /// Manifest selected by this root. Its owner must be `namespace_id`.
-    pub manifest: ManifestRef,
-    /// Unix-millisecond wall-clock stamp for observability and GC grace policy, not ordering.
-    pub updated_at_ms: u64,
 }
 
 /// Status of a compaction lease.
@@ -1016,10 +983,8 @@ pub type ControlObjectEnvelope<T> = crate::envelope::VerifiedEnvelope<T>;
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 /// Specializes a control envelope for a durable upload workflow.
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
-/// Specializes a control envelope for the selected materialized manifest.
-pub type MetadataRootEnvelope = ControlObjectEnvelope<MetadataRootState>;
-/// Specializes a control envelope for the retained-history floor.
-pub type WalFloorEnvelope = ControlObjectEnvelope<WalFloorState>;
+/// Specializes a control envelope for manifest discovery.
+pub type HintEnvelope = ControlObjectEnvelope<HintState>;
 /// Specializes a control envelope for a durable manifest pin.
 pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>;
 /// Specializes a control envelope for a running compaction's ownership of
@@ -1363,9 +1328,8 @@ mod tests {
             decode_control_object(&encoded, ControlObjectKind::WalHead).expect("decode");
         assert_eq!(decoded.into_payload(), state);
 
-        let mismatch =
-            decode_control_object::<MetadataRootState>(&encoded, ControlObjectKind::MetadataRoot)
-                .expect_err("kind mismatch");
+        let mismatch = decode_control_object::<HintState>(&encoded, ControlObjectKind::Hint)
+            .expect_err("kind mismatch");
         assert!(matches!(mismatch, EnvelopeCodecError::KindMismatch { .. }));
     }
 
@@ -1422,10 +1386,7 @@ mod tests {
             manifest: ManifestRef {
                 owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 manifest_no: ManifestNo(7),
-                manifest_object_id: ManifestObjectId::parse(
-                    "man_00000000000000000007-0123456789abcdef",
-                )
-                .expect("valid manifest object id"),
+
                 manifest_head_seq: ChangeSeq(7),
                 manifest_payload_checksum: "sha256:test".to_owned(),
             },

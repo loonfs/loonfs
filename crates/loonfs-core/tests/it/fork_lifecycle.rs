@@ -24,8 +24,7 @@ use loonfs_core::control::load_namespace_head_control;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{
-    content_blob, content_owner_prefix, content_store, metadata_manifest_object, metadata_root,
-    wal_floor, wal_head,
+    content_blob, content_owner_prefix, content_store, hint, metadata_manifest_object, wal_head,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -293,7 +292,7 @@ async fn namespace_keys<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn a_created_namespace_has_a_descriptor_and_only_a_head_until_its_first_flush() {
+async fn a_created_namespace_installs_its_descriptor_hint_and_head_before_its_first_flush() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -307,8 +306,8 @@ async fn a_created_namespace_has_a_descriptor_and_only_a_head_until_its_first_fl
     assert_eq!(created.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![wal_head(&namespace_id)],
-        "creation writes only the head under the namespace prefix"
+        vec![hint(&namespace_id), wal_head(&namespace_id)],
+        "creation writes the hint and head under the namespace prefix"
     );
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
@@ -352,7 +351,8 @@ async fn a_created_namespace_has_a_descriptor_and_only_a_head_until_its_first_fl
     );
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
-        keys.iter().all(|key| key == &wal_head(&namespace_id)
+        keys.iter().all(|key| key == &hint(&namespace_id)
+            || key == &wal_head(&namespace_id)
             || key.starts_with(&format!(
                 "namespaces/{}/wal/segments/",
                 namespace_id.as_str()
@@ -367,11 +367,11 @@ async fn a_created_namespace_has_a_descriptor_and_only_a_head_until_its_first_fl
         .expect("flush");
     assert!(
         store
-            .head(&metadata_root(&namespace_id))
+            .head(&hint(&namespace_id))
             .await
             .expect("probe root")
             .is_some(),
-        "the first flush publishes metadata/root.json"
+        "the first flush publishes manifest number one"
     );
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/docs/first.txt")
@@ -434,7 +434,7 @@ async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
     assert_eq!(loser.code(), ErrorCode::NamespaceExists);
     assert_eq!(
         namespace_keys(store.as_ref(), &namespace_id).await,
-        vec![wal_head(&namespace_id)]
+        vec![hint(&namespace_id), wal_head(&namespace_id)]
     );
 }
 
@@ -640,7 +640,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 
     assert_eq!(
         namespace_keys(&store, &clone_namespace_id).await,
-        vec![wal_head(&clone_namespace_id)],
+        vec![hint(&clone_namespace_id), wal_head(&clone_namespace_id)],
         "a fork target is its head and nothing else"
     );
 
@@ -801,15 +801,12 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .await
         .expect("flush clone");
     let clone_root =
-        loonfs_core::control::load_namespace_metadata_root_control(&store, &clone_namespace_id)
+        loonfs_core::control::load_namespace_current_manifest(&store, &clone_namespace_id)
             .await
             .expect("clone metadata root");
     let clone_manifest_bytes = store
         .get(
-            &metadata_manifest_object(
-                &clone_namespace_id,
-                &clone_root.state.manifest.manifest_object_id,
-            ),
+            &metadata_manifest_object(&clone_namespace_id, &clone_root.state.manifest.manifest_no),
             None,
         )
         .await
@@ -1063,9 +1060,12 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
         .expect("fork");
     assert!(
         store
-            .head(&metadata_root(&clone))
+            .head(&metadata_manifest_object(
+                &clone,
+                &loonfs_api::ManifestNo(1)
+            ))
             .await
-            .expect("probe clone root")
+            .expect("probe first manifest")
             .is_none(),
         "a fresh fork target has published no manifest"
     );
@@ -1082,7 +1082,7 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
     .await
     .expect("read record")
     .expect("record exists");
-    let manifest_key = metadata_manifest_object(&clone, &record.manifest.manifest_object_id);
+    let manifest_key = metadata_manifest_object(&clone, &record.manifest.manifest_no);
     assert!(
         store
             .head(&manifest_key)
@@ -1093,7 +1093,7 @@ async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
     );
     assert!(
         store
-            .head(&metadata_root(&clone))
+            .head(&hint(&clone))
             .await
             .expect("probe clone root")
             .is_some(),
@@ -1179,10 +1179,8 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
-    let manifest_key = metadata_manifest_object(
-        &source_namespace_id,
-        &source_record.manifest.manifest_object_id,
-    );
+    let manifest_key =
+        metadata_manifest_object(&source_namespace_id, &source_record.manifest.manifest_no);
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await
@@ -1440,15 +1438,16 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
         surviving,
         vec![
             loonfs_objectstore::keys::gc_run(&namespace_id),
+            hint(&namespace_id),
             wal_head(&namespace_id)
         ],
         "reclamation leaves the tombstone and completed GC progress"
     );
     assert!(store
-        .head(&wal_floor(&namespace_id))
+        .head(&hint(&namespace_id))
         .await
-        .expect("probe floor")
-        .is_none());
+        .expect("probe hint")
+        .is_some());
 }
 
 /// Releases a fork checkpoint before its renewal can complete.
@@ -1583,6 +1582,7 @@ async fn bootstrap_writes_a_descriptor_before_the_head_and_fork_writes_none() {
         puts,
         vec![
             (descriptor_key.clone(), PutMode::CreateIfAbsent),
+            (hint(&source), PutMode::CreateIfAbsent),
             (wal_head(&source), PutMode::CreateIfAbsent),
         ]
     );
@@ -1793,7 +1793,7 @@ async fn a_creator_losing_after_the_head_read_leaves_only_an_orphan_descriptor()
     assert!(descriptors.contains(&content_store(&head.content_store_id)));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![wal_head(&namespace_id)]
+        vec![hint(&namespace_id), wal_head(&namespace_id)]
     );
 }
 

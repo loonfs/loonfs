@@ -391,7 +391,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     let manifest = match load_namespace_manifest_envelope(
         store,
         &record.namespace_id,
-        &record.manifest.manifest_object_id,
+        &record.manifest.manifest_no,
     )
     .await
     {
@@ -422,7 +422,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus, ManifestRef};
-    use loonfs_api::{ChangeSeq, CommitId, ManifestNo, ManifestObjectId};
+    use loonfs_api::{ChangeSeq, CommitId, ManifestNo};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::{tempdir, TempDir};
@@ -448,10 +448,7 @@ mod tests {
             manifest: ManifestRef {
                 owner_namespace_id: namespace_id,
                 manifest_no: ManifestNo(1),
-                manifest_object_id: ManifestObjectId::parse(
-                    "man_00000000000000000001-0123456789abcdef",
-                )
-                .expect("manifest object id"),
+
                 manifest_head_seq: ChangeSeq(1),
                 manifest_payload_checksum: "sha256:test".to_owned(),
             },

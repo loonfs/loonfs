@@ -244,23 +244,9 @@ pub struct GcRoots {
     pub reclaim_after_ms: Option<u64>,
     /// Incomplete root reads forbid metadata and content reclamation.
     pub degraded: bool,
-    /// Historical reference boundary selected using the fixed run clock.
-    pub anchor: GcReferenceAnchor,
-}
-
-/// Evidence that an old object has also been unreferenced long enough.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum GcReferenceAnchor {
-    /// Namespace never materialized metadata, or has no live readers.
-    NotNeeded {},
-    /// A fully aged manifest generation could not be established.
-    Missing {},
-    /// Lowest head sequence among the protected generation's candidates.
-    Manifest {
-        /// Lowest materialized sequence across the selected generation.
-        head_seq: ChangeSeq,
-    },
+    /// First number needed for discovery; this and later numbers cannot be swept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_start_manifest_no: Option<crate::ManifestNo>,
 }
 
 /// Root discovery and its bounded merge state.
@@ -296,44 +282,10 @@ pub enum GcMarkSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_key: Option<String>,
     },
-    /// Find the newest generation whose surviving candidates are all aged.
-    AnchorDiscovery {
-        /// Last key inspected, exclusive on resume.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_key: Option<String>,
-        /// Whether any recognizable manifest candidate was listed.
-        candidate_seen: bool,
-        /// Aged candidates in the current generation.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        current: Option<GcManifestRange>,
-        /// Previous complete aged generation.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        aged: Option<GcManifestRange>,
-    },
-    /// Protect every candidate in the selected generation.
-    AnchorManifests {
-        /// Selected inclusive manifest range.
-        range: GcManifestRange,
-        /// Last key inspected, exclusive on resume.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_key: Option<String>,
-    },
     /// Follow and validate one retained WAL segment per step.
     Wal {},
     /// Finish outstanding table merges.
     Done {},
-}
-
-/// Inclusive key range for one immutable manifest generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GcManifestRange {
-    /// Shared publication generation.
-    pub manifest_no: crate::ManifestNo,
-    /// First surviving aged candidate.
-    pub first_key: String,
-    /// Last surviving aged candidate.
-    pub last_key: String,
 }
 
 /// Durable sweep order; retired content follows upload cleanup.

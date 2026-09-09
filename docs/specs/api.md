@@ -1052,10 +1052,9 @@ that reason, and the fields sum to the total:
 
 | Reason | Means |
 | --- | --- |
-| `referenced` | Selected as unreachable, then found reachable by the re-verification that runs immediately before every deletion. A candidate the pass already knew was reachable is never examined, so this counts the namespace moving underneath the pass, not the size of its live set. |
+| `referenced` | Protected by the run's reference marks or needed for forward manifest discovery. |
 | `within_grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
-| `no_reference_manifest` | Unreachable and aged, but the namespace has published no manifest old enough to say what it referenced when the grace window opened. A reader that pinned its anchor inside the window may still be reading the object, so the pass keeps it until a manifest ages past the window. |
 | `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and segment deletion was suppressed wholesale. `retention_degraded` is set too. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
 | `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork record its target may still reach, a released record still inside its grace, or an active pin doing its job. |
@@ -1065,14 +1064,11 @@ that reason, and the fields sum to the total:
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
 
-An object that something once referenced is not collectable the moment it
-stops being referenced. Reads pin a head and the manifest under it and go on
-reading through that pair, so `grace_window_ms` runs from the unreferencing
-as well as from the write: a segment a reorganization folds away today is
-collected a grace window from now, not on the next pass. A namespace too
-young to have any manifest older than the window has nothing that dates its
-unreferencing yet, and a pass over one collects nothing and reports every
-candidate under `no_reference_manifest`.
+The current manifest and active checkpoint records protect their metadata
+segments. An unreferenced object becomes eligible for collection after its
+own provider timestamp is at least `grace_window_ms` old. A live namespace
+also retains the manifest numbers needed for forward discovery from its
+hint. Those intermediate manifests do not protect their runs.
 
 #### Deleting, retaining, and reclaiming
 
@@ -2668,8 +2664,8 @@ A conforming server must:
 5. resolve namespace content through the immutable `content_store_id` in the
    namespace head;
 6. implement tombstone-first delete;
-7. serve replay from the current verified manifest named by
-   `metadata/root.json`, plus the visible WAL segment chain, replayed as
+7. serve replay from the highest numbered verified manifest found through
+   `hint.json`, plus the visible WAL segment chain, replayed as
    logical commits; checkpoints pin manifest versions for retention, stable
    reads, restore, and forks;
 8. fold sibling names into name keys by the v0 rule (`format.md`, section

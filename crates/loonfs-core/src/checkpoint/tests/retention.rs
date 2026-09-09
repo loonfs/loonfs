@@ -10,7 +10,7 @@ struct ManifestChecksumMismatchOnceStore {
     checkpoint_prefix: String,
     manifest_key: String,
     mismatched_manifest: Bytes,
-    mismatch_armed: AtomicBool,
+    mismatch_armed: AtomicUsize,
     mismatch_injected: AtomicBool,
     checkpoint_writes: AtomicUsize,
 }
@@ -27,7 +27,7 @@ impl ManifestChecksumMismatchOnceStore {
             checkpoint_prefix: checkpoint_prefix(namespace_id),
             manifest_key,
             mismatched_manifest,
-            mismatch_armed: AtomicBool::new(false),
+            mismatch_armed: AtomicUsize::new(0),
             mismatch_injected: AtomicBool::new(false),
             checkpoint_writes: AtomicUsize::new(0),
         }
@@ -57,7 +57,12 @@ impl ObjectStore for ManifestChecksumMismatchOnceStore {
         let stored = self.inner.get(key, range).await?;
         if key == self.manifest_key
             && full_object
-            && self.mismatch_armed.swap(false, Ordering::SeqCst)
+            && self
+                .mismatch_armed
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                == Ok(1)
         {
             return Ok(Some(self.mismatched_manifest.clone()));
         }
@@ -82,7 +87,7 @@ impl ObjectStore for ManifestChecksumMismatchOnceStore {
             // Only the first verification observes the contradiction. If the
             // operation retries, the next basis is sound and would hide it.
             if !self.mismatch_injected.swap(true, Ordering::SeqCst) {
-                self.mismatch_armed.store(true, Ordering::SeqCst);
+                self.mismatch_armed.store(2, Ordering::SeqCst);
             }
         }
         result
@@ -105,7 +110,7 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> ManifestNo {
-    load_metadata_root_object(store, namespace_id)
+    load_current_manifest(store, namespace_id)
         .await
         .expect("read metadata root")
         .state
@@ -332,7 +337,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let root = load_metadata_root_object(&store, &namespace_id)
+    let root = load_current_manifest(&store, &namespace_id)
         .await
         .expect("load metadata root")
         .state;
@@ -340,7 +345,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         &store,
         None,
         &namespace_id,
-        &root.manifest.manifest_object_id,
+        &root.manifest.manifest_no,
     )
     .await
     .expect("load current manifest")
@@ -410,7 +415,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .await
         .expect("create checkpoint");
 
-    let root = load_metadata_root_object(&store, &namespace_id)
+    let root = load_current_manifest(&store, &namespace_id)
         .await
         .expect("load metadata root")
         .state;
@@ -418,7 +423,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         &store,
         None,
         &namespace_id,
-        &root.manifest.manifest_object_id,
+        &root.manifest.manifest_no,
     )
     .await
     .expect("load current manifest");
@@ -475,7 +480,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         .await
         .expect("create checkpoint");
 
-    let root = load_metadata_root_object(&setup_store, &namespace_id)
+    let root = load_current_manifest(&setup_store, &namespace_id)
         .await
         .expect("load metadata root")
         .state;
@@ -483,7 +488,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         &setup_store,
         None,
         &namespace_id,
-        &root.manifest.manifest_object_id,
+        &root.manifest.manifest_no,
     )
     .await
     .expect("load current manifest");
@@ -918,7 +923,7 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
         manifest: loonfs_api::wire::control::ManifestRef {
             owner_namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(0),
-            manifest_object_id: manifest_object_id(ManifestNo(0)),
+
             manifest_head_seq: ChangeSeq(0),
             manifest_payload_checksum: "sha256:stale".to_owned(),
         },
@@ -1020,7 +1025,7 @@ async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_recor
                     operation.kind(),
                     loonfs_test_support::stores::OperationKind::Get { .. }
                 )
-                && selected_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+                && selected_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 3
         },
         InjectedError::Transport("injected basis verification failure".to_owned()),
     );
@@ -1049,7 +1054,7 @@ async fn checkpoint_basis_verification_store_failure_surfaces_and_releases_recor
     assert_eq!(store.attempts(), 1, "only the verification read fails");
     assert_eq!(
         manifest_reads.load(std::sync::atomic::Ordering::SeqCst),
-        2,
+        4,
         "the injected failure follows the projection's manifest read"
     );
 
@@ -1950,7 +1955,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
 }
 
 #[tokio::test]
-async fn a_missing_floor_reads_as_retain_everything() {
+async fn a_namespace_retains_from_birth_before_retention_advances() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1958,14 +1963,6 @@ async fn a_missing_floor_reads_as_retain_everything() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    assert!(
-        store
-            .head(&loonfs_objectstore::keys::wal_floor(&namespace_id))
-            .await
-            .expect("probe floor")
-            .is_none(),
-        "creation writes no floor object"
-    );
 
     let head = crate::namespace::control::load_head_object(&store, &namespace_id)
         .await
@@ -2000,7 +1997,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     )
     .await
     .expect("seed file");
-    let root_before = load_metadata_root_object(&store, &namespace_id)
+    let root_before = load_current_manifest(&store, &namespace_id)
         .await
         .expect("read root")
         .state;
@@ -2016,7 +2013,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         "expected budget error, got {error:?}"
     );
 
-    let root_after = load_metadata_root_object(&store, &namespace_id)
+    let root_after = load_current_manifest(&store, &namespace_id)
         .await
         .expect("read root")
         .state;
@@ -2059,7 +2056,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     super::flush::flush_wal(&store, &namespace_id, &context)
         .await
         .expect("publish a delta run to fold");
-    let root_before = load_metadata_root_object(&store, &namespace_id)
+    let root_before = load_current_manifest(&store, &namespace_id)
         .await
         .expect("read root")
         .state;
@@ -2084,7 +2081,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         "expected budget error, got {error:?}"
     );
 
-    let root_after = load_metadata_root_object(&store, &namespace_id)
+    let root_after = load_current_manifest(&store, &namespace_id)
         .await
         .expect("read root")
         .state;
@@ -2115,9 +2112,9 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     MetadataFamilyGroup,
     super::reorganize::ReorganizationSelection,
 ) {
-    let manifest_object_id = current_manifest_object_id(store, namespace_id).await;
+    let manifest_number = current_manifest_number(store, namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_object_id)
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
             .await
             .expect("load manifest segments");
     let group = super::reorganize::select_family_group(

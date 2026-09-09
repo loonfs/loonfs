@@ -1,17 +1,18 @@
-//! Immutable view inputs are cached once per handle.
+//! Cached reads and current retention-floor reads use different manifest requests.
 
 use loonfs::{
     CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
     NamespaceId, PutFileOptions, SharedObjectStore,
 };
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
-fn immutable_input_gets(gets: &[String]) -> Vec<String> {
+fn manifest_gets(gets: &[String]) -> Vec<String> {
     gets.iter()
-        .filter(|key| key.ends_with(".manifest.json"))
+        .filter(|key| loonfs_objectstore::layout::manifest_no_of(key).is_some())
         .cloned()
         .collect()
 }
@@ -56,7 +57,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
 }
 
 #[tokio::test]
-async fn warm_handles_stop_fetching_immutable_view_inputs() {
+async fn warm_reads_reuse_their_manifest_and_writes_refresh_the_retention_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -74,22 +75,18 @@ async fn warm_handles_stop_fetching_immutable_view_inputs() {
         .get_path_entry(&namespace_id, "/docs/file-0.txt", Default::default())
         .await
         .expect("first stat");
-    let warmup = immutable_input_gets(&recording.take_get_keys());
-    assert!(
-        !warmup.is_empty(),
-        "the first read on a handle loads the immutable inputs"
-    );
+    let warmup = manifest_gets(&recording.take_get_keys());
+    assert!(!warmup.is_empty(), "the first read loads its manifest");
 
     reader
         .get_path_entry(&namespace_id, "/docs/file-1.txt", Default::default())
         .await
         .expect("second stat");
-    let repeats = immutable_input_gets(&recording.take_get_keys());
+    let repeats = manifest_gets(&recording.take_get_keys());
     assert_eq!(
         repeats,
         Vec::<String>::new(),
-        "a warm handle must not re-fetch the namespace config, the \
-         content-store descriptor, or the manifest object"
+        "a warm reader reuses its manifest"
     );
 
     let writer = FsWriter::builder_with_store(store.clone())
@@ -107,11 +104,8 @@ async fn warm_handles_stop_fetching_immutable_view_inputs() {
         )
         .await
         .expect("first write");
-    let warmup = immutable_input_gets(&recording.take_get_keys());
-    assert!(
-        !warmup.is_empty(),
-        "the first write on a handle loads the immutable inputs"
-    );
+    let warmup = manifest_gets(&recording.take_get_keys());
+    assert!(!warmup.is_empty(), "the first write loads its manifest");
 
     writer
         .put_file_bytes(
@@ -122,11 +116,13 @@ async fn warm_handles_stop_fetching_immutable_view_inputs() {
         )
         .await
         .expect("second write");
-    let repeats = immutable_input_gets(&recording.take_get_keys());
+    let repeats = manifest_gets(&recording.take_get_keys());
     assert_eq!(
         repeats,
-        Vec::<String>::new(),
-        "a warm writer must not re-fetch the namespace config, the \
-         content-store descriptor, or the manifest object"
+        vec![
+            metadata_manifest_object(&namespace_id, &loonfs_api::ManifestNo(1)),
+            metadata_manifest_object(&namespace_id, &loonfs_api::ManifestNo(2)),
+        ],
+        "a warm writer discovers the current retention floor"
     );
 }

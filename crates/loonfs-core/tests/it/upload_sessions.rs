@@ -74,7 +74,7 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
 
 fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore<LocalFsStore> {
     let wal_prefix = format!("namespaces/{namespace}/wal/segments/");
-    let manifest_prefix = format!("namespaces/{namespace}/metadata/manifests/");
+    let manifest_prefix = format!("namespaces/{namespace}/manifests/");
     let store = FailStore::new(
         LocalFsStore::new(root.as_ref()).expect("store"),
         KeyPredicate::new(move |key| {
