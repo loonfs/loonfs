@@ -269,6 +269,7 @@ The script creates a temporary namespace and deletes it before exiting.
 - Set memory and open-file limits before enabling the local cache.
 - Monitor health, readiness, metrics, and repeated error logs.
 - Run the smoke test after installation and every upgrade.
+- Check the release notes for format compatibility before an upgrade; a namespace prefix copy or a fork is not a complete backup.
 
 ## Probes and metrics
 
@@ -403,7 +404,8 @@ helm upgrade loonfs-server oci://ghcr.io/loonfs/charts/loonfs-server \
 The chart stops the old pod before starting the new one. The API is
 unavailable during this period. Run the smoke test after the rollout.
 
-To roll back the Helm release:
+Roll back only to a release whose notes say it reads this release's durable
+format. A flush is not a format downgrade. To roll back the Helm release:
 
 ```bash
 helm rollback loonfs-server --namespace loonfs

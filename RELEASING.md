@@ -34,7 +34,9 @@ only after the normal PR checks pass.
 ## 2. Publish the GitHub release
 
 Write the release notes before publishing. Start with a short summary of the
-important changes, followed by the generated PR list:
+important changes and whether the previous release reads this release's
+durable format (rollback is supported only where the notes say so), followed
+by the generated PR list:
 
 ```sh
 gh api repos/loonfs/loonfs/releases/generate-notes -f tag_name=vX.Y.Z --jq .body
