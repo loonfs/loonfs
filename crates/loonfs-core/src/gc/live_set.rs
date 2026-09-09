@@ -18,7 +18,6 @@ pub(super) struct LiveSet {
     pub(super) reclaim_after_ms: Option<u64>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
-    pub(super) checkpoints: Vec<String>,
     folded_and_floor_wal_no: Option<WalNo>,
 }
 
@@ -35,7 +34,6 @@ impl LiveSet {
             reclaim_after_ms: head.status.reclaim_after_ms(),
             discovery_start_manifest_no: snapshot.root.discovery_start_manifest_no,
             objects: BTreeSet::from([snapshot.root.object_key.clone()]),
-            checkpoints: Vec::new(),
             folded_and_floor_wal_no: (!head.status.is_deleted())
                 .then_some(head.last_folded_wal_no.min(head.retention_floor_wal_no)),
         };
@@ -69,7 +67,6 @@ impl LiveSet {
                 )
                 .await?;
             }
-            live.checkpoints.push(key);
         }
         Ok(live)
     }

@@ -3494,15 +3494,6 @@
               "gc"
             ],
             "type": "string"
-          },
-          "max_steps": {
-            "description": "Maximum candidates that need a store request after the listing (an age\ncheck, a record read, or a deletion); the default is 1024.",
-            "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
           }
         },
         "required": [
@@ -3593,10 +3584,6 @@
       "RunMaintenanceResponseGc": {
         "description": "Counts and deadlines from one collection call.",
         "properties": {
-          "budget_exhausted": {
-            "description": "Whether the pass reached `max_steps` before completion.",
-            "type": "boolean"
-          },
           "deleted": {
             "$ref": "#/components/schemas/DeletedObjectCounts",
             "description": "Objects the pass deleted, split by object family."
@@ -3644,7 +3631,6 @@
           "released_checkpoints",
           "retained_candidates",
           "retained",
-          "budget_exhausted",
           "kind"
         ],
         "type": "object"
@@ -5205,7 +5191,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call reads current roots, then examines up to 1024 candidates unless `max_steps` says otherwise. It returns `budget_exhausted` when candidates remain. Every call lists from the start and keeps no continuation. Root discovery is outside the candidate budget.",
+        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call reads current roots, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
         "operationId": "run_maintenance",
         "parameters": [
           {

@@ -1608,7 +1608,6 @@ mod tests {
                 referenced: 2,
                 ..loonfs_api::RetainedCandidates::default()
             },
-            budget_exhausted: false,
             next_reclamation_at_ms: None,
             reclaim_after_ms: None,
         };

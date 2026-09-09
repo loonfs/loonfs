@@ -92,9 +92,6 @@ pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 /// Direct expiry comparisons do not add this margin to stored deadlines.
 pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 
-/// Default work budget for one garbage-collection invocation.
-pub const DEFAULT_GC_MAX_STEPS: u64 = 1024;
-
 const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right {
         left

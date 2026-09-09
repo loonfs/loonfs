@@ -251,10 +251,7 @@ impl FsMaintenance {
                 .map(RunMaintenanceResponse::MetadataCompaction),
             RunMaintenanceRequest::Gc(request) => {
                 self.load_maintenance_status(namespace_id, true).await?;
-                let mut config = crate::options::gc_config_from_request(request);
-                config
-                    .max_steps
-                    .get_or_insert(loonfs_core::limits::DEFAULT_GC_MAX_STEPS);
+                let config = crate::options::gc_config_from_request(request);
                 self.gc_namespace(namespace_id, &config)
                     .await
                     .map(RunMaintenanceResponse::Gc)

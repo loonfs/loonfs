@@ -74,7 +74,6 @@ pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
     let defaults = GcConfig::default();
     GcConfig {
         grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
-        max_steps: request.max_steps,
     }
 }
 
@@ -164,12 +163,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_gc_request_translates_without_resolving_its_budget() {
-        let explicit = gc_config_from_request(GcRequest::default());
-        assert_eq!(explicit.max_steps, None);
-    }
-
-    #[test]
     fn an_absent_threshold_resolves_to_the_default() {
         assert_eq!(
             MetadataMaintenanceOptions::from_request(MetadataMaintenanceRequest::default())
@@ -187,14 +180,5 @@ mod tests {
             .expect_err("the threshold is out of range");
             assert_eq!(error.code(), crate::ErrorCode::InvalidRequest);
         }
-    }
-
-    #[test]
-    fn gc_conversion_preserves_explicit_budget() {
-        let gc = gc_config_from_request(GcRequest {
-            max_steps: Some(7),
-            ..GcRequest::default()
-        });
-        assert_eq!(gc.max_steps, Some(7));
     }
 }

@@ -15,7 +15,7 @@ use crate::args::{
     RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
-use crate::render::{gc_pass_line, write_stderr_progress};
+use crate::render::write_stderr_progress;
 use crate::resolve::parse_namespace_id;
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
@@ -23,7 +23,6 @@ use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
     AdvanceRetentionRequest, ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode,
     GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest, RunMaintenanceRequest,
-    RunMaintenanceResponse,
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
@@ -75,7 +74,7 @@ pub(crate) async fn run_maintenance_command(
                 run_maintenance_retention_advance(kind, config_path, args).await
             }
         },
-        MaintenanceCommand::Gc(args) => run_maintenance_gc(kind, config_path, args, runtime).await,
+        MaintenanceCommand::Gc(args) => run_maintenance_gc(kind, config_path, args).await,
         MaintenanceCommand::Store { command } => match command {
             MaintenanceStoreCommand::Probe(args) => {
                 run_maintenance_store_probe(kind, config_path, args).await
@@ -105,59 +104,26 @@ async fn run_maintenance_metadata(
     ))
 }
 
-/// Runs garbage collection until it finishes unless `--max-steps` requests
-/// one bounded pass. Multi-pass human output writes progress to stderr and a
-/// combined summary to stdout. JSON and single-pass output contain no progress
-/// lines.
 async fn run_maintenance_gc(
     kind: CommandKind,
     config_path: &Path,
     args: MaintenanceGcArgs,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let single_pass = args.max_steps.is_some();
-    let max_steps = Some(args.max_steps.unwrap_or(loonfs::DEFAULT_GC_MAX_STEPS));
-    let mut progress = PassProgress::new(runtime);
-    let mut total = None;
-    loop {
-        let response = context
-            .target
-            .run_maintenance(
-                context.namespace(),
-                RunMaintenanceRequest::Gc(GcRequest {
-                    grace_window_ms: args.grace_window_ms,
-                    max_steps,
-                }),
-            )
-            .await
-            .map_err(|error| context.fail(kind, error))?;
-        let RunMaintenanceResponse::Gc(pass) = response else {
-            return Err(context.fail(
-                kind,
-                crate::error::CliError::new(
-                    ErrorCode::ServerError.as_str(),
-                    "maintenance GC returned a non-GC response",
-                ),
-            ));
-        };
-        let changed =
-            pass.deleted != Default::default() || pass.released_checkpoints != Default::default();
-        let complete = single_pass || !pass.budget_exhausted || !changed;
-        progress.pass_completed(gc_pass_line(&pass));
-        match &mut total {
-            Some(total) => accumulate_gc_response(total, pass),
-            None => total = Some(pass),
-        }
-        if complete {
-            break;
-        }
-    }
-    let response = total.expect("GC loop should run at least once");
+    let response = context
+        .target
+        .run_maintenance(
+            context.namespace(),
+            RunMaintenanceRequest::Gc(GcRequest {
+                grace_window_ms: args.grace_window_ms,
+            }),
+        )
+        .await
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(context.output(
         kind,
-        CommandData::MaintenanceRan(MaintenanceRan::new(RunMaintenanceResponse::Gc(response))),
+        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
     ))
 }
 
@@ -238,23 +204,6 @@ where
         progress.pass_completed(describe(&pass));
         accumulate(&mut total, pass);
     }
-}
-
-fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::GcResponse) {
-    total.deleted.add(&pass.deleted);
-    total.released_checkpoints.add(&pass.released_checkpoints);
-    total.retained_candidates += pass.retained_candidates;
-    total.retained.add(&pass.retained);
-    total.budget_exhausted = pass.budget_exhausted;
-    // The summary keeps the soonest obligation any pass reported — the same
-    // soonest-wake rule the maintenance runner applies. A later pass with
-    // nothing deferred does not erase an earlier pass's pending horizon.
-    total.next_reclamation_at_ms = match (total.next_reclamation_at_ms, pass.next_reclamation_at_ms)
-    {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
-    total.reclaim_after_ms = pass.reclaim_after_ms.or(total.reclaim_after_ms);
 }
 
 async fn run_maintenance_checkpoint(
@@ -747,37 +696,6 @@ async fn run_maintenance_index_disable(
 mod tests {
     use super::*;
     use crate::progress::ProgressMode;
-    use loonfs_api::{GcResponse, NamespaceId};
-
-    #[test]
-    fn the_summary_totals_reclamation_and_keeps_retirement_and_the_soonest_deadline() {
-        let namespace = NamespaceId::parse("demo").expect("namespace id");
-        let mut total = GcResponse::empty(namespace.clone());
-
-        let mut first = GcResponse::empty(namespace.clone());
-        first.released_checkpoints.expired = 2;
-        first.deleted.content_objects = 1;
-        first.deleted.retired_content_objects = 2;
-        first.next_reclamation_at_ms = Some(9_000);
-        accumulate_gc_response(&mut total, first);
-
-        let mut second = GcResponse::empty(namespace.clone());
-        second.released_checkpoints.expired = 1;
-        second.deleted.content_objects = 3;
-        second.deleted.retired_content_objects = 4;
-        second.reclaim_after_ms = Some(12_000);
-        accumulate_gc_response(&mut total, second);
-
-        let mut third = GcResponse::empty(namespace);
-        third.next_reclamation_at_ms = Some(12_000);
-        accumulate_gc_response(&mut total, third);
-
-        assert_eq!(total.released_checkpoints.expired, 3);
-        assert_eq!(total.deleted.content_objects, 4);
-        assert_eq!(total.deleted.retired_content_objects, 6);
-        assert_eq!(total.reclaim_after_ms, Some(12_000));
-        assert_eq!(total.next_reclamation_at_ms, Some(9_000));
-    }
 
     fn runtime(json: bool) -> RuntimeBehavior {
         RuntimeBehavior {

@@ -95,7 +95,6 @@ async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence(
     assert_eq!(current.envelope.payload().retention_floor_wal_no, WalNo(1));
     let config = crate::gc::GcConfig {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
-        max_steps: None,
     };
     let aged = context(config.grace_window_ms + 1);
     let report = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)

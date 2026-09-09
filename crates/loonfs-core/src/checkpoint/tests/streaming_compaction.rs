@@ -3201,7 +3201,6 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     let store = MetadataMapStore::aged(failing, KeyPredicate::any());
     let config = crate::gc::GcConfig {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
-        max_steps: None,
     };
     for age_ms in [
         UNREFERENCED_SEGMENT_MIN_AGE_MS,

@@ -2354,6 +2354,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
             metadata_manifest_prefix(&live_namespace),
             wal_segment_prefix(&live_namespace),
             metadata_segment_prefix(&live_namespace),
+            checkpoint_prefix(&live_namespace),
             upload_session_prefix(&live_namespace),
         ],
         "core GC must list only its own core prefixes"

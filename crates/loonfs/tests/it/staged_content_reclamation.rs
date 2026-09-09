@@ -39,7 +39,6 @@ const GRACE_MS: u64 = 60 * 60 * 1000;
 fn config() -> GcConfig {
     GcConfig {
         grace_window_ms: GRACE_MS,
-        max_steps: None,
     }
 }
 

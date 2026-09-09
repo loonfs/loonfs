@@ -1,16 +1,17 @@
 //! One namespace collection call with a fixed clock and no durable progress.
 
 use super::families::CandidateFamily;
+use super::fork_checkpoints::release_source_checkpoint;
 use super::live_set::LiveSet;
 use super::sweep::Sweep;
 use super::uploads::{PublicationView, UploadSweepContext};
-use super::{GcConfig, PassBudget};
+use super::GcConfig;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
 use crate::namespace::control_snapshot::load_control_snapshot;
-use futures::{stream, StreamExt};
+use futures::StreamExt;
 use loonfs_api::{GcResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -36,51 +37,47 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         &basis,
     );
     let retired_content = live.retired_content(context.now_ms);
-    let mut budget = PassBudget::new(config.max_steps);
     let mut checkpoints_retained = false;
-    let mut sweep = Sweep {
-        store,
-        namespace_id,
-        grace_window_ms: config.grace_window_ms,
-        mutation: context,
-        live: &live,
-        view: &view,
-        budget: &mut budget,
-        upload_sweep: UploadSweepContext::new(
-            store,
-            namespace_id,
-            live.content_store_id.clone(),
-            retired_content,
-            config.grace_window_ms,
-            context,
-        ),
-        checkpoints_retained: &mut checkpoints_retained,
-        report: &mut report,
-    };
     for family in CandidateFamily::ALL {
         if family == CandidateFamily::OwnedContent {
             if !retired_content {
                 continue;
             }
             verify_retired_owner(store, namespace_id, &live, context.now_ms).await?;
-        }
-        let prefix = family.prefix(namespace_id, &live);
-        let mut listing = match family {
-            CandidateFamily::Checkpoints => {
-                stream::iter(live.checkpoints.clone().into_iter().map(Ok)).boxed()
+            if let Some(basis) = &snapshot.head.state.fork_basis {
+                if release_source_checkpoint(store, basis).await? {
+                    report.released_checkpoints.fork += 1;
+                    report.deleted.checkpoint_records += 1;
+                }
             }
-            _ => store.list_prefix_stream(&prefix),
+        }
+        let mut sweep = Sweep {
+            store,
+            namespace_id,
+            grace_window_ms: config.grace_window_ms,
+            mutation: context,
+            live: &live,
+            view: &view,
+            upload_sweep: UploadSweepContext::new(
+                store,
+                namespace_id,
+                live.content_store_id.clone(),
+                retired_content,
+                config.grace_window_ms,
+                context,
+            ),
+            checkpoints_retained: &mut checkpoints_retained,
+            report: &mut report,
         };
+        let prefix = family.prefix(namespace_id, &live);
+        let mut listing = store.list_prefix_stream(&prefix);
         while let Some(key) = listing
             .next()
             .await
             .transpose()
             .map_err(|error| CoreError::store(&prefix, &error))?
         {
-            if !sweep.candidate(family, &key).await? {
-                sweep.report.budget_exhausted = true;
-                return retirement_report(store, namespace_id, context.now_ms, report).await;
-            }
+            sweep.candidate(family, &key).await?;
         }
         if family == CandidateFamily::Checkpoints
             && live.namespace_deleted

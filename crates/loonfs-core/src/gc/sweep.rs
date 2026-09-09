@@ -5,7 +5,6 @@ use super::reap::{grace_age, sweep_checkpoint_record, CheckpointSweep, GraceAge}
 use super::uploads::{
     sweep_upload_session, PublicationView, UploadSessionSweep, UploadSweepContext,
 };
-use super::PassBudget;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
@@ -20,20 +19,17 @@ pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
     pub(super) mutation: &'a MutationContext,
     pub(super) live: &'a LiveSet,
     pub(super) view: &'a PublicationView<'a, 'store, S>,
-    pub(super) budget: &'a mut PassBudget,
     pub(super) upload_sweep: UploadSweepContext<'a, S>,
     pub(super) checkpoints_retained: &'a mut bool,
     pub(super) report: &'a mut GcResponse,
 }
 
 impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
-    /// Decides one listed key. Returns `false` when the key needs a store
-    /// request and the budget has none left; the key is then untouched.
-    pub(super) async fn candidate(&mut self, family: CandidateFamily, key: &str) -> Result<bool> {
+    pub(super) async fn candidate(&mut self, family: CandidateFamily, key: &str) -> Result<()> {
         if !family.recognizes(key) {
             self.report.retain(RetainedReason::UnrecognizedKey);
             *self.checkpoints_retained |= family == CandidateFamily::Checkpoints;
-            return Ok(true);
+            return Ok(());
         }
         match family {
             CandidateFamily::WalSegments => {
@@ -49,19 +45,10 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                     .await
             }
             CandidateFamily::Checkpoints => {
-                if !self.budget.try_charge() {
-                    return Ok(false);
-                }
                 *self.checkpoints_retained |= !self.process_checkpoint(key).await?;
-                Ok(true)
+                Ok(())
             }
-            CandidateFamily::UploadSessions => {
-                if !self.budget.try_charge() {
-                    return Ok(false);
-                }
-                self.process_upload_session(key).await?;
-                Ok(true)
-            }
+            CandidateFamily::UploadSessions => self.process_upload_session(key).await,
             CandidateFamily::OwnedContent => {
                 let prefix = family.prefix(self.namespace_id, self.live);
                 if !key.starts_with(&prefix)
@@ -70,14 +57,11 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                     })
                 {
                     self.report.retain(RetainedReason::UnrecognizedKey);
-                    return Ok(true);
-                }
-                if !self.budget.try_charge() {
-                    return Ok(false);
+                    return Ok(());
                 }
                 self.delete_key(key).await?;
                 self.report.deleted.retired_content_objects += 1;
-                Ok(true)
+                Ok(())
             }
         }
     }
@@ -86,22 +70,19 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         family: CandidateFamily,
         key: &str,
         deleted: fn(&mut DeletedObjectCounts) -> &mut u64,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if family == CandidateFamily::Manifests
             && loonfs_objectstore::layout::manifest_no_of(key)
                 .is_some_and(|number| number >= self.live.discovery_start_manifest_no)
         {
             self.report.retain(RetainedReason::Referenced);
-            return Ok(true);
+            return Ok(());
         }
         if self.live.objects.contains(key)
             || (family == CandidateFamily::WalSegments && self.live.protects_wal(key))
         {
             self.report.retain(RetainedReason::Referenced);
-            return Ok(true);
-        }
-        if !self.budget.try_charge() {
-            return Ok(false);
+            return Ok(());
         }
         if family == CandidateFamily::Manifests {
             let successor = loonfs_objectstore::layout::manifest_no_of(key)
@@ -123,7 +104,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                 // predecessor while its successor is young.
                 if let Some(reason) = age.retained_reason() {
                     self.report.retain(reason);
-                    return Ok(true);
+                    return Ok(());
                 }
             }
         }
@@ -137,7 +118,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         if self.sweep_aged(key, min_age_ms).await? {
             *deleted(&mut self.report.deleted) += 1;
         }
-        Ok(true)
+        Ok(())
     }
     async fn process_checkpoint(&mut self, key: &str) -> Result<bool> {
         let decision = sweep_checkpoint_record(

@@ -354,7 +354,6 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
     let config = crate::gc::GcConfig {
         grace_window_ms: grace,
-        max_steps: None,
     };
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -441,7 +440,6 @@ async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number()
     let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
     let config = crate::gc::GcConfig {
         grace_window_ms: grace,
-        max_steps: None,
     };
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),

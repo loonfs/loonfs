@@ -172,7 +172,6 @@ fn no_schema_a_response_reaches_admits_null() {
 const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("DeletedObjectCounts", "content_objects"),
     ("DeletedObjectCounts", "upload_sessions"),
-    ("RunMaintenanceResponseGc", "budget_exhausted"),
     ("RunMaintenanceResponseGc", "deleted"),
     ("RunMaintenanceResponseGc", "released_checkpoints"),
     ("RunMaintenanceResponseGc", "retained"),
