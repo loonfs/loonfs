@@ -442,6 +442,15 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     };
 
     Ok(NamespaceManifestPayload {
+        compactor_epoch: if !projection.basis.is_owned_by(namespace_id) {
+            0
+        } else {
+            projection
+                .manifest_segments
+                .manifest()
+                .payload()
+                .compactor_epoch
+        },
         namespace_id: namespace_id.clone(),
         manifest_no,
         head_seq,

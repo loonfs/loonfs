@@ -16,7 +16,6 @@
 | **Revision** | One immutable committed version of a file's content. Revisions are ordered by `revision_no` within an inode. |
 | **Namespace manifest** | The immutable object that describes one durable namespace file set: metadata segments, manifest number, head summary, fork references, and checkpoint records. |
 | **Checkpoint** | A durable pinned reference to one manifest version and namespace sequence. It lets readers and retention logic rely on that manifest without replaying the entire WAL history. |
-| **Compaction lease** | A compaction lease is the durable, family-group-specific claim that fences concurrent metadata compactions and permits takeover after expiry. |
 | **Family group** | A family group is one related set of metadata families that bounded reorganization and streaming compaction plan and publish together. |
 | **Snapshot** | An in-process read view. It may be stable for one operation or session, but it is not a durable checkpoint unless explicitly recorded as one. |
 | **Content object** | One immutable object containing file bytes. In v0, each file revision stores the whole file as one object. |

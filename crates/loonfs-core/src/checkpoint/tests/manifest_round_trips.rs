@@ -828,6 +828,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     .await
     .expect("write empty metadata run segments");
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
+        compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),
 

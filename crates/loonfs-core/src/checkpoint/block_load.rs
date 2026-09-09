@@ -261,7 +261,7 @@ mod tests {
 
     fn manifest_block() -> DecodedMetadataSegmentBlock {
         let manifest = loonfs_api::wire::manifest::decode_namespace_manifest_json(include_bytes!(
-            "../../../loonfs-api/tests/golden/namespace_manifest.v4.json"
+            "../../../loonfs-api/tests/golden/namespace_manifest.v1.json"
         ))
         .expect("valid manifest fixture");
         DecodedMetadataSegmentBlock::Manifest {

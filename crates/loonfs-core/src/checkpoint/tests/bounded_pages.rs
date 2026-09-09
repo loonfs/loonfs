@@ -1,7 +1,7 @@
 //! Bounded loading must return the same raw-row prefix as an unbounded scan.
 
 use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
-use super::super::build::{write_manifest_segment, MetadataSegmentDestination};
+use super::super::build::write_manifest_segment;
 use super::*;
 
 const FAMILY: ApiMetadataRowFamily = ApiMetadataRowFamily::DirentryBinds;
@@ -51,9 +51,7 @@ async fn segment(store: &impl ObjectStore, rows: &[MetadataRow]) -> MetadataSegm
     );
     write_manifest_segment(
         store,
-        MetadataSegmentDestination::Published {
-            namespace_id: &NamespaceId::parse("bounded-pages").expect("namespace"),
-        },
+        &NamespaceId::parse("bounded-pages").expect("namespace"),
         FAMILY,
         0,
         built,

@@ -54,15 +54,12 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
                 DurableObjectFamily::MetadataManifest => {
                     summary.manifest_objects += 1;
                 }
-                DurableObjectFamily::MetadataSegment
-                | DurableObjectFamily::MetadataCompactionStaging => {
+                DurableObjectFamily::MetadataSegment => {
                     summary.compacted_metadata_objects += 1;
                 }
                 DurableObjectFamily::CheckpointRecord
-                | DurableObjectFamily::CompactionOutputProtection
                 | DurableObjectFamily::GcRun
                 | DurableObjectFamily::GcMarkPage
-                | DurableObjectFamily::MetadataCompactionLease
                 | DurableObjectFamily::UploadSession
                 | DurableObjectFamily::ContentBlob
                 | DurableObjectFamily::ContentStore => {}

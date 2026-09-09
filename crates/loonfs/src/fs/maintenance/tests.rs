@@ -523,3 +523,84 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
         "and the explicit call runs it, got {outcome:?}"
     );
 }
+
+#[tokio::test]
+async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+    let directory = tempdir().expect("tempdir");
+    let namespace = namespace_id("shared-claim");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace,
+        )),
+    ));
+    let shared: SharedObjectStore = store.clone();
+    let writer = FsWriter::builder_with_store(shared.clone())
+        .writer_id("writer")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace, CreateNamespaceOptions::default())
+        .await
+        .expect("namespace");
+    let maintenance = FsMaintenance::builder_with_store(shared.clone())
+        .actor_id("maintenance")
+        .build()
+        .await
+        .expect("maintenance");
+    maintenance
+        .create_checkpoint(
+            &namespace,
+            CreateCheckpointOptions {
+                name: "basis".to_owned(),
+                ttl_ms: None,
+            },
+        )
+        .await
+        .expect("checkpoint");
+    let before = current_manifest_payload(store.as_ref(), &namespace).await;
+    store.reset();
+    assert!(matches!(
+        maintenance
+            .reorganize_once(&namespace, MetadataCompactionPolicy::SizeTiered)
+            .await
+            .expect("no work"),
+        super::ReorganizationStep::Concluded(ReorganizeStepOutcome::NotNeeded)
+    ));
+    assert_eq!(store.counts().puts, 0);
+    let cloned = maintenance.clone();
+    let (first, second) = tokio::join!(
+        maintenance.compactor_epoch(&namespace),
+        cloned.compactor_epoch(&namespace)
+    );
+    let epoch = first.expect("first claim");
+    assert_eq!(second.expect("shared claim"), epoch);
+    assert_eq!(store.counts().create_if_absent_puts, 1);
+    let mut expected = before.clone();
+    expected.manifest_no = before.manifest_no.successor().expect("next manifest");
+    expected.compactor_epoch = before.compactor_epoch + 1;
+    assert_eq!(
+        current_manifest_payload(store.as_ref(), &namespace).await,
+        expected
+    );
+    let other = FsMaintenance::builder_with_store(shared)
+        .actor_id("other")
+        .build()
+        .await
+        .expect("other process");
+    assert_eq!(
+        other.compactor_epoch(&namespace).await.expect("new claim"),
+        epoch + 1
+    );
+    store.reset();
+    assert_eq!(
+        maintenance
+            .compactor_epoch(&namespace)
+            .await
+            .expect("remembered claim"),
+        epoch
+    );
+    assert_eq!(store.counts().puts, 0);
+}

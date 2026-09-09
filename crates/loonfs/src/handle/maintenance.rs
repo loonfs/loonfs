@@ -17,6 +17,8 @@ use std::sync::Arc;
 pub struct FsMaintenance {
     pub(crate) core: ReadCore,
     pub(crate) actor: WriterIdentity,
+    pub(crate) compactor_epochs:
+        Arc<tokio::sync::Mutex<std::collections::BTreeMap<crate::NamespaceId, u64>>>,
     /// A narrowed per-step row budget for the tests that need a family group
     /// whose base run no bounded step can fold. See
     /// [`Self::starve_reorganization_row_budget`].
@@ -44,6 +46,7 @@ impl FsMaintenance {
         Ok(Self {
             core,
             actor: WriterIdentity::new(actor_id)?,
+            compactor_epochs: Arc::default(),
             #[cfg(test)]
             reorganization_row_budget: None,
         })
@@ -147,6 +150,7 @@ impl FsMaintenanceBuilder {
         Ok(FsMaintenance {
             core: self.core.open_read_core()?,
             actor,
+            compactor_epochs: Arc::default(),
             #[cfg(test)]
             reorganization_row_budget: None,
         })

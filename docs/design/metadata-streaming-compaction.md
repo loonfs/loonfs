@@ -6,7 +6,7 @@ Status: accepted
 
 LoonFS stores namespace metadata in immutable runs. The oldest data is stored in a base run, and flushes add newer delta runs. Routine maintenance merges complete runs within a fixed per-step budget, but a family group can eventually become larger than that budget. Once this happens, ordinary maintenance can reduce the number of delta runs but cannot rebuild the base run or apply retention across the complete group.
 
-This design adds a background streaming compaction for oversized metadata family groups. The job reads a fixed snapshot of the selected runs and captures a retention floor, which is the sequence number below which obsolete history may be removed. It applies that floor throughout the job, writes output segments under a job-specific prefix, and publishes the result with one manifest update. Readers continue using the existing manifest until that final update succeeds.
+This design adds a background streaming compaction for oversized metadata family groups. The job reads a fixed snapshot of the selected runs and captures a retention floor, which is the sequence number below which obsolete history may be removed. It applies that floor throughout the job, writes output segments directly under the namespace segment prefix, and publishes the result with one manifest update. Readers continue using the existing manifest until that final update succeeds.
 
 Metadata output uses the same incremental writer for WAL folds and compaction.
 Rows are encoded as they arrive; completed data blocks are compressed immediately.
@@ -36,13 +36,11 @@ Merges above the base can continue reducing delta-run count, but they cannot app
 - Avoid rebuilding a large base after every small batch of delta runs.
 - Allow cancellation without publishing a partial result.
 - Prevent garbage collection from deleting output that belongs to an active job.
-- Reclaim unreferenced output after failed, cancelled, or superseded jobs.
+- Reclaim unreferenced output after failed, cancelled, abandoned, or fenced jobs.
 
 ## Non-goals
 
 - Durable resume after a process restart.
-- More than one active metadata compaction per family group.
-- A fixed wall-clock limit for the complete job.
 - Changes to the metadata segment format.
 - Configurable process-wide concurrency. The `metadata_compaction` job uses a fixed limit of two concurrent runs.
 
@@ -50,9 +48,11 @@ Merges above the base can continue reducing delta-run count, but they cannot app
 
 Both reorganization paths merge with the same code. A maintenance pass runs it synchronously over the window its budgets selected, and a background job runs it over a selected window that exceeds the step's row or byte budget. The merge itself does not know which one is driving it: it reads sorted iterators, applies the retention operators, writes segments, and reports what it wrote. Rows are dropped when, and only when, the merge placement is base-tier, which is the same rule that decides the output level.
 
-The two orchestrations exist because the work has two shapes. A step-contained merge is the frequent small case. It is bounded by the step's input budgets, it publishes inside the step that ran it, and paying for a lease, a staging prefix, a registry entry, and an admission permit on every one of them would be pure overhead. One call does one unit of work and either publishes it or reports that there was nothing to do.
-
-The background job exists because work of unbounded duration cannot be done that way. A job may run for minutes or hours, so its output has to be staged where a lease can speak for it, its concurrency has to be admitted, and its publication has to revalidate the input it read. Those costs buy nothing for a merge that finishes inside its own step.
+A step-contained merge is bounded by its input budgets and publishes inside
+the step that ran it. A background job may run for hours. It uses a process
+permit, a monotonic time bound, and input verification before publication.
+Both paths write direct segment objects and require the claimed compactor
+epoch at publication.
 
 One thing inside the merge follows the same split, and only one: how a reverse bind row is resolved. The two resource contracts genuinely differ there, and the section on reverse-index resolution below says how. Everything else — iteration, retention, segment writing, index parity, and what the merge reports — is the same code for both.
 
@@ -63,17 +63,17 @@ Normal bounded merges remain the preferred path. Streaming compaction is selecte
 The complete operation has five stages:
 
 1. Capture an immutable compaction specification containing a generated job ID, the family group, selected input runs, output identity, and retention floor.
-2. Acquire the family-group lease, open sorted iterators over the selected runs, and merge their rows in key order.
-3. Apply the retention rules and write completed output segments under `metadata/compactions/{job_id}/segments/`.
-4. Reload the current manifest and confirm that every selected input is still present and unchanged.
-5. Publish one manifest update that removes the selected inputs and adds the completed output.
+2. Claim the namespace compactor epoch once per runtime, open sorted iterators over the selected runs, and merge their rows in key order.
+3. Apply retention and write completed output at `namespaces/{namespace_id}/segments/{segment_id}.sst.zst` with fresh generated ids.
+4. Check the elapsed time bound, reload the current manifest, and confirm the epoch and selected inputs.
+5. Publish the next manifest number with the selected inputs replaced by the completed output.
 
-The manifest remains unchanged during stages 1 through 4. A crash, cancellation, or validation failure leaves the existing metadata state intact. A later maintenance pass may start the job again.
+The epoch claim preserves the current file set. Output becomes visible only at final publication. A crash, cancellation, or validation failure leaves the visible metadata state intact. A later maintenance pass may start another job.
 
 ```text
-fixed input runs -> sorted iterators -> retention -> staged output segments
+fixed input runs -> sorted iterators -> retention -> output segments
 
-current manifest + verified inputs + staged output -> one manifest publication
+current manifest + verified inputs + output -> one manifest publication
 ```
 
 ## Merge placement
@@ -103,13 +103,13 @@ The planner tries to execute an eligible prefix within the step's row, byte, and
 
 `MetadataCompactionPolicy::SizeTiered` is the automatic policy. `CompactImmediately` bypasses size thresholds for an explicit request, while retaining the input limit. Explicit compaction performs one window per call and may require repeated calls to drain a backlog. Small workloads consolidate promptly. For large workloads, delaying a base rewrite reduces write amplification but leaves obsolete metadata until enough newer data accumulates or an operator requests compaction.
 
-The bounded pass reports `compaction_required`; the `metadata_compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order and reads each selected group's lease by key, skipping an `active` unexpired lease while unrelated groups remain available. Runner shutdown cancels running jobs.
+The bounded pass reports `compaction_required`; the `metadata_compaction` job runs the streaming compaction under its own two-permit limit. The planner considers family groups in ranked order. Concurrent groups share the runtime's epoch claim. Runner shutdown cancels running jobs.
 
 Runs published after the snapshot was captured are not part of the compaction input. Final publication preserves those runs.
 
 ## Streaming executor
 
-This is the engine both paths run. Each family is read through a sorted iterator over its selected runs. A k-way merge selects the next row in family key order. Completed output segments are written as soon as they reach the normal segment target size. A background job writes them under its own prefix; a step-contained merge writes them at ordinary segment keys, because the publication that names them lands in the same step and the ordinary write-time grace already covers them.
+This is the engine both paths run. Each family is read through a sorted iterator over its selected runs. A k-way merge selects the next row in family key order. Completed output segments are written as soon as they reach the normal segment target size. Both paths write directly to the namespace segment collection. A descriptor derives its key from the owner namespace and segment id.
 
 The following resources have explicit limits, and they bound both paths:
 
@@ -157,41 +157,45 @@ The same 65,536-row window resolved from the collected set costs 386 data-block 
 
 Step budgets therefore price the selected logical input, and a step-contained merge reads exactly that: each selected segment's index once and its data once. Reverse resolution adds no store work to it.
 
-## Job leases and garbage collection
+## Compactor epochs and garbage collection
 
-Each family group has one lease at `metadata/compaction_leases/{group}.json`, and its payload names the job whose output under `metadata/compactions/{job_id}/segments/` it protects. An `active` unexpired group lease excludes every other job for that group.
+Every manifest carries `compactor_epoch`. Before its first eligible compaction,
+a maintenance runtime claims the namespace by publishing the next manifest
+number with an incremented epoch and otherwise identical content. Clones share
+that claim. Another runtime can claim a newer epoch and fence earlier jobs.
+A fenced runtime does not automatically reclaim the role.
 
-The lease records the job ID, namespace ID, writer ID, status, start time, and absolute expiry. It does not contain a cursor, output descriptors, offsets, or progress, so it cannot be used to resume a failed job.
+GC determines whether a segment is listed through its mark table. An unlisted
+segment becomes eligible only after 24 hours of provider age. This applies to
+both failed output and replaced runs, independently of the run's grace window.
 
-The job creates a missing lease with `active` status and create-if-absent semantics before writing the first output segment. It takes over an expired or terminal lease with one compare-and-swap that replaces the job, writer, start, and expiry fields; a held unexpired active lease supersedes the new job. Every refresh uses compare-and-swap with the ETag returned by the preceding lease write and stores the current time plus the 25-minute lease lifetime in `expires_at_ms`. Refreshes occur every five minutes while the job runs and at the start of every finalization attempt. Readers compare their current time directly with `expires_at_ms`; the lifetime constant is only the writer's policy.
-
-Garbage collection reads the seven group lease keys once per namespace per pass and maps each named job to its lease. A fresh active lease keeps only that job's objects regardless of age. For an expired active lease, the collector uses compare-and-swap to change the status to `reaping`. If a concurrent refresh wins, the collector retains the job's objects. If the collector wins, the job's next refresh fails, the job returns a fenced outcome without publishing, and its unreferenced objects become eligible for collection. The `reaping` status is terminal, so a later pass can continue an interrupted cleanup without repeating the ownership decision.
-
-A missing lease or a lease naming another job provides no ownership claim. An invalid lease fails the pass. Unreferenced objects in that prefix become eligible after a staging grace period derived from the lease expiry and the normal publication grace. Unrecognized keys under the compaction prefix are retained because ownership cannot be established safely.
-
-Before each publication attempt, the job confirms its refreshed lease deadline in `metadata/compactions/{job_id}/protection.json`. This is a separate control record containing namespace, job ID, and expiry; it is created only after output writing ends and updated by CAS. Confirming it before root publication covers a crash immediately after publication. After the final attempt, the job changes its group slot to `completed`, allowing the next job immediately. GC checks the protection deadline before group ownership, and removes that record only after its deadline and after the output prefix is empty. Group slots remain in place and are only replaced by CAS, so a paused collector cannot delete a newer job's claim. A failed completion write may leave the group held until expiry.
+Streaming jobs measure monotonic elapsed time from before their first output.
+They abandon publication after `UNREFERENCED_SEGMENT_MIN_AGE_MS -
+GC_MIN_GRACE_WINDOW_MS`, currently 23 hours, 39 minutes, and 30 seconds. The
+reserved grace floor covers publication, provider time, clock error, and
+scheduling delay. A crashed job leaves objects that age out by the same rule.
 
 ## Finalization
 
-Finalization refreshes the lease with compare-and-swap, then reloads the current root and manifest. A failed lease refresh means garbage collection has claimed the prefix, so finalization returns a fenced outcome without publishing. Publication is otherwise allowed only when every selected input descriptor is still present and unchanged and canonical-family and secondary-index validation succeeded.
+Finalization checks elapsed monotonic time and reloads the current manifest. A changed compactor epoch returns a fenced outcome without a manifest write. Publication is otherwise allowed only when every selected input descriptor is still present and unchanged and canonical-family and secondary-index validation succeeded.
 
 The new manifest removes exactly the selected input descriptors, adds the output descriptors, and preserves every newer or unrelated run.
 
-Publication uses the normal manifest compare-and-swap. If an unrelated publication wins the race, finalization refreshes the lease, reloads the manifest, and retries. If any selected input changed, the compaction result is abandoned because it no longer represents the current snapshot.
+Publication uses put-if-absent at the next manifest number. If an unrelated publication wins, finalization checks its time bound, reloads the manifest, confirms the epoch, and retries. If any selected input changed, the compaction result is abandoned because it no longer represents the current snapshot.
 
 ## Cancellation and recovery
 
 The executor checks a cancellation token during input processing, object-store work, retention processing, and output writing. Graceful shutdown requests cancellation before waiting for background tasks to drain.
 
-Cancellation and lease fencing never publish a partial result. A process restart does not resume completed segments; maintenance starts a new compaction from the current manifest. This repeats work but does not require durable progress state in the namespace manifest or lease.
+Cancellation and epoch fencing never publish a partial result. A process restart does not resume completed segments; maintenance starts a new compaction from the current manifest. This repeats work but does not require durable progress state in the namespace manifest.
 
 ## Maintenance results and observability
 
 The maintenance API reports `compaction_required` when a bounded pass plans a streaming compaction and publishes nothing for that group. The `metadata_compaction` job performs the work.
 
-An explicit `FsMaintenance::compact_metadata` call reports whether no work was needed, a bounded merge published, a streaming compaction published, or the attempt was superseded, abandoned, cancelled, or fenced.
+An explicit `FsMaintenance::compact_metadata` call reports whether no work was needed, a bounded merge published, a streaming compaction published, or the attempt was abandoned, cancelled, or fenced.
 
-Lifecycle logging covers job selection, start, progress, publication, cancellation, abandonment, supersession, and failure. Progress records include the namespace, family group, input-run count, rows processed, output-segment count, peak retention rows, elapsed time, and final outcome.
+Lifecycle logging covers job selection, start, progress, publication, cancellation, abandonment, fencing, and failure. Progress records include the namespace, family group, input-run count, rows processed, output-segment count, peak retention rows, elapsed time, and final outcome.
 
 ## Validation
 
@@ -203,23 +207,21 @@ The implementation is validated with the following tests:
 - Reject a row key repeated in both families of a secondary-index pair, on both paths, without publishing.
 - Confirm that new runs published during execution survive finalization.
 - Confirm that changed input causes abandonment without publication.
-- Exercise compare-and-swap retries after unrelated manifest updates.
+- Count next-number publication attempts when two groups publish concurrently.
 - Cancel jobs during reading, retention, writing, and finalization and verify that readers continue using the original manifest.
-- Keep all objects under a fresh job lease live beyond the normal garbage-collection grace period.
-- Race a job refresh against garbage collection's expired-lease claim and verify that exactly one side owns the prefix.
-- Fence a job after garbage collection claims its prefix and verify that the job publishes nothing.
-- Leave the final lease after publication and verify that an older collection pass cannot remove the published output.
-- Reclaim staged output after a lease expires, is already marked `reaping`, or is missing.
-- Reject malformed leases and leases whose namespace or group disagrees with their key.
+- Fence a job after another runtime claims a newer compactor epoch and verify zero publication writes.
+- Advance the injected timer beyond the bound and verify abandonment with zero publication writes.
+- Retain failed output through the segment minimum age, then reclaim it.
+- Verify that a runtime shares one claim across concurrent calls and skips claims when no compaction is needed.
 - Exercise continuous delta creation and verify that size-based selection eventually merges an eligible base within the eight-run fan-in limit.
 - Verify that explicit compaction bypasses the size ratio and automatic trigger while preserving the fan-in limit.
 - Process large attribute histories and heavily reused binding slots while holding at most one row in retention state.
 - Reject canonical-family and secondary-index mismatches before publication.
 - Reject a metadata family whose merge input repeats a row key.
-- Load a published manifest whose descriptors still use compaction-prefix object keys.
+- Verify that published descriptors reference direct segment keys.
 
 ## Deferred work
 
-Durable resume may be added later if measured restart cost justifies the additional state. Resume state would be owned by the compactor and would record completed segment boundaries without changing the reader-visible namespace manifest. The job lease is not resume state and never records progress.
+Durable resume may be added later if measured restart cost justifies the additional state. Resume state would be owned by the compactor and would record completed segment boundaries without changing the reader-visible namespace manifest.
 
-The built-in job defaults to two concurrent compactions per process; `MetadataCompactionJob::max_concurrent` sets another limit. Each family group has its own durable lease. A completed job retains its separate output protection and immediately releases the group for another window.
+The built-in job defaults to two concurrent compactions per process; `MetadataCompactionJob::max_concurrent` sets another limit. Concurrent groups publish through the same namespace epoch and next-number path.

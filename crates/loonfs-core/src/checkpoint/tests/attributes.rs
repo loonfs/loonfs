@@ -290,6 +290,7 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
 ) -> ManifestNo {
     let manifest_number = manifest_no;
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
+        compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no,
 

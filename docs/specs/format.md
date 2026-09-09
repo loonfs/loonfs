@@ -95,10 +95,7 @@ The required durable object families and standard key patterns are:
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/wal_{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata segment references and a head summary. Segment references carry their own owner, so a fork target's manifest names source-owned segments without recording anything about the fork. | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user, fork target, or snapshot). The record's `status` is monotonic: a record is created `active` under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
-| **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/segments/{segment_id}.sst.zst` |
-| **Compaction staging** | Immutable | Holds segments written by a streaming compaction before publication. The descriptor stores the job id used to derive this key. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` |
-| **Compaction leases** | Mutable group slot | An `active` lease owns a running job's output. `completed` and `reaping` jobs release the group. Slots are replaced by CAS and never deleted. | `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json` |
-| **Compaction output protection** | Mutable deadline | Before each publication attempt, a job records its lease deadline beside the sealed output. This record remains until the output prefix is empty. | `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/protection.json` |
+| **Metadata segments** | Immutable | Store metadata rows referenced by manifests. Segments may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The record's `status` is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Hint** | Mutable | Starts forward discovery of numbered manifests; never authority. | `namespaces/{namespace_id}/hint.json` |
 | **GC run** | Mutable CAS | Coordinates marking and sweeping across calls and hosts; one active run per namespace. | `namespaces/{namespace_id}/gc/run.json` |
@@ -162,15 +159,13 @@ The namespace tree's lifecycle can be read off its grammar:
   exactly one object per number. The highest number is current. Discovery
   probes forward from the hint with GETs and never lists the collection.
 - **Other collections are not authoritative via enumeration.** GC lists
-  `wal/segments/`, `manifests/`, `metadata/segments/`, and checkpoint records.
+  `wal/segments/`, `manifests/`, `segments/`, and checkpoint records.
   WAL ids use `wal_`, a 20-digit start sequence, and a 16-character lowercase
   hex suffix. Metadata segment ids remain generated identities.
 - **Paths express ownership, not authority.** Envelopes and payloads still
   validate namespace id, object id, family, checksum, and sequence fields;
   the same fact is never encoded twice (the row family lives in the manifest
   and the segment envelope, not the path).
-  The compaction lease is the exception: its key embeds the family group so
-  all seven lease keys can be computed and read without listing.
 - **`wal/head.json` is the namespace.** The head exists, or the namespace does
   not. It is the existence marker, and after deletion it is kept forever as
   the tombstone that retires the namespace id.
@@ -345,10 +340,9 @@ store content-store ids or object-store paths.
 The namespace head and mutable lifecycle records use compare-and-swap.
 The discovery hint uses plain PUT after installation.
 
-Eight control-object kinds are registered: `wal_head`, `hint`,
-`checkpoint_record`, `upload_session`, `compaction_lease`,
-`compaction_output_protection`, `gc_run`, and `content_store`. Other kind
-strings are rejected.
+Six control-object kinds are registered: `wal_head`, `hint`,
+`checkpoint_record`, `upload_session`, `gc_run`, and `content_store`.
+Other kind strings are rejected.
 
 `hint.json` has kind `hint`, version 1, and a strict payload
 `{ namespace_id, manifest_no }`. Creation and fork install it with
@@ -359,11 +353,6 @@ Readers GET the hinted manifest, then successive numbers until a GET returns
 404, bounded by the manifest number write stop. A lagging hint is normal.
 A missing hint is namespace corruption, as is a missing head in an installed
 namespace. Discovery never uses LIST.
-
-A compaction lease carries `expires_at_ms`. The job writes its current time
-plus `METADATA_COMPACTION_LEASE_EXPIRY_MS` when it creates or refreshes the
-lease. Readers compare their current time directly with that stored instant;
-they do not apply the writer's lifetime policy again.
 
 Every durable decoder rejects unknown fields in its envelope and complete
 nested payload. Mutable updates, WAL folding, and compaction all write
@@ -1721,8 +1710,6 @@ checkpoint instead of replaying from an obsolete cursor.
 
 Durable attribution fields describe the recorded event. Inode rows use `created_by`; file revisions, commit receipts, and WAL commits use `committed_by`; tombstones and active deletions use `deleted_by`; and attribute revisions use `updated_by`.
 
-A streaming compaction lease's `writer_id` is the writer id of the process running the job (`MutationContext::writer_id`): the server's in an embedded deployment, the maintenance node's in a standalone one. No other maintenance job stores this value.
-
 The commit fingerprint preimage in section 3.3.1 describes the commit request rather than a durable record. It uses the same `{kind, id}` actor shape as `CommitRequest.actor`.
 
 Retained commits keep their actor in the change feed and in metadata for inode
@@ -1989,17 +1976,15 @@ and absent, and no schema language states it, so no durable encoding writes one.
 | Family | `kind` | Encoding | Current version |
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
-| Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 3 (via namespace manifest) |
+| Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via namespace manifest) |
 | Grep root pointer | `grep_root` | JSON, uncompressed | 1 |
 | Grep manifest | `grep_manifest` | JSON, uncompressed | 1 |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the grep manifest) |
-| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 4 |
+| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Hint | `hint` | JSON, uncompressed | 1 |
 | WAL head | `wal_head` | JSON, uncompressed | 2 |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
-| Compaction lease | `compaction_lease` | JSON, uncompressed | 3 |
-| Compaction output protection | `compaction_output_protection` | JSON, uncompressed | 1 |
 | GC run | `gc_run` | JSON, uncompressed | 1 |
 | Content store descriptor | `content_store` | JSON, uncompressed | 1 |
 | GC mark page | `gc_mark_page` | JSON, uncompressed | 1 |
@@ -2039,7 +2024,8 @@ failures as malformed. The segment format is versioned by the manifest that
 references it (`namespace_manifest` `format_version`), since a segment is
 unreachable except through a manifest. Rows inside a segment use the attribution fields defined in section 3.8.1.
 
-A descriptor does not store an object key. Readers derive the key from `owner_namespace_id`, `segment_id`, and optional `compaction_job_id`. Compaction output includes the job id and remains under that job's prefix (section 6.2). Other segments omit the field and use the owner's `metadata/segments/` prefix.
+A descriptor does not store an object key. Readers derive its key from
+`owner_namespace_id` and `segment_id`: `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst`.
 
 A **run** is the set of segments one producer wrote together, and `run_no` is
 its identity. The manifest allocates run numbers from `next_run_no`: a
@@ -2352,7 +2338,7 @@ File revisions are stored once in the `revisions` family, newest first within
 an inode, using the same descending revision, sequence, and delta ordering as
 attribute revisions. Exact revision reads and paginated history scans use this
 family directly. The namespace manifest version governs these row-key meanings;
-version 3 requires this ordering. The metadata block framing is unchanged.
+version 1 requires this ordering.
 
 Segment reads verify the per-block checksums in the block handles and enforce
 key ranges. Directory bindings retain both parent-and-name and child lookup
@@ -2426,9 +2412,32 @@ an undelete give back the map the inode had. A rewrite refuses to compact
 when two rows for one inode share a revision number at or below the floor,
 because that makes "the newest at the floor" arbitrary and the drop unsafe.
 
-A rebuild that cannot fit within one bounded maintenance pass runs as a streaming compaction. The job merges every run in the group and writes output segments as they fill. These segments use `namespaces/{owner_namespace_id}/metadata/compactions/{job_id}/segments/{segment_id}.sst.zst` instead of `metadata/segments/`.
+A rebuild that cannot fit within one bounded maintenance pass runs as a
+streaming compaction. The job merges its selected runs and writes output
+segments as they fill, with fresh generated ids, at
+`namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst`. Publication
+references these objects in place through the next manifest number.
 
-Each family group has one lease at `namespaces/{owner_namespace_id}/metadata/compaction_leases/{group}.json`. An unexpired `active` lease excludes another job for that group. An expired, `completed`, or `reaping` slot can be replaced with one compare-and-swap; the old job's refresh then fails. Before each publication attempt, the job confirms its current lease deadline at `metadata/compactions/{job_id}/protection.json`. No output is written after this record is created. After the final publication attempt, the group slot becomes `completed`. The protection record remains until the job's output prefix is empty. An older collector therefore retains its protection even after a newer job takes over the group. A published manifest references the segments in place. Each descriptor stores `compaction_job_id`, and readers use it to derive the key (section 4.2.1).
+Every manifest carries `compactor_epoch`, initially zero. A process claims
+the namespace compactor role before its first compaction after open. It
+publishes the next manifest number with `compactor_epoch + 1` and otherwise
+identical content. The runtime remembers that claim in memory. Concurrent
+family groups in one runtime share the epoch. Every other publication
+preserves the current epoch.
+
+Streaming and bounded compaction publications require the claimed epoch to
+equal the current manifest's epoch. A stale compactor receives `fenced` and
+writes no manifest. Its unreferenced output remains eligible for collection
+once old enough. A streaming publication that loses the next-number put
+reloads the manifest and retries only while its input runs still contain
+the same segments. Changed inputs produce `abandoned`.
+
+Before each publication attempt, a streaming job checks elapsed monotonic
+time from before its first output. It reports `abandoned` without a manifest
+write when elapsed time exceeds
+`UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS`. The segment minimum
+age is 86,400,000 ms. The remaining grace floor covers publication, provider
+operations, clock error, and scheduling delay (section 6.4).
 
 The rules a rebuild applies are the same however it runs them. A bounded
 merge holds every row of its window and decides them together. A streaming
@@ -2490,9 +2499,8 @@ version gates.
 There is no mixed-protocol collection or compatibility fallback.
 
 GC uses resumable listing mark-and-sweep. Its inputs are `wal/head.json`,
-`hint.json`, the seven point-read compaction lease
-keys, and the `manifests/`, `metadata/segments/`,
-`metadata/compactions/`, `checkpoints/`, and `wal/segments/` collections. A live manifest roots every object key its
+`hint.json`, and the `manifests/`, `segments/`, `checkpoints/`, and
+`wal/segments/` collections. A live manifest roots every object key its
 `runs` list names, wherever that key sits. The pass also
 sweeps `uploads/`, and that sweep owns content reclamation as well; the two
 halves are split at the completed line and described in rule 11.
@@ -2526,8 +2534,9 @@ publishing CAS) — under these rules:
    window below the floor is rejected as `invalid_request` at every
    surface. Under the floor's inequality, any acknowledged root
    publication lands its compare-and-swap before an object it references
-   could age past `T`, so GC never deletes any object younger than `T`,
-   reachable or not. An object without a provider timestamp reads as
+   could age past `T`, so GC never deletes an object younger than its applicable minimum age,
+   reachable or not. Metadata segments use the minimum age in rule 12; other
+   families use `T`. An object without a provider timestamp reads as
    young.
 
    **Clock assumptions.** Object age compares the collector host's recorded
@@ -2566,18 +2575,11 @@ publishing CAS) — under these rules:
    Grace-delayed reclamation protects publication; it does not promise
    simultaneous expiry decisions or the full requested lifetime on every host.
 
-   Fork and compaction publication have explicit remaining-time checks.
-   `FORK_CHECKPOINT_LEASE_MS = 2 * GC_MIN_GRACE_WINDOW_MS` supplies the fork
-   lease. Installation requires strictly more remaining lease time than
+   Fork installation requires strictly more remaining lease time than
    `FORK_INSTALL_MARGIN_MS = 330,000 ms`: one 150,000 ms provider operation
-   plus the 180,000 ms allowance. The full lease alone would not cover skew
-   when a delayed installer has nearly spent it. A compaction refresh stamps
-   its deadline before its provider write, so its checked inequality is
-   `METADATA_COMPACTION_LEASE_EXPIRY_MS >= 150,000 + GC_MIN_GRACE_WINDOW_MS`.
-   The current 1,500,000 ms lease exceeds this 1,380,000 ms floor. It covers
-   the refresh write, publication, final provider operation, and the same
-   180,000 ms allowance. `METADATA_COMPACTION_STAGING_GRACE_MS` adds that
-   lease lifetime to the minimum object-age grace. These inequalities assume
+   plus the 180,000 ms allowance. `FORK_CHECKPOINT_LEASE_MS` is twice the GC
+   grace floor. Streaming compaction reserves the same grace floor within
+   its segment minimum age (rule 12). These inequalities assume
    the stated provider and monotonic publication bounds hold; they do not
    cover an unbounded pause between a budget check and its write.
 
@@ -2597,7 +2599,7 @@ publishing CAS) — under these rules:
    Consequently a new valid pin transfers references from the captured root
    or an already protected pin. A new immutable publication is protected by
    the fixed cutoff and publication budgets; streaming compaction uses the
-   independent protection in rule 12. An arbitrarily paused older collector
+   segment age and elapsed-time bound in rule 12. An arbitrarily paused older collector
    retains these same protections and cannot advance a newer run's CAS state.
    Mutable candidate lifecycles are still inspected when swept. The recorded
    `now` makes paused and resumed passes consistent; it does not remove
@@ -2722,101 +2724,25 @@ publishing CAS) — under these rules:
    embedded raw-ref import (section 2.8) writes the verified bytes under a
    fresh destination-owned identity. A future identity-preserving copy would
    have to root the reference on the source side the way a fork does.
-12. **A compaction job's objects are decided by its lease.** A streaming
-   compaction ("Compaction") publishes nothing until it finishes and is paced
-   by no budget, so its output is unreferenced for as long as the job runs.
-   `T` only has to cover a publication in flight, so a sweep applying it to
-   `metadata/compactions/` would delete the output of a job still writing it,
-   and no fixed window can replace it: any such window is a guess at how long
-   a job may run, which is exactly what the design refuses to bound.
+12. **Unreferenced segments require a full day of age.** The mark table
+   determines whether any root manifest lists a segment. An unlisted segment
+   under `segments/` is a deletion candidate only when its provider age
+   exceeds `UNREFERENCED_SEGMENT_MIN_AGE_MS`, independently of the run's grace
+   window. The clock-error allowance in rule 1 still applies.
 
-   The lease says so instead. Every job owns the prefix
-   `namespaces/{namespace_id}/metadata/compactions/{job_id}/` and writes its
-   output under `segments/` inside it, while its family group has one lease at
-   `namespaces/{namespace_id}/metadata/compaction_leases/{group}.json`. The
-   lease carries ownership only — job, namespace, group, `writer_id`, the tagged
-   `status`, `started_at_ms`, `expires_at_ms` — and never a cursor, an output
-   descriptor, an offset, or resumable progress. The job creates a missing
-   lease `active` with create-if-absent before its first output object, takes
-   over an expired `active` lease with one compare-and-swap, and refreshes the
-   etag it last observed every `METADATA_COMPACTION_LEASE_REFRESH_INTERVAL_MS`
-   while it runs and at the top of every finalization attempt. Creation and
-   every refresh store the job's current time plus
-   `METADATA_COMPACTION_LEASE_EXPIRY_MS` in `expires_at_ms`. An `active`
-   unexpired lease excludes every other job for the group.
+   Streaming compaction checks its elapsed monotonic time before each
+   publication attempt. The bound is derived by reserving the GC grace floor:
 
-   The lease is a fence, not a timestamp. An expired lease alone proves
-   nothing — the job may be resuming from a long stall — so a pass claims one
-   by compare-and-swapping its tagged `status` from `active` to `reaping`, and
-   only the winner of that compare-and-swap may act:
-
-   ```
-   the job's refresh wins -> the pass retains the prefix
-   the pass's claim wins  -> the job is fenced: its next refresh fails,
-                             it publishes nothing, and the prefix is the
-                             pass's to reclaim
+   ```text
+   METADATA_COMPACTION_BUDGET_MS + GC_MIN_GRACE_WINDOW_MS
+       <= UNREFERENCED_SEGMENT_MIN_AGE_MS = 24 * 60 * 60 * 1000
    ```
 
-   `reaping` fences that job permanently. The group slot can be replaced by
-   a new job with a new identity; a replaced job never regains ownership.
-
-   Before each manifest publication attempt, after refreshing the group lease,
-   the job confirms an output-protection record at
-   `metadata/compactions/{job_id}/protection.json`. It contains `namespace_id`,
-   `job_id`, and `expires_at_ms`, and its deadline only advances by CAS. No
-   output writes follow the first protection record. Confirming protection
-   before the manifest put-if-absent also covers a crash immediately after publication.
-
-   After the final publication attempt, the job changes its group slot to
-   `completed` by CAS, immediately admitting the next job. A failed completion
-   write leaves the group held until expiry; a lost CAS cannot change a newer
-   job's claim. Output protection is already independent of that slot.
-
-   GC checks output protection before the group slot. A deadline at or after
-   the pass's fixed clock retains the output. An expired deadline still
-   requires the normal group-lease ownership check: a publisher may have
-   refreshed its group lease and be about to extend output protection.
-   GC removes protection only after its deadline and after the output prefix
-   is empty. Thus a newer collector cannot erase the protection needed by
-   one paused before publication. Removing the record may take one additional
-   pass after the last output is removed.
-
-   A pass reads the seven group lease keys once and decides one staged object
-   as follows. An object the manifest references is live, like every other
-   referenced object. Otherwise, if a lease naming that job is `active` and
-   its `expires_at_ms` has not passed, the object is retained whatever its
-   age; so is one whose expired lease the pass tried and failed to claim. A
-   lease naming a different job protects nothing in this prefix. Otherwise
-   the object ages as an ordinary unreferenced orphan under
-   `METADATA_COMPACTION_STAGING_GRACE_MS`, which is derived rather than tuned:
-
-   ```
-   METADATA_COMPACTION_STAGING_GRACE_MS
-       >= METADATA_COMPACTION_LEASE_EXPIRY_MS   (the lifetime written by a refresh)
-          + T                                (rule 1: the publication that may still name it)
-   ```
-
-   `METADATA_COMPACTION_LEASE_EXPIRY_MS` is
-   `METADATA_COMPACTION_LEASE_MISSED_REFRESHES` times the refresh interval,
-   and it must itself cover one provider operation plus
-   `GC_MIN_GRACE_WINDOW_MS`. The refresh write precedes the finalization
-   budget; both that write and the final manifest put-if-absent consume a
-   provider bound. Rule 1 derives the clock-error allowance for this check.
-   That inequality is also what completes the fence — a job that refreshed
-   at the top of an attempt cannot have its prefix claimed before that
-   attempt's manifest put-if-absent.
-
-   Group slots are never deleted by GC. They stay available for replacement
-   by CAS, which prevents a paused collector from deleting a newer job's
-   lease. This retains at most one small slot per family group.
-
-   The lease is a mutable control object and decodes strictly like every
-   other. A lease that does not decode, or whose namespace, group, job identity, or terminal status disagrees
-   with its location, fails the pass and is reported: nothing else reads the object,
-   so believing a corrupt one would keep its named job's output alive forever
-   and nothing would ever say why. Every other rule — the manifest roots,
-   the complete run index, degraded roots — applies here exactly as it
-   applies to `metadata/segments/`.
+   A job past this bound abandons because its earliest output may have been
+   collected. A crashed job leaves unreferenced segments that age out by the
+   same rule. Every compaction publishes only while the current manifest's
+   `compactor_epoch` equals its claim. A newer claim fences every older
+   compactor. Numbered manifest puts serialize claims and compaction output.
 
 13. **Namespace retirement requires a complete checkpoint sweep.** A run may
     retire only if its reserved roots captured a deleted head with no
@@ -2915,7 +2841,7 @@ The phases are:
 - `sealing`: merge the content index and object table into one complete table.
 - `sweeping`: that table, the small retention summary, `checkpoints_retained`,
   candidate family, and exclusive last-decided key. The order is WAL segments,
-  metadata segments, compaction staging, manifests, checkpoints, upload sessions,
+  metadata segments, manifests, checkpoints, upload sessions,
   and owned content.
 - `cleaning`: exclusive last-decided scratch key. Only recognized mark pages
   are removed, including abandoned pages from older runs.

@@ -834,7 +834,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let mut revisions_compacted = false;
     for _ in 0..16 {
         let report = engine
-            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately)
+            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
             .await
             .expect("compact clone");
         match report.outcome {
@@ -921,7 +921,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let mut compacted = false;
     for _ in 0..16 {
         match engine
-            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately)
+            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
             .await
             .expect("compact descendant")
             .outcome

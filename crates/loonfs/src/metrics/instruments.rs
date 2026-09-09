@@ -370,9 +370,7 @@ impl RuntimeInstruments {
                 CompactionOutcome::Completed,
                 Some((*rows_read, *rows_written, *input_bytes, *output_bytes)),
             ),
-            Ok(
-                MetadataCompactionJobOutcome::Abandoned | MetadataCompactionJobOutcome::Superseded,
-            ) => (CompactionOutcome::Superseded, None),
+            Ok(MetadataCompactionJobOutcome::Abandoned) => (CompactionOutcome::Superseded, None),
             Ok(MetadataCompactionJobOutcome::Cancelled) => (CompactionOutcome::Cancelled, None),
             Ok(MetadataCompactionJobOutcome::Fenced) => (CompactionOutcome::Fenced, None),
             Err(_) => (CompactionOutcome::Failed, None),

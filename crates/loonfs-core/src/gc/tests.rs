@@ -8,7 +8,7 @@ use super::run::gc_namespace;
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::tests::{
-    compact_a_family_group_into_staging, create_checkpoint, mutation_context, write_test_file,
+    compact_a_family_group, create_checkpoint, mutation_context, write_test_file,
 };
 use crate::checkpoint::MetadataCompactionPolicy;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
@@ -16,8 +16,7 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::limits::{
     CONTENT_RECLAMATION_GRACE_MS, FORK_CHECKPOINT_LEASE_MS, GC_MIN_GRACE_WINDOW_MS,
-    METADATA_COMPACTION_LEASE_EXPIRY_MS, METADATA_COMPACTION_STAGING_GRACE_MS,
-    UPLOAD_SESSION_LEASE_MS,
+    UNREFERENCED_SEGMENT_MIN_AGE_MS, UPLOAD_SESSION_LEASE_MS,
 };
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
@@ -29,9 +28,8 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::gc::*;
 use loonfs_api::{CheckpointId, ContentRef, ContentStoreId, ManifestNo, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_compaction_lease, metadata_compaction_segment,
-    metadata_manifest_object, metadata_manifest_prefix, metadata_segment, metadata_segment_prefix,
-    wal_head, wal_segment, wal_segment_prefix,
+    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
+    metadata_segment_prefix, wal_head, wal_segment, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -147,10 +145,7 @@ async fn marked<S: ObjectStore + ?Sized>(
                 Some(DurableObjectFamily::WalSegment) => {
                     live.wal_segments.insert(key.to_owned());
                 }
-                Some(
-                    DurableObjectFamily::MetadataSegment
-                    | DurableObjectFamily::MetadataCompactionStaging,
-                ) => {
+                Some(DurableObjectFamily::MetadataSegment) => {
                     live.segments.insert(key.to_owned());
                 }
                 Some(DurableObjectFamily::CheckpointRecord) => {
@@ -641,7 +636,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     // pin: released here, deleted a grace window after that release.
     assert_eq!(report.released_checkpoints.expired, 1);
     assert!(!report.retention_degraded);
-    let reaped = context(aged.now_ms + GRACE_MS);
+    let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
         .await
         .expect("gc pass past the release grace window");
@@ -1743,17 +1738,6 @@ async fn gc_retains_everything_inside_the_grace_window() {
     stat_root(&store, &namespace_id).await;
 }
 
-/// Every object under the namespace, as the keys stand right now.
-async fn namespace_key_set(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTreeSet<String> {
-    store
-        .list_prefix(&loonfs_objectstore::keys::namespace_prefix(namespace_id))
-        .await
-        .expect("list namespace")
-        .into_iter()
-        .filter(|key| !key.starts_with(&format!("namespaces/{namespace_id}/gc/")))
-        .collect()
-}
-
 /// Reports every object written before this point as ancient, leaving
 /// everything written after it with its real age.
 ///
@@ -1780,452 +1764,8 @@ fn reason_total(report: &GcResponse) -> u64 {
         .sum()
 }
 
-/// Creates a namespace with one aged staged segment and returns the keys for
-/// the segment and its compaction lease.
-async fn namespace_with_staged_output(
-    temp_dir: &tempfile::TempDir,
-    namespace_id: &NamespaceId,
-    metadata_compaction_id: &loonfs_api::MetadataCompactionId,
-) -> (MetadataMapStore<LocalFsStore>, String, String) {
-    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    let setup = context(1_000);
-    bootstrap_namespace(&inner, namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&inner, namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    crate::checkpoint::flush_wal(&inner, namespace_id, &setup)
-        .await
-        .expect("flush wal");
-
-    // The namespace ages past the window, so the pass has an anchor. The
-    // staged segment below is written after it, the way a job's output is.
-    let published = namespace_key_set(&inner, namespace_id).await;
-    let store = aged_before_now(inner, published);
-    let staged_key = metadata_compaction_segment(
-        namespace_id,
-        metadata_compaction_id,
-        &loonfs_api::MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef")
-            .expect("valid metadata segment id"),
-    );
-    store
-        .put_if_absent(&staged_key, Bytes::from_static(b"staged segment"))
-        .await
-        .expect("write a staged segment");
-    let lease_key =
-        metadata_compaction_lease(namespace_id, loonfs_api::MetadataFamilyGroup::Bindings);
-    (store, staged_key, lease_key)
-}
-
-/// Writes an active compaction lease with the given expiry.
-async fn write_compaction_lease<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    metadata_compaction_id: &loonfs_api::MetadataCompactionId,
-    expires_at_ms: u64,
-) {
-    write_compaction_lease_in_state(
-        store,
-        namespace_id,
-        metadata_compaction_id,
-        loonfs_api::MetadataFamilyGroup::Bindings,
-        expires_at_ms,
-        loonfs_api::wire::control::CompactionLeaseStatus::Active {},
-    )
-    .await;
-}
-
-/// Writes a compaction lease in the lifecycle state required by the test.
-async fn write_compaction_lease_in_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    metadata_compaction_id: &loonfs_api::MetadataCompactionId,
-    group: loonfs_api::MetadataFamilyGroup,
-    expires_at_ms: u64,
-    status: loonfs_api::wire::control::CompactionLeaseStatus,
-) {
-    let envelope = loonfs_api::wire::control::MetadataCompactionLeaseState {
-        job_id: metadata_compaction_id.clone(),
-        namespace_id: namespace_id.clone(),
-        group,
-        writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
-        status,
-        started_at_ms: 1_000,
-        expires_at_ms,
-    };
-    let bytes = loonfs_api::wire::control::encode_control_state(
-        loonfs_api::wire::control::ControlObjectKind::CompactionLease,
-        &envelope,
-    )
-    .expect("encode a lease");
-    store
-        .put(
-            &metadata_compaction_lease(namespace_id, group),
-            Bytes::from(bytes),
-            PutMode::Overwrite,
-        )
-        .await
-        .expect("write a lease");
-}
-
-fn test_metadata_compaction_id() -> loonfs_api::MetadataCompactionId {
-    loonfs_api::MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
-        .expect("valid metadata compaction id")
-}
-
 #[tokio::test]
-async fn a_live_jobs_staged_output_survives_however_old_it_is() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let (store, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
-            .await;
-
-    // Old staged output remains protected by a fresh job lease.
-    let now_ms = now_after_newest_object(store.inner(), &namespace_id, 24 * 60 * 60 * 1000).await;
-    write_compaction_lease(
-        &store,
-        &namespace_id,
-        &test_metadata_compaction_id(),
-        now_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
-    )
-    .await;
-
-    let report = gc_namespace(&store, &namespace_id, &config(), &context(now_ms))
-        .await
-        .expect("gc pass while the job holds its lease");
-    assert_eq!(
-        report.deleted.metadata_segments, 0,
-        "a running job's output must not be reaped"
-    );
-    assert_eq!(
-        report.retained.within_grace_window, 1,
-        "the segment is retained by the lease"
-    );
-    for key in [&staged_key, &lease_key] {
-        assert!(store
-            .head(key)
-            .await
-            .expect("head a staged object")
-            .is_some());
-    }
-}
-
-#[tokio::test]
-async fn a_dead_jobs_staged_output_is_reclaimed_after_the_staging_window() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let (store, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
-            .await;
-
-    // The job's last refresh, and then a pass after the recorded expiry. The
-    // lease is stale, but the objects are still inside the staging window.
-    let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
-    let expires_at_ms = died_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
-    write_compaction_lease(
-        &store,
-        &namespace_id,
-        &test_metadata_compaction_id(),
-        expires_at_ms,
-    )
-    .await;
-    let expired_ms = expires_at_ms.saturating_add(1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &context(expired_ms))
-        .await
-        .expect("gc pass once the lease expired");
-    assert_eq!(
-        report.deleted.metadata_segments, 0,
-        "an expired lease still leaves the objects their own window"
-    );
-    assert!(store
-        .head(&staged_key)
-        .await
-        .expect("head the staged segment")
-        .is_some());
-
-    // Past the staging window, the same objects are the orphans a dead job
-    // left. Only the staged object counts as a metadata segment; the lease
-    // is a control object.
-    let reclaimable_ms = now_after_newest_object(
-        store.inner(),
-        &namespace_id,
-        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
-    )
-    .await;
-    let report = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
-        .await
-        .expect("gc pass once no job could still be running");
-    assert_eq!(
-        report.deleted.metadata_segments, 1,
-        "a dead job's orphan must be reaped"
-    );
-    assert!(store
-        .head(&staged_key)
-        .await
-        .expect("removed output")
-        .is_none());
-    assert!(store
-        .head(&lease_key)
-        .await
-        .expect("terminal group slot")
-        .is_some());
-}
-
-#[tokio::test]
-async fn staged_output_with_no_lease_at_all_is_reclaimed() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let (store, staged_key, _) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
-            .await;
-
-    let reclaimable_ms = now_after_newest_object(
-        store.inner(),
-        &namespace_id,
-        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
-    )
-    .await;
-    let report = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
-        .await
-        .expect("gc pass over an unclaimed prefix");
-    assert_eq!(report.deleted.metadata_segments, 1);
-    assert!(store
-        .head(&staged_key)
-        .await
-        .expect("head the staged segment")
-        .is_none());
-}
-
-#[tokio::test]
-async fn a_lease_that_does_not_decode_fails_the_pass() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let (store, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
-            .await;
-    store
-        .put(
-            &lease_key,
-            Bytes::from_static(b"{\"kind\":\"compaction_lease\",\"payload\":"),
-            PutMode::Overwrite,
-        )
-        .await
-        .expect("write a corrupt lease");
-
-    let reclaimable_ms = now_after_newest_object(
-        store.inner(),
-        &namespace_id,
-        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
-    )
-    .await;
-    let error = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
-        .await
-        .expect_err("a corrupt lease fails the pass");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    for key in [&staged_key, &lease_key] {
-        assert!(store
-            .head(key)
-            .await
-            .expect("head a staged object")
-            .is_some());
-    }
-}
-
-#[tokio::test]
-async fn two_group_leases_naming_the_same_job_are_namespace_corruption() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let metadata_compaction_id = test_metadata_compaction_id();
-    let (store, staged_key, _) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &metadata_compaction_id).await;
-    let now_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
-    for group in [
-        loonfs_api::MetadataFamilyGroup::Bindings,
-        loonfs_api::MetadataFamilyGroup::Revisions,
-    ] {
-        write_compaction_lease_in_state(
-            &store,
-            &namespace_id,
-            &metadata_compaction_id,
-            group,
-            now_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
-            loonfs_api::wire::control::CompactionLeaseStatus::Active {},
-        )
-        .await;
-    }
-
-    let error = gc_namespace(&store, &namespace_id, &config(), &context(now_ms))
-        .await
-        .expect_err("one job id cannot own two group leases");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(store
-        .head(&staged_key)
-        .await
-        .expect("head the staged segment")
-        .is_some());
-}
-
-#[tokio::test]
-async fn a_candidate_error_leaves_the_terminal_group_slot() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let (inner, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
-            .await;
-
-    let died_at_ms = now_after_newest_object(inner.inner(), &namespace_id, 0).await;
-    let expires_at_ms = died_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
-    write_compaction_lease(
-        &inner,
-        &namespace_id,
-        &test_metadata_compaction_id(),
-        expires_at_ms,
-    )
-    .await;
-    let reclaimable_ms = now_after_newest_object(
-        inner.inner(),
-        &namespace_id,
-        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
-    )
-    .await;
-
-    // GC claims the cached group lease before deciding the staged segment,
-    // then this injected metadata failure makes the decision return early.
-    let store = FailStore::new(
-        inner,
-        KeyPredicate::exact(staged_key.clone()),
-        OperationClass::Head,
-        InjectedError::Transport("staged segment metadata timed out".to_owned()),
-    );
-    store.fail_all();
-    let error = gc_namespace(&store, &namespace_id, &config(), &context(reclaimable_ms))
-        .await
-        .expect_err("the candidate read still fails the pass");
-
-    assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
-    assert!(
-        store
-            .inner()
-            .head(&lease_key)
-            .await
-            .expect("head the claimed lease")
-            .is_some(),
-        "a terminal group slot stays available for replacement by CAS"
-    );
-    assert!(
-        store
-            .inner()
-            .head(&staged_key)
-            .await
-            .expect("head the undecided segment")
-            .is_some(),
-        "the failing candidate itself stays for a later pass"
-    );
-}
-
-#[tokio::test]
-async fn a_budget_stop_leaves_the_terminal_group_slot() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let (store, staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
-            .await;
-
-    let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
-    let expires_at_ms = died_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
-    write_compaction_lease(
-        &store,
-        &namespace_id,
-        &test_metadata_compaction_id(),
-        expires_at_ms,
-    )
-    .await;
-    let reclaimable = context(expires_at_ms.saturating_add(1));
-    let marking = marking_units(&store, &namespace_id, &reclaimable).await;
-
-    // Stop during the sweep; a bounded return leaves the group slot intact.
-    let mut bounded = config();
-    bounded.max_steps = Some(marking + 1);
-
-    let report = gc_namespace(&store, &namespace_id, &bounded, &reclaimable)
-        .await
-        .expect("bounded pass");
-
-    assert!(report.budget_exhausted);
-    assert!(report.next_cursor.is_some());
-    assert!(
-        store
-            .head(&lease_key)
-            .await
-            .expect("head the claimed lease")
-            .is_some(),
-        "a terminal group slot stays available for replacement by CAS"
-    );
-    assert!(
-        store
-            .head(&staged_key)
-            .await
-            .expect("head the unvisited segment")
-            .is_some(),
-        "the claimed job's young segment remains for a later pass"
-    );
-}
-
-#[tokio::test]
-async fn marking_reads_no_compaction_lease_before_the_sweep() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let (store, _staged_key, lease_key) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &test_metadata_compaction_id())
-            .await;
-
-    let died_at_ms = now_after_newest_object(store.inner(), &namespace_id, 0).await;
-    let expires_at_ms = died_at_ms.saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS);
-    write_compaction_lease(
-        &store,
-        &namespace_id,
-        &test_metadata_compaction_id(),
-        expires_at_ms,
-    )
-    .await;
-    let reclaimable = context(expires_at_ms.saturating_add(1));
-    let marking = marking_units(&store, &namespace_id, &reclaimable).await;
-    let store = RecordingStore::new(store, KeyPredicate::exact(lease_key.clone()));
-
-    // Stop exactly after marking, before the sweep needs a compaction lease.
-    let mut short = config();
-    short.max_steps = Some(marking);
-
-    let report = gc_namespace(&store, &namespace_id, &short, &reclaimable)
-        .await
-        .expect("refused pass");
-
-    assert!(report.budget_exhausted);
-    assert_eq!(
-        store.count(OperationClass::Read),
-        0,
-        "the lease is not read on a budget that cannot pay for the stage"
-    );
-    assert!(store
-        .head(&lease_key)
-        .await
-        .expect("head the lease")
-        .is_some());
-
-    // Unbounded, the same pass claims the expired lease and keeps its slot.
-    gc_namespace(&store, &namespace_id, &config(), &reclaimable)
-        .await
-        .expect("unbounded rerun");
-    assert!(store.count(OperationClass::Read) > 0);
-    assert!(store
-        .head(&lease_key)
-        .await
-        .expect("head the lease")
-        .is_some());
-}
-
-#[tokio::test]
-async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
+async fn published_compaction_segments_are_referenced_and_kept() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -2249,16 +1789,11 @@ async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
             .await
             .expect("flush wal");
     }
-    let staged = compact_a_family_group_into_staging(&store, &namespace_id, &setup).await;
+    let staged = compact_a_family_group(&store, &namespace_id, &setup).await;
 
     // Far past every window this collector knows, including the staging one.
     let long_after = context(
-        now_after_newest_object(
-            &store,
-            &namespace_id,
-            METADATA_COMPACTION_STAGING_GRACE_MS * 4,
-        )
-        .await,
+        now_after_newest_object(&store, &namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS * 4).await,
     );
     let report = gc_namespace(&store, &namespace_id, &config(), &long_after)
         .await
@@ -2272,7 +1807,7 @@ async fn a_published_compactions_staged_segments_are_referenced_and_kept() {
             store
                 .head(key)
                 .await
-                .expect("head a staged segment")
+                .expect("head a output segment")
                 .is_some(),
             "a published job's segment must survive every window"
         );
@@ -2331,9 +1866,11 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
                 &spec,
             )
             .await;
-            let staged =
-                crate::checkpoint::tests::staged_keys_of_the_current_manifest(&seed, &namespace_id)
-                    .await;
+            let staged = crate::checkpoint::tests::segment_keys_of_the_current_manifest(
+                &seed,
+                &namespace_id,
+            )
+            .await;
             gated.release();
             staged
         }
@@ -2344,88 +1881,9 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
         assert!(
             seed.head(key)
                 .await
-                .expect("head a staged segment")
+                .expect("head a output segment")
                 .is_some(),
             "a segment the manifest names must survive a pass whose live set predates it"
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_published_jobs_group_slot_survives_gc() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    for index in 0..4 {
-        write_test_file(
-            &store,
-            &namespace_id,
-            &format!("/docs/{index}.txt"),
-            &format!("gc-body-{index}"),
-            &setup,
-        )
-        .await;
-        crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
-            .await
-            .expect("flush wal");
-    }
-    let (policy, spec) =
-        crate::checkpoint::tests::plan_a_family_group_compaction(&store, &namespace_id, &setup)
-            .await;
-    crate::checkpoint::tests::publish_planned_compaction(
-        &store,
-        &namespace_id,
-        &setup,
-        policy,
-        &spec,
-    )
-    .await;
-    let staged =
-        crate::checkpoint::tests::staged_keys_of_the_current_manifest(&store, &namespace_id).await;
-    let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
-    assert!(
-        store
-            .head(&lease_key)
-            .await
-            .expect("head the lease")
-            .is_some(),
-        "a published job leaves its lease standing"
-    );
-
-    // Past the lease's own expiry, with the root that names the segments long
-    // since published.
-    let expired = context(
-        now_after_newest_object(
-            &store,
-            &namespace_id,
-            METADATA_COMPACTION_LEASE_EXPIRY_MS + GRACE_MS + 1,
-        )
-        .await,
-    );
-    gc_namespace(&store, &namespace_id, &config(), &expired)
-        .await
-        .expect("gc pass once the published job's lease expired");
-
-    assert!(
-        store
-            .head(&lease_key)
-            .await
-            .expect("head the lease")
-            .is_some(),
-        "GC retains the group slot for replacement by CAS"
-    );
-    for key in &staged {
-        assert!(
-            store
-                .head(key)
-                .await
-                .expect("head a staged segment")
-                .is_some(),
-            "and every segment the manifest names stays exactly where it is"
         );
     }
 }
@@ -2715,7 +2173,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         let report = crate::checkpoint::reorganize_metadata_step(
             &store,
             &namespace_id,
-            &setup,
+            0,
             fold_policy,
             MetadataCompactionPolicy::default(),
         )
@@ -2728,7 +2186,9 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
             break;
         }
     }
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let aged = context(
+        now_after_newest_object(&store, &namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1).await,
+    );
     let after_fold = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass after reorganization");
@@ -4502,110 +3962,6 @@ async fn stale_cursor_preserves_new_publications_with_the_original_cutoff() {
         );
     }
     stat_root(&store, &namespace_id).await;
-}
-
-#[tokio::test]
-async fn output_protection_survives_a_new_group_owner() {
-    use loonfs_api::wire::control::{encode_control_state, CompactionLeaseStatus};
-    use loonfs_objectstore::keys::metadata_compaction_output_protection;
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let job_id = test_metadata_compaction_id();
-    let (store, staged_key, _) =
-        namespace_with_staged_output(&temp_dir, &namespace_id, &job_id).await;
-    let now_ms = now_after_newest_object(
-        store.inner(),
-        &namespace_id,
-        METADATA_COMPACTION_STAGING_GRACE_MS + 1,
-    )
-    .await;
-    write_compaction_lease_in_state(
-        &store,
-        &namespace_id,
-        &job_id,
-        loonfs_api::MetadataFamilyGroup::Bindings,
-        now_ms + 10_000,
-        CompactionLeaseStatus::Completed {},
-    )
-    .await;
-    let completed = crate::checkpoint::load_group_lease(
-        &store,
-        &namespace_id,
-        loonfs_api::MetadataFamilyGroup::Bindings,
-    )
-    .await
-    .expect("group")
-    .expect("completed group");
-    let protection_key = metadata_compaction_output_protection(&namespace_id, &job_id);
-    store
-        .put_if_absent(
-            &protection_key,
-            Bytes::from(
-                encode_control_state(
-                    ControlObjectKind::CompactionOutputProtection,
-                    &loonfs_api::wire::control::CompactionOutputProtectionState {
-                        namespace_id: namespace_id.clone(),
-                        job_id: job_id.clone(),
-                        expires_at_ms: completed.state.expires_at_ms,
-                    },
-                )
-                .expect("encode protection"),
-            ),
-        )
-        .await
-        .expect("copy protection");
-    let next_job = loonfs_api::MetadataCompactionId::parse("cmp_abcdef0123456789abcdef0123456789")
-        .expect("next job");
-    write_compaction_lease(&store, &namespace_id, &next_job, now_ms + 20_000).await;
-
-    // This old collector's clock predates completion. A later group owner
-    // must not erase the protection it needs, however old the output is.
-    gc_namespace(&store, &namespace_id, &config(), &context(now_ms))
-        .await
-        .expect("old collector");
-    assert!(store
-        .head(&staged_key)
-        .await
-        .expect("protected output")
-        .is_some());
-    assert!(store
-        .head(&protection_key)
-        .await
-        .expect("protected lease")
-        .is_some());
-
-    // A later pass may remove unreferenced output. It leaves protection
-    // while that output exists, including while deciding this pass.
-    gc_namespace(&store, &namespace_id, &config(), &context(now_ms + 10_001))
-        .await
-        .expect("new collector");
-    assert!(store
-        .head(&staged_key)
-        .await
-        .expect("removed output")
-        .is_none());
-    assert!(store
-        .head(&protection_key)
-        .await
-        .expect("output protection")
-        .is_some());
-    gc_namespace(&store, &namespace_id, &config(), &context(now_ms + 10_001))
-        .await
-        .expect("empty prefix cleanup");
-    assert!(store
-        .head(&protection_key)
-        .await
-        .expect("removed output protection")
-        .is_none());
-    let group = crate::checkpoint::load_group_lease(
-        &store,
-        &namespace_id,
-        loonfs_api::MetadataFamilyGroup::Bindings,
-    )
-    .await
-    .expect("group")
-    .expect("new job remains");
-    assert_eq!(group.state.job_id, next_job);
 }
 
 #[tokio::test]

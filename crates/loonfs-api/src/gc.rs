@@ -296,8 +296,6 @@ pub enum GcCandidateFamily {
     WalSegments,
     /// Immutable metadata segments.
     MetadataSegments,
-    /// Compaction output and publication protection records.
-    CompactionStaging,
     /// Immutable metadata manifests.
     Manifests,
     /// Mutable pin records.
@@ -310,10 +308,9 @@ pub enum GcCandidateFamily {
 
 impl GcCandidateFamily {
     /// Metadata precedes its protecting records; retired content comes last.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::WalSegments,
         Self::MetadataSegments,
-        Self::CompactionStaging,
         Self::Manifests,
         Self::Checkpoints,
         Self::UploadSessions,
@@ -325,11 +322,10 @@ impl GcCandidateFamily {
         match self {
             Self::WalSegments => 0,
             Self::MetadataSegments => 1,
-            Self::CompactionStaging => 2,
-            Self::Manifests => 3,
-            Self::Checkpoints => 4,
-            Self::UploadSessions => 5,
-            Self::OwnedContent => 6,
+            Self::Manifests => 2,
+            Self::Checkpoints => 3,
+            Self::UploadSessions => 4,
+            Self::OwnedContent => 5,
         }
     }
 }

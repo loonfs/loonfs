@@ -169,7 +169,6 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 MetadataCompactionOutcome::Cancelled => "cancelled".to_owned(),
                 MetadataCompactionOutcome::Abandoned => "abandoned".to_owned(),
                 MetadataCompactionOutcome::Fenced => "fenced".to_owned(),
-                MetadataCompactionOutcome::Superseded => "superseded".to_owned(),
             };
             format!(
                 "metadata compaction for {}: {summary}",

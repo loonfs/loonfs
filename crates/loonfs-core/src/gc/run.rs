@@ -1,7 +1,6 @@
 //! Server-owned GC progress. Every worker joins the same run and advances it
 //! by CAS; a client token carries identity, never deletion evidence.
 use super::budget::PassBudget;
-use super::compaction_staging::CompactionLeases;
 use super::config::GcConfig;
 use super::cursor::CandidateFamilyExt;
 use super::mark_table::MarkTables;
@@ -246,7 +245,6 @@ pub(super) struct Pass<'a, S: ?Sized> {
     namespace_id: &'a NamespaceId,
     context: &'a MutationContext,
     tables: MarkTables<'a, S>,
-    leases: CompactionLeases,
     scan: mark::Scan,
 }
 
@@ -262,7 +260,6 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
             namespace_id,
             context,
             tables: MarkTables::new(store, namespace_id, run_id),
-            leases: CompactionLeases::default(),
             scan: mark::Scan::default(),
         }
     }
@@ -276,7 +273,6 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
         let namespace_id = self.namespace_id;
         let context = self.context;
         let tables = &mut self.tables;
-        let leases = &mut self.leases;
         let scan = &mut self.scan;
         match &mut state.phase {
             GcPhase::Starting {} => {
@@ -486,7 +482,6 @@ impl<'a, S: ObjectStore + ?Sized> Pass<'a, S> {
                             mutation: context,
                             references,
                             upload_sweep,
-                            leases,
                             report,
                             checkpoints_retained,
                         }

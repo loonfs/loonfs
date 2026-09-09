@@ -17,6 +17,7 @@ pub(crate) type LoadedHeadObject = LoadedControl<HeadState>;
 pub struct CurrentManifest {
     pub manifest: ManifestRef,
     pub retention_floor_seq: loonfs_api::ChangeSeq,
+    pub compactor_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +165,7 @@ async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
                 manifest_payload_checksum: envelope.payload_checksum().to_owned(),
             },
             retention_floor_seq: envelope.payload().retention_floor_seq,
+            compactor_epoch: envelope.payload().compactor_epoch,
         },
         envelope,
     }))

@@ -3,9 +3,6 @@
 //! same place, restart equivalence, and the resource bounds that make a merge
 //! independent of the size of what it merges.
 
-use super::super::compaction_lease::{
-    claim_group_lease, load_group_lease, CompactionLease, CompactionPrefixOwner, LeaseHold,
-};
 use super::super::reorganize::{
     group_run_descriptors, select_reorganization_input, MetadataCompactionPolicy,
     ReorganizationPlan,
@@ -15,14 +12,13 @@ use super::super::runs::MetadataFamilyGroup;
 use super::super::scan::VerifiedMetadataSegments;
 use super::super::streaming_compaction::{
     finalize_metadata_compaction, merge_group_in_step, run_metadata_compaction,
-    snapshot_segment_keys, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionSpec, MetadataMergeResult,
+    snapshot_segment_keys, CompactionPublication, MetadataCompactionCancellation,
+    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataMergeResult,
 };
 use super::*;
-use crate::limits::METADATA_COMPACTION_LEASE_EXPIRY_MS;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::ActiveDeletionRowAction;
-use loonfs_objectstore::keys::{metadata_compaction_lease, metadata_compaction_prefix};
+use loonfs_objectstore::keys::metadata_segment_prefix;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, KeyPredicate, OperationClass,
 };
@@ -598,71 +594,6 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
 /// it. These tests split the rebuild from the driver, so they create the
 /// lease themselves — every later write compare-and-swaps against the etag
 /// this one returns, so a lease that was never created cannot be refreshed.
-async fn test_lease<'a, S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    spec: &MetadataCompactionSpec,
-    timer: &'a dyn MonotonicTimer,
-) -> CompactionLease<'a> {
-    let context = test_context();
-    CompactionLease::open_for_test(
-        store,
-        namespace_id,
-        spec,
-        &context.writer_id,
-        context.now_ms,
-        timer,
-    )
-    .await
-    .expect("open the job's lease")
-}
-
-async fn write_active_lease<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    spec: &MetadataCompactionSpec,
-    expires_at_ms: u64,
-) {
-    write_lease_in_state(
-        store,
-        namespace_id,
-        spec,
-        expires_at_ms,
-        loonfs_api::wire::control::CompactionLeaseStatus::Active {},
-    )
-    .await;
-}
-
-async fn write_lease_in_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    spec: &MetadataCompactionSpec,
-    expires_at_ms: u64,
-    status: loonfs_api::wire::control::CompactionLeaseStatus,
-) {
-    let state = loonfs_api::wire::control::MetadataCompactionLeaseState {
-        job_id: spec.job_id().clone(),
-        namespace_id: namespace_id.clone(),
-        group: spec.group(),
-        writer_id: loonfs_api::WriterId::parse("test-writer").expect("writer id"),
-        status,
-        started_at_ms: 1_000,
-        expires_at_ms,
-    };
-    let bytes = loonfs_api::wire::control::encode_control_state(
-        loonfs_api::wire::control::ControlObjectKind::CompactionLease,
-        &state,
-    )
-    .expect("encode lease");
-    store
-        .put_overwrite(
-            &metadata_compaction_lease(namespace_id, spec.group()),
-            Bytes::from(bytes),
-        )
-        .await
-        .expect("write lease");
-}
-
 async fn run_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -671,18 +602,9 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
     cancellation: &MetadataCompactionCancellation,
 ) -> std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
-    let timer = StdMonotonicTimer::default();
-    let mut lease = test_lease(store, namespace_id, spec, &timer).await;
-    run_metadata_compaction(
-        &segments,
-        namespace_id,
-        spec,
-        policy,
-        cancellation,
-        &mut lease,
-    )
-    .await
-    .expect("run the streaming compaction")
+    run_metadata_compaction(&segments, namespace_id, spec, policy, cancellation)
+        .await
+        .expect("run the streaming compaction")
 }
 
 /// The segments the group's snapshot runs hold right now, which is what
@@ -729,7 +651,11 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     cancellation: &MetadataCompactionCancellation,
 ) -> MetadataCompactionJobOutcome {
     let timer = StdMonotonicTimer::default();
-    let mut lease = test_lease(store, namespace_id, spec, &timer).await;
+    let publication = CompactionPublication {
+        compactor_epoch: 0,
+        timer: &timer,
+        started_ms: 0,
+    };
     finalize_metadata_compaction(
         store,
         namespace_id,
@@ -737,7 +663,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
         snapshot_keys,
         result.clone(),
         cancellation,
-        &mut lease,
+        &publication,
     )
     .await
     .expect("finalize the streaming compaction")
@@ -818,14 +744,16 @@ fn copy_store_tree(from: &Path, to: &Path) {
     }
 }
 
-async fn staged_object_keys<S: ObjectStore + ?Sized>(
+async fn orphan_segment_keys<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<String> {
     use futures::StreamExt;
+    let referenced = referenced_segment_keys(store, namespace_id).await;
     store
-        .list_prefix_stream(&metadata_compaction_prefix(namespace_id))
-        .map(|key| key.expect("list staged objects"))
+        .list_prefix_stream(&metadata_segment_prefix(namespace_id))
+        .map(|key| key.expect("list segments"))
+        .filter(|key| std::future::ready(!referenced.contains(key)))
         .collect()
         .await
 }
@@ -840,7 +768,7 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
     let report = super::super::reorganize_metadata_step(
         store,
         namespace_id,
-        &test_context(),
+        0,
         fold_everything_policy(),
         MetadataCompactionPolicy::default(),
     )
@@ -929,10 +857,11 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     seed_bindings_workload(&store, &namespace_id).await;
     let before = current_manifest_number(&store, &namespace_id).await;
 
+    let store = loonfs_test_support::stores::RecordingStore::new(store, KeyPredicate::any());
     let report = super::super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        &test_context(),
+        0,
         starving_policy(),
         MetadataCompactionPolicy::default(),
     )
@@ -948,121 +877,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
         before,
         "a step that plans a compaction publishes nothing"
     );
-    assert!(
-        staged_object_keys(&store, &namespace_id).await.is_empty(),
-        "and stages nothing, because the job has not started"
-    );
-}
-
-#[tokio::test]
-async fn held_group_leases_are_skipped_and_an_expired_lease_is_available() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let group = MetadataFamilyGroup::Bindings;
-    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let policy = MetadataLsmPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
-    };
-    let context = mutation_context(
-        "test-writer",
-        METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_add(10_000),
-    );
-    let active_dir = tempdir().expect("tempdir");
-    let reaping_dir = tempdir().expect("tempdir");
-    let expired_dir = tempdir().expect("tempdir");
-    copy_store_tree(temp_dir.path(), active_dir.path());
-    copy_store_tree(temp_dir.path(), reaping_dir.path());
-    copy_store_tree(temp_dir.path(), expired_dir.path());
-    let active_store = LocalFsStore::new(active_dir.path()).expect("store");
-    let reaping_store = LocalFsStore::new(reaping_dir.path()).expect("store");
-    let expired_store = LocalFsStore::new(expired_dir.path()).expect("store");
-
-    write_active_lease(
-        &active_store,
-        &namespace_id,
-        &spec,
-        context
-            .now_ms
-            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
-    )
-    .await;
-    let active = super::super::reorganize_metadata_step(
-        &active_store,
-        &namespace_id,
-        &context,
-        policy,
-        MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("step with active lease");
-    let MetadataReorganizeOutcome::UnitPublished {
-        group: active_group,
-        ..
-    } = active.outcome
-    else {
-        panic!("expected another group to merge, got {:?}", active.outcome);
-    };
-    assert_ne!(
-        active_group, group,
-        "the active lease excludes its family group"
-    );
-
-    write_lease_in_state(
-        &reaping_store,
-        &namespace_id,
-        &spec,
-        0,
-        loonfs_api::wire::control::CompactionLeaseStatus::Reaping {},
-    )
-    .await;
-    let reaping = super::super::reorganize_metadata_step(
-        &reaping_store,
-        &namespace_id,
-        &context,
-        policy,
-        MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("step with reaping lease");
-    let MetadataReorganizeOutcome::UnitPublished {
-        group: reaping_group,
-        ..
-    } = reaping.outcome
-    else {
-        panic!("expected another group to merge, got {:?}", reaping.outcome);
-    };
-    assert_eq!(
-        reaping_group, group,
-        "a fenced job does not hold its family group"
-    );
-
-    write_active_lease(&expired_store, &namespace_id, &spec, 0).await;
-    let expired = super::super::reorganize_metadata_step(
-        &expired_store,
-        &namespace_id,
-        &context,
-        policy,
-        MetadataCompactionPolicy::default(),
-    )
-    .await
-    .expect("step with expired lease");
-    let MetadataReorganizeOutcome::UnitPublished {
-        group: expired_group,
-        ..
-    } = expired.outcome
-    else {
-        panic!(
-            "expected the leased group to merge, got {:?}",
-            expired.outcome
-        );
-    };
-    assert_eq!(
-        expired_group, group,
-        "an expired lease does not exclude its family group"
-    );
+    assert_eq!(store.counts().puts, 0);
 }
 
 #[tokio::test]
@@ -1097,7 +912,7 @@ async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            &context,
+            0,
             policy,
             MetadataCompactionPolicy::SizeTiered,
         )
@@ -1157,7 +972,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            &context,
+            0,
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1204,7 +1019,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            &context,
+            0,
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1261,9 +1076,9 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
     assert!(
         result.output_segments.iter().all(|descriptor| {
             metadata_segment_object_key(descriptor)
-                .starts_with(&metadata_compaction_prefix(&namespace_id))
+                .starts_with(&metadata_segment_prefix(&namespace_id))
         }),
-        "every output segment is written to the staging directory"
+        "every output segment is written to the segment directory"
     );
     // Every reverse row the floor covers costs one point read, and no other
     // row costs one. That is what bounds the reads a job makes.
@@ -1565,8 +1380,6 @@ async fn a_repeated_revision_row_key_is_refused() {
     assert_duplicate_row_key(&step_error, &duplicated_key);
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let timer = StdMonotonicTimer::default();
-    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     let job_error = run_metadata_compaction(
         &segments,
@@ -1574,7 +1387,6 @@ async fn a_repeated_revision_row_key_is_refused() {
         &spec,
         fold_everything_policy(),
         &MetadataCompactionCancellation::default(),
-        &mut lease,
     )
     .await
     .expect_err("a background compaction must refuse the duplicate");
@@ -2189,7 +2001,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
             reader_answers_before,
             "and what a reader sees never moves"
         );
-        orphans.extend(staged_object_keys(&store, &namespace_id).await);
+        orphans.extend(orphan_segment_keys(&store, &namespace_id).await);
     }
     assert!(
         cancelled_attempts > 0,
@@ -2237,7 +2049,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     );
     // The cancelled attempts' segments are still there and nothing names
     // them: they are orphans for the collector, not state anything reads.
-    let staged_now = staged_object_keys(&store, &namespace_id).await;
+    let staged_now = orphan_segment_keys(&store, &namespace_id).await;
     for orphan in &orphans {
         assert!(staged_now.contains(orphan));
         assert!(
@@ -2260,212 +2072,6 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
     );
 }
 
-// -------------------------------------------------------------------------
-// The job's claim on its own output
-// -------------------------------------------------------------------------
-
-#[tokio::test]
-async fn a_job_keeps_published_output_under_its_own_prefix() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    seed_bindings_workload(&store, &namespace_id).await;
-    let group = MetadataFamilyGroup::Bindings;
-    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
-    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
-    let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
-
-    let outcome = run_metadata_compaction_job(
-        &store,
-        &namespace_id,
-        &context,
-        &spec,
-        policy,
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("run the job");
-    assert!(matches!(
-        outcome,
-        MetadataCompactionJobOutcome::Published { .. }
-    ));
-
-    // The job writes every segment under its own prefix, and the manifest now
-    // references them.
-    let staged = staged_object_keys(&store, &namespace_id).await;
-    let referenced = referenced_segment_keys(&store, &namespace_id).await;
-    let job_prefix = format!(
-        "{}{}/",
-        metadata_compaction_prefix(&namespace_id),
-        spec.job_id().as_str()
-    );
-    assert!(
-        staged.iter().all(|key| key.starts_with(&job_prefix)),
-        "every object a job writes belongs to that job's prefix: {staged:?}"
-    );
-    assert!(
-        !staged.is_empty()
-            && staged
-                .iter()
-                .filter(|key| key.ends_with(".sst.zst"))
-                .all(|key| referenced.contains(key)),
-        "the manifest must name every segment the job published"
-    );
-    assert!(
-        store
-            .head(&lease_key)
-            .await
-            .expect("head the group lease")
-            .is_some(),
-        "a completed group slot remains available for the next job's CAS"
-    );
-}
-
-#[tokio::test]
-async fn group_lease_acquisition_supersedes_a_second_job_and_fences_an_expired_owner() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let policy = small_segment_policy();
-    let first_spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let second_spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let timer = StdMonotonicTimer::default();
-    let mut first_lease = test_lease(&store, &namespace_id, &first_spec, &timer).await;
-
-    let staged_before = staged_object_keys(&store, &namespace_id).await;
-    let held = run_metadata_compaction_job(
-        &store,
-        &namespace_id,
-        &test_context(),
-        &second_spec,
-        policy,
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("try the held group");
-    assert_eq!(held, MetadataCompactionJobOutcome::Superseded);
-    assert_eq!(
-        staged_object_keys(&store, &namespace_id).await,
-        staged_before,
-        "a superseded job writes no staged object"
-    );
-
-    let takeover_context = mutation_context(
-        "takeover-writer",
-        test_context()
-            .now_ms
-            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS)
-            .saturating_add(1),
-    );
-    let previous = load_group_lease(&store, &namespace_id, first_spec.group())
-        .await
-        .expect("load the first lease")
-        .expect("the first lease exists");
-    assert!(
-        previous.state.expires_at_ms < takeover_context.now_ms,
-        "takeover requires the stored expiry to be in the past"
-    );
-    let taken_over = run_metadata_compaction_job(
-        &store,
-        &namespace_id,
-        &takeover_context,
-        &second_spec,
-        policy,
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("take over the expired lease");
-    assert!(matches!(
-        taken_over,
-        MetadataCompactionJobOutcome::Published { .. }
-    ));
-    assert_eq!(
-        first_lease
-            .refresh(&store)
-            .await
-            .expect("refresh the old lease"),
-        LeaseHold::Fenced
-    );
-}
-
-#[tokio::test]
-async fn a_worker_whose_expired_lease_was_claimed_is_fenced_and_publishes_nothing() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
-    let Ok(result) = run_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        small_segment_policy(),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    else {
-        panic!("nothing cancelled this job while it read");
-    };
-    let manifest_before = current_manifest_number(&store, &namespace_id).await;
-
-    // The claim the worker holds, taken before the collector's. That is the
-    // whole shape of the race: the worker's etag is the one it last wrote,
-    // and the collector is about to replace it.
-    let timer = StdMonotonicTimer::default();
-    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
-
-    // Well past the expiry rather than one millisecond past it: the job
-    // stamped its lease off a real clock, so the pass's clock has to clear
-    // whatever it spent running.
-    let expired_ms = test_context().now_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS * 2;
-    let owner = claim_group_lease(
-        &store,
-        &namespace_id,
-        spec.group(),
-        spec.job_id(),
-        expired_ms,
-    )
-    .await
-    .expect("claim the expired prefix");
-    assert_eq!(
-        owner,
-        CompactionPrefixOwner::Fenced,
-        "an expired lease is claimed, and only the winner may reap the prefix"
-    );
-
-    assert_eq!(
-        lease.refresh(&store).await.expect("refresh the lease"),
-        LeaseHold::Fenced,
-        "the worker's next refresh must find the claim and stop"
-    );
-    let finalization = finalize_metadata_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        &snapshot_keys,
-        result,
-        &MetadataCompactionCancellation::default(),
-        &mut lease,
-    )
-    .await
-    .expect("finalize the fenced job");
-    assert!(
-        matches!(finalization, MetadataCompactionJobOutcome::Fenced),
-        "a fenced job reports it rather than publishing, got {finalization:?}"
-    );
-    assert_eq!(
-        current_manifest_number(&store, &namespace_id).await,
-        manifest_before,
-        "and the root must not have moved"
-    );
-}
-
 /// A monotonic clock that advances a second per reading.
 #[derive(Debug, Default)]
 struct SteppingTimer(AtomicU64);
@@ -2474,122 +2080,6 @@ impl MonotonicTimer for SteppingTimer {
     fn monotonic_now_ms(&self) -> u64 {
         self.0.fetch_add(1_000, Ordering::SeqCst)
     }
-}
-
-#[tokio::test]
-async fn lease_creation_and_refresh_write_absolute_expiry() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let context = test_context();
-    let timer = SteppingTimer::default();
-    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
-
-    let created = load_group_lease(&store, &namespace_id, spec.group())
-        .await
-        .expect("load the created lease")
-        .expect("created lease");
-    assert_eq!(
-        created.state.expires_at_ms,
-        context
-            .now_ms
-            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
-        "creation writes the expiry policy as an absolute instant"
-    );
-
-    assert_eq!(
-        lease.refresh(&store).await.expect("refresh the lease"),
-        LeaseHold::Held
-    );
-    let refreshed = load_group_lease(&store, &namespace_id, spec.group())
-        .await
-        .expect("load the refreshed lease")
-        .expect("refreshed lease");
-    assert_eq!(
-        refreshed.state.expires_at_ms,
-        context
-            .now_ms
-            .saturating_add(1_000)
-            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
-        "refresh writes its current time plus the expiry policy"
-    );
-}
-
-#[tokio::test]
-async fn exactly_one_of_a_refresh_and_a_reaping_claim_wins() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let lease_key = metadata_compaction_lease(&namespace_id, spec.group());
-    // The stepping clock below moves each refresh's expiry forward a few
-    // seconds, so the pass's clock is set well past the expiry rather than one
-    // millisecond past it.
-    let expired_ms = test_context().now_ms + METADATA_COMPACTION_LEASE_EXPIRY_MS * 2;
-    // The local store's etags are content hashes, so two lease writes inside
-    // one millisecond would carry identical bytes under an identical etag and
-    // the race under test would not be one. A stepping clock makes every
-    // refresh a distinct document, which is what a provider etag gives for
-    // free.
-    let timer = SteppingTimer::default();
-    let mut lease = test_lease(&store, &namespace_id, &spec, &timer).await;
-
-    let gated = BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(lease_key),
-        OperationClass::CompareAndSwap,
-    );
-    gated.block_next();
-    let (claimed, refresh) = tokio::join!(
-        claim_group_lease(
-            &gated,
-            &namespace_id,
-            spec.group(),
-            spec.job_id(),
-            expired_ms,
-        ),
-        async {
-            gated.wait_until_blocked().await;
-            let refresh = lease.refresh(&store).await.expect("refresh the lease");
-            gated.release();
-            refresh
-        }
-    );
-    assert_eq!(
-        refresh,
-        LeaseHold::Held,
-        "the worker got there first, so it keeps its prefix"
-    );
-    assert_eq!(
-        claimed.expect("claim the prefix"),
-        CompactionPrefixOwner::Protected,
-        "and the claim behind it is refused, so exactly one of the two won"
-    );
-
-    // The other order, on the same lease: the claim lands, and the refresh
-    // behind it finds an etag it does not hold.
-    assert_eq!(
-        claim_group_lease(
-            &store,
-            &namespace_id,
-            spec.group(),
-            spec.job_id(),
-            expired_ms,
-        )
-        .await
-        .expect("claim the prefix"),
-        CompactionPrefixOwner::Fenced
-    );
-    assert_eq!(
-        lease.refresh(&store).await.expect("refresh the lease"),
-        LeaseHold::Fenced,
-        "exactly one of the two compare-and-swaps may win"
-    );
 }
 
 // -------------------------------------------------------------------------
@@ -2982,7 +2472,6 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
 
     let mut active: Option<MetadataCompactionSpec> = None;
     let mut steps_with_a_job_running = 0usize;
-    let mut other_groups_folded = 0usize;
     let mut arrived_keys = BTreeSet::new();
     let mut published_jobs = 0usize;
     let mut settled = false;
@@ -2991,7 +2480,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            &context,
+            0,
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -3004,7 +2493,6 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                         folded, group,
                         "no step may merge the group a job is rebuilding"
                     );
-                    other_groups_folded += 1;
                 }
             }
             MetadataReorganizeOutcome::CompactionPlanned {
@@ -3017,15 +2505,6 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                 if active.is_none() {
                     assert_eq!(planned_group, group, "this budget starves this group first");
                     active = Some(spec.clone());
-                    write_active_lease(
-                        &store,
-                        &namespace_id,
-                        spec,
-                        context
-                            .now_ms
-                            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS),
-                    )
-                    .await;
                     if arrived_keys.is_empty() {
                         // A run arrives while the first job runs. It is
                         // outside that job's snapshot, so the job never reads
@@ -3054,7 +2533,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                     }
                 }
             }
-            MetadataReorganizeOutcome::Superseded => {
+            MetadataReorganizeOutcome::Superseded | MetadataReorganizeOutcome::Fenced => {
                 panic!("no concurrent publisher exists in this test")
             }
             MetadataReorganizeOutcome::NotNeeded { .. } if active.is_none() => {
@@ -3079,15 +2558,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
         if let Some(spec) = active.clone() {
             steps_with_a_job_running += 1;
             if steps_with_a_job_running % 3 == 0 {
-                store
-                    .delete(&metadata_compaction_lease(&namespace_id, spec.group()))
-                    .await
-                    .expect("remove the test lease before the job creates it");
                 publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
-                store
-                    .delete(&metadata_compaction_lease(&namespace_id, spec.group()))
-                    .await
-                    .expect("expire the completed test job's lease");
                 published_jobs += 1;
                 active = None;
                 if published_jobs == 1 {
@@ -3107,10 +2578,6 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
     }
 
     assert!(published_jobs > 0, "the group must be rebuilt by a job");
-    assert!(
-        other_groups_folded > 0,
-        "ordinary maintenance must keep folding while a job runs"
-    );
     assert!(settled, "maintenance must settle with nothing left to fold");
 
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
@@ -3141,14 +2608,14 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
 async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    _context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> MetadataCompactionSpec {
     for _step in 0..64 {
         let report = super::super::reorganize_metadata_step(
             store,
             namespace_id,
-            context,
+            0,
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -3182,12 +2649,12 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
     let manifest_before = current_manifest_number(&store, &namespace_id).await;
 
     // The attempt dies partway through, which is what a cancellation and a
-    // kill leave behind alike: staged segments and nothing else. The
+    // kill leave behind alike: output segments and nothing else. The
     // cancellation lands after a number of reads rather than at a boundary
     // the test picked, so several thresholds are tried until one lands after
     // the job has written something.
     let mut orphans = BTreeSet::new();
-    for (attempt, reads_before_cancel) in [8usize, 16, 24, 32].into_iter().enumerate() {
+    for reads_before_cancel in [8usize, 16, 24, 32] {
         let cancellation = MetadataCompactionCancellation::default();
         let dying_store = CancelAfterReadsStore {
             inner: LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -3195,18 +2662,10 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             reads_before_cancel,
             reads: AtomicUsize::new(0),
         };
-        let attempt_context = mutation_context(
-            "test-writer",
-            context.now_ms.saturating_add(
-                u64::try_from(attempt)
-                    .expect("four attempts should fit in u64")
-                    .saturating_mul(METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_mul(2)),
-            ),
-        );
         let outcome = run_metadata_compaction_job(
             &dying_store,
             &namespace_id,
-            &attempt_context,
+            0,
             &spec,
             policy,
             &cancellation,
@@ -3218,14 +2677,6 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             MetadataCompactionJobOutcome::Cancelled,
             "the cancellation must land before the job finishes"
         );
-        assert!(
-            store
-                .head(&metadata_compaction_lease(&namespace_id, spec.group()))
-                .await
-                .expect("head the lease")
-                .is_some(),
-            "a cancelled job's claim stands until it expires"
-        );
         assert_eq!(
             current_manifest_number(&store, &namespace_id).await,
             manifest_before,
@@ -3236,7 +2687,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
             visible,
             "and must leave what a read answers exactly where it was"
         );
-        orphans.extend(staged_object_keys(&store, &namespace_id).await);
+        orphans.extend(orphan_segment_keys(&store, &namespace_id).await);
         if !orphans.is_empty() {
             break;
         }
@@ -3251,17 +2702,8 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         "and nothing may reference them"
     );
 
-    // Once the abandoned lease expires, the next step plans the group again,
-    // and the second attempt finishes.
-    let expired_context = mutation_context(
-        "test-writer",
-        context
-            .now_ms
-            .saturating_add(METADATA_COMPACTION_LEASE_EXPIRY_MS.saturating_mul(10)),
-    );
-    let spec =
-        step_until_a_compaction_is_planned(&store, &namespace_id, &expired_context, policy).await;
-    publish_planned_compaction(&store, &namespace_id, &expired_context, policy, &spec).await;
+    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
+    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
 
     assert_eq!(
         visible_namespace(&store, &namespace_id).await,
@@ -3276,7 +2718,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
     // The first attempt's segments are still staged and still named by
     // nothing: orphans for the collector, not state anything reads.
     let referenced = referenced_segment_keys(&store, &namespace_id).await;
-    let staged_now = staged_object_keys(&store, &namespace_id).await;
+    let staged_now = orphan_segment_keys(&store, &namespace_id).await;
     assert!(orphans.is_subset(&staged_now));
     assert!(orphans.is_disjoint(&referenced));
 }
@@ -3487,7 +2929,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
         visible_before,
         "and a read must answer exactly what it answered before"
     );
-    let staged = staged_object_keys(&store, &namespace_id).await;
+    let staged = orphan_segment_keys(&store, &namespace_id).await;
     let referenced = referenced_segment_keys(&store, &namespace_id).await;
     assert!(
         !staged.is_empty(),
@@ -3671,106 +3113,298 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
 }
 
 #[tokio::test]
-async fn completed_output_protection_does_not_hold_the_group() {
-    use super::super::compaction_lease::{load_output_protection, LeaseAcquire};
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let first =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let second =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let timer = StdMonotonicTimer::default();
-    let mut lease = test_lease(&store, &namespace_id, &first, &timer).await;
-    let before = load_group_lease(&store, &namespace_id, first.group())
+async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
+    use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, RecordingStore};
+
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("direct-output").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let epoch = super::super::compactor::claim_compactor(&store, &namespace)
         .await
-        .expect("load group")
-        .expect("held group");
-    lease
-        .protect_output(&store)
-        .await
-        .expect("protect sealed output");
-    lease.complete(&store).await.expect("complete job");
-    let protected = load_output_protection(&store, &namespace_id, first.job_id())
-        .await
-        .expect("load protection")
-        .expect("protection exists");
-    assert_eq!(protected.state.expires_at_ms, before.state.expires_at_ms);
-    let acquired = CompactionLease::acquire(
+        .expect("claim");
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let before = current_manifest_number(&store, &namespace).await;
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let outcome = run_metadata_compaction_job(
         &store,
-        &namespace_id,
-        &second,
-        &test_context().writer_id,
-        test_context().now_ms,
-        &timer,
+        &namespace,
+        epoch,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
     )
     .await
-    .expect("acquire next job");
+    .expect("publish");
     assert!(
-        matches!(acquired, LeaseAcquire::Acquired(_)),
-        "completion must not wait for expiry"
+        matches!(outcome, MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no == before.successor().expect("next number"))
     );
-    assert_eq!(
-        lease.refresh(&store).await.expect("old lease is fenced"),
-        LeaseHold::Fenced
+    let puts = store
+        .take()
+        .into_iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                loonfs_test_support::stores::RecordedOperation::Put { .. }
+                    | loonfs_test_support::stores::RecordedOperation::PutStreamed { .. }
+            )
+        })
+        .map(|operation| operation.key().to_owned())
+        .collect::<Vec<_>>();
+    assert!(puts
+        .iter()
+        .any(|key| key.starts_with(&metadata_segment_prefix(&namespace))));
+    assert!(puts
+        .iter()
+        .all(|key| key.starts_with(&metadata_segment_prefix(&namespace))
+            || key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(
+                &namespace
+            ))
+            || key == &loonfs_objectstore::keys::hint(&namespace)));
+
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let current_keys = referenced_segment_keys(&store, &namespace).await;
+    let before = current_manifest_number(&store, &namespace).await;
+    let existing_orphans = orphan_segment_keys(&store, &namespace).await;
+    let failing = FailStore::new(
+        store,
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace,
+        )),
+        OperationClass::Put,
+        InjectedError::PermissionDenied("publication stopped".to_owned()),
     );
-    assert_eq!(
-        load_output_protection(&store, &namespace_id, first.job_id())
-            .await
-            .expect("old output protection")
-            .expect("still present")
-            .state,
-        protected.state
-    );
+    failing.fail_next(1);
+    assert!(run_metadata_compaction_job(
+        &failing,
+        &namespace,
+        epoch,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default()
+    )
+    .await
+    .is_err());
+    assert_eq!(current_manifest_number(&failing, &namespace).await, before);
+    let orphans = orphan_segment_keys(&failing, &namespace)
+        .await
+        .difference(&existing_orphans)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(!orphans.is_empty());
+    failing.clear();
+    let store = MetadataMapStore::aged(failing, KeyPredicate::any());
+    let config = crate::gc::GcConfig {
+        grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
+        max_steps: None,
+        ..crate::gc::GcConfig::default()
+    };
+    for age_ms in [
+        UNREFERENCED_SEGMENT_MIN_AGE_MS,
+        UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
+    ] {
+        crate::gc::gc_namespace(
+            &store,
+            &namespace,
+            &config,
+            &mutation_context("collector", age_ms),
+        )
+        .await
+        .expect("collect");
+        for key in &orphans {
+            assert_eq!(
+                store.head(key).await.expect("head").is_some(),
+                age_ms == UNREFERENCED_SEGMENT_MIN_AGE_MS
+            );
+        }
+        for key in &current_keys {
+            assert!(store.head(key).await.expect("head").is_some());
+        }
+    }
 }
 
 #[tokio::test]
-async fn output_protection_is_durable_before_manifest_publication() {
-    use super::super::compaction_lease::load_output_protection;
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let gated = BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::manifest(&namespace_id),
+async fn a_new_compactor_epoch_and_an_expired_job_each_prevent_publication() {
+    use crate::limits::METADATA_COMPACTION_BUDGET_MS;
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace = NamespaceId::parse("fencing").expect("namespace");
+    seed_bindings_workload(&store, &namespace).await;
+    let epoch = super::super::compactor::claim_compactor(&store, &namespace)
+        .await
+        .expect("claim");
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let snapshot = snapshot_keys_now(&store, &namespace, &spec).await;
+    let cancellation = MetadataCompactionCancellation::default();
+    let result = run_compaction(
+        &store,
+        &namespace,
+        &spec,
+        small_segment_policy(),
+        &cancellation,
+    )
+    .await
+    .expect("merge");
+    let timer = SteppingTimer(AtomicU64::new(0));
+    let mut publication = CompactionPublication {
+        compactor_epoch: epoch,
+        timer: &timer,
+        started_ms: 0,
+    };
+    let next_epoch = super::super::compactor::claim_compactor(&store, &namespace)
+        .await
+        .expect("another claim");
+    assert_eq!(next_epoch, epoch + 1);
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let outcome = finalize_metadata_compaction(
+        &store,
+        &namespace,
+        &spec,
+        &snapshot,
+        result.clone(),
+        &cancellation,
+        &publication,
+    )
+    .await
+    .expect("fenced");
+    assert_eq!(outcome, MetadataCompactionJobOutcome::Fenced);
+    assert_eq!(store.counts().puts, 0);
+    let bounded = super::super::reorganize_metadata_step(
+        &store,
+        &namespace,
+        epoch,
+        fold_everything_policy(),
+        MetadataCompactionPolicy::CompactImmediately,
+    )
+    .await
+    .expect("bounded fence");
+    assert_eq!(bounded.outcome, MetadataReorganizeOutcome::Fenced);
+    assert_eq!(store.counts().puts, 0);
+
+    publication.compactor_epoch = next_epoch;
+    timer
+        .0
+        .store(METADATA_COMPACTION_BUDGET_MS + 1, Ordering::SeqCst);
+    let outcome = finalize_metadata_compaction(
+        &store,
+        &namespace,
+        &spec,
+        &snapshot,
+        result,
+        &cancellation,
+        &publication,
+    )
+    .await
+    .expect("elapsed bound");
+    assert_eq!(outcome, MetadataCompactionJobOutcome::Abandoned);
+    assert_eq!(store.counts().puts, 0);
+}
+
+#[tokio::test]
+async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("concurrent-groups").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let epoch = super::super::compactor::claim_compactor(&store, &namespace)
+        .await
+        .expect("claim");
+    let before = current_manifest_number(&store, &namespace).await;
+    let first = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let second =
+        compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Revisions).await;
+    let first_keys = snapshot_keys_now(&store, &namespace, &first).await;
+    let second_keys = snapshot_keys_now(&store, &namespace, &second).await;
+    let cancellation = MetadataCompactionCancellation::default();
+    let timer = StdMonotonicTimer::default();
+    let publication = CompactionPublication {
+        compactor_epoch: epoch,
+        timer: &timer,
+        started_ms: timer.monotonic_now_ms(),
+    };
+    let first_output = run_compaction(
+        &store,
+        &namespace,
+        &first,
+        small_segment_policy(),
+        &cancellation,
+    )
+    .await
+    .expect("first merge");
+    let second_output = run_compaction(
+        &store,
+        &namespace,
+        &second,
+        small_segment_policy(),
+        &cancellation,
+    )
+    .await
+    .expect("second merge");
+    let output_keys = first_output
+        .output_segments
+        .iter()
+        .chain(&second_output.output_segments)
+        .map(metadata_segment_object_key)
+        .collect::<BTreeSet<_>>();
+    let store = BlockingStore::new(
+        RecordingStore::new(
+            store,
+            KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+                &namespace,
+            )),
+        ),
+        KeyPredicate::exact(metadata_manifest_object(
+            &namespace,
+            &before.successor().expect("next number"),
+        )),
         OperationClass::Put,
     );
-    gated.block_next();
-    let context = test_context();
-    let cancellation = MetadataCompactionCancellation::default();
-    let (result, ()) = tokio::join!(
-        run_metadata_compaction_job(
-            &gated,
-            &namespace_id,
-            &context,
-            &spec,
-            small_segment_policy(),
-            &cancellation
+    store.block_next();
+    let (first_outcome, second_outcome) = tokio::join!(
+        finalize_metadata_compaction(
+            &store,
+            &namespace,
+            &first,
+            &first_keys,
+            first_output,
+            &cancellation,
+            &publication
         ),
         async {
-            gated.wait_until_blocked().await;
-            let protection = load_output_protection(&store, &namespace_id, spec.job_id())
-                .await
-                .expect("protection read")
-                .expect("protected before publication");
-            let group = load_group_lease(&store, &namespace_id, spec.group())
-                .await
-                .expect("group read")
-                .expect("active group");
-            assert_eq!(protection.state.expires_at_ms, group.state.expires_at_ms);
-            assert_eq!(
-                group.state.status,
-                loonfs_api::wire::control::CompactionLeaseStatus::Active {}
-            );
-            gated.release();
+            store.wait_until_blocked().await;
+            let result = finalize_metadata_compaction(
+                &store,
+                &namespace,
+                &second,
+                &second_keys,
+                second_output,
+                &cancellation,
+                &publication,
+            )
+            .await;
+            store.release();
+            result
         }
     );
-    assert!(matches!(
-        result.expect("publish"),
-        MetadataCompactionJobOutcome::Published { .. }
-    ));
+    assert!(
+        matches!(second_outcome.expect("second publication"), MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no.0 == before.0 + 1)
+    );
+    assert!(
+        matches!(first_outcome.expect("retried publication"), MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no.0 == before.0 + 2)
+    );
+    assert_eq!(store.inner().counts().create_if_absent_puts, 3);
+    assert!(output_keys.is_subset(&referenced_segment_keys(&store, &namespace).await));
+    assert_eq!(
+        load_current_manifest(&store, &namespace)
+            .await
+            .expect("manifest")
+            .state
+            .compactor_epoch,
+        epoch
+    );
 }

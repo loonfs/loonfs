@@ -1,5 +1,4 @@
 //! Sweep one candidate using completed durable marking evidence.
-use super::compaction_staging::CompactionLeases;
 use super::cursor::{CandidateFamily, CandidateFamilyExt};
 use super::fork_checkpoints::{
     maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
@@ -8,11 +7,9 @@ use super::fork_checkpoints::{
 use super::reap::{grace_age, sweep_checkpoint_record, CheckpointSweep, GraceAge};
 use super::references::References;
 use super::uploads::{sweep_upload_session, UploadSessionSweep, UploadSweepContext};
-use crate::checkpoint::CompactionPrefixOwner;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use crate::limits::METADATA_COMPACTION_STAGING_GRACE_MS;
-use futures::StreamExt;
+use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
 use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::ObjectStore;
@@ -24,7 +21,6 @@ pub(super) struct Sweep<'a, 'store, S: ?Sized> {
     pub(super) mutation: &'a MutationContext,
     pub(super) references: References<'a, 'store, S>,
     pub(super) upload_sweep: UploadSweepContext<'a, S>,
-    pub(super) leases: &'a mut CompactionLeases,
     pub(super) checkpoints_retained: &'a mut bool,
     pub(super) report: &'a mut GcResponse,
 }
@@ -53,10 +49,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             CandidateFamily::Manifests => {
                 self.process_aged_family(family, key, |counts| &mut counts.manifests)
                     .await
-            }
-            CandidateFamily::CompactionStaging => {
-                self.leases.load_once(self.store, self.namespace_id).await?;
-                self.process_compaction_staging(key).await
             }
             CandidateFamily::Checkpoints => {
                 *self.checkpoints_retained |= !self.process_checkpoint(key).await?;
@@ -110,80 +102,17 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             self.report.retain(RetainedReason::Referenced);
             return Ok(());
         }
-        if self.sweep_aged(key, self.grace_window_ms).await? {
+        // A compaction may publish output that is exactly the minimum age
+        // old, so a segment must be strictly older before it goes.
+        let min_age_ms = if family == CandidateFamily::MetadataSegments {
+            UNREFERENCED_SEGMENT_MIN_AGE_MS + 1
+        } else {
+            self.grace_window_ms
+        };
+        if self.sweep_aged(key, min_age_ms).await? {
             *deleted(&mut self.report.deleted) += 1;
         }
         Ok(())
-    }
-
-    async fn process_compaction_staging(&mut self, key: &str) -> Result<()> {
-        if key.ends_with("/protection.json") {
-            return self.process_compaction_output_protection(key).await;
-        }
-        if self.references.roots.degraded {
-            self.report.retain(RetainedReason::DegradedRoots);
-            return Ok(());
-        }
-        if self.references.object(key).await? {
-            self.report.retain(RetainedReason::Referenced);
-            return Ok(());
-        }
-
-        match self
-            .leases
-            .owner_of(self.store, self.namespace_id, key, self.mutation.now_ms)
-            .await?
-        {
-            Some(CompactionPrefixOwner::Protected) => {
-                self.report.retain(RetainedReason::WithinGraceWindow);
-            }
-            None => {
-                self.report.retain(RetainedReason::UnrecognizedKey);
-            }
-            Some(CompactionPrefixOwner::Fenced | CompactionPrefixOwner::Unclaimed) => {
-                if key.ends_with(".sst.zst")
-                    && self
-                        .sweep_aged(key, METADATA_COMPACTION_STAGING_GRACE_MS)
-                        .await?
-                {
-                    self.report.deleted.metadata_segments += 1;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Output protection stays readable until no output remains. In particular,
-    /// a newer collector must not remove the protection an older one still needs.
-    async fn process_compaction_output_protection(&mut self, key: &str) -> Result<()> {
-        use loonfs_objectstore::layout::parse_object_key;
-        let parsed = parse_object_key(key).expect("recognized output protection");
-        let job_id = loonfs_api::MetadataCompactionId::parse(parsed.identifier().expect("job id"))
-            .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
-        let Some(loaded) =
-            crate::checkpoint::load_output_protection(self.store, self.namespace_id, &job_id)
-                .await?
-        else {
-            return Ok(());
-        };
-        if self.mutation.now_ms <= loaded.state.expires_at_ms {
-            self.report.retain(RetainedReason::WithinGraceWindow);
-            return Ok(());
-        }
-        let prefix = format!(
-            "{}segments/",
-            key.strip_suffix("protection.json")
-                .expect("protection suffix")
-        );
-        let mut outputs = self.store.list_prefix_from_stream(&prefix, None);
-        match outputs.next().await {
-            Some(Ok(_)) => {
-                self.report.retain(RetainedReason::Referenced);
-                Ok(())
-            }
-            Some(Err(error)) => Err(CoreError::store(&prefix, &error)),
-            None => self.delete_key(key).await,
-        }
     }
 
     async fn process_missing_basis_checkpoint(&mut self, key: &str) -> Result<()> {

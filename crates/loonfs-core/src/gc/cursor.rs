@@ -7,8 +7,8 @@ use loonfs_api::{
     PageCursor,
 };
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, content_owner_prefix, metadata_compaction_prefix, metadata_manifest_prefix,
-    metadata_segment_prefix, upload_session_prefix, wal_segment_prefix,
+    checkpoint_prefix, content_owner_prefix, metadata_manifest_prefix, metadata_segment_prefix,
+    upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -37,11 +37,6 @@ impl CandidateFamilyExt for CandidateFamily {
         match self {
             Self::WalSegments => family == DurableObjectFamily::WalSegment,
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
-            Self::CompactionStaging => matches!(
-                family,
-                DurableObjectFamily::MetadataCompactionStaging
-                    | DurableObjectFamily::CompactionOutputProtection
-            ),
             Self::Manifests => manifest_no_of(key).is_some(),
             Self::Checkpoints => family == DurableObjectFamily::CheckpointRecord,
             Self::UploadSessions => family == DurableObjectFamily::UploadSession,
@@ -53,7 +48,6 @@ impl CandidateFamilyExt for CandidateFamily {
         match self {
             Self::WalSegments => wal_segment_prefix(namespace_id),
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
-            Self::CompactionStaging => metadata_compaction_prefix(namespace_id),
             Self::Manifests => metadata_manifest_prefix(namespace_id),
             Self::Checkpoints => checkpoint_prefix(namespace_id),
             Self::UploadSessions => upload_session_prefix(namespace_id),
@@ -195,7 +189,7 @@ mod tests {
             "kind": "test_gc",
             "namespace_id": "demo",
             "family": "metadata_segments",
-            "last_key": "namespaces/demo/metadata/segments/segment.sst.zst",
+            "last_key": "namespaces/demo/segments/segment.sst.zst",
             "future_field": {"ignored": true}
         }));
 
@@ -203,7 +197,7 @@ mod tests {
         assert_eq!(cursor.keyspace().family, CandidateFamily::MetadataSegments);
         assert_eq!(
             cursor.last_key(),
-            Some("namespaces/demo/metadata/segments/segment.sst.zst")
+            Some("namespaces/demo/segments/segment.sst.zst")
         );
     }
 

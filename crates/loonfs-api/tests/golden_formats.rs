@@ -20,16 +20,15 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    CompactionLeaseStatus, ContentStoreState, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
-    HeadState, HintState, ManifestRef, MetadataCompactionLeaseState, NamespaceStatus,
-    ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus, UploadSessionState,
-    WalSegmentPointer, WriterBlock,
+    ContentStoreState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HeadState, HintState,
+    ManifestRef, NamespaceStatus, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
+    UploadSessionState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
-    DeletedDirentry, MetadataFamilyGroup, MetadataRow, MetadataRowFamily, MetadataRunRef,
-    MetadataSegmentRef, NamespaceManifestPayload, RunTier, TombstoneGeneration, TombstoneRowAction,
+    DeletedDirentry, MetadataRow, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
+    NamespaceManifestPayload, RunTier, TombstoneGeneration, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
@@ -38,9 +37,8 @@ use loonfs_api::wire::wal::{
 use loonfs_api::{
     sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
     Attributes, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId,
-    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo,
-    MetadataCompactionId, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo, UploadId,
-    WalSegmentId, WriterEpoch, WriterId,
+    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, MetadataSegmentId,
+    NameKey, NamespaceId, RevisionNo, RunNo, UploadId, WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -319,6 +317,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
 
 fn sample_manifest_payload() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
+        compactor_epoch: 0,
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
 
@@ -336,8 +335,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
             segments: vec![MetadataSegmentRef {
                 owner_namespace_id: namespace_id(),
                 segment_id: segment_id(),
-                // WAL flush segments use the standard metadata segment prefix.
-                compaction_job_id: None,
                 family: MetadataRowFamily::Inodes,
                 segment_index: 0,
                 row_count: 6,
@@ -497,7 +494,7 @@ fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(sample_manifest_payload())
         .expect("encode")
         .into_bytes();
-    assert_matches_golden("namespace_manifest.v4.json", &encoded);
+    assert_matches_golden("namespace_manifest.v1.json", &encoded);
     let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
@@ -506,7 +503,7 @@ fn namespace_manifest_matches_golden_bytes() {
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v4.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded.into_payload(), sample_manifest_payload());
 }
@@ -712,49 +709,6 @@ fn control_objects_match_golden_bytes() {
             status: CheckpointStatus::Active {},
         },
     );
-    // The lease is a control object of its own family, and the two things
-    // that write it — the job and the collector that fences it — decide
-    // ownership by compare-and-swapping this document. Its bytes are pinned
-    // like every other family's so a field rename cannot silently change what
-    // either party reads that claim out of.
-    check_control_golden(
-        "control_compaction_lease.v3.json",
-        ControlObjectKind::CompactionLease,
-        MetadataCompactionLeaseState {
-            job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
-                .expect("valid compaction id"),
-            namespace_id: namespace_id(),
-            group: MetadataFamilyGroup::Bindings,
-            writer_id: WriterId::parse("writer-1").expect("writer id"),
-            status: CompactionLeaseStatus::Active {},
-            started_at_ms: 1_000,
-            expires_at_ms: 1_503_000,
-        },
-    );
-    check_control_golden(
-        "control_compaction_completed_lease.v3.json",
-        ControlObjectKind::CompactionLease,
-        MetadataCompactionLeaseState {
-            job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
-                .expect("valid compaction id"),
-            namespace_id: namespace_id(),
-            group: MetadataFamilyGroup::Bindings,
-            writer_id: WriterId::parse("writer-1").expect("writer id"),
-            status: CompactionLeaseStatus::Completed {},
-            started_at_ms: 1_000,
-            expires_at_ms: 1_503_000,
-        },
-    );
-    check_control_golden(
-        "control_compaction_output_protection.v1.json",
-        ControlObjectKind::CompactionOutputProtection,
-        loonfs_api::wire::control::CompactionOutputProtectionState {
-            namespace_id: namespace_id(),
-            job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
-                .expect("job id"),
-            expires_at_ms: 1_503_000,
-        },
-    );
     check_control_golden(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
@@ -899,7 +853,6 @@ fn every_durable_status_is_a_kind_tagged_object() {
         "control_checkpoint_record.v1.json",
         "control_checkpoint_record_released.v1.json",
         "control_upload_session.v1.json",
-        "control_compaction_lease.v3.json",
     ];
     for fixture in fixtures {
         let document: serde_json::Value =
@@ -956,34 +909,10 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
         ControlObjectKind::UploadSession,
         add_unknown,
     );
-    assert_control_payload_edit_is_corrupt::<MetadataCompactionLeaseState>(
-        "control_compaction_lease.v3.json",
-        ControlObjectKind::CompactionLease,
-        add_unknown,
-    );
     assert_control_payload_edit_is_corrupt::<HeadState>(
         "control_namespace_head.fork.v2.json",
         ControlObjectKind::WalHead,
         add_unknown,
-    );
-}
-
-#[test]
-fn compaction_leases_reject_the_retired_refresh_instant_field() {
-    let retired_field = ["heart", "beat_at_ms"].concat();
-    let field_for_edit = retired_field.clone();
-    let message = assert_control_payload_edit_is_corrupt::<MetadataCompactionLeaseState>(
-        "control_compaction_lease.v3.json",
-        ControlObjectKind::CompactionLease,
-        move |payload| {
-            let fields = payload.as_object_mut().expect("lease payload");
-            fields.remove("expires_at_ms");
-            fields.insert(field_for_edit, serde_json::Value::from(3_000));
-        },
-    );
-    assert!(
-        message.contains("unknown field") && message.contains(&retired_field),
-        "unexpected refusal: {message}"
     );
 }
 
@@ -1407,20 +1336,6 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
             })
             .expect("upload state"),
         ),
-        (
-            ControlObjectKind::CompactionLease,
-            serde_json::to_value(MetadataCompactionLeaseState {
-                job_id: MetadataCompactionId::parse("cmp_0123456789abcdef0123456789abcdef")
-                    .expect("valid compaction id"),
-                namespace_id: namespace_id(),
-                group: MetadataFamilyGroup::Bindings,
-                writer_id: WriterId::parse("writer-1").expect("writer id"),
-                status: CompactionLeaseStatus::Active {},
-                started_at_ms: 1_000,
-                expires_at_ms: 1_503_000,
-            })
-            .expect("compaction lease state"),
-        ),
     ];
     for (kind, state) in cases {
         let encoded =
@@ -1787,7 +1702,7 @@ fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
         .into_bytes();
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    for version in [1, 2, 3, 7] {
+    for version in [0, 2, 3, 7] {
         document["format_version"] = serde_json::Value::from(version);
         let wrong_version = serde_json::to_vec(&document).expect("encode document");
         let err = decode_namespace_manifest_json(&wrong_version)
@@ -1797,7 +1712,7 @@ fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
                 err,
                 EnvelopeCodecError::UnsupportedFormatVersion {
                     found,
-                    supported: 4,
+                    supported: 1,
                     ..
                 } if found == version
             ),
@@ -2763,17 +2678,6 @@ fn every_metadata_row_rejects_unknown_fields() {
             );
         }
     }
-}
-
-#[test]
-fn compaction_output_protection_rejects_unknown_payload_fields() {
-    assert_control_payload_edit_is_corrupt::<
-        loonfs_api::wire::control::CompactionOutputProtectionState,
-    >(
-        "control_compaction_output_protection.v1.json",
-        ControlObjectKind::CompactionOutputProtection,
-        |payload| payload["unknown"] = serde_json::json!(true),
-    );
 }
 
 #[test]

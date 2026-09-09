@@ -334,7 +334,7 @@ fn fold_rows_with_retention(
 async fn drain_reorganization<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    _context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> ManifestNo {
     let fold_policy = MetadataLsmPolicy {
@@ -345,7 +345,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
         let report = super::reorganize_metadata_step(
             store,
             namespace_id,
-            context,
+            0,
             fold_policy,
             MetadataCompactionPolicy::default(),
         )
@@ -353,7 +353,8 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
         .expect("reorganization step");
         match report.outcome {
             super::MetadataReorganizeOutcome::UnitPublished { .. }
-            | super::MetadataReorganizeOutcome::Superseded => continue,
+            | super::MetadataReorganizeOutcome::Superseded
+            | super::MetadataReorganizeOutcome::Fenced => continue,
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
             super::MetadataReorganizeOutcome::CompactionPlanned { .. } => {
                 panic!("test reorganization budget should admit a progress-making subset")
@@ -374,14 +375,14 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
 async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    _context: &MutationContext,
     policy: MetadataLsmPolicy,
     spec: &MetadataCompactionSpec,
 ) -> MetadataCompactionJobOutcome {
     run_metadata_compaction_job(
         store,
         namespace_id,
-        context,
+        0,
         spec,
         policy,
         &MetadataCompactionCancellation::default(),
@@ -430,16 +431,16 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
 /// swap, answering with the staged object keys the manifest now names.
 ///
 /// For a caller that needs a namespace whose manifest references segments
-/// under the compaction staging directory: the collector's tests, which have
+/// under the compaction segment directory: the collector's tests, which have
 /// to tell a published job's output from an orphan.
-pub(crate) async fn compact_a_family_group_into_staging<S: ObjectStore + ?Sized>(
+pub(crate) async fn compact_a_family_group<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> BTreeSet<String> {
     let (policy, spec) = plan_a_family_group_compaction(store, namespace_id, context).await;
     publish_planned_compaction(store, namespace_id, context, policy, &spec).await;
-    staged_keys_of_the_current_manifest(store, namespace_id).await
+    segment_keys_of_the_current_manifest(store, namespace_id).await
 }
 
 /// Plans one family group's streaming compaction without running it, with the
@@ -450,7 +451,7 @@ pub(crate) async fn compact_a_family_group_into_staging<S: ObjectStore + ?Sized>
 pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
+    _context: &MutationContext,
 ) -> (MetadataLsmPolicy, MetadataCompactionSpec) {
     // One byte admits no run whole, so the group a step selects has no window
     // that makes progress and is handed to a job.
@@ -462,7 +463,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     let report = reorganize_metadata_step(
         store,
         namespace_id,
-        context,
+        0,
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -475,11 +476,11 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
 }
 
 /// The staged object keys the namespace's current manifest names.
-pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>(
+pub(crate) async fn segment_keys_of_the_current_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<String> {
-    let staging_prefix = loonfs_objectstore::keys::metadata_compaction_prefix(namespace_id);
+    let segment_prefix = loonfs_objectstore::keys::metadata_segment_prefix(namespace_id);
     let manifest_number = current_manifest_number(store, namespace_id).await;
     let staged: BTreeSet<String> =
         load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
@@ -491,11 +492,11 @@ pub(crate) async fn staged_keys_of_the_current_manifest<S: ObjectStore + ?Sized>
             .iter()
             .flat_map(|run| &run.segments)
             .map(metadata_segment_object_key)
-            .filter(|key| key.starts_with(&staging_prefix))
+            .filter(|key| key.starts_with(&segment_prefix))
             .collect();
     assert!(
         !staged.is_empty(),
-        "a published job's output is referenced from the staging directory"
+        "a published job's output is referenced from the segment directory"
     );
     staged
 }
@@ -888,6 +889,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     };
 
     encode_namespace_manifest_json(NamespaceManifestPayload {
+        compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no,
 

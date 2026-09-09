@@ -896,7 +896,7 @@ async fn drain_reorganization(
     for _ in 0..16 {
         let report = harness
             .engine
-            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::default())
+            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::default(), 0)
             .await
             .expect("reorganize metadata");
         match report.outcome {
@@ -911,7 +911,7 @@ async fn drain_reorganization(
                     .assert_equivalence(&context, checkpoint, expected)
                     .await;
             }
-            MetadataReorganizeOutcome::Superseded => {
+            MetadataReorganizeOutcome::Superseded | MetadataReorganizeOutcome::Fenced => {
                 panic!("single-writer test must not supersede reorganization")
             }
             MetadataReorganizeOutcome::CompactionPlanned { .. } => {
