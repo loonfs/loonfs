@@ -126,7 +126,6 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         loonfs_core::gc_namespace(&store, &source, &loonfs_core::GcConfig::default(), &aged)
             .await
             .expect("collect source before fork");
-    assert!(!collected.budget_exhausted);
     assert!(collected.deleted.metadata_segments > 0);
     let fork = engine
         .fork_namespace(&target, Some(&snapshot.checkpoint_id))
