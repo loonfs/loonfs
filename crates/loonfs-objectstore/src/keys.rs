@@ -64,14 +64,14 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
     metadata_segment(&descriptor.owner_namespace_id, &descriptor.segment_id)
 }
 
-/// Builds the mutable lifecycle key for one checkpoint record.
+/// Builds a pin key with its manifest number in the id.
 pub fn checkpoint_record(namespace_id: &NamespaceId, checkpoint_id: &CheckpointId) -> String {
-    format!("namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json")
+    format!("namespaces/{namespace_id}/pins/{checkpoint_id}.json")
 }
 
 /// Builds the listing prefix containing checkpoint records for one namespace.
 pub fn checkpoint_prefix(namespace_id: &NamespaceId) -> String {
-    format!("namespaces/{namespace_id}/checkpoints/")
+    format!("namespaces/{namespace_id}/pins/")
 }
 
 /// Builds the listing prefix containing durable upload sessions for one namespace.
@@ -137,7 +137,8 @@ mod tests {
     }
 
     fn checkpoint_id() -> CheckpointId {
-        CheckpointId::parse("chk_00000000000000000000000000000001").expect("valid checkpoint id")
+        CheckpointId::parse("pin_00000000000000000001-0000000000000001")
+            .expect("valid checkpoint id")
     }
 
     fn metadata_segment_id() -> MetadataSegmentId {
@@ -191,7 +192,7 @@ mod tests {
                 .replace("{wal_no:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
                 .replace("{manifest_no:020}", "00000000000000000400")
-                .replace("{checkpoint_id}", "chk_00000000000000000000000000000001")
+                .replace("{pin_id}", "pin_00000000000000000001-0000000000000001")
                 .replace("{job_id}", "cmp_00000000000000000000000000000001")
                 .replace("{group}", "bindings")
                 .replace("{segment_id}", "seg_00000000000000000000000000000001")
@@ -212,7 +213,7 @@ mod tests {
                 metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
             ),
             (
-                "Checkpoint records",
+                "Pin records",
                 checkpoint_record(&namespace_id(), &checkpoint_id()),
             ),
             (

@@ -42,7 +42,6 @@ from loonfs.server import (
     FilesystemOperation_PutFile,
     FilesystemOperation_PutFileByInode,
     FilesystemOperation_PutFileRevisionByInode,
-    GoneError,
     ListPathEntriesResponse,
     LoonFS,
     NotFoundError,
@@ -59,6 +58,7 @@ from loonfs.server import (
     UploadSession_Aborted,
     UploadSession_Completed,
 )
+from loonfs.core.api_error import ApiError
 from loonfs.proxy import LoonFSProxy
 
 
@@ -315,7 +315,6 @@ class SnapshotsExpected:
     current_revision_no: int
     current_entry_names: list[str]
     snapshot_change_seqs: list[int]
-    snapshot_gone: ErrorStatusExpected
     snapshot_not_found: ErrorStatusExpected
     revision_with_snapshot: ErrorStatusExpected
     zero_ttl: ErrorStatusExpected
@@ -690,6 +689,13 @@ def _list_inode_children(
         limit=request.page_size,
         cursor=cursor,
     )
+
+
+def error_code(body: object) -> str:
+    """Reads the error code from a raw or parsed error body."""
+    if isinstance(body, dict):
+        return str(body["code"])
+    return str(getattr(body, "code"))
 
 
 def test_error_contract(cases: dict[str, ConformanceCase], harness: Harness) -> None:
@@ -1244,28 +1250,29 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
     assert first_release.namespace_id == namespace_id
     assert first_release.snapshot_id == snapshot.snapshot_id
-    second_release = client.snapshots.release(
-        namespace_id, snapshot.snapshot_id
-    )
-    assert second_release.namespace_id == namespace_id
-    assert second_release.snapshot_id == snapshot.snapshot_id
+    # The published client predates the 404 on release and extend, so it
+    # raises the base error there until it is regenerated.
+    with pytest.raises(ApiError) as second_release:
+        client.snapshots.release(namespace_id, snapshot.snapshot_id)
+    assert second_release.value.status_code == expected.snapshot_not_found.status
+    assert error_code(second_release.value.body) == expected.snapshot_not_found.code
 
-    with pytest.raises(GoneError) as released_read:
+    with pytest.raises(NotFoundError) as released_read:
         client.files.retrieve(
             namespace_id,
             path=child_path(request.replaced_file_name),
             snapshot_id=snapshot.snapshot_id,
         )
-    assert released_read.value.status_code == expected.snapshot_gone.status
-    assert released_read.value.body.code == expected.snapshot_gone.code
-    with pytest.raises(GoneError) as released_extend:
+    assert released_read.value.status_code == expected.snapshot_not_found.status
+    assert released_read.value.body.code == expected.snapshot_not_found.code
+    with pytest.raises(ApiError) as released_extend:
         client.snapshots.extend(
             namespace_id,
             snapshot.snapshot_id,
             ttl_ms=request.extend_ttl_ms,
         )
-    assert released_extend.value.status_code == expected.snapshot_gone.status
-    assert released_extend.value.body.code == expected.snapshot_gone.code
+    assert released_extend.value.status_code == expected.snapshot_not_found.status
+    assert error_code(released_extend.value.body) == expected.snapshot_not_found.code
 
     with pytest.raises(NotFoundError) as unknown_read:
         client.files.retrieve(

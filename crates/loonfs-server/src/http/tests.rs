@@ -123,7 +123,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "max_wal_tail_segments",
     "metadata_compaction",
     "metadata_segments",
-    "missing_basis",
     "move_by_inode",
     "move_path",
     "name_key",

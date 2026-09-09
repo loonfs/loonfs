@@ -461,9 +461,8 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
             None => get_json::<serde_json::Value>(&url),
         }
         .expect_err("released snapshot read must fail");
-        assert_eq!(error.0, 410, "route {name}");
-        assert_eq!(error.1.code, "snapshot_gone", "route {name}");
-        assert!(error.1.message.contains("released"), "route {name}");
+        assert_eq!(error.0, 404, "route {name}");
+        assert_eq!(error.1.code, "snapshot_not_found", "route {name}");
     }
 
     let checkpoint = harness
@@ -487,7 +486,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
     assert_eq!(error.code, "invalid_request");
     assert!(error.message.contains("is a user checkpoint"));
 
-    let unknown = "chk_ffffffffffffffffffffffffffffffff";
+    let unknown = "pin_00000000000000000001-ffffffffffffffff";
     let (status, error) = get_json::<PathEntry>(&stat_url(
         &harness.server_url,
         namespace.as_str(),

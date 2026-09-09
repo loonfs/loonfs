@@ -155,7 +155,7 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
         GrepIndexStatus::Backfilling {
             target_seq: ChangeSeq(7),
             cursor_inode_id: Some(InodeId(7)),
-            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("valid checkpoint id"),
         },
         GrepIndexState {

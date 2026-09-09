@@ -7,7 +7,12 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { test } from "node:test";
 
-import { LoonFS, LoonFSClient, type PreparedFileContent } from "../../../generated/typescript/index.js";
+import {
+    LoonFS,
+    LoonFSClient,
+    LoonFSError,
+    type PreparedFileContent,
+} from "../../../generated/typescript/index.js";
 import {
     LoonFS as BrowserLoonFS,
     LoonFSClient as BrowserLoonFSClient,
@@ -159,7 +164,6 @@ interface SnapshotsExpected {
     current_revision_no: number;
     current_entry_names: string[];
     snapshot_change_seqs: number[];
-    snapshot_gone: ErrorStatusExpected;
     snapshot_not_found: ErrorStatusExpected;
     revision_with_snapshot: ErrorStatusExpected;
     zero_ttl: ErrorStatusExpected;
@@ -417,7 +421,6 @@ const SNAPSHOTS_EXPECTED_FIELDS = [
     "current_revision_no",
     "current_entry_names",
     "snapshot_change_seqs",
-    "snapshot_gone",
     "snapshot_not_found",
     "revision_with_snapshot",
     "zero_ttl",
@@ -1786,9 +1789,14 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     const firstRelease = await client.snapshots.release(releaseRequest);
     assert.equal(firstRelease.namespace_id, namespaceId);
     assert.equal(firstRelease.snapshot_id, snapshot.snapshot_id);
-    const secondRelease = await client.snapshots.release(releaseRequest);
-    assert.equal(secondRelease.namespace_id, namespaceId);
-    assert.equal(secondRelease.snapshot_id, snapshot.snapshot_id);
+    // The published client predates the 404 on release and extend, so it
+    // raises the base error there until it is regenerated.
+    await assert.rejects(client.snapshots.release(releaseRequest), (error: unknown) => {
+        assert.ok(error instanceof LoonFSError);
+        assert.equal(error.statusCode, expected.snapshot_not_found.status);
+        assert.equal((error.body as { code?: string }).code, expected.snapshot_not_found.code);
+        return true;
+    });
 
     await assert.rejects(
         client.files.retrieve({
@@ -1797,9 +1805,9 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
             snapshot_id: snapshot.snapshot_id,
         }),
         (error: unknown) => {
-            assert.ok(error instanceof LoonFS.GoneError);
-            assert.equal(error.statusCode, expected.snapshot_gone.status);
-            assert.equal(error.body.code, expected.snapshot_gone.code);
+            assert.ok(error instanceof LoonFS.NotFoundError);
+            assert.equal(error.statusCode, expected.snapshot_not_found.status);
+            assert.equal(error.body.code, expected.snapshot_not_found.code);
             return true;
         },
     );
@@ -1810,9 +1818,9 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
             ttl_ms: request.extend_ttl_ms,
         }),
         (error: unknown) => {
-            assert.ok(error instanceof LoonFS.GoneError);
-            assert.equal(error.statusCode, expected.snapshot_gone.status);
-            assert.equal(error.body.code, expected.snapshot_gone.code);
+            assert.ok(error instanceof LoonFSError);
+            assert.equal(error.statusCode, expected.snapshot_not_found.status);
+            assert.equal((error.body as { code?: string }).code, expected.snapshot_not_found.code);
             return true;
         },
     );

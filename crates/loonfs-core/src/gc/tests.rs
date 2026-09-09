@@ -14,15 +14,14 @@ use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::limits::{
-    CONTENT_RECLAMATION_GRACE_MS, FORK_CHECKPOINT_LEASE_MS, GC_MIN_GRACE_WINDOW_MS,
-    UNREFERENCED_SEGMENT_MIN_AGE_MS, UPLOAD_SESSION_LEASE_MS,
+    CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+    UPLOAD_SESSION_LEASE_MS,
 };
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordState, CheckpointStatus,
-    ControlObjectKind, ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus,
-    UploadSessionState,
+    decode_control_object, CheckpointOwner, CheckpointRecordState, ControlObjectKind,
+    ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus, UploadSessionState,
 };
 use loonfs_api::{CheckpointId, ContentRef, ContentStoreId, ManifestNo, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
@@ -61,18 +60,15 @@ fn context(now_ms: u64) -> MutationContext {
     mutation_context("gc-test", now_ms)
 }
 
-/// The durable lifecycle of one checkpoint record, stamp included.
-async fn checkpoint_lifecycle<S: ObjectStore + ?Sized>(
+async fn checkpoint_exists<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-) -> CheckpointStatus {
+) -> bool {
     crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
         .await
         .expect("read checkpoint record")
-        .expect("checkpoint record exists")
-        .state
-        .status
+        .is_some()
 }
 
 /// Derives "now" from durable object ages so the tests never touch a
@@ -109,7 +105,6 @@ async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
 
 #[derive(Debug, Clone, Copy)]
 enum BlockingControlCasTarget {
-    CheckpointReleased,
     UploadCompleted,
     UploadAborted,
 }
@@ -117,15 +112,6 @@ enum BlockingControlCasTarget {
 impl BlockingControlCasTarget {
     fn matches(self, bytes: &[u8]) -> bool {
         match self {
-            BlockingControlCasTarget::CheckpointReleased => {
-                let Ok(envelope) = decode_control_object::<CheckpointRecordState>(
-                    bytes,
-                    ControlObjectKind::CheckpointRecord,
-                ) else {
-                    return false;
-                };
-                matches!(envelope.payload().status, CheckpointStatus::Released { .. })
-            }
             BlockingControlCasTarget::UploadCompleted | BlockingControlCasTarget::UploadAborted => {
                 let Ok(envelope) = decode_control_object::<UploadSessionState>(
                     bytes,
@@ -144,7 +130,6 @@ impl BlockingControlCasTarget {
                             UploadSessionRecordStatus::Aborted { .. }
                         )
                     }
-                    _ => false,
                 }
             }
         }
@@ -302,86 +287,6 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn active_record_with_a_missing_basis_is_released_not_degrading() {
-    // The crash window between record write and verification can leave
-    // an active record pinning a basis an earlier pass already deleted.
-    // Such a record can never serve a read; the pass releases it with
-    // the same compare-and-swap the creator's verification failure
-    // would have run — and the absent basis never degrades sweeping.
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let pinned = create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("first checkpoint");
-
-    // Advance the root past the pinned basis so deleting the basis
-    // object leaves the namespace itself healthy.
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    let moved_on = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
-        CheckpointOwner::User {
-            name: "other-pin".to_owned(),
-            expires_at_ms: None,
-        },
-        &setup,
-    )
-    .await
-    .expect("second checkpoint");
-    assert_ne!(moved_on.manifest_no, pinned.manifest_no);
-
-    // Simulate the crash residue: the pinned record stays active while
-    // its basis manifest object vanishes.
-    let record = crate::checkpoint::record::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &pinned.checkpoint_id,
-    )
-    .await
-    .expect("read record")
-    .expect("record exists")
-    .state;
-    let basis_key = metadata_manifest_object(&namespace_id, &record.manifest.manifest_no);
-    store.delete(&basis_key).await.expect("drop basis manifest");
-
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("gc pass");
-    assert_eq!(report.released_checkpoints.missing_basis, 1);
-    let released = crate::checkpoint::record::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &pinned.checkpoint_id,
-    )
-    .await
-    .expect("read record")
-    .expect("record still present")
-    .state;
-    assert_eq!(
-        released.status,
-        loonfs_api::wire::control::CheckpointStatus::Released {
-            released_at_ms: aged.now_ms
-        }
-    );
-
-    // Idempotent: the released record is no longer a zombie, and the
-    // namespace still reads (the live pin and root are untouched).
-    let again = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &again)
-        .await
-        .expect("second gc pass");
-    assert_eq!(report.released_checkpoints.missing_basis, 0);
-    stat_root(&store, &namespace_id).await;
-}
-
-#[tokio::test]
 async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     // After deletion, user checkpoints, WAL, manifests, and segments can age
     // out. Only tombstone objects remain to prevent id reuse.
@@ -413,14 +318,13 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     assert!(report.deleted.wal_segments >= 1);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 4);
-    // The pin on a tombstone has one route out, the same as every other
-    // pin: released here, deleted a grace window after that release.
     assert_eq!(report.released_checkpoints.expired, 1);
+    assert_eq!(report.deleted.checkpoint_records, 1);
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
         .await
-        .expect("gc pass past the release grace window");
-    assert!(report.deleted.checkpoint_records >= 1);
+        .expect("gc pass after segment grace");
+    assert_eq!(report.deleted.checkpoint_records, 0);
     assert!(report.deleted.metadata_segments >= 1);
     assert!(report.deleted.manifests >= 1);
 
@@ -460,7 +364,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .await
         .expect("second gc pass");
     assert_eq!(report.deleted.wal_segments, 0);
-    assert_eq!(report.deleted.manifests, 1);
+    assert_eq!(report.deleted.manifests, 0);
     assert_eq!(
         store
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
@@ -497,7 +401,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
 
     // The deleted source keeps exactly what the living clone needs.
     let fork_record = read_fork_record(&store, &source).await;
-    let basis_key = metadata_manifest_object(&source, &fork_record.manifest.manifest_no);
+    let basis_key = metadata_manifest_object(&source, &fork_record.manifest_no);
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
@@ -534,14 +438,12 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         "the active record protects its basis during the call that releases it"
     );
 
-    // Idempotent: the released record ages out on later passes and
-    // nothing resurrects.
     let again = context(deadline + GRACE_MS);
     let report = gc_namespace(&store, &source, &config(), &again)
         .await
         .expect("idempotent pass");
     assert_eq!(report.released_checkpoints.fork, 0);
-    assert_eq!(report.deleted.manifests, 1);
+    assert_eq!(report.deleted.manifests, 2);
     assert!(store
         .head(&basis_key)
         .await
@@ -1375,16 +1277,11 @@ async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let pinned = create_checkpoint(&store, &namespace_id, &setup)
+    create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
 
-    // Released just now: a candidate the pass must hold for its own grace
-    // window before the key can go.
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS * 2).await);
-    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pinned.checkpoint_id, &aged)
-        .await
-        .expect("release checkpoint");
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass");
@@ -1436,47 +1333,6 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .expect("tail commit stays readable");
 }
 
-async fn gc_pass(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    config: &GcConfig,
-    context: &MutationContext,
-    max_steps: Option<usize>,
-) -> Result<GcResponse, CoreError> {
-    let mut config = config.clone();
-    config.max_steps = max_steps.map(|value| value as u64);
-    let mut total = GcResponse::empty(namespace_id.clone());
-    loop {
-        let pass = gc_namespace(store, namespace_id, &config, context).await?;
-        accumulate_report(&mut total, &pass);
-        if !pass.budget_exhausted {
-            return Ok(total);
-        }
-    }
-}
-
-async fn assert_record_and_basis_reaped(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    pass: &GcResponse,
-    checkpoint_id: &loonfs_api::CheckpointId,
-    manifest_number: &ManifestNo,
-) {
-    assert_eq!(pass.deleted.checkpoint_records, 1);
-    assert!(
-        crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
-            .await
-            .expect("read record")
-            .is_none(),
-        "the released record goes on the pass that decides it"
-    );
-    assert!(store
-        .head(&metadata_manifest_object(namespace_id, manifest_number))
-        .await
-        .expect("probe basis")
-        .is_none());
-}
-
 async fn assert_basis_reaped(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -1492,62 +1348,6 @@ async fn assert_basis_reaped(
     .is_err());
 }
 
-#[tokio::test]
-async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
-    assert_a_dead_records_cascade(None).await;
-}
-
-async fn assert_a_dead_records_cascade(max_steps: Option<usize>) {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let first = create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("first checkpoint");
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("second checkpoint");
-    let first_record =
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
-            .await
-            .expect("read first record")
-            .expect("first record exists")
-            .state;
-    release_checkpoint_record(&store, &namespace_id, &first.checkpoint_id, setup.now_ms)
-        .await
-        .expect("mark first dead");
-
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let first_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_steps)
-        .await
-        .expect("first gc pass");
-    assert_record_and_basis_reaped(
-        &store,
-        &namespace_id,
-        &first_pass,
-        &first.checkpoint_id,
-        &first_record.manifest.manifest_no,
-    )
-    .await;
-
-    let second_pass = gc_pass(&store, &namespace_id, &config(), &aged, max_steps)
-        .await
-        .expect("second gc pass");
-    assert_basis_reaped(
-        &store,
-        &namespace_id,
-        &second_pass,
-        &first_record.manifest.manifest_no,
-    )
-    .await;
-    stat_root(&store, &namespace_id).await;
-}
 #[tokio::test]
 async fn gc_retains_unrecognized_manifest_keys() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1615,7 +1415,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
             .expect("flush wal");
     }
 
-    // Record-less maintenance: nothing accumulates under `checkpoints/`.
+    // Record-less maintenance: nothing accumulates under `pins/`.
     assert!(
         store
             .list_prefix(&checkpoint_prefix(&namespace_id))
@@ -1686,372 +1486,6 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
 }
 
 #[tokio::test]
-async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let pinned = create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("pin checkpoint");
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("advance past the pinned basis");
-
-    let first_release =
-        crate::checkpoint::release_checkpoint(&store, &namespace_id, &pinned.checkpoint_id, &setup)
-            .await
-            .expect("release");
-    assert_eq!(first_release.checkpoint_id, pinned.checkpoint_id);
-    let repeat_release =
-        crate::checkpoint::release_checkpoint(&store, &namespace_id, &pinned.checkpoint_id, &setup)
-            .await
-            .expect("repeat release");
-    assert_eq!(repeat_release.checkpoint_id, pinned.checkpoint_id);
-
-    let pinned_record =
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &pinned.checkpoint_id)
-            .await
-            .expect("read pinned record")
-            .expect("pinned record exists")
-            .state;
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("first gc pass");
-    assert_record_and_basis_reaped(
-        &store,
-        &namespace_id,
-        &first_pass,
-        &pinned.checkpoint_id,
-        &pinned_record.manifest.manifest_no,
-    )
-    .await;
-
-    let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("second gc pass");
-    assert_basis_reaped(
-        &store,
-        &namespace_id,
-        &second_pass,
-        &pinned_record.manifest.manifest_no,
-    )
-    .await;
-    // Releasing an already-reaped record stays idempotent success.
-    let after_reap =
-        crate::checkpoint::release_checkpoint(&store, &namespace_id, &pinned.checkpoint_id, &setup)
-            .await
-            .expect("release after reap");
-    assert_eq!(after_reap.checkpoint_id, pinned.checkpoint_id);
-    stat_root(&store, &namespace_id).await;
-}
-
-#[tokio::test]
-async fn caller_release_and_expiry_release_converge_on_the_winners_stamp() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let pin = |name: &'static str| async {
-        crate::checkpoint::create_checkpoint(
-            &store,
-            &namespace_id,
-            CheckpointOwner::User {
-                name: name.to_owned(),
-                expires_at_ms: Some(setup.now_ms + GRACE_MS),
-            },
-            &setup,
-        )
-        .await
-    };
-    let pass_first = pin("pass-first").await.expect("expiring checkpoint");
-    let caller_first = pin("caller-first").await.expect("expiring checkpoint");
-    let expired = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-
-    // The caller gets there first: the pass finds the record already
-    // released, leaves the stamp alone, and counts no release of its own.
-    let caller_stamp = expired.now_ms + 1;
-    let released = crate::checkpoint::release_checkpoint(
-        &store,
-        &namespace_id,
-        &caller_first.checkpoint_id,
-        &context(caller_stamp),
-    )
-    .await
-    .expect("caller release");
-    assert_eq!(released.checkpoint_id, caller_first.checkpoint_id);
-    let report = gc_namespace(&store, &namespace_id, &config(), &expired)
-        .await
-        .expect("gc pass");
-    assert_eq!(
-        report.released_checkpoints.expired, 1,
-        "only the record the caller left alone is released here"
-    );
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &caller_first.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: caller_stamp
-        },
-        "the winner's stamp stands"
-    );
-
-    // The pass got there first: the caller reports the same end state, and
-    // the pass's stamp is what ages the record out.
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &pass_first.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: expired.now_ms
-        }
-    );
-    let late = crate::checkpoint::release_checkpoint(
-        &store,
-        &namespace_id,
-        &pass_first.checkpoint_id,
-        &context(caller_stamp),
-    )
-    .await
-    .expect("a release that lost is still success");
-    assert_eq!(late.checkpoint_id, pass_first.checkpoint_id);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &pass_first.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: expired.now_ms
-        },
-        "the loser rewrites nothing"
-    );
-}
-
-#[tokio::test]
-async fn a_release_that_loses_its_etag_retains_without_erroring() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let pinned = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
-        CheckpointOwner::User {
-            name: "short-lived".to_owned(),
-            expires_at_ms: Some(setup.now_ms + GRACE_MS),
-        },
-        &setup,
-    )
-    .await
-    .expect("expiring checkpoint");
-    let expired = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let caller_stamp = expired.now_ms + 1;
-
-    let store = blocking_control_cas_store(store, BlockingControlCasTarget::CheckpointReleased);
-    let gc_config = config();
-    let pass = gc_namespace(&store, &namespace_id, &gc_config, &expired);
-    let caller = async {
-        store.wait_until_blocked().await;
-        let released = crate::checkpoint::release_checkpoint(
-            &store,
-            &namespace_id,
-            &pinned.checkpoint_id,
-            &context(caller_stamp),
-        )
-        .await;
-        store.release();
-        released
-    };
-    let (report, released) = tokio::join!(pass, caller);
-    assert_eq!(
-        released.expect("caller release").checkpoint_id,
-        pinned.checkpoint_id
-    );
-    let report = report.expect("the pass finishes");
-    assert_eq!(report.released_checkpoints.expired, 0);
-    assert_eq!(report.deleted.checkpoint_records, 0);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &pinned.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: caller_stamp
-        }
-    );
-}
-
-#[tokio::test]
-async fn gc_deletes_a_released_record_only_after_its_release_ages() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let pinned = create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("pin checkpoint");
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("advance past the pinned basis");
-
-    // Release long after every object was written, so the object's own age
-    // is far past the grace window and only the release stamp is young.
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS * 4).await);
-    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pinned.checkpoint_id, &aged)
-        .await
-        .expect("release");
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &pinned.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: aged.now_ms
-        }
-    );
-
-    let inside_grace = context(aged.now_ms + GRACE_MS - 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &inside_grace)
-        .await
-        .expect("pass inside the release grace window");
-    assert_eq!(
-        report.deleted.checkpoint_records, 0,
-        "an old object with a young release is retained"
-    );
-    assert!(crate::checkpoint::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &pinned.checkpoint_id
-    )
-    .await
-    .expect("read record")
-    .is_some());
-
-    let past_grace = context(aged.now_ms + GRACE_MS);
-    let report = gc_namespace(&store, &namespace_id, &config(), &past_grace)
-        .await
-        .expect("pass past the release grace window");
-    assert_eq!(report.deleted.checkpoint_records, 1);
-    assert!(crate::checkpoint::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &pinned.checkpoint_id
-    )
-    .await
-    .expect("read record")
-    .is_none());
-}
-
-#[tokio::test]
-async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    // Expiry compares the caller's `now_ms` against the record's stamp;
-    // object ages come from provider timestamps. Pin one record already
-    // expired at any provider-derived "now" and one that never expires.
-    let expiring = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
-        CheckpointOwner::User {
-            name: "short-lived".to_owned(),
-            expires_at_ms: Some(setup.now_ms + GRACE_MS),
-        },
-        &setup,
-    )
-    .await
-    .expect("expiring checkpoint");
-    let lasting = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
-        CheckpointOwner::User {
-            name: "long-lived".to_owned(),
-            expires_at_ms: Some(u64::MAX),
-        },
-        &setup,
-    )
-    .await
-    .expect("lasting checkpoint");
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("advance past the expiring basis");
-
-    // Past expiry: the pass releases the record, and only a later pass —
-    // one grace window past the release stamp — deletes it.
-    let expired = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    assert!(
-        expired.now_ms > 1_000 + GRACE_MS,
-        "provider clock sits past the expiry"
-    );
-    let first_pass = gc_namespace(&store, &namespace_id, &config(), &expired)
-        .await
-        .expect("post-expiry pass");
-    assert_eq!(first_pass.released_checkpoints.expired, 1);
-    assert_eq!(first_pass.deleted.checkpoint_records, 0);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &expiring.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: expired.now_ms
-        }
-    );
-    let expiring_record =
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &expiring.checkpoint_id)
-            .await
-            .expect("read expiring record")
-            .expect("the released record is still there to read")
-            .state;
-    let aged_out = context(expired.now_ms + GRACE_MS);
-    let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged_out)
-        .await
-        .expect("second post-expiry pass");
-    assert_eq!(second_pass.deleted.checkpoint_records, 1);
-    assert!(crate::checkpoint::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &expiring.checkpoint_id
-    )
-    .await
-    .expect("record read")
-    .is_none());
-    assert!(store
-        .head(&metadata_manifest_object(
-            &namespace_id,
-            &expiring_record.manifest.manifest_no
-        ))
-        .await
-        .expect("pinned basis")
-        .is_some());
-    // The unexpired pin — same basis, different owner — still roots it.
-    let survivor =
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &lasting.checkpoint_id)
-            .await
-            .expect("read lasting record")
-            .expect("lasting record survives")
-            .state;
-    assert!(crate::checkpoint::load_namespace_manifest_envelope(
-        &store,
-        &namespace_id,
-        &survivor.manifest.manifest_no,
-    )
-    .await
-    .is_ok());
-    stat_root(&store, &namespace_id).await;
-}
-
-#[tokio::test]
 async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2097,7 +1531,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("first gc pass");
-    assert_eq!(first_pass.deleted.checkpoint_records, 1);
+    assert_eq!(first_pass.deleted.checkpoint_records, 0);
 
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
@@ -2115,7 +1549,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         crate::checkpoint::load_namespace_manifest_envelope(
             &store,
             &namespace_id,
-            &keeper.manifest.manifest_no,
+            &keeper.manifest_no,
         )
         .await
         .is_ok(),
@@ -2140,10 +1574,9 @@ async fn fork_owned_checkpoints_reject_user_release() {
 
     let fork_record = read_fork_record(&store, &source).await;
 
-    let error =
-        crate::checkpoint::release_checkpoint(&store, &source, &fork_record.checkpoint_id, &setup)
-            .await
-            .expect_err("fork-owned release must fail");
+    let error = crate::checkpoint::release_checkpoint(&store, &source, &fork_record.pin_id, &setup)
+        .await
+        .expect_err("fork-owned release must fail");
     assert!(
         matches!(
             &error,
@@ -2192,71 +1625,7 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
         ),
         "expected invalid checkpoint request, got {error:?}"
     );
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &snapshot.checkpoint_id).await,
-        CheckpointStatus::Active {}
-    );
-}
-
-#[tokio::test]
-async fn gc_releases_an_expired_snapshot_under_its_own_count() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let expiring = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
-        CheckpointOwner::Snapshot {
-            name: "short-lived".to_owned(),
-            expires_at_ms: setup.now_ms + GRACE_MS,
-        },
-        &setup,
-    )
-    .await
-    .expect("expiring snapshot");
-    let lasting = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
-        CheckpointOwner::Snapshot {
-            name: "long-lived".to_owned(),
-            expires_at_ms: u64::MAX,
-        },
-        &setup,
-    )
-    .await
-    .expect("lasting snapshot");
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("advance past the expiring basis");
-
-    let expired = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let pass = gc_namespace(&store, &namespace_id, &config(), &expired)
-        .await
-        .expect("post-expiry pass");
-    assert_eq!(pass.released_checkpoints.snapshot, 1);
-    assert_eq!(
-        pass.released_checkpoints.expired, 0,
-        "a snapshot release is not counted as a user pin expiring"
-    );
-    assert_eq!(pass.deleted.checkpoint_records, 0);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &expiring.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: expired.now_ms
-        }
-    );
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &lasting.checkpoint_id).await,
-        CheckpointStatus::Active {},
-        "the unexpired snapshot survives the pass"
-    );
-    stat_root(&store, &namespace_id).await;
+    assert!(checkpoint_exists(&store, &namespace_id, &snapshot.checkpoint_id).await);
 }
 
 #[tokio::test]
@@ -2295,7 +1664,7 @@ async fn gc_retains_active_checkpoint_bases() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
-        &first_record.manifest.manifest_no,
+        &first_record.manifest_no,
     )
     .await
     .is_ok());
@@ -2343,7 +1712,7 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     let target_pin = create_checkpoint(&store, &clone, &setup)
         .await
         .expect("materialize target root");
-    release_checkpoint_record(&store, &clone, &target_pin.checkpoint_id, setup.now_ms)
+    release_checkpoint_record(&store, &clone, &target_pin.checkpoint_id)
         .await
         .expect("release target pin");
     let fork_record = read_fork_record(&store, &source).await;
@@ -2379,44 +1748,21 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     assert_eq!(waiting.released_checkpoints.fork, 0);
     let aged = context(deadline);
 
-    // Pass one flips the record; the record still roots its basis.
     let first_pass = gc_namespace(&store, &source, &config(), &aged)
         .await
-        .expect("first gc pass");
+        .expect("collect fork pin");
     assert_eq!(first_pass.released_checkpoints.fork, 1);
-    assert_eq!(first_pass.deleted.checkpoint_records, 0);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: aged.now_ms
-        }
-    );
-
-    // The release stamp starts the record's own grace window.
-    let aged_out = context(aged.now_ms + GRACE_MS);
-    let second_pass = gc_namespace(&store, &source, &config(), &aged_out)
+    assert_eq!(first_pass.deleted.checkpoint_records, 1);
+    assert!(!checkpoint_exists(&store, &source, &fork_record.pin_id).await);
+    assert!(store
+        .head(&metadata_manifest_object(&source, &fork_record.manifest_no))
         .await
-        .expect("second gc pass");
-    assert_record_and_basis_reaped(
-        &store,
-        &source,
-        &second_pass,
-        &fork_record.checkpoint_id,
-        &fork_record.manifest.manifest_no,
-    )
-    .await;
-
-    // Pass three reaps the unreferenced basis.
-    let third_pass = gc_namespace(&store, &source, &config(), &aged_out)
+        .expect("manifest")
+        .is_some());
+    let next_pass = gc_namespace(&store, &source, &config(), &aged)
         .await
-        .expect("third gc pass");
-    assert_basis_reaped(
-        &store,
-        &source,
-        &third_pass,
-        &fork_record.manifest.manifest_no,
-    )
-    .await;
+        .expect("collect basis");
+    assert_basis_reaped(&store, &source, &next_pass, &fork_record.manifest_no).await;
     stat_root(&store, &source).await;
 }
 
@@ -2446,10 +1792,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .await
         .expect("an unreadable target is retained conservatively");
     assert_eq!(report.released_checkpoints.fork, 0);
-    assert_eq!(
-        checkpoint_lifecycle(store.inner(), &source, &fork_record.checkpoint_id).await,
-        CheckpointStatus::Active {}
-    );
+    assert!(checkpoint_exists(store.inner(), &source, &fork_record.pin_id).await);
 
     store.clear();
     let current = crate::namespace::control::load_current_manifest(store.inner(), &clone)
@@ -2470,7 +1813,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .await
         .expect_err("a target naming this record with another manifest is corruption");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(fork_record.checkpoint_id.as_str()));
+    assert!(error.message().contains(fork_record.pin_id.as_str()));
 
     store
         .put_overwrite(&hint(&clone), Bytes::from_static(b"not json"))
@@ -2501,8 +1844,8 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
     assert!(
-        fork_record.owner.expires_at_ms().is_some(),
-        "a fork record carries the attempt's lease"
+        fork_record.owner.expires_at_ms().is_none(),
+        "fork pins carry no lease"
     );
     // Only the fork-owned record can protect the basis after this.
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
@@ -2510,12 +1853,11 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .await
         .expect("advance root past the fork basis");
 
-    // Every clock: inside the lease, one tick past it, and absurdly past it.
-    let lease = fork_record.owner.expires_at_ms().expect("lease");
+    let grace_deadline = fork_record.created_at_ms + GRACE_MS;
     for now_ms in [
         now_after_newest_object(&store, &source, GRACE_MS + 1).await,
-        lease,
-        lease + FORK_CHECKPOINT_LEASE_MS,
+        grace_deadline,
+        grace_deadline + GRACE_MS,
         u64::MAX / 2,
     ] {
         let report = gc_namespace(&store, &source, &config(), &context(now_ms))
@@ -2523,16 +1865,15 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
             .expect("gc pass with a live target");
         assert_eq!(report.released_checkpoints.fork, 0, "at {now_ms}");
         assert_eq!(report.released_checkpoints.expired, 0, "at {now_ms}");
-        assert_eq!(
-            checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
-            CheckpointStatus::Active {},
+        assert!(
+            checkpoint_exists(&store, &source, &fork_record.pin_id).await,
             "a live target keeps its pin at {now_ms}"
         );
     }
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &source,
-        &fork_record.manifest.manifest_no,
+        &fork_record.manifest_no,
     )
     .await
     .is_ok());
@@ -2542,191 +1883,6 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .resolve_path("/docs/one.txt", AttributeInclusion::Omit)
         .await
         .expect("forked file readable");
-}
-
-#[tokio::test]
-async fn a_fork_pin_with_a_missing_basis_survives_the_missing_basis_pass() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, None, &setup)
-        .await
-        .expect("fork");
-    let fork_record = read_fork_record(&store, &source).await;
-    // Keep the source root valid after deleting the fork basis.
-    write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &source, &setup)
-        .await
-        .expect("advance root past the fork basis");
-    let basis_key = metadata_manifest_object(&source, &fork_record.manifest.manifest_no);
-    store.delete(&basis_key).await.expect("drop basis manifest");
-
-    let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &source, &config(), &aged)
-        .await
-        .expect("gc pass");
-    assert_eq!(report.released_checkpoints.missing_basis, 0);
-    assert_eq!(report.released_checkpoints.fork, 0);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
-        CheckpointStatus::Active {},
-        "a live target keeps its fork checkpoint"
-    );
-}
-
-/// A released fork checkpoint still protects a live target that names it.
-#[tokio::test]
-async fn gc_retains_a_released_fork_record_when_its_target_lives() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, None, &setup)
-        .await
-        .expect("fork");
-    let fork_record = read_fork_record(&store, &source).await;
-
-    // Move the source root beyond the fork basis, then release its checkpoint.
-    write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &source, &setup)
-        .await
-        .expect("advance root past the fork basis");
-    release_checkpoint_record(&store, &source, &fork_record.checkpoint_id, setup.now_ms)
-        .await
-        .expect("simulate the racing checkpoint release");
-    delete_namespace(&store, &source, DeleteNamespaceOptions::default(), &setup)
-        .await
-        .expect("delete source so only the fork pin protects its basis");
-
-    let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &source, &config(), &aged)
-        .await
-        .expect("gc with a released fork record and live target");
-    assert_eq!(report.deleted.checkpoint_records, 0);
-    assert_eq!(report.released_checkpoints.fork, 0);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: setup.now_ms
-        }
-    );
-    assert!(crate::checkpoint::load_namespace_manifest_envelope(
-        &store,
-        &source,
-        &fork_record.manifest.manifest_no,
-    )
-    .await
-    .is_ok());
-    load_current_metadata_view(&store, &clone)
-        .await
-        .expect("target remains readable after source collection")
-        .resolve_path("/docs/one.txt", AttributeInclusion::Omit)
-        .await
-        .expect("forked file remains readable");
-}
-
-#[tokio::test]
-async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    // The tightest legal grace window, so a clock inside the lease can still
-    // be well past every object's own age: the point of the arm is that the
-    // lease decides, not the ages.
-    let tight = GcConfig {
-        grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-        max_steps: None,
-    };
-    // The crash window itself: the fork wrote its leased source record and
-    // died before installing the target head, so nothing under the target
-    // prefix ever existed.
-    let attempt = context(now_after_newest_object(&store, &source, 0).await);
-    let lease = attempt.now_ms + FORK_CHECKPOINT_LEASE_MS;
-    let abandoned = crate::checkpoint::create_checkpoint(
-        &store,
-        &source,
-        CheckpointOwner::Fork {
-            target_namespace_id: clone.clone(),
-            expires_at_ms: lease,
-        },
-        &attempt,
-    )
-    .await
-    .expect("leased fork record");
-    let fork_record = read_fork_record(&store, &source).await;
-    write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &source, &setup)
-        .await
-        .expect("advance root past the abandoned basis");
-
-    // Inside the lease the record is a root, whatever the object ages say:
-    // a live retry could still be between its two writes.
-    assert!(
-        lease - 1 > attempt.now_ms + tight.grace_window_ms,
-        "the second clock below is past the grace window and still inside the lease"
-    );
-    for now_ms in [attempt.now_ms + tight.grace_window_ms + 1, lease - 1] {
-        let report = gc_namespace(&store, &source, &tight, &context(now_ms))
-            .await
-            .expect("gc inside the lease");
-        assert_eq!(report.released_checkpoints.fork, 0, "at {now_ms}");
-        assert_eq!(
-            checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-            CheckpointStatus::Active {}
-        );
-        assert!(crate::checkpoint::load_namespace_manifest_envelope(
-            &store,
-            &source,
-            &fork_record.manifest.manifest_no,
-        )
-        .await
-        .is_ok());
-    }
-
-    // Past the lease: the attempt is provably gone.
-    let expired = context(lease);
-    let report = gc_namespace(&store, &source, &tight, &expired)
-        .await
-        .expect("gc past the lease");
-    assert_eq!(report.released_checkpoints.fork, 1);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: expired.now_ms
-        }
-    );
-
-    // From there it is an ordinary released record.
-    let aged_out = context(expired.now_ms + tight.grace_window_ms);
-    let reaping = gc_namespace(&store, &source, &tight, &aged_out)
-        .await
-        .expect("gc past the release grace window");
-    assert_record_and_basis_reaped(
-        &store,
-        &source,
-        &reaping,
-        &abandoned.checkpoint_id,
-        &fork_record.manifest.manifest_no,
-    )
-    .await;
-    stat_root(&store, &source).await;
 }
 
 #[tokio::test]
@@ -2745,12 +1901,11 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         &source,
         CheckpointOwner::Fork {
             target_namespace_id: clone.clone(),
-            expires_at_ms: setup.now_ms + FORK_CHECKPOINT_LEASE_MS,
         },
         &setup,
     )
     .await
-    .expect("leased fork record from the attempt that died");
+    .expect("fork pin from the abandoned attempt");
 
     fork_namespace(&store, &source, &clone, None, &setup)
         .await
@@ -2761,25 +1916,17 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
         .expect("list checkpoints")
         .len();
     assert_eq!(retry, 2, "the retry pins for itself instead of reusing");
-    assert_eq!(
-        checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-        CheckpointStatus::Active {},
+    assert!(
+        checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await,
         "the retry leaves the abandoned record alone"
     );
 
-    // The target now reads through the retry's checkpoint, so the abandoned
-    // record protects nothing and is reclaimable inside its own lease.
-    let inside_the_lease = context(setup.now_ms + 1);
-    let report = gc_namespace(&store, &source, &config(), &inside_the_lease)
+    let before_creation_grace = context(setup.now_ms + 1);
+    let report = gc_namespace(&store, &source, &config(), &before_creation_grace)
         .await
         .expect("gc pass with a target that reads through another record");
     assert_eq!(report.released_checkpoints.fork, 1);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: inside_the_lease.now_ms
-        }
-    );
+    assert!(!checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await);
     load_current_metadata_view(&store, &clone)
         .await
         .expect("target readable after retry and collection")
@@ -2816,7 +1963,7 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
         .expect("the checkpoint wrote a record")
         .clone();
     let before = namespace_keys(store.inner(), &namespace_id).await;
-    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let aged = context(setup.now_ms);
 
     store.fail_all();
     let error = gc_namespace(&store, &namespace_id, &config(), &aged)
@@ -2838,7 +1985,7 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
         .put_overwrite(&record_key, Bytes::from_static(b"not json"))
         .await
         .expect("corrupt record");
-    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
+    let aged = context(setup.now_ms);
     let error = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect_err("a corrupt record fails the pass");
@@ -2983,18 +2130,6 @@ async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTr
         .collect()
 }
 
-fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
-    total.deleted.add(&pass.deleted);
-    total.released_checkpoints.add(&pass.released_checkpoints);
-    total.retained_candidates += pass.retained_candidates;
-    total.retained.add(&pass.retained);
-    total.next_reclamation_at_ms = match (total.next_reclamation_at_ms, pass.next_reclamation_at_ms)
-    {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
-}
-
 #[tokio::test]
 async fn provider_age_reserves_the_clock_margin_before_deletion() {
     use super::reap::{delete_if_aged, GraceAge};
@@ -3034,81 +2169,6 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
         GraceAge::Aged,
     );
     assert_eq!(store.counts().deletes, 1);
-}
-
-#[tokio::test]
-async fn host_clock_error_advances_record_expiry_but_release_keeps_its_grace() {
-    use crate::limits::GC_SAFETY_MARGIN_MS;
-
-    let dir = tempdir().expect("tempdir");
-    let store = MetadataMapStore::without_last_modified(
-        LocalFsStore::new(dir.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let creator = context(1_000_000);
-    bootstrap_namespace(&store, &namespace_id, &creator, false)
-        .await
-        .expect("bootstrap");
-    let expires_at_ms = creator.now_ms + 2 * GC_SAFETY_MARGIN_MS;
-    let checkpoint = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
-        CheckpointOwner::User {
-            name: "clock-boundary".to_owned(),
-            expires_at_ms: Some(expires_at_ms),
-        },
-        &creator,
-    )
-    .await
-    .expect("checkpoint");
-    let key = loonfs_objectstore::keys::checkpoint_record(&namespace_id, &checkpoint.checkpoint_id);
-    let store = RecordingStore::new(store, KeyPredicate::exact(key.clone()));
-    let config = GcConfig {
-        grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-        ..config()
-    };
-    let clock_error = GC_SAFETY_MARGIN_MS / 2;
-    let creator_at_expiry_check = expires_at_ms - clock_error;
-    let collector = context(creator_at_expiry_check + clock_error);
-    gc_namespace(
-        &store,
-        &namespace_id,
-        &config,
-        &context(collector.now_ms - 1),
-    )
-    .await
-    .expect("before expiry");
-    assert_eq!(store.counts().compare_and_swaps, 0);
-    gc_namespace(&store, &namespace_id, &config, &collector)
-        .await
-        .expect("at expiry on the faster host");
-    assert_eq!(store.counts().compare_and_swaps, 1);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &checkpoint.checkpoint_id).await,
-        CheckpointStatus::Released {
-            released_at_ms: collector.now_ms
-        }
-    );
-    gc_namespace(
-        &store,
-        &namespace_id,
-        &config,
-        &context(collector.now_ms + GC_MIN_GRACE_WINDOW_MS - 1),
-    )
-    .await
-    .expect("before release grace cutoff");
-    assert_eq!(store.counts().deletes, 0);
-    gc_namespace(
-        &store,
-        &namespace_id,
-        &config,
-        &context(collector.now_ms + GC_MIN_GRACE_WINDOW_MS),
-    )
-    .await
-    .expect("at release grace cutoff");
-    assert_eq!(store.counts().deletes, 1);
-    assert!(store.head(&key).await.expect("head checkpoint").is_none());
 }
 
 #[tokio::test]
@@ -3515,60 +2575,6 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
 }
 
 #[tokio::test]
-async fn retirement_uses_the_complete_listing_and_the_calls_clock() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("retirement-clock").expect("namespace");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    let pin = create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("checkpoint");
-    delete_namespace(&store, &namespace_id, Default::default(), &setup)
-        .await
-        .expect("delete");
-    let released_at_ms = GRACE_MS * 3;
-    let released = gc_namespace(&store, &namespace_id, &config(), &context(released_at_ms))
-        .await
-        .expect("release pin");
-    assert_eq!(released.reclaim_after_ms, None);
-    assert_eq!(
-        checkpoint_lifecycle(&store, &namespace_id, &pin.checkpoint_id).await,
-        CheckpointStatus::Released { released_at_ms }
-    );
-    let within_grace = gc_namespace(
-        &store,
-        &namespace_id,
-        &config(),
-        &context(released_at_ms + GRACE_MS - 1),
-    )
-    .await
-    .expect("release grace");
-    assert_eq!(within_grace.reclaim_after_ms, None);
-    let clock = released_at_ms + GRACE_MS;
-    let stopped = gc_namespace(
-        &store,
-        &namespace_id,
-        &GcConfig {
-            max_steps: Some(1),
-            ..config()
-        },
-        &context(clock),
-    )
-    .await
-    .expect("bounded call before checkpoint cleanup");
-    assert!(stopped.budget_exhausted);
-    assert_eq!(stopped.reclaim_after_ms, None);
-    let retired = gc_namespace(&store, &namespace_id, &config(), &context(clock))
-        .await
-        .expect("retire");
-    assert_eq!(retired.reclaim_after_ms, Some(clock + GRACE_MS));
-    assert_eq!(retired.next_reclamation_at_ms, retired.reclaim_after_ms);
-}
-
-#[tokio::test]
 async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("owner-sweep").expect("namespace");
@@ -3681,4 +2687,210 @@ async fn retired_owner_head_recheck_fails_without_writes() {
     for key in keys {
         assert!(store.head(&key).await.expect("owned content").is_some());
     }
+}
+
+#[tokio::test]
+async fn gc_reads_only_budgeted_pin_bodies_and_uses_every_key_as_a_root() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("pin-budget").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+    );
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    for _ in 0..64 {
+        crate::checkpoint::create_checkpoint(
+            &store,
+            &namespace_id,
+            CheckpointOwner::Snapshot {
+                name: "batch".to_owned(),
+                expires_at_ms: 2_000,
+            },
+            &setup,
+        )
+        .await
+        .expect("pin");
+    }
+    store.reset();
+    let report = gc_namespace(
+        &store,
+        &namespace_id,
+        &GcConfig {
+            max_steps: Some(1),
+            ..config()
+        },
+        &context(2_000 + GRACE_MS),
+    )
+    .await
+    .expect("bounded collection");
+    assert!(report.budget_exhausted);
+    assert_eq!(report.deleted.checkpoint_records, 1);
+    assert_eq!(store.counts().gets + store.counts().gets_with_metadata, 1);
+    assert_eq!(store.counts().deletes, 1);
+    let operations = store.snapshot();
+    let read_keys: Vec<_> = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            loonfs_test_support::stores::RecordedOperation::GetWithMetadata { key, .. } => {
+                Some(key)
+            }
+            _ => None,
+        })
+        .collect();
+    let deleted_keys: Vec<_> = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            loonfs_test_support::stores::RecordedOperation::Delete { key, .. } => Some(key),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(read_keys, deleted_keys);
+}
+
+#[tokio::test]
+async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("pin-grace").expect("namespace");
+    let target = NamespaceId::parse("absent").expect("target");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let mut pins = Vec::new();
+    for owner in [
+        CheckpointOwner::User {
+            name: "permanent".to_owned(),
+            expires_at_ms: None,
+        },
+        CheckpointOwner::User {
+            name: "expiring".to_owned(),
+            expires_at_ms: Some(2_000),
+        },
+        CheckpointOwner::Snapshot {
+            name: "snapshot".to_owned(),
+            expires_at_ms: 2_000,
+        },
+        CheckpointOwner::Fork {
+            target_namespace_id: target.clone(),
+        },
+    ] {
+        pins.push(
+            crate::checkpoint::create_checkpoint(&store, &namespace_id, owner, &setup)
+                .await
+                .expect("pin"),
+        );
+    }
+    let before = gc_namespace(
+        &store,
+        &namespace_id,
+        &config(),
+        &context(1_000 + GRACE_MS - 1),
+    )
+    .await
+    .expect("before creation grace");
+    assert_eq!(before.deleted.checkpoint_records, 0);
+    let abandoned = gc_namespace(&store, &namespace_id, &config(), &context(1_000 + GRACE_MS))
+        .await
+        .expect("creation grace");
+    assert_eq!(abandoned.released_checkpoints.fork, 1);
+    assert!(!checkpoint_exists(&store, &namespace_id, &pins[3].checkpoint_id).await);
+    assert!(namespace_keys(&store, &target).await.is_empty());
+    let before_expiry = gc_namespace(
+        &store,
+        &namespace_id,
+        &config(),
+        &context(2_000 + GRACE_MS - 1),
+    )
+    .await
+    .expect("before expiry grace");
+    assert_eq!(before_expiry.deleted.checkpoint_records, 0);
+    let expired = gc_namespace(&store, &namespace_id, &config(), &context(2_000 + GRACE_MS))
+        .await
+        .expect("expiry grace");
+    assert_eq!(expired.deleted.checkpoint_records, 2);
+    assert_eq!(expired.released_checkpoints.expired, 1);
+    assert_eq!(expired.released_checkpoints.snapshot, 1);
+    assert!(checkpoint_exists(&store, &namespace_id, &pins[0].checkpoint_id).await);
+    assert!(!checkpoint_exists(&store, &namespace_id, &pins[1].checkpoint_id).await);
+    assert!(!checkpoint_exists(&store, &namespace_id, &pins[2].checkpoint_id).await);
+    let deleted_at = 3_000 + GRACE_MS;
+    delete_namespace(
+        &store,
+        &namespace_id,
+        Default::default(),
+        &context(deleted_at),
+    )
+    .await
+    .expect("delete");
+    let stopped = gc_namespace(
+        &store,
+        &namespace_id,
+        &GcConfig {
+            max_steps: Some(1),
+            ..config()
+        },
+        &context(deleted_at),
+    )
+    .await
+    .expect("bounded collection");
+    assert!(stopped.budget_exhausted);
+    assert_eq!(stopped.reclaim_after_ms, None);
+    let retired = gc_namespace(&store, &namespace_id, &config(), &context(deleted_at))
+        .await
+        .expect("retire");
+    assert_eq!(retired.deleted.checkpoint_records, 1);
+    assert_eq!(retired.reclaim_after_ms, Some(deleted_at + GRACE_MS));
+}
+
+#[tokio::test]
+async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("missing-manifest").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let initial = crate::checkpoint::create_checkpoint(
+        &store,
+        &namespace_id,
+        CheckpointOwner::User {
+            name: "initial".to_owned(),
+            expires_at_ms: None,
+        },
+        &setup,
+    )
+    .await
+    .expect("pin");
+    write_test_file(&store, &namespace_id, "/file", "new", &setup).await;
+    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+        .await
+        .expect("flush");
+    store
+        .delete(&metadata_manifest_object(
+            &namespace_id,
+            &initial.manifest_no,
+        ))
+        .await
+        .expect("delete manifest");
+    store.reset();
+    let error = gc_namespace(&store, &namespace_id, &config(), &context(GRACE_MS * 3))
+        .await
+        .expect_err("missing pin manifest");
+    assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
+    assert!(error
+        .to_string()
+        .contains(&loonfs_objectstore::keys::checkpoint_record(
+            &namespace_id,
+            &initial.checkpoint_id
+        )));
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().deletes, 0);
 }

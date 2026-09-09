@@ -178,7 +178,6 @@ const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("RunMaintenanceResponseGc", "retained"),
     ("GrepMatch", "line_truncated"),
     ("ReleasedCheckpointCounts", "expired"),
-    ("ReleasedCheckpointCounts", "missing_basis"),
 ];
 
 #[test]

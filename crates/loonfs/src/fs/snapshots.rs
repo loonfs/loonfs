@@ -233,7 +233,7 @@ impl FsWriter {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Releases a snapshot. Repeated releases succeed.
+    /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.snapshot_release",

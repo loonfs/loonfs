@@ -1,6 +1,6 @@
 //! Fork installation copies pinned source runs into target manifest 1.
 
-use crate::checkpoint::record::{release_checkpoint_record, renew_fork_checkpoint_for_install};
+use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::{
     classify_live_snapshot, create_checkpoint, create_checkpoint_at_basis, load_checkpoint_record,
     load_namespace_manifest_envelope,
@@ -8,7 +8,7 @@ use crate::checkpoint::{
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::{FORK_CHECKPOINT_LEASE_MS, FORK_INSTALL_MARGIN_MS};
+use crate::limits::FORK_INSTALL_BUDGET_MS;
 use crate::namespace::bootstrap::{install_namespace_manifest, NamespaceInstall};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{CheckpointOwner, ForkBasis, NamespaceStatus};
@@ -22,12 +22,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     snapshot_id: Option<&CheckpointId>,
     context: &MutationContext,
 ) -> Result<Namespace> {
-    // Include time already spent on the fork when renewing its lease.
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     let owner = CheckpointOwner::Fork {
         target_namespace_id: new_namespace_id.clone(),
-        expires_at_ms: context.now_ms.saturating_add(FORK_CHECKPOINT_LEASE_MS),
     };
     let checkpoint = if let Some(snapshot_id) = snapshot_id {
         create_snapshot_fork_checkpoint(store, source_namespace_id, snapshot_id, owner, context)
@@ -48,18 +46,18 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_manifest = load_namespace_manifest_envelope(
         store,
         source_namespace_id,
-        &source_record.manifest.manifest_no,
+        &source_record.pin_id.manifest_no(),
     )
     .await
     .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
     crate::checkpoint::ensure_manifest_reference_matches(
         "fork checkpoint",
-        &source_record.manifest,
+        &source_record.manifest(),
         &source_manifest,
     )?;
     let fork_basis = ForkBasis {
-        manifest: source_record.manifest.clone(),
-        source_checkpoint_id: source_record.checkpoint_id.clone(),
+        manifest: source_record.manifest(),
+        source_checkpoint_id: source_record.pin_id.clone(),
     };
     let fork_seq = fork_basis.manifest.manifest_head_seq;
 
@@ -77,23 +75,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         status: NamespaceStatus::Active {},
         ..source_manifest.payload().clone()
     };
-    // Renew before creating the target so this races safely with GC release.
-    let checkpoint_expires_at_ms = renew_fork_checkpoint_for_install(
-        store,
-        source_namespace_id,
-        &source_record.checkpoint_id,
-        new_namespace_id,
-        context
-            .now_ms
-            .saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
-    )
-    .await?;
     match install_namespace_manifest(store, &manifest, || {
-        let install_started_at_ms = context.now_ms.saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms));
-        if checkpoint_expires_at_ms <= install_started_at_ms.saturating_add(FORK_INSTALL_MARGIN_MS) {
+        if timer.monotonic_now_ms().saturating_sub(started_ms) > FORK_INSTALL_BUDGET_MS {
             return Err(CoreError::CheckpointUnavailable(format!(
-                "fork of `{source_namespace_id}` into `{new_namespace_id}` cannot install before source checkpoint `{}` expires",
-                source_record.checkpoint_id
+                "fork of `{source_namespace_id}` into `{new_namespace_id}` exceeded its installation budget"
             )));
         }
         Ok(())
@@ -135,7 +120,7 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
         store,
         source_namespace_id,
         owner,
-        snapshot.manifest,
+        snapshot.manifest(),
         snapshot.head_commit_id,
         context,
     )
@@ -152,13 +137,7 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
             )
         });
     if let Err(error) = rechecked {
-        release_checkpoint_record(
-            store,
-            source_namespace_id,
-            &checkpoint.checkpoint_id,
-            context.now_ms,
-        )
-        .await?;
+        release_checkpoint_record(store, source_namespace_id, &checkpoint.checkpoint_id).await?;
         return Err(match error {
             CoreError::SnapshotNotFound { .. } => CoreError::SnapshotGone {
                 snapshot_id: snapshot_id.clone(),

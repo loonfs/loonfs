@@ -232,7 +232,7 @@ mod tests {
         let backfilling = GrepIndexLifecycle::Backfilling {
             target_seq: ChangeSeq(9),
             cursor_inode_id: Some(InodeId(4)),
-            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("checkpoint id"),
         };
         assert_eq!(
@@ -241,7 +241,7 @@ mod tests {
                 "status": "backfilling",
                 "target_seq": 9,
                 "cursor_inode_id": "ino_4",
-                "checkpoint_id": "chk_00000000000000000000000000000009"
+                "checkpoint_id": "pin_00000000000000000001-0000000000000009"
             }),
             "a backfill reports its target and its walk, never a watermark"
         );
@@ -267,7 +267,7 @@ mod tests {
         let backfilling = GrepIndexLifecycle::Backfilling {
             target_seq: ChangeSeq(9),
             cursor_inode_id: None,
-            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("checkpoint id"),
         };
         assert!(
@@ -317,7 +317,7 @@ mod tests {
                 lifecycle: GrepIndexLifecycle::Backfilling {
                     target_seq: ChangeSeq(12),
                     cursor_inode_id: Some(InodeId(4)),
-                    checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+                    checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000009")
                         .expect("checkpoint id"),
                 },
                 next_run_no: RunNo(1),
@@ -329,7 +329,7 @@ mod tests {
                 "status": "backfilling",
                 "target_seq": 12,
                 "cursor_inode_id": "ino_4",
-                "checkpoint_id": "chk_00000000000000000000000000000009",
+                "checkpoint_id": "pin_00000000000000000001-0000000000000009",
                 "next_run_no": 1,
                 "reorganize_pending": false
             })

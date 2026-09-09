@@ -268,8 +268,9 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
 | `namespace_deleted` | 410 | The namespace's current manifest records terminal deleted status. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
+| `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
 | `snapshot_not_found` | 404 | The snapshot id names no checkpoint record. Refresh state or choose another snapshot. |
-| `snapshot_gone` | 410 | The snapshot record exists but is released or expired. The message names which terminal condition applies. |
+| `snapshot_gone` | 410 | The snapshot has expired, or was released while a fork was verifying its selected snapshot. |
 | `path_not_found` | 404 | No visible entry at the path. |
 | `inode_not_found` | 404 | The requested visible or retained inode does not exist. |
 | `revision_not_found` | 404 | The file has no such revision. |
@@ -782,13 +783,13 @@ The table below lists the retry class for every v0 operation.
 | Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`; requires `name` and `ttl_ms` |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling |
-| Release a snapshot | `release_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/release` (idempotent and one-way) |
+| Release a snapshot | `release_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/release` (deletes the pin; a missing id returns `snapshot_not_found`) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `filesystem.namespaces.delete`; the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; records owned by another operation are rejected) |
+| Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (deletes the pin; a missing id returns `checkpoint_not_found`; other owners are rejected) |
 | Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`; the body names one job with `kind` |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
@@ -815,7 +816,7 @@ For example:
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"chk_00000000000000000000000000000009","next_run_no":1,"reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
 ```
 
 A backfill therefore never reports a `built_through_seq`, and an active index
@@ -883,29 +884,33 @@ floor has advanced.
 
 A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `checkpoint_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
 
+The id is `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the
+manifest used by checkpoint and snapshot reads. Every pin has a fresh id.
+
 For example, a create response is:
 
 ```json
-{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}
+{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}
 ```
 
-`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns active
+`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing
 checkpoints in ascending `checkpoint_id` order. Each entry is the same
 checkpoint object returned by create. User checkpoints can be released by
 id. Fork checkpoints retain their `fork` owner and remain while their target
 namespace still reads through them.
 
 ```json
-{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}]}
 ```
 
-Release is idempotent and returns only the addressed namespace and
-checkpoint. The response is identical whether this call released an active
-record or the record was already released or reaped:
+Release deletes the pin and returns the addressed namespace and checkpoint.
+The success response is:
 
 ```json
-{"namespace_id":"demo","checkpoint_id":"chk_00000000000000000000000000000009"}
+{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009"}
 ```
+
+A missing id, including one already released, returns `checkpoint_not_found`.
 
 `limit` follows the advertised pagination limits. `next_cursor` is omitted
 after the final page. Cursors are opaque and tied to this namespace and
@@ -914,12 +919,9 @@ operation; clients should only return them unchanged.
 This is a live listing, not a snapshot. Checkpoints created, released, or
 collected while a client is paging can affect later pages.
 
-Released records are absent, because a release is what stops a record
-pinning anything. A record whose `expires_at_ms` has passed is still
-present, with that instant in the entry: expiry is not release — garbage
-collection is what turns a passed expiry into one — so until a pass reaches
-it the record is still a root, and reads still serve from it. Listing it is
-the honest answer to the question the route is asked.
+Release deletes the record. An expired user pin remains listed and readable
+until GC deletes it after expiry plus grace. A permanent user pin on a live
+namespace requires explicit release.
 
 #### Snapshots
 
@@ -932,10 +934,10 @@ never moves the expiry past `snapshot.max_lifetime_ms` from the record's
 `created_at_ms`. A namespace may hold at most
 `snapshot.max_live_per_namespace` live snapshots.
 
-Snapshot listing returns only snapshot-owned records whose leases have not
+Snapshot listing returns only snapshot-owned pins whose lifetimes have not
 expired. The maintenance checkpoint listing keeps expired records visible until
-collection releases them. Snapshot release is idempotent and one-way. A
-second release succeeds, including after the record is reaped.
+collection deletes them. Snapshot release deletes the pin. A second release returns
+`snapshot_not_found`.
 
 These operations manage the snapshot lifetime. Path stat, directory listing,
 file content, download, and change-feed requests accept an optional
@@ -944,8 +946,8 @@ with `revision_no`; the snapshot selects the revision. A snapshot change feed
 ends at the captured sequence, and `after_seq` cannot exceed that sequence.
 
 Snapshot reads require a live snapshot. Missing snapshots return
-`snapshot_not_found`, while released or expired snapshots return
-`snapshot_gone`. Neither case falls back to the current namespace state.
+`snapshot_not_found`, including after release. Expired snapshots return
+`snapshot_gone` while their pins still exist. Neither case falls back to the current namespace state.
 
 #### Store contract probe
 
@@ -1017,7 +1019,7 @@ the call before sweeping.
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`,
 `content_objects`, and `retired_content_objects`. `released_checkpoints`
-contains `fork`, `expired`, `snapshot`, and `missing_basis` counts. Every count field is
+contains `fork`, `expired`, and `snapshot` counts for pins deleted in the pass. Every count field is
 present, including zero values.
 
 `content_objects` counts reclamation through completed upload sessions.
@@ -1037,14 +1039,14 @@ that reason, and the fields sum to the total:
 | `within_grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
-| `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, a fork record its target may still reach, a released record still inside its grace, or an active pin doing its job. |
+| `checkpoint_not_releasable` | A pin retained by its owner or its grace window. |
 | `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, a content cleanup failure, or a deleted namespace still waiting for retirement. |
 
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
 
-The current manifest and active checkpoint records protect their metadata
+The current manifest and every manifest number in the pin key listing protect their metadata
 segments. An unreferenced object becomes eligible for collection after its
 own provider timestamp is at least `grace_window_ms` old. Metadata segments
 use the separate `UNREFERENCED_SEGMENT_MIN_AGE_MS` age gate and must be

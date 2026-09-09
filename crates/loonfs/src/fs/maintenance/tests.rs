@@ -140,10 +140,6 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         ("deleted_upload_sessions", gc.deleted.upload_sessions),
         ("deleted_content_objects", gc.deleted.content_objects),
         (
-            "released_missing_basis_checkpoints",
-            gc.released_checkpoints.missing_basis,
-        ),
-        (
             "released_snapshot_checkpoints",
             gc.released_checkpoints.snapshot,
         ),

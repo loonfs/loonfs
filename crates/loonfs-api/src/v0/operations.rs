@@ -790,7 +790,7 @@ pub struct Checkpoint {
     pub owner: CheckpointOwnerSummary,
     /// Time the checkpoint record was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// The automatic release time in Unix milliseconds, or `None` until an explicit release.
+    /// Expiry in Unix milliseconds; collection waits one further grace window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expires_at_ms: Option<u64>,
@@ -815,7 +815,7 @@ pub struct SnapshotSummary {
     pub head_seq: ChangeSeq,
     /// Time the snapshot record was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// When the snapshot lease expires, in Unix milliseconds.
+    /// When the snapshot expires, in Unix milliseconds.
     pub expires_at_ms: u64,
 }
 
@@ -955,7 +955,7 @@ pub struct DeletedObjectCounts {
     pub metadata_segments: u64,
     /// Unreferenced manifests deleted.
     pub manifests: u64,
-    /// Released checkpoint records deleted after their grace window.
+    /// Pin records deleted by this pass.
     pub checkpoint_records: u64,
     /// Upload-session control objects deleted after the reap window.
     pub upload_sessions: u64,
@@ -995,8 +995,6 @@ pub struct ReleasedCheckpointCounts {
     pub fork: u64,
     /// User-owned records released after expiry or terminal namespace deletion.
     pub expired: u64,
-    /// Active records released because their basis manifests are gone.
-    pub missing_basis: u64,
     /// Snapshot-owned records released after expiry or terminal namespace deletion.
     pub snapshot: u64,
 }
@@ -1007,12 +1005,10 @@ impl ReleasedCheckpointCounts {
         let Self {
             fork,
             expired,
-            missing_basis,
             snapshot,
         } = other;
         self.fork += fork;
         self.expired += expired;
-        self.missing_basis += missing_basis;
         self.snapshot += snapshot;
     }
 }
@@ -2009,7 +2005,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let checkpoint = Checkpoint {
             namespace_id: namespace_id.clone(),
-            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
+            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000001")
                 .expect("checkpoint id"),
             owner: CheckpointOwnerSummary::User {
                 name: "release".to_owned(),
@@ -2021,7 +2017,7 @@ mod tests {
         };
         let checkpoint_json = serde_json::json!({
             "namespace_id": "demo",
-            "checkpoint_id": "chk_00000000000000000000000000000001",
+            "checkpoint_id": "pin_00000000000000000001-0000000000000001",
             "owner": {"kind": "user", "name": "release"},
             "created_at_ms": 1_752_623_000_000_u64,
             "expires_at_ms": 1_752_626_600_000_u64,
@@ -2052,7 +2048,7 @@ mod tests {
             .expect("serialize release checkpoint response"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "checkpoint_id": "chk_00000000000000000000000000000001",
+                "checkpoint_id": "pin_00000000000000000001-0000000000000001",
             }),
         );
     }
@@ -2061,7 +2057,7 @@ mod tests {
     fn optional_response_fields_are_omitted_and_default_when_absent() {
         let checkpoint_json = serde_json::to_value(Checkpoint {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
+            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000001")
                 .expect("checkpoint id"),
             owner: CheckpointOwnerSummary::User {
                 name: "release".to_owned(),

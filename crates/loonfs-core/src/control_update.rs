@@ -296,7 +296,7 @@ mod tests {
     async fn generated_id_create_recovers_when_the_first_write_lands_ambiguously() {
         let temp_dir = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-        let object_key = "namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json";
+        let object_key = "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json";
         let payload = Bytes::from_static(b"generated control record");
         let store = FailStore::new(
             inner,
@@ -324,7 +324,7 @@ mod tests {
     async fn generated_id_create_does_not_adopt_an_existing_identical_record() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let object_key = "namespaces/demo/checkpoints/chk_00000000000000000000000000000001.json";
+        let object_key = "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json";
         let payload = Bytes::from_static(b"generated control record");
         store
             .put_if_absent(object_key, payload.clone())

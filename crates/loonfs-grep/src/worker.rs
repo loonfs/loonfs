@@ -293,7 +293,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         ) {
             Ok(next) => next,
             Err(error) => {
-                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 return Err(error);
             }
@@ -307,7 +307,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 state: published.manifest_state().status().clone(),
             }),
             Err(GrepRootError::Conflict { .. }) => {
-                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 Ok(GrepEnableOutcome::Superseded)
             }
@@ -348,7 +348,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
-                    self.release_checkpoint(namespace_id, &checkpoint_id)
+                    self.release_checkpoint_if_present(namespace_id, &checkpoint_id)
                         .await?;
                 }
                 Ok(GrepDisableOutcome::Disabled)
@@ -487,15 +487,20 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await?)
     }
 
-    async fn release_checkpoint(
+    async fn release_checkpoint_if_present(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
     ) -> Result<()> {
-        self.maintenance
+        match self
+            .maintenance
             .release_checkpoint(namespace_id, checkpoint_id)
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.code() == ErrorCode::CheckpointNotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn restart_backfill(
@@ -516,7 +521,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         ) {
             Ok(next) => next,
             Err(error) => {
-                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 return Err(error);
             }
@@ -524,7 +529,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match self.advance_root(current, &next).await {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
-                    self.release_checkpoint(namespace_id, &previous_checkpoint_id)
+                    self.release_checkpoint_if_present(namespace_id, &previous_checkpoint_id)
                         .await?;
                 }
                 Ok(GrepBuildOutcome::BackfillRestarted {
@@ -532,7 +537,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 })
             }
             Err(GrepRootError::Conflict { .. }) => {
-                self.release_checkpoint(namespace_id, &checkpoint.checkpoint_id)
+                self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 Ok(GrepBuildOutcome::Superseded)
             }
@@ -631,7 +636,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
-                    self.release_checkpoint(namespace_id, &checkpoint_id)
+                    self.release_checkpoint_if_present(namespace_id, &checkpoint_id)
                         .await?;
                 }
                 Ok(GrepBuildOutcome::Published {

@@ -175,22 +175,11 @@ pub const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// one upload.
 pub const MAX_SIGNED_PARTS_PER_REQUEST: usize = 1_000;
 
-/// Lease for the source checkpoint created by a fork attempt.
-///
-/// Renewal and the installation margin protect an absent target against
-/// collection by a host whose clock is ahead within the safety allowance.
-pub const FORK_CHECKPOINT_LEASE_MS: u64 = 2 * GC_MIN_GRACE_WINDOW_MS;
-
-/// Remaining lease time required before target installation, including
-/// the provider write and the clock-error and scheduling allowance.
-pub const FORK_INSTALL_MARGIN_MS: u64 =
-    PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS;
-
-const fn covers_fork_installation(margin_ms: u64) -> bool {
-    margin_ms >= PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS
-}
-
-const _: () = assert!(covers_fork_installation(FORK_INSTALL_MARGIN_MS));
+/// Bounds installation before an absent target's pin can be collected.
+pub const FORK_INSTALL_BUDGET_MS: u64 = GC_MIN_GRACE_WINDOW_MS
+    - PROVIDER_OPERATION_DEADLINE_MS
+    - PROVIDER_ATTEMPT_TIMEOUT_MS
+    - GC_SAFETY_MARGIN_MS;
 
 /// Lifetime resolved on the creating host; expiry checks add no clock-error margin.
 pub const UPLOAD_SESSION_LEASE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -229,18 +218,6 @@ const _: () = assert!(
     outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS),
     "content reclamation must outlast the last receipt a completed session can mint, \
      the commit that receipt admits, and that commit's publication"
-);
-
-// The fork lease must cover a whole fork attempt, which is an inequality over
-// the constants above rather than a judgement call, so it is checked where a
-// broken derivation is a compile error instead of a test failure.
-const _: () = assert!(
-    FORK_CHECKPOINT_LEASE_MS >= GC_MIN_GRACE_WINDOW_MS,
-    "a fork attempt may take as long as any other publication"
-);
-const _: () = assert!(
-    FORK_INSTALL_MARGIN_MS < FORK_CHECKPOINT_LEASE_MS,
-    "a renewed fork checkpoint must outlast target installation"
 );
 
 #[cfg(test)]
@@ -289,12 +266,5 @@ mod tests {
                 ) + PROVIDER_OPERATION_DEADLINE_MS,
             "the floor keeps a margin above budget plus provider deadline"
         );
-    }
-
-    #[test]
-    fn the_fork_installation_margin_reserves_clock_error_after_the_provider_write() {
-        assert_eq!(FORK_INSTALL_MARGIN_MS, 330_000);
-        assert!(covers_fork_installation(FORK_INSTALL_MARGIN_MS));
-        assert!(!covers_fork_installation(FORK_INSTALL_MARGIN_MS - 1));
     }
 }

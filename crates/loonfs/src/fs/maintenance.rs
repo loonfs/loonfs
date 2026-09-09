@@ -746,7 +746,7 @@ impl FsMaintenance {
         ))
     }
 
-    /// Releases a user-owned checkpoint by id. Idempotent.
+    /// Deletes a user-owned pin. A missing id returns `checkpoint_not_found`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.release_checkpoint",

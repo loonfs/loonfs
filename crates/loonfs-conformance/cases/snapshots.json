@@ -18,7 +18,7 @@
     "added_content_utf8": "added after snapshot",
     "create_ttl_ms": 3600000,
     "extend_ttl_ms": 7200000,
-    "unknown_snapshot_id": "chk_ffffffffffffffffffffffffffffffff"
+    "unknown_snapshot_id": "pin_00000000000000000001-ffffffffffffffff"
   },
   "expected": {
     "snapshot_head_seq": 3,
@@ -37,10 +37,6 @@
       2,
       3
     ],
-    "snapshot_gone": {
-      "status": 410,
-      "code": "snapshot_gone"
-    },
     "snapshot_not_found": {
       "status": 404,
       "code": "snapshot_not_found"

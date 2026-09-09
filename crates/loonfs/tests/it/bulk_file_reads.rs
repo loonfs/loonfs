@@ -558,7 +558,7 @@ async fn a_released_checkpoint_refuses_enumeration_instead_of_answering_current_
         .expect_err("a released checkpoint pins nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
 
-    let missing = loonfs::CheckpointId::parse("chk_0123456789abcdef0123456789abcdef")
+    let missing = loonfs::CheckpointId::parse("pin_00000000000000000001-0123456789abcdef")
         .expect("valid checkpoint id");
     let error = fs
         .reader

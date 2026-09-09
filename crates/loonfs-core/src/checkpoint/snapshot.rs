@@ -8,7 +8,7 @@ use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointStatus};
+use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::{Checkpoint, CheckpointId, NamespaceId, ReleaseSnapshotResponse};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -103,14 +103,13 @@ pub(crate) async fn release_snapshot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-    context: &MutationContext,
+    _context: &MutationContext,
 ) -> Result<ReleaseSnapshotResponse> {
     release_owned_checkpoint(
         store,
         namespace_id,
         checkpoint_id,
         CheckpointOwnerKind::Snapshot,
-        context,
     )
     .await?;
     Ok(ReleaseSnapshotResponse {
@@ -139,9 +138,6 @@ pub(crate) fn classify_live_snapshot(
         .owner
         .expires_at_ms()
         .expect("a snapshot owner should carry an expiry");
-    if loaded.state.status != (CheckpointStatus::Active {}) {
-        return Err(snapshot_gone(checkpoint_id, "released"));
-    }
     if expires_at_ms <= now_ms {
         return Err(snapshot_gone(checkpoint_id, "expired"));
     }

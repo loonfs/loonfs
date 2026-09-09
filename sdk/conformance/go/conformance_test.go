@@ -1469,7 +1469,6 @@ type snapshotsExpected struct {
 	CurrentRevisionNo    int64               `json:"current_revision_no"`
 	CurrentEntryNames    []string            `json:"current_entry_names"`
 	SnapshotChangeSeqs   []int64             `json:"snapshot_change_seqs"`
-	SnapshotGone         errorStatusExpected `json:"snapshot_gone"`
 	SnapshotNotFound     errorStatusExpected `json:"snapshot_not_found"`
 	RevisionWithSnapshot errorStatusExpected `json:"revision_with_snapshot"`
 	ZeroTtl              errorStatusExpected `json:"zero_ttl"`
@@ -1686,28 +1685,28 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: request.NamespaceID,
 		SnapshotID:  snapshotID,
 	}
-	for _, label := range []string{"release snapshot", "release snapshot again"} {
-		released, releaseErr := h.client.Snapshots.Release(ctx, releaseRequest)
-		if releaseErr != nil {
-			t.Fatalf("%s: %v", label, releaseErr)
-		}
-		if string(released.NamespaceID) != request.NamespaceID || released.SnapshotID != snapshotID {
-			t.Errorf("%s response = %#v", label, released)
-		}
+	released, releaseErr := h.client.Snapshots.Release(ctx, releaseRequest)
+	if releaseErr != nil {
+		t.Fatalf("release snapshot: %v", releaseErr)
 	}
+	if string(released.NamespaceID) != request.NamespaceID || released.SnapshotID != snapshotID {
+		t.Errorf("release snapshot response = %#v", released)
+	}
+	_, err = h.client.Snapshots.Release(ctx, releaseRequest)
+	assertNotFoundError(t, err, expected.SnapshotNotFound)
 
 	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
 		SnapshotID:  &snapshotID,
 	})
-	assertGoneError(t, err, expected.SnapshotGone)
+	assertNotFoundError(t, err, expected.SnapshotNotFound)
 	_, err = h.client.Snapshots.Extend(ctx, &loonfs.ExtendSnapshotRequest{
 		NamespaceID: request.NamespaceID,
 		SnapshotID:  snapshotID,
 		TTLMs:       request.ExtendTTLMs,
 	})
-	assertGoneError(t, err, expected.SnapshotGone)
+	assertNotFoundError(t, err, expected.SnapshotNotFound)
 
 	unknownSnapshotID := loonfs.CheckpointID(request.UnknownSnapshotID)
 	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
@@ -1757,14 +1756,14 @@ func readSDKFileBytes(
 	return content
 }
 
-func assertGoneError(t *testing.T, err error, expected errorStatusExpected) {
+func assertNotFoundError(t *testing.T, err error, expected errorStatusExpected) {
 	t.Helper()
-	var gone *loonfs.GoneError
-	if !errors.As(err, &gone) {
-		t.Fatalf("expected GoneError, found %T: %v", err, err)
+	var notFound *loonfs.NotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected NotFoundError, found %T: %v", err, err)
 	}
-	if gone.StatusCode != expected.Status || gone.Body == nil || gone.Body.Code != expected.Code {
-		t.Errorf("gone error = %#v, want %#v", gone, expected)
+	if notFound.StatusCode != expected.Status || notFound.Body == nil || notFound.Body.Code != expected.Code {
+		t.Errorf("gone error = %#v, want %#v", notFound, expected)
 	}
 }
 

@@ -1,5 +1,4 @@
-//! Checkpoint creation: advance the metadata root to cover the current head,
-//! then pin the resulting manifest under one durable checkpoint record.
+//! Flushes the WAL and creates a verified pin for the resulting manifest.
 
 use super::flush::{try_flush_wal, TryFlushWal};
 use super::record::{
@@ -12,7 +11,7 @@ use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState, CheckpointStatus};
+use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState};
 use loonfs_api::{Checkpoint, CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -75,15 +74,16 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
 ) -> Result<Checkpoint> {
     validate_checkpoint_owner(&owner)?;
     let timer = StdMonotonicTimer::default();
-    let checkpoint_id = CheckpointId::generate();
+    let checkpoint_id = CheckpointId::generate(manifest.manifest_no);
     let record = CheckpointRecordState {
-        checkpoint_id: checkpoint_id.clone(),
+        pin_id: checkpoint_id.clone(),
         namespace_id: namespace_id.clone(),
-        manifest,
+        manifest_no: manifest.manifest_no,
+        manifest_head_seq: manifest.manifest_head_seq,
+        manifest_payload_checksum: manifest.manifest_payload_checksum,
         head_commit_id,
         created_at_ms: context.now_ms,
         owner,
-        status: CheckpointStatus::Active {},
     };
     let verify_started_ms = timer.monotonic_now_ms();
     write_checkpoint_record(store, &record).await?;
@@ -94,7 +94,7 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
             // Cleanup is best effort on an error and must not replace its
             // original classification.
             if let Err(cleanup_error) =
-                release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await
+                release_checkpoint_record(store, namespace_id, &checkpoint_id).await
             {
                 tracing::warn!(
                     namespace_id = %namespace_id,
@@ -115,7 +115,7 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
 
     // Overrunning the budget counts as verification failure: the record
     // may have raced the grace window, so it must not stand as a root.
-    release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await?;
+    release_checkpoint_record(store, namespace_id, &checkpoint_id).await?;
     Err(CoreError::CheckpointUnavailable(
         "checkpoint publication retry exhausted".to_owned(),
     ))
