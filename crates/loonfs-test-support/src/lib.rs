@@ -7,6 +7,7 @@
 //! stay in the crate that owns those types.
 
 pub mod block_on;
+pub mod clock;
 mod env_guard;
 pub mod http;
 pub mod ids;

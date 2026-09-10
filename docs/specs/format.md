@@ -678,7 +678,7 @@ reclaim_after_ms = call.now_ms
                   + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)
 ```
 
-The deadline uses the call's fixed clock. A concurrent collector's established deadline wins; it must never be cleared or moved. An uncertain publication requires readback. Every successor remains deleted.
+The deadline uses the call's fixed clock. A collector establishes retirement only while its elapsed monotonic time since capturing that clock is within `RETIREMENT_PUBLICATION_BUDGET_MS`. This bounds how far the call clock can lag publication, as the retirement grace calculation requires. A concurrent collector's established deadline wins; it must never be cleared or moved. An uncertain publication requires readback. Every successor remains deleted.
 
 Retirement itself deletes no content. After the deadline, collection can sweep the namespace's owner prefix and release its source pin. The shared descriptor and other owners' content remain outside that sweep.
 
@@ -1344,7 +1344,7 @@ A content reference is represented by exactly these fields, in this order:
 {"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":15}
 ```
 
-The owner namespace and checksum are excluded by the current v3 scheme. The scheme treats the randomly allocated content ID as the identity across owners; the checksum is verification evidence rather than a second identity. The mandatory owner and checksum are still present and validated on the actual reference. Their exclusion from the fingerprint does not make them optional on a commit.
+The owner namespace and checksum are excluded by the current v3 scheme. Every reference a commit can admit is owned by the committing namespace: an upload records its session's namespace as the owner, and admission requires the reference to match the prepared content exactly, so the owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
 
 Two uploads of identical bytes have different IDs and different fingerprints. A retry reuses the original reference rather than repeating the upload and substituting a new one.
 
@@ -1394,6 +1394,7 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `WAL_PUBLISH_BUDGET_MS` | 60,000 | Observing the planning tip through initiation of its next numbered put. |
 | `CHECKPOINT_VERIFY_BUDGET_MS` | 60,000 | Pin write through completion of post-write verification. |
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | First output through initiation of a bounded manifest publication. |
+| `RETIREMENT_PUBLICATION_BUDGET_MS` | 900,000 | Capturing the collection call clock through initiation of retirement publication. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | Shared client-operation retry budget. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One control-operation attempt. |
 | `GC_SAFETY_MARGIN_MS` | 180,000 | Combined relative-clock, timestamp-precision, and scheduling allowance. |
@@ -1403,7 +1404,7 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `METADATA_COMPACTION_BUDGET_MS` | 85,170,000 | Maximum elapsed time before initiating streaming publication. |
 | `FORK_INSTALL_BUDGET_MS` | 900,000 | Fork installation before initiating target manifest publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | Lifetime of a direct transfer capability. |
-| `NAMESPACE_RETIREMENT_GRACE_MS` | 1,230,000 | Minimum grace after establishing retirement. |
+| `NAMESPACE_RETIREMENT_GRACE_MS` | 2,130,000 | Minimum grace after establishing retirement. |
 
 A provider attempt can begin before its operation deadline and finish within its separate timeout. The grace therefore includes both terms. This client-side calculation does not prove that a timed-out remote mutation had no effect.
 
@@ -1418,14 +1419,20 @@ GC_MIN_GRACE_WINDOW_MS
 METADATA_COMPACTION_BUDGET_MS
     = UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS
 
+RETIREMENT_PUBLICATION_BUDGET_MS
+    = METADATA_PUBLICATION_BUDGET_MS
+    <= max(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS,
+           METADATA_PUBLICATION_BUDGET_MS)
+
 FORK_INSTALL_BUDGET_MS
     = GC_MIN_GRACE_WINDOW_MS - PROVIDER_OPERATION_DEADLINE_MS
       - PROVIDER_ATTEMPT_TIMEOUT_MS - GC_SAFETY_MARGIN_MS
 
 NAMESPACE_RETIREMENT_GRACE_MS
-    = max(GC_MIN_GRACE_WINDOW_MS,
-          DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_OPERATION_DEADLINE_MS
-          + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS)
+    = RETIREMENT_PUBLICATION_BUDGET_MS
+      + max(GC_MIN_GRACE_WINDOW_MS,
+            DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_OPERATION_DEADLINE_MS
+            + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS)
 ```
 
 Configured grace `T` cannot be below the minimum. Retirement uses the greater of `T` and the retirement minimum. Segment age and completed-content grace use their fixed constants. Changing a publication bound or its safety relationship changes the protocol, not just a scheduling preference.
