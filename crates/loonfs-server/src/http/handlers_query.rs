@@ -302,7 +302,7 @@ pub(super) async fn disable_grep_index(
         request_body(content = ref("#/components/schemas/GrepGcRequest")),
         responses(
             (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
-            (status = 400, description = "Invalid budget or cursor", body = ApiError),
+            (status = 400, description = "Invalid namespace id or options", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),

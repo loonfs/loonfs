@@ -190,7 +190,7 @@ pub struct NamespaceDiagnostics {
     pub head_seq: ChangeSeq,
     /// Oldest sequence still promised for incremental replay.
     pub retention_floor_seq: ChangeSeq,
-    /// Current manifest pointer recorded by the head.
+    /// The namespace's current manifest number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub current_manifest_no: Option<ManifestNo>,
@@ -882,15 +882,15 @@ pub struct ReleaseSnapshotResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum FlushWalOutcome {
-    /// The root already covered the head; nothing was published.
+    /// The current manifest already covered the WAL tail; nothing was published.
     AlreadyCurrent,
-    /// This call published a new manifest and advanced the root to it.
+    /// This call published the next current manifest.
     Published,
-    /// Another publisher updated the root before this call could reference its manifest.
+    /// Another publisher changed the current manifest before this call could publish.
     RootAdvanced,
 }
 
-/// The metadata root state after one WAL flush.
+/// The current manifest state after one WAL flush.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FlushWalResponse {
@@ -1202,16 +1202,16 @@ pub struct MetadataCompactionRequest {}
 pub enum WalFlushStepOutcome {
     /// The tail was below the threshold, so there was nothing to flush.
     NotNeeded,
-    /// The step flushed the WAL tail and advanced the metadata root.
+    /// The step flushed the WAL tail and published the next current manifest.
     Flushed {
         /// Sequence covered by the published manifest.
         manifest_head_seq: ChangeSeq,
     },
-    /// The step did not update a root that already referenced another manifest.
+    /// The current manifest already covered the captured WAL tail; this step published no manifest.
     AlreadyPublished {
         /// Sequence this step attempted to flush through.
         attempted_seq: ChangeSeq,
-        /// Manifest the root currently references.
+        /// The namespace's current manifest number.
         current_manifest_no: ManifestNo,
     },
     /// Concurrent updates prevented every publication attempt.
@@ -1232,7 +1232,7 @@ pub enum ReorganizeStepOutcome {
     UnitPublished,
     /// A family group needs a streaming compaction. Run the `metadata_compaction` job.
     CompactionRequired,
-    /// Another publisher updated the metadata root before this step could reference its manifest.
+    /// Another publisher changed the current manifest before this step could publish.
     RootAdvanced,
 }
 

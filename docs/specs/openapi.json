@@ -2447,14 +2447,6 @@
         "pattern": "^ino_[1-9][0-9]*$",
         "type": "string"
       },
-      "InodeKind": {
-        "description": "Filesystem item kind.",
-        "enum": [
-          "file",
-          "dir"
-        ],
-        "type": "string"
-      },
       "ListChangesResponse": {
         "description": "Change-feed response after a cursor.",
         "properties": {
@@ -2879,7 +2871,7 @@
         "properties": {
           "current_manifest_no": {
             "$ref": "#/components/schemas/ManifestNo",
-            "description": "Current manifest pointer recorded by the head."
+            "description": "The namespace's current manifest number."
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -4135,7 +4127,7 @@
         ]
       },
       "WalFlushStepOutcomeAlreadyPublished": {
-        "description": "The step did not update a root that already referenced another manifest.",
+        "description": "The current manifest already covered the captured WAL tail; this step published no manifest.",
         "properties": {
           "attempted_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -4143,7 +4135,7 @@
           },
           "current_manifest_no": {
             "$ref": "#/components/schemas/ManifestNo",
-            "description": "Manifest the root currently references."
+            "description": "The namespace's current manifest number."
           },
           "outcome": {
             "enum": [
@@ -4160,7 +4152,7 @@
         "type": "object"
       },
       "WalFlushStepOutcomeFlushed": {
-        "description": "The step flushed the WAL tail and advanced the metadata root.",
+        "description": "The step flushed the WAL tail and published the next current manifest.",
         "properties": {
           "manifest_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -5083,7 +5075,7 @@
                 }
               }
             },
-            "description": "Invalid budget or cursor"
+            "description": "Invalid namespace id or options"
           },
           "401": {
             "content": {
@@ -5136,7 +5128,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call reads current roots, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
+        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, or `retention`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
         "operationId": "run_maintenance",
         "parameters": [
           {

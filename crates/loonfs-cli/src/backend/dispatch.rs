@@ -793,7 +793,7 @@ impl ResolvedTarget {
         }
     }
 
-    /// Releases a user-owned checkpoint pin by id. Idempotent.
+    /// Deletes a user-owned checkpoint pin. A missing id returns `checkpoint_not_found`.
     pub(crate) async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,

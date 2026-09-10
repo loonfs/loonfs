@@ -545,7 +545,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             }
             ManifestPublicationOutcome::CoveredByCurrent(_) => "covered_by_current",
             ManifestPublicationOutcome::PredecessorChanged(_) => "predecessor_changed",
-            ManifestPublicationOutcome::Installable => "root_cas_race",
+            ManifestPublicationOutcome::Installable => "manifest_number_taken",
         };
         tracing::debug!(
             namespace_id = namespace_id.as_str(),

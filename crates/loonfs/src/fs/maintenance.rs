@@ -465,7 +465,7 @@ impl FsMaintenance {
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
                 tracing::info!(
-                    "metadata root changed before reorganization published; a later step retries"
+                    "current manifest changed before reorganization published; a later step retries"
                 );
                 ReorganizeStepOutcome::RootAdvanced
             }

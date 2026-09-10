@@ -86,7 +86,8 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use loonfs_api::IndexSegmentId;
+    use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintState};
+    use loonfs_api::{IndexSegmentId, ManifestNo, WalNo};
     use loonfs_grep::keyspace::{hint_key, manifest_key, segment_key};
     use loonfs_objectstore::keys::{hint, wal_segment};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -98,9 +99,22 @@ mod tests {
         let namespace_id = NamespaceId::parse("sim").expect("valid namespace id");
 
         store
-            .put_overwrite(&hint(&namespace_id), Bytes::from_static(b"head"))
+            .put_overwrite(
+                &hint(&namespace_id),
+                Bytes::from(
+                    encode_control_state(
+                        ControlObjectKind::Hint,
+                        &HintState {
+                            namespace_id: namespace_id.clone(),
+                            manifest_no: ManifestNo(1),
+                            wal_no: WalNo(1),
+                        },
+                    )
+                    .expect("encode hint"),
+                ),
+            )
             .await
-            .expect("head");
+            .expect("hint");
         store
             .put_overwrite(
                 &wal_segment(&namespace_id, &loonfs_api::WalNo(1)),

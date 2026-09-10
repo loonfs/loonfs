@@ -681,11 +681,7 @@ string_id! {
 }
 
 string_id! {
-    /// Durable id for one streaming metadata compaction job.
-    ///
-    /// The job's staged output and its lease live under one prefix named by
-    /// this id, so a collector can tell one job's output from another's
-    /// without reading anything.
+    /// Identifies one streaming metadata compaction job for log correlation only.
     MetadataCompactionId,
     prefix = "cmp"
 }
