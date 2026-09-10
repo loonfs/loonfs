@@ -53,13 +53,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> PublicationView<'a, 'store, S> {
                 load_metadata_view(
                     self.store,
                     self.namespace_id,
-                    ReadLoadContext::pinned_head(
-                        &snapshot.head.state,
-                        &snapshot.head.etag,
-                        self.basis,
-                        None,
-                        None,
-                    ),
+                    ReadLoadContext::pinned_head(&snapshot.head, self.basis, None, None),
                 )
             })
             .await

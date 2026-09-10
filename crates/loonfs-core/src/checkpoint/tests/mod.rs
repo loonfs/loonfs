@@ -227,8 +227,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
 ) -> ChangeSeq {
     let head = load_head_object(store, namespace_id)
         .await
-        .expect("read head")
-        .state;
+        .expect("read head");
     crate::namespace::control_snapshot::resolve_retention_floor_seq(store, &head)
         .await
         .expect("resolve retention floor")

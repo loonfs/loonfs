@@ -55,7 +55,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         }
     };
     loop {
-        let head = load_head_object(store, namespace_id).await?.state;
+        let head = load_head_object(store, namespace_id).await?;
         ensure_writer_not_fenced(&head, &acquired)?;
         super::control::ensure_namespace_live(&head)?;
         let wal_no = head

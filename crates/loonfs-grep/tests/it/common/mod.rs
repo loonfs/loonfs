@@ -207,7 +207,6 @@ pub(crate) mod control {
         loonfs::control::load_namespace_head_control(store, namespace_id)
             .await
             .expect("namespace state")
-            .state
     }
 
     pub(crate) async fn metadata_root(

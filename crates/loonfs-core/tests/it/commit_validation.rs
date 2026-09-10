@@ -303,8 +303,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     );
     let head_before = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
         .await
-        .expect("head")
-        .state;
+        .expect("head");
     store.reset();
     store.inner().reset();
     let rejected = publisher
@@ -335,8 +334,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     assert_eq!(
         loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
             .await
-            .expect("head")
-            .state,
+            .expect("head"),
         head_before
     );
 }

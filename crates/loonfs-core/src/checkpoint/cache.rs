@@ -194,13 +194,14 @@ pub struct WalTailProjectionCacheStats {
     pub cached_decoded_bytes: usize,
 }
 
+// Within a namespace, numbered immutable manifests and WAL fix the state between
+// manifest_head_seq and head_seq. Writer fences publish a new manifest number.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WalTailProjectionCacheKey {
     pub namespace_id: NamespaceId,
     pub manifest_no: ManifestNo,
     pub manifest_head_seq: ChangeSeq,
     pub head_seq: ChangeSeq,
-    pub head_etag: String,
 }
 
 impl DecodedBlock for Arc<MetadataState> {
@@ -358,7 +359,6 @@ mod tests {
             manifest_no: ManifestNo(7),
             manifest_head_seq: ChangeSeq(11),
             head_seq: ChangeSeq(12),
-            head_etag: "stable-head-etag".to_owned(),
         };
         let actors = [
             ActorId::parse("auth0|x").expect("actor id"),

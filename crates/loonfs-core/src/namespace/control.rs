@@ -12,7 +12,6 @@ use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStore;
 
-pub(crate) type LoadedHeadObject = LoadedControl<NamespaceReadState>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentManifest {
     pub manifest: ManifestRef,
@@ -26,7 +25,6 @@ pub struct LoadedManifest {
     pub object_key: String,
     pub discovery_start_manifest_no: loonfs_api::ManifestNo,
     pub state: CurrentManifest,
-    pub hint_etag: String,
     pub hinted_wal_no: loonfs_api::WalNo,
     pub envelope: loonfs_api::wire::manifest::NamespaceManifestEnvelope,
 }
@@ -187,7 +185,6 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
     }
     if let Some(current) = &mut current {
         current.discovery_start_manifest_no = hint.state.manifest_no;
-        current.hint_etag = hint.etag;
         current.hinted_wal_no = hint.state.wal_no;
     }
     Ok(current)
@@ -220,7 +217,6 @@ pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
     Ok(envelope.map(|envelope| LoadedManifest {
         object_key,
         discovery_start_manifest_no: manifest_no,
-        hint_etag: String::new(),
         hinted_wal_no: loonfs_api::WalNo(0),
         state: CurrentManifest {
             manifest: ManifestRef {
@@ -240,7 +236,7 @@ pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
 pub(crate) async fn load_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<LoadedHeadObject, ControlObjectLoadError> {
+) -> Result<NamespaceReadState, ControlObjectLoadError> {
     Ok(
         crate::namespace::control_snapshot::load_control_snapshot(store, expected_namespace_id)
             .await?
@@ -271,7 +267,7 @@ pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
 pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<(LoadedControl<NamespaceReadState>, MetadataBasis), ControlObjectLoadError> {
+) -> Result<(NamespaceReadState, MetadataBasis), ControlObjectLoadError> {
     let loaded = load_head_and_metadata_basis(store, expected_namespace_id).await?;
     Ok((loaded.head, loaded.basis))
 }
@@ -279,7 +275,7 @@ pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
 pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<LoadedControl<NamespaceReadState>, ControlObjectLoadError> {
+) -> Result<NamespaceReadState, ControlObjectLoadError> {
     load_head_object(store, expected_namespace_id).await
 }
 

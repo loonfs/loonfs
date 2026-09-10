@@ -129,10 +129,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .session_writer_epoch(&store, &setup)
         .await
         .expect("acquire writer");
-    let head_before = load_head_object(&store, &namespace_id)
-        .await
-        .expect("head")
-        .state;
+    let head_before = load_head_object(&store, &namespace_id).await.expect("head");
     store.block_next();
     let options = PublishTailOptions::default();
     let publish = engine.publish_batch(
@@ -172,10 +169,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             .code(),
         loonfs_api::ErrorCode::ContentNotPrepared
     );
-    let head_after = load_head_object(&store, &namespace_id)
-        .await
-        .expect("head")
-        .state;
+    let head_after = load_head_object(&store, &namespace_id).await.expect("head");
     assert_eq!(head_after.seq, head_before.seq);
     assert_eq!(head_after.wal_no, head_before.wal_no);
     assert_eq!(
@@ -213,10 +207,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .results
         .remove(0)
         .expect("original commit");
-    let head_before = load_head_object(&store, &namespace_id)
-        .await
-        .expect("head")
-        .state;
+    let head_before = load_head_object(&store, &namespace_id).await.expect("head");
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
     let alias = CommitCandidate::new(primary.request().clone());
@@ -252,10 +243,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         result.results[3].as_ref().expect("independent replay"),
         &original
     );
-    let head_after = load_head_object(&store, &namespace_id)
-        .await
-        .expect("head")
-        .state;
+    let head_after = load_head_object(&store, &namespace_id).await.expect("head");
     assert_eq!(head_after.seq, ChangeSeq(3));
     assert_eq!(
         head_after.wal_no,

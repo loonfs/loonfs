@@ -25,7 +25,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .expect("load head");
     let acquired_writer = loonfs_api::wire::control::AcquiredWriter {
         writer_id: context.writer_id.clone(),
-        writer_epoch: head.state.writer_epoch,
+        writer_epoch: head.writer_epoch,
     };
     let (_, projection) = crate::protocol::load_publish_metadata_view(
         &store,
@@ -224,10 +224,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
     .await
     .expect("load genesis from manifest one");
     assert!(genesis.segments.manifest().payload().runs.is_empty());
-    let head = load_head_object(&store, &namespace_id)
-        .await
-        .expect("head")
-        .state;
+    let head = load_head_object(&store, &namespace_id).await.expect("head");
     assert_eq!(genesis.replay_head(&head), head);
     for family in CHECKPOINT_ROW_FAMILIES {
         assert!(genesis

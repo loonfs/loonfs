@@ -36,8 +36,7 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
         .await
         .expect("load read anchor");
     RuntimeReadContext {
-        head: head.state,
-        head_etag: head.etag,
+        head,
         basis,
         segment_cache: Arc::new(MetadataSegmentCache::new(
             MetadataSegmentCacheConfig::default(),

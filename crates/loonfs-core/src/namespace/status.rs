@@ -41,7 +41,7 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     let basis = snapshot.basis();
     let retention_floor_seq = snapshot.retention_floor_seq;
-    let head = snapshot.head.state;
+    let head = snapshot.head;
     super::control::ensure_namespace_live(&head)?;
     let current_manifest_no = Some(basis.manifest_no());
     Ok(LoadedHeadBasis {
@@ -59,7 +59,6 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     let (head, retention_floor_seq) = load_head_and_retention_floor(store, expected_namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let head = head.state;
     super::control::ensure_namespace_live(&head)?;
     Ok(Namespace {
         namespace_id: head.namespace_id,
@@ -106,7 +105,6 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
     let (head, retention_floor_seq) = load_head_and_retention_floor(store, expected_namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let head = head.state;
     if !head.status.is_deleted() {
         return Err(CoreError::Internal(format!(
             "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"

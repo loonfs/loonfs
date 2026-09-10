@@ -10,8 +10,7 @@ use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats}
 use loonfs_core::control::NamespaceReadState;
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_namespace_read_anchor, load_snapshot_read_basis,
-    CheckpointReadBasis, ControlObjectLoadError, LoadedControl, MetadataBasis,
-    VerifiedNamespaceCatalogEntry,
+    CheckpointReadBasis, ControlObjectLoadError, MetadataBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -25,19 +24,13 @@ pub(crate) struct RuntimeControlCache {
     namespace_order: Recency<NamespaceId>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct CachedControl<T> {
-    pub(crate) etag: String,
-    pub(crate) state: T,
-}
-
 /// A head snapshot and the metadata basis it authorized at that point.
 /// Keeping them together ensures reads use a consistent pair. If compaction
 /// advances the live root, reads may replay additional WAL entries until the
 /// cache refreshes.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedNamespaceAnchor {
-    pub(crate) head: CachedControl<NamespaceReadState>,
+    pub(crate) head: NamespaceReadState,
     pub(crate) basis: MetadataBasis,
     locally_published: bool,
     last_control_check_ms: u64,
@@ -276,7 +269,7 @@ impl ReadCore {
                 }
                 let mut context = self.runtime_read_context(&head);
                 if loonfs_core::control::probe_namespace_wal(self.store(), &mut context).await? {
-                    head.head.state = context.head;
+                    head.head = context.head;
                     return Ok(head);
                 }
             }
@@ -339,8 +332,7 @@ impl ReadCore {
         anchor: &CachedNamespaceAnchor,
     ) -> RuntimeReadContext {
         RuntimeReadContext {
-            head: anchor.head.state.clone(),
-            head_etag: anchor.head.etag.clone(),
+            head: anchor.head.clone(),
             basis: anchor.basis.clone(),
             segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
             tail_cache: Arc::clone(&self.inner.wal_tail_projection_cache),
@@ -377,7 +369,7 @@ impl ReadCore {
         let pinned = load_checkpoint_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
-            &live.head.state,
+            &live.head,
             checkpoint_id,
         )
         .await?;
@@ -398,7 +390,7 @@ impl ReadCore {
         let pinned = load_snapshot_read_basis(
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
-            &live.head.state,
+            &live.head,
             snapshot_id,
             now_ms,
         )
@@ -415,10 +407,7 @@ impl ReadCore {
         RuntimeReadContext,
     ) {
         let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
-            head: CachedControl {
-                etag: pinned.head_etag,
-                state: pinned.head,
-            },
+            head: pinned.head,
             basis: pinned.basis,
             locally_published: false,
             last_control_check_ms: 0,
@@ -447,7 +436,7 @@ impl ReadCore {
         namespace_id: &NamespaceId,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
         let anchor = self.head_for_metadata_read(namespace_id).await?;
-        Ok(VerifiedNamespaceCatalogEntry::from_head(&anchor.head.state))
+        Ok(VerifiedNamespaceCatalogEntry::from_head(&anchor.head))
     }
 
     /// Namespace-terminal invalidation: the whole entry is removed, because
@@ -482,10 +471,7 @@ impl ReadCore {
         cache.insert_namespace_head(
             namespace_id,
             CachedNamespaceAnchor {
-                head: CachedControl {
-                    etag: state.head_etag.clone(),
-                    state: state.head,
-                },
+                head: state.head,
                 basis: state.basis,
                 locally_published: true,
                 last_control_check_ms,
@@ -500,7 +486,6 @@ impl ReadCore {
                 manifest_no,
                 manifest_head_seq: state.manifest_head_seq,
                 head_seq,
-                head_etag: state.head_etag,
             },
             state.tail_rows,
         );
@@ -536,14 +521,11 @@ impl ReadCore {
 }
 
 fn cached_anchor(
-    (head, basis): (LoadedControl<NamespaceReadState>, MetadataBasis),
+    (head, basis): (NamespaceReadState, MetadataBasis),
     last_control_check_ms: u64,
 ) -> CachedNamespaceAnchor {
     CachedNamespaceAnchor {
-        head: CachedControl {
-            etag: head.etag,
-            state: head.state,
-        },
+        head,
         basis,
         locally_published: false,
         last_control_check_ms,

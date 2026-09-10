@@ -78,7 +78,6 @@ impl MaintenanceJob for GarbageCollectionJob {
             )
             .await
             .map_err(loonfs_core::Error::ControlObjectLoad)?
-            .state
             .fork_basis
             .map(|basis| (MaintenanceJobId::GC, basis.manifest.owner_namespace_id))
         } else {

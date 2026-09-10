@@ -23,7 +23,6 @@ use std::sync::Arc;
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     content_store_id: ContentStoreId,
     pub(super) head: NamespaceReadState,
-    pub(super) head_etag: String,
     pub(super) acquired_writer: AcquiredWriter,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
     tail_state: Arc<MetadataState>,
@@ -96,15 +95,9 @@ pub struct PublishTailWeight {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HeadAnchor {
-    seq: ChangeSeq,
-    etag: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct PublishProjectionKey {
     namespace_id: NamespaceId,
-    head: HeadAnchor,
+    head_seq: ChangeSeq,
     basis: MetadataBasisIdentity,
 }
 
@@ -135,10 +128,6 @@ impl PublishTailProjection {
             && weight.decoded_bytes <= options.max_tail_decoded_bytes
     }
 
-    pub(crate) fn head_etag(&self) -> &str {
-        &self.key.head.etag
-    }
-
     pub(crate) fn basis(&self) -> &MetadataBasis {
         self.key.basis.basis()
     }
@@ -147,11 +136,8 @@ impl PublishTailProjection {
         self.key.basis.manifest_head_seq()
     }
 
-    pub(crate) fn reanchor(&mut self, head: NamespaceReadState, etag: String) {
-        self.key.head = HeadAnchor {
-            seq: head.seq,
-            etag,
-        };
+    pub(crate) fn reanchor(&mut self, head: NamespaceReadState) {
+        self.key.head_seq = head.seq;
         self.head = head;
     }
 }
@@ -166,11 +152,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
     let loaded = if let Some(cached) = cached_projection {
         crate::namespace::control_snapshot::LoadedNamespaceBasis {
-            head: crate::control_object::LoadedControl {
-                object_key: loonfs_objectstore::keys::hint(namespace_id),
-                etag: cached.head_etag().to_owned(),
-                state: cached.head.clone(),
-            },
+            head: cached.head.clone(),
             basis: cached.basis().clone(),
             retention_floor_seq: cached.retention_floor_seq,
         }
@@ -180,8 +162,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             .map_err(CoreError::ControlObjectLoad)?
     };
     let retention_floor_seq = loaded.retention_floor_seq;
-    let head_etag = loaded.head.etag;
-    let head = loaded.head.state;
+    let head = loaded.head;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -194,10 +175,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     let loaded_basis = load_basis_metadata_segments(store, segment_cache, &loaded.basis).await?;
     let key = PublishProjectionKey {
         namespace_id: namespace_id.clone(),
-        head: HeadAnchor {
-            seq: head.seq,
-            etag: head_etag.clone(),
-        },
+        head_seq: head.seq,
         basis: loaded_basis.identity.clone(),
     };
     let projection = if let Some(cached) =
@@ -215,7 +193,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         PublishMetadataView {
             content_store_id: catalog_entry.content_store_id().clone(),
             head,
-            head_etag,
             acquired_writer,
             manifest_segments,
             tail_state,
@@ -290,16 +267,12 @@ mod tests {
     fn projection_key(
         namespace: &str,
         head_seq: u64,
-        head_etag: &str,
         basis: MetadataBasis,
         manifest_head_seq: u64,
     ) -> PublishProjectionKey {
         PublishProjectionKey {
             namespace_id: namespace_id(namespace),
-            head: HeadAnchor {
-                seq: ChangeSeq(head_seq),
-                etag: head_etag.to_owned(),
-            },
+            head_seq: ChangeSeq(head_seq),
             basis: MetadataBasisIdentity::from_verified_basis(basis, ChangeSeq(manifest_head_seq)),
         }
     }
@@ -311,7 +284,7 @@ mod tests {
                 .expect("valid content store id"),
             1_000,
         );
-        head.seq = key.head.seq;
+        head.seq = key.head_seq;
         PublishTailProjection {
             head,
             retention_floor_seq: Some(ChangeSeq(0)),
@@ -333,7 +306,6 @@ mod tests {
         let key = projection_key(
             "fork-target",
             9,
-            "head-etag-a",
             manifest_basis("fork-source", 4, "sha256:basis-a"),
             7,
         );
@@ -347,7 +319,6 @@ mod tests {
                 projection_key(
                     "other-target",
                     9,
-                    "head-etag-a",
                     manifest_basis("fork-source", 4, "sha256:basis-a"),
                     7,
                 ),
@@ -357,17 +328,6 @@ mod tests {
                 projection_key(
                     "fork-target",
                     10,
-                    "head-etag-a",
-                    manifest_basis("fork-source", 4, "sha256:basis-a"),
-                    7,
-                ),
-            ),
-            (
-                "head etag",
-                projection_key(
-                    "fork-target",
-                    9,
-                    "head-etag-b",
                     manifest_basis("fork-source", 4, "sha256:basis-a"),
                     7,
                 ),
@@ -377,7 +337,6 @@ mod tests {
                 projection_key(
                     "fork-target",
                     9,
-                    "head-etag-a",
                     manifest_basis("other-source", 4, "sha256:basis-a"),
                     7,
                 ),
@@ -387,7 +346,6 @@ mod tests {
                 projection_key(
                     "fork-target",
                     9,
-                    "head-etag-a",
                     manifest_basis("fork-source", 5, "sha256:basis-a"),
                     7,
                 ),
@@ -397,7 +355,6 @@ mod tests {
                 projection_key(
                     "fork-target",
                     9,
-                    "head-etag-a",
                     manifest_basis("fork-source", 4, "sha256:basis-b"),
                     7,
                 ),
@@ -407,7 +364,6 @@ mod tests {
                 projection_key(
                     "fork-target",
                     9,
-                    "head-etag-a",
                     manifest_basis("fork-source", 4, "sha256:basis-a"),
                     8,
                 ),
@@ -427,7 +383,6 @@ mod tests {
         let key = projection_key(
             "fork-target",
             9,
-            "head-etag-a",
             manifest_basis("fork-source", 4, "sha256:basis-a"),
             7,
         );
@@ -447,7 +402,6 @@ mod tests {
         let key = projection_key(
             "genesis-namespace",
             0,
-            "genesis-etag",
             manifest_basis("genesis-namespace", 1, "sha256:genesis"),
             0,
         );

@@ -2057,8 +2057,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
         &namespace_id("demo"),
     )
     .await
-    .expect("read head")
-    .state;
+    .expect("read head");
     assert_eq!(
         head.writer.expect("writer block").writer_id,
         loonfs_api::WriterId::parse("server-writer").expect("writer id")

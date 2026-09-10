@@ -21,7 +21,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     let started_ms = timer.monotonic_now_ms();
     loop {
         let snapshot = load_control_snapshot(store, namespace_id).await?;
-        let head = &snapshot.head.state;
+        let head = &snapshot.head;
         super::control::ensure_namespace_live(head)?;
         ensure_writer_not_fenced(head, &acquired_writer)?;
         if let Some(expected) = options.expected_head_seq {

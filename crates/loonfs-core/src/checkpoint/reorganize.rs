@@ -287,8 +287,8 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     let snapshot = load_control_snapshot(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    crate::namespace::control::ensure_namespace_live(&snapshot.head.state)?;
-    let head = &snapshot.head.state;
+    crate::namespace::control::ensure_namespace_live(&snapshot.head)?;
+    let head = &snapshot.head;
     let wal_tail_segments = head.wal_no.0 - head.last_folded_wal_no.0;
     if wal_tail_segments >= max_wal_tail_segments {
         return Ok(true);

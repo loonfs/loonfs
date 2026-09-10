@@ -268,7 +268,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     let basis = snapshot.basis();
     let floor_seq = snapshot.retention_floor_seq;
-    let head = snapshot.head.state;
+    let head = snapshot.head;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {

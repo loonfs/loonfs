@@ -51,7 +51,6 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
     pub head: NamespaceReadState,
-    pub head_etag: String,
     /// Metadata basis referenced by the pinned head. This is the namespace's own
     /// root after one is published, or its genesis or fork basis before then.
     pub basis: MetadataBasis,
@@ -62,7 +61,6 @@ pub struct RuntimeReadContext {
 fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_, '_> {
     ReadLoadContext::pinned_head(
         &context.head,
-        context.head_etag.as_str(),
         &context.basis,
         Some(&context.segment_cache),
         Some(&context.tail_cache),

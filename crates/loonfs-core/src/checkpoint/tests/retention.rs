@@ -782,7 +782,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
             expires_at_ms: None,
         },
         initial.basis().manifest().clone(),
-        initial.head.state.head_commit_id.clone(),
+        initial.head.head_commit_id.clone(),
         &context,
     )
     .await
@@ -871,7 +871,7 @@ async fn checkpoint_basis_verification_store_failure_deletes_the_record() {
             expires_at_ms: None,
         },
         initial.basis().manifest().clone(),
-        initial.head.state.head_commit_id.clone(),
+        initial.head.head_commit_id.clone(),
         &context,
     )
     .await
@@ -1671,8 +1671,7 @@ async fn a_namespace_retains_from_birth_before_retention_advances() {
 
     let head = crate::namespace::control::load_head_object(&store, &namespace_id)
         .await
-        .expect("head")
-        .state;
+        .expect("head");
     let floor = crate::namespace::control_snapshot::resolve_retention_floor_seq(&store, &head)
         .await
         .expect("missing floor defaults");

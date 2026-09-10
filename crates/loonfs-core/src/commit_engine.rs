@@ -261,7 +261,6 @@ pub struct WalFoldSnapshot {
 #[derive(Debug, Clone)]
 pub struct ResultingReadState {
     pub head: NamespaceReadState,
-    pub head_etag: String,
     /// Metadata basis used for replay. The published head still references this
     /// basis, so a seeded read cache matches the next store-backed read.
     pub basis: MetadataBasis,
@@ -562,20 +561,15 @@ impl NamespaceCommitEngine {
                 self.invalidate_projection();
                 return (projection.wal_tail_segments, None);
             }
-            PublishViewEffect::Advanced {
-                records,
-                head,
-                head_etag,
-            } => {
+            PublishViewEffect::Advanced { records, head } => {
                 projection.wal_tail_segments += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
                 for record in &records {
                     tail_state.apply_committed_wal_record_mut(record);
                 }
-                projection.reanchor(head.clone(), head_etag.clone());
+                projection.reanchor(head.clone());
                 Some(ResultingReadState {
                     head,
-                    head_etag,
                     basis: projection.basis().clone(),
                     manifest_head_seq: projection.manifest_head_seq(),
                     tail_rows: Arc::clone(&projection.tail_state),
@@ -900,7 +894,6 @@ mod tests {
         let epoch_after_takeover = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .state
             .writer_epoch;
 
         // A is fenced terminally: both attempts fail with writer_fenced, the
@@ -920,8 +913,7 @@ mod tests {
         }
         let head = load_head_object(&store, &namespace_id)
             .await
-            .expect("read head")
-            .state;
+            .expect("read head");
         assert_eq!(head.writer_epoch, epoch_after_takeover);
         assert_eq!(
             head.writer.expect("writer block").writer_id.as_str(),
@@ -1055,7 +1047,6 @@ mod tests {
         let epoch_after_fencing = load_head_object(&store, &namespace_id)
             .await
             .expect("read head")
-            .state
             .writer_epoch;
 
         // A rebuilt engine — cache eviction, cache-disabled mode — shares
@@ -1078,8 +1069,7 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::WriterFenced);
         let head = load_head_object(&store, &namespace_id)
             .await
-            .expect("read head")
-            .state;
+            .expect("read head");
         assert_eq!(head.writer_epoch, epoch_after_fencing);
         assert_eq!(
             head.writer.expect("writer block").writer_id.as_str(),
@@ -1114,10 +1104,7 @@ mod tests {
             .session_writer_epoch(&store, &writer)
             .await
             .expect("acquire");
-        let head_before = load_head_object(&store, &namespace_id)
-            .await
-            .expect("head")
-            .state;
+        let head_before = load_head_object(&store, &namespace_id).await.expect("head");
         let abandoned = over_budget
             .publish_batch(
                 &store,
@@ -1144,8 +1131,7 @@ mod tests {
 
         let head_after = load_head_object(&store, &namespace_id)
             .await
-            .expect("read head")
-            .state;
+            .expect("read head");
         assert_eq!(head_after.seq, head_before.seq);
         assert_eq!(head_after.wal_no, head_before.wal_no);
         assert_eq!(wal_segment_count(&store, &namespace_id).await, 1);
@@ -1164,8 +1150,7 @@ mod tests {
         assert_eq!(wal_segment_count(&store, &namespace_id).await, 3);
         let head_final = load_head_object(&store, &namespace_id)
             .await
-            .expect("read head")
-            .state;
+            .expect("read head");
         assert_eq!(head_final.seq, ChangeSeq(1));
         // Two engines are two sessions, and each acquires its own epoch: the
         // abandoned attempt took 1, the retry took 2.

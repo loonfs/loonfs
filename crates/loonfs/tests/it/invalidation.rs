@@ -84,7 +84,6 @@ async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Na
     loonfs_core::control::load_namespace_head_control(store, namespace_id)
         .await
         .expect("load head")
-        .state
 }
 
 #[tokio::test]

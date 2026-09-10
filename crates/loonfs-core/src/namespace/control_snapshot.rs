@@ -1,15 +1,15 @@
 //! Loads a current manifest and discovers its numbered WAL tip.
 
-use crate::control_object::{ControlObjectLoadError, LoadedControl};
+use crate::control_object::ControlObjectLoadError;
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control::{load_current_manifest, LoadedHeadObject, LoadedManifest};
+use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::load_wal_segment;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) struct NamespaceControlSnapshot {
-    pub(crate) head: LoadedHeadObject,
+    pub(crate) head: NamespaceReadState,
     pub(crate) root: LoadedManifest,
     pub(crate) retention_floor_seq: ChangeSeq,
 }
@@ -21,7 +21,7 @@ impl NamespaceControlSnapshot {
 }
 
 pub(crate) struct LoadedNamespaceBasis {
-    pub(crate) head: LoadedHeadObject,
+    pub(crate) head: NamespaceReadState,
     pub(crate) basis: MetadataBasis,
     pub(crate) retention_floor_seq: Option<ChangeSeq>,
 }
@@ -29,7 +29,7 @@ pub(crate) struct LoadedNamespaceBasis {
 pub(crate) async fn load_head_and_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<(LoadedHeadObject, ChangeSeq), ControlObjectLoadError> {
+) -> Result<(NamespaceReadState, ChangeSeq), ControlObjectLoadError> {
     let snapshot = load_control_snapshot(store, namespace_id).await?;
     Ok((snapshot.head, snapshot.retention_floor_seq))
 }
@@ -73,11 +73,7 @@ pub(crate) async fn load_control_snapshot<S: ObjectStore + ?Sized>(
                 }
                 return Ok(NamespaceControlSnapshot {
                     retention_floor_seq: root.state.retention_floor_seq,
-                    head: LoadedControl {
-                        object_key: loonfs_objectstore::keys::hint(namespace_id),
-                        etag: root.hint_etag.clone(),
-                        state,
-                    },
+                    head: state,
                     root,
                 });
             }

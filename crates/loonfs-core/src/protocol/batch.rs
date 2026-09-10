@@ -47,7 +47,6 @@ pub(crate) enum PublishViewEffect {
     Advanced {
         records: Vec<WalCommitPayload>,
         head: NamespaceReadState,
-        head_etag: String,
     },
 }
 
@@ -257,7 +256,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if let Err(error) = publish_wal(store, &wal).await {
         return abort_batch(slots, &error);
     }
-    let head_etag = view.head_etag.clone();
 
     let wal_records = wal.envelope().payload().records.clone();
     assert_eq!(
@@ -287,7 +285,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         effect: PublishViewEffect::Advanced {
             records: wal_records,
             head: resulting_head,
-            head_etag,
         },
     }
 }

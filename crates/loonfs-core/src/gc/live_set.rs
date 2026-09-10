@@ -27,7 +27,7 @@ impl LiveSet {
         namespace_id: &NamespaceId,
         snapshot: &NamespaceControlSnapshot,
     ) -> Result<Self> {
-        let head = &snapshot.head.state;
+        let head = &snapshot.head;
         let mut live = Self {
             content_store_id: head.content_store_id.clone(),
             namespace_deleted: head.status.is_deleted(),

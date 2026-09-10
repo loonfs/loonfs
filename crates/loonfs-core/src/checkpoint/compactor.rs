@@ -17,7 +17,7 @@ pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(
     let head = crate::namespace::control::load_head_object(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    crate::namespace::control::ensure_namespace_live(&head.state)?;
+    crate::namespace::control::ensure_namespace_live(&head)?;
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     loop {
