@@ -5,7 +5,7 @@ export interface ProxyConfig {
 }
 
 interface ProxyRoute {
-    method: "GET" | "POST" | "PUT";
+    method: "GET" | "POST" | "PUT" | "DELETE";
     pattern: RegExp;
 }
 
@@ -23,7 +23,7 @@ const HOP_BY_HOP_HEADERS = [
 
 // These routes must match docs/specs/openapi-proxy.json.
 interface ProxyRouteTemplate {
-    method: "GET" | "POST" | "PUT";
+    method: "GET" | "POST" | "PUT" | "DELETE";
     template: string;
 }
 
