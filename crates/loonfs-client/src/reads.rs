@@ -111,17 +111,17 @@ impl Client {
         .await
     }
 
-    /// Releases a snapshot. Releasing it again succeeds.
-    pub async fn release_snapshot(
+    /// Deletes the snapshot record. A missing id returns `snapshot_not_found`.
+    pub async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
         snapshot_id: &CheckpointId,
-    ) -> Result<ReleaseSnapshotResponse> {
+    ) -> Result<DeleteSnapshotResponse> {
         let url = format!(
-            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
+            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
             self.base_url
         );
-        self.request_json::<(), ReleaseSnapshotResponse>(self.post(&url), None, SendPolicy::Retry)
+        self.request_json::<(), DeleteSnapshotResponse>(self.delete(&url), None, SendPolicy::Retry)
             .await
     }
 

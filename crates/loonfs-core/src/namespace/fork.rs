@@ -1,6 +1,6 @@
 //! Fork installation copies pinned source runs into target manifest 1.
 
-use crate::checkpoint::record::{release_checkpoint_record, write_checkpoint_record};
+use crate::checkpoint::record::{delete_checkpoint_record, write_checkpoint_record};
 use crate::checkpoint::{
     classify_live_snapshot, create_checkpoint, load_checkpoint_record,
     load_namespace_manifest_envelope,
@@ -134,11 +134,11 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
     )
     .await;
     if let Err(error) = rechecked {
-        release_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
+        delete_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
         return Err(error);
     }
     if timer.monotonic_now_ms().saturating_sub(started_ms) > CHECKPOINT_VERIFY_BUDGET_MS {
-        release_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
+        delete_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
         return Err(CoreError::CheckpointUnavailable(
             "snapshot fork verification exceeded its budget".to_owned(),
         ));
@@ -158,7 +158,7 @@ async fn verify_snapshot_fork_basis<S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| CoreError::SnapshotGone {
             snapshot_id: snapshot_id.clone(),
-            reason: "released".to_owned(),
+            reason: "deleted".to_owned(),
         })?;
     classify_live_snapshot(
         Some(snapshot),

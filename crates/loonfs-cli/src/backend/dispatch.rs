@@ -11,14 +11,14 @@ use crate::uploads::UploadJournal;
 use loonfs::{MaintenanceJobId, ReadFileStreamOptions};
 use loonfs_api::{
     v0::{
-        GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
-        ReleaseSnapshotResponse, SnapshotSummary, StoreProbeRequest, StoreProbeResponse,
+        DeleteSnapshotResponse, GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse,
+        ListSnapshotsResponse, SnapshotSummary, StoreProbeRequest, StoreProbeResponse,
         UploadSession,
     },
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, CommitResponse,
-    ContentRef, CreateCheckpointRequest, DeleteNamespaceResponse, GrepRequest, GrepResponse,
-    InodeId, ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
-    ListTrashResponse, Namespace, NamespaceId, PathEntry, ReleaseCheckpointResponse, RevisionNo,
+    ContentRef, CreateCheckpointRequest, DeleteCheckpointResponse, DeleteNamespaceResponse,
+    GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceId, PathEntry, RevisionNo,
     RunMaintenanceRequest, RunMaintenanceResponse, UploadId,
 };
 use loonfs_client::{
@@ -730,21 +730,21 @@ impl ResolvedTarget {
     }
 
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
-    pub(crate) async fn release_snapshot(
+    pub(crate) async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
         snapshot_id: &CheckpointId,
-    ) -> Result<ReleaseSnapshotResponse, CliError> {
+    ) -> Result<DeleteSnapshotResponse, CliError> {
         match self {
             Self::Embedded(target) => target
                 .backend
                 .writer
-                .release_snapshot(namespace_id, snapshot_id)
+                .delete_snapshot(namespace_id, snapshot_id)
                 .await
                 .scoped(namespace_id),
             Self::Remote(target) => Ok(target
                 .client
-                .release_snapshot(namespace_id, snapshot_id)
+                .delete_snapshot(namespace_id, snapshot_id)
                 .await?),
         }
     }
@@ -794,21 +794,21 @@ impl ResolvedTarget {
     }
 
     /// Deletes a user-owned checkpoint pin. A missing id returns `checkpoint_not_found`.
-    pub(crate) async fn release_checkpoint(
+    pub(crate) async fn delete_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
-    ) -> Result<ReleaseCheckpointResponse, CliError> {
+    ) -> Result<DeleteCheckpointResponse, CliError> {
         match self {
             Self::Embedded(target) => target
                 .backend
                 .maintenance
-                .release_checkpoint(namespace_id, checkpoint_id)
+                .delete_checkpoint(namespace_id, checkpoint_id)
                 .await
                 .scoped(namespace_id),
             Self::Remote(target) => Ok(target
                 .client
-                .release_checkpoint(namespace_id, checkpoint_id)
+                .delete_checkpoint(namespace_id, checkpoint_id)
                 .await?),
         }
     }

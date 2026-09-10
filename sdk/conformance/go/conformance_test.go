@@ -1681,18 +1681,18 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("listed snapshots = %#v, want only %q", listed.Results, snapshotID)
 	}
 
-	releaseRequest := &loonfs.ReleaseSnapshotRequest{
+	deleteRequest := &loonfs.DeleteSnapshotRequest{
 		NamespaceID: request.NamespaceID,
 		SnapshotID:  snapshotID,
 	}
-	released, releaseErr := h.client.Snapshots.Release(ctx, releaseRequest)
-	if releaseErr != nil {
-		t.Fatalf("release snapshot: %v", releaseErr)
+	deleted, deleteErr := h.client.Snapshots.Delete(ctx, deleteRequest)
+	if deleteErr != nil {
+		t.Fatalf("delete snapshot: %v", deleteErr)
 	}
-	if string(released.NamespaceID) != request.NamespaceID || released.SnapshotID != snapshotID {
-		t.Errorf("release snapshot response = %#v", released)
+	if string(deleted.NamespaceID) != request.NamespaceID || deleted.SnapshotID != snapshotID {
+		t.Errorf("delete snapshot response = %#v", deleted)
 	}
-	_, err = h.client.Snapshots.Release(ctx, releaseRequest)
+	_, err = h.client.Snapshots.Delete(ctx, deleteRequest)
 	assertNotFoundError(t, err, expected.SnapshotNotFound)
 
 	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{

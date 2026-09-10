@@ -70,9 +70,8 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
         .await
         .expect("complete pass");
     assert_eq!(report.deleted.upload_sessions, 1);
-    assert_eq!(report.deleted.checkpoint_records, 1025);
-    assert_eq!(report.released_checkpoints.snapshot, 1025);
-    assert_eq!(report.retained.checkpoint_not_releasable, 1);
+    assert_eq!(report.deleted_checkpoints_by_owner.snapshot, 1025);
+    assert_eq!(report.retained.checkpoint_not_deletable, 1);
     assert_eq!(store.counts().deletes, 1026);
     let operations = store.take();
     assert_eq!(

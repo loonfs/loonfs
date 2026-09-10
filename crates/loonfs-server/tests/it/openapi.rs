@@ -173,10 +173,10 @@ const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("DeletedObjectCounts", "content_objects"),
     ("DeletedObjectCounts", "upload_sessions"),
     ("RunMaintenanceResponseGc", "deleted"),
-    ("RunMaintenanceResponseGc", "released_checkpoints"),
+    ("RunMaintenanceResponseGc", "deleted_checkpoints_by_owner"),
     ("RunMaintenanceResponseGc", "retained"),
     ("GrepMatch", "line_truncated"),
-    ("ReleasedCheckpointCounts", "expired"),
+    ("DeletedCheckpointsByOwner", "expired"),
 ];
 
 #[test]
@@ -229,8 +229,8 @@ fn openapi_documents_current_server_paths() {
             "post",
         ),
         (
-            "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
-            "post",
+            "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
+            "delete",
         ),
         (
             "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
@@ -278,8 +278,8 @@ fn openapi_documents_current_server_paths() {
             "get",
         ),
         (
-            "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
-            "post",
+            "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+            "delete",
         ),
         ("/v0/maintenance/namespaces/{namespace_id}/runs", "post"),
         (
@@ -1247,7 +1247,8 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "ReorganizeStepOutcomeNotNeeded",
                 "ReorganizeStepOutcomeUnitPublished",
                 "ReorganizeStepOutcomeCompactionRequired",
-                "ReorganizeStepOutcomeRootAdvanced",
+                "ReorganizeStepOutcomeManifestAdvanced",
+                "ReorganizeStepOutcomeFenced",
             ][..],
         ),
         (

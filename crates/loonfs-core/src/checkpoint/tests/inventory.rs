@@ -3,7 +3,7 @@
 //! The listing exists so a pin can be found again once its creation response
 //! is gone, so what it must never do is hide a record that still roots a
 //! basis. These tests pin exactly that: labels do not identify records,
-//! release removes them from the answer, and a passed expiry does not.
+//! delete removes them from the answer, and a passed expiry does not.
 
 use super::*;
 use crate::checkpoint::list::list_checkpoints_page;
@@ -92,16 +92,16 @@ async fn two_pins_under_one_label_list_as_two_records() {
         assert_eq!(checkpoint.expires_at_ms, None, "no ttl was asked for");
     }
 
-    // Release is what takes a record out of the answer, and it takes out
+    // Delete is what takes a record out of the answer, and it takes out
     // exactly the one named.
-    super::super::release::release_checkpoint(&store, &namespace_id, &first)
+    super::super::delete::delete_checkpoint(&store, &namespace_id, &first)
         .await
-        .expect("release checkpoint");
-    let after_release = list_all_checkpoints(&store, &namespace_id)
+        .expect("delete checkpoint");
+    let after_delete = list_all_checkpoints(&store, &namespace_id)
         .await
         .expect("list checkpoints");
-    assert_eq!(after_release.checkpoints.len(), 1);
-    assert_ne!(after_release.checkpoints[0].checkpoint_id, first);
+    assert_eq!(after_delete.checkpoints.len(), 1);
+    assert_ne!(after_delete.checkpoints[0].checkpoint_id, first);
 }
 
 #[tokio::test]
@@ -224,9 +224,9 @@ async fn deleted_pins_are_absent_from_later_pages() {
     }
     ids.sort();
     for checkpoint_id in &ids[1..6] {
-        super::super::release::release_checkpoint(&store, &namespace_id, checkpoint_id)
+        super::super::delete::delete_checkpoint(&store, &namespace_id, checkpoint_id)
             .await
-            .expect("release checkpoint in filtered run");
+            .expect("delete checkpoint in filtered run");
     }
 
     let first = list_checkpoints_page(
@@ -250,7 +250,7 @@ async fn deleted_pins_are_absent_from_later_pages() {
         },
     )
     .await
-    .expect("second page across released run");
+    .expect("second page across deleted run");
     assert_eq!(second.items[0].checkpoint_id, ids[6]);
     assert_eq!(
         second

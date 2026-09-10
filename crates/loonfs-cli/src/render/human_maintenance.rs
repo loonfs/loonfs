@@ -1,12 +1,12 @@
 use super::summaries::*;
 use crate::commands::{MaintenanceKeyReport, MaintenanceRan};
 use loonfs_api::v0::{
-    GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, ReleaseSnapshotResponse,
+    DeleteSnapshotResponse, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
     SnapshotSummary, StoreProbeResponse,
 };
 use loonfs_api::{
-    ChangeSeq, Checkpoint, DeleteNamespaceResponse, ListCheckpointsResponse,
-    MetadataCompactionOutcome, Namespace, NamespaceId, ReleaseCheckpointResponse,
+    ChangeSeq, Checkpoint, DeleteCheckpointResponse, DeleteNamespaceResponse,
+    ListCheckpointsResponse, MetadataCompactionOutcome, Namespace, NamespaceId,
     ReorganizeStepOutcome, RunMaintenanceResponse,
 };
 
@@ -79,9 +79,9 @@ pub(super) fn human_snapshot_extended(snapshot: &SnapshotSummary) -> String {
     )
 }
 
-pub(super) fn human_snapshot_released(response: &ReleaseSnapshotResponse) -> String {
+pub(super) fn human_snapshot_deleted(response: &DeleteSnapshotResponse) -> String {
     format!(
-        "snapshot {} in {} released",
+        "snapshot {} in {} deleted",
         response.snapshot_id, response.namespace_id
     )
 }
@@ -126,9 +126,9 @@ pub(super) fn human_checkpoints_listed(response: &ListCheckpointsResponse) -> St
     lines.join("\n")
 }
 
-pub(super) fn human_checkpoint_released(response: &ReleaseCheckpointResponse) -> String {
+pub(super) fn human_checkpoint_deleted(response: &DeleteCheckpointResponse) -> String {
     format!(
-        "checkpoint {} in {} released or already gone",
+        "checkpoint {} in {} deleted",
         response.checkpoint_id, response.namespace_id
     )
 }
@@ -145,7 +145,8 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 ReorganizeStepOutcome::CompactionRequired => {
                     "one family group needs the metadata_compaction job"
                 }
-                ReorganizeStepOutcome::RootAdvanced => {
+                ReorganizeStepOutcome::Fenced => "reorganize fenced by a newer runtime",
+                ReorganizeStepOutcome::ManifestAdvanced => {
                     "another publisher advanced the manifest number, so reorganization published nothing"
                 }
             }

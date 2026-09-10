@@ -88,14 +88,10 @@ pub(crate) struct ReadConfig {
 /// same way: a zero budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCacheConfig {
-    /// Minimum monotonic interval between checks for a successor to the
-    /// cached manifest, which is how a warm reader observes deletion, a
-    /// retention floor, or a new manifest. Defaults to 1000 milliseconds;
-    /// zero checks on every read. Commits are observed on every read by
-    /// probing the next WAL number, so a read after the interval costs two
-    /// requests and a read within it costs one. The interval also paces
-    /// attempts to raise the namespace hint after publication.
-    pub control_revalidation_interval_ms: u64,
+    /// Minimum monotonic interval between checks for a successor to the cached manifest.
+    /// Also paces the writer's hint raise after publication. Defaults to 1000 milliseconds;
+    /// zero checks on every read.
+    pub manifest_revalidation_interval_ms: u64,
     /// Maximum namespaces retained by entry-counted runtime caches. Zero
     /// disables those caches. This does not affect maintenance scheduling.
     ///
@@ -120,7 +116,7 @@ impl RuntimeCacheConfig {
     /// Disables runtime caches by zeroing every budget.
     pub fn disabled() -> Self {
         Self {
-            control_revalidation_interval_ms: 1000,
+            manifest_revalidation_interval_ms: 1000,
             max_cached_namespaces: 0,
             max_cached_wal_tail_projection_rows: 0,
             max_cached_wal_tail_projection_decoded_bytes: 0,
@@ -134,7 +130,7 @@ impl RuntimeCacheConfig {
 impl Default for RuntimeCacheConfig {
     fn default() -> Self {
         Self {
-            control_revalidation_interval_ms: 1000,
+            manifest_revalidation_interval_ms: 1000,
             max_cached_namespaces: DEFAULT_MAX_CACHED_NAMESPACES,
             max_cached_wal_tail_projection_rows: DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS,
             max_cached_wal_tail_projection_decoded_bytes:

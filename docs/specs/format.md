@@ -23,7 +23,7 @@ This specification defines the storage layout, encodings, read and write protoco
 | [5. Uploading content](#5-uploading-content) | Upload sessions, direct transfers, and admission proofs |
 | [6. Publishing a commit](#6-publishing-a-commit) | Writer fencing, validation, group commit, and retries |
 | [7. Materializing metadata](#7-materializing-metadata) | Manifests, runs, segments, and publication |
-| [8. Checkpoints and snapshots](#8-checkpoints-and-snapshots) | Stable views, verification, release, and expiry |
+| [8. Checkpoints and snapshots](#8-checkpoints-and-snapshots) | Stable views, verification, deletion, and expiry |
 | [9. Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks) | Creation, copy-on-write forks, deletion, and retirement |
 | [10. Retention and compaction](#10-retention-and-compaction) | History boundaries and metadata rewrites |
 | [11. Garbage collection](#11-garbage-collection) | Reference roots, collection safety, and complete passes |
@@ -208,11 +208,13 @@ Manifest and WAL numbers are independent, positive counters scoped to a namespac
 
 Each number names one immutable object. A publisher creates the next number with put-if-absent. Competing publishers cannot install different objects at the same number; a loser loads the winner before planning another attempt. The payload's namespace and number must agree with its key.
 
-A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies its manifest; the random suffix distinguishes separate pins over that manifest. IDs are never reused, including after release. The API calls this value a `checkpoint_id`; the durable record calls it `pin_id`.
+A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies its manifest; the random suffix distinguishes separate pins over that manifest. IDs are never reused, including after deletion. The API calls this value a `checkpoint_id`; the durable record calls it `pin_id`.
 
 Content IDs are `con_` followed by 32 random lowercase hexadecimal characters. Metadata segment IDs are also generated identities, rather than positions in publication history. A collision at a newly generated immutable key must not overwrite existing bytes.
 
 ### 2.4 The current manifest and WAL tip
+
+Creation and fork write the hint before manifest 1, nothing deletes a live namespace's hint, and a reader that finds no hint reports the namespace as absent without listing.
 
 The current manifest is authoritative for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe materialized metadata through `head_seq`, and `last_folded_wal_no` identifies the WAL boundary already included in those runs.
 
@@ -577,11 +579,11 @@ Each pin is stored under `pins/{pin_id}.json`. Its positioned ID identifies the 
 
 | Owner | Stored owner fields | Lifetime |
 | --- | --- | --- |
-| `user` | `name`, optional `expires_at_ms` | Explicit release, or GC after expiry and grace. |
+| `user` | `name`, optional `expires_at_ms` | Explicit deletion, or GC after expiry and grace. |
 | `snapshot` | `name`, required `expires_at_ms` | Reads require an unexpired snapshot; GC adds grace before deletion. |
 | `fork` | `target_namespace_id` | Retained while the target depends on the source. |
 
-The record also stores namespace, manifest number, head sequence, payload checksum, head commit ID, and creation time. It has no lifecycle status. Creating the record establishes the candidate pin; deleting it releases the pin. Fork pins have no expiry or renewal protocol.
+The record also stores namespace, manifest number, head sequence, payload checksum, head commit ID, and creation time. It has no lifecycle status. Creating the record establishes the candidate pin; deleting it ends the pin. Fork pins have no expiry or renewal protocol.
 
 ### 8.2 Creating and verifying a checkpoint
 
@@ -598,13 +600,13 @@ This order matters when collection races with pin creation. A collector either c
 
 A fork of a snapshot uses a different protecting root. It first writes a fork pin for the snapshot's historical manifest, then rereads the snapshot pin and requires it still to exist and be unexpired. It does not require that historical manifest to remain current. Failure deletes the new fork pin and returns `snapshot_gone` when the snapshot was lost; verification remains time-bounded.
 
-### 8.3 Reads, release, and expiry
+### 8.3 Reads, deletion, and expiry
 
 A checkpoint read derives the manifest number from the ID, confirms the pin's existence and owner, and verifies its manifest reference. Reads use that manifest directly, without replaying later namespace history.
 
 User pins remain readable while their records exist, even after an optional expiry. Snapshot reads and extensions require an unexpired snapshot owner. Expiry and physical deletion are therefore different events: an expired snapshot remains a collection root until its record is deleted after grace.
 
-Explicit release checks the owner and deletes the pin. Releasing it again returns not-found. Callers cannot release fork-owned pins through the user release API. Every pin encountered in a collector's initial listing protects its files for that whole pass, including a pin that the same pass subsequently deletes.
+Explicit deletion checks the owner and deletes the pin. Deleting it again returns not-found. Callers cannot delete fork-owned pins through the user checkpoint API. Every pin encountered in a collector's initial listing protects its files for that whole pass, including a pin that the same pass subsequently deletes.
 
 ### 8.4 Extending a snapshot
 
@@ -680,23 +682,23 @@ reclaim_after_ms = call.now_ms
 
 The deadline uses the call's fixed clock. A collector establishes retirement only while its elapsed monotonic time since capturing that clock is within `RETIREMENT_PUBLICATION_BUDGET_MS`. This bounds how far the call clock can lag publication, as the retirement grace calculation requires. A concurrent collector's established deadline wins; it must never be cleared or moved. An uncertain publication requires readback. Every successor remains deleted.
 
-Retirement itself deletes no content. After the deadline, collection can sweep the namespace's owner prefix and release its source pin. The shared descriptor and other owners' content remain outside that sweep.
+Retirement itself deletes no content. After the deadline, collection can sweep the namespace's owner prefix and delete its source pin. The shared descriptor and other owners' content remain outside that sweep.
 
 ### 9.6 Fork dependencies after deletion
 
 A source pin remains required while a target refers to it, including a deleted target that has not finished retirement. Rewriting a target's metadata does not transfer ownership of inherited file bytes.
 
-Consider `A → B → C`. C's fork pin on B prevents B from retiring. B's pin on A remains until B's own retirement deadline passes and its collector releases that pin. After C retires, C releases its pin on B; B can then retire, and eventually release its pin on A.
+Consider `A → B → C`. C's fork pin on B prevents B from retiring. B's pin on A remains until B's own retirement deadline passes and its collector deletes that pin. After C retires, C deletes its pin on B; B can then retire, and eventually delete its pin on A.
 
 ```text
 source A <── pin owned by B ── B <── pin owned by C ── C
 
-retire C and release C's pin on B
-    → retire B and release B's pin on A
+retire C and delete C's pin on B
+    → retire B and delete B's pin on A
         → A can retire when no other pins remain
 ```
 
-Release proceeds from descendants to ancestors. Each retired target's collector repeats the source-pin deletion on later passes, using the identity preserved in the permanent tombstone, so a failed delete can be retried.
+Pin deletion proceeds from descendants to ancestors. Each retired target's collector repeats the source-pin deletion on later passes, using the identity preserved in the permanent tombstone, so a failed delete can be retried.
 
 ### 9.7 Cross-namespace copies and moves
 
@@ -757,7 +759,7 @@ Compaction must preserve visible metadata at every retained sequence. It publish
 
 A streaming compaction processes selected runs without holding every row in memory. It writes completed segments under the namespace's normal `segments/` prefix using fresh IDs, then publishes references to that output in the next manifest. Readers continue using the preceding manifest until publication succeeds.
 
-A runtime claims the namespace's compactor epoch before its first compaction after open. Claiming publishes a manifest with `compactor_epoch + 1` and otherwise unchanged state. Concurrent family groups in that runtime share the claim. Bounded and streaming compaction publications must match the current epoch; a newer claim fences older compactors.
+A runtime claims the namespace's compactor epoch before its first compaction after open. Claiming publishes a manifest with `compactor_epoch + 1` and otherwise unchanged state. Concurrent family groups in that runtime share the claim. Bounded and streaming compaction publications must match the current epoch; a newer claim fences older compactors. Core keeps this epoch because streaming compaction rebuilds a whole family group and publishes once at the end, so a newer runtime can stop a stale compactor at its next check; grep publishes each bounded step, so a lost race costs one step.
 
 Before each publication, a job checks its elapsed monotonic time and reloads the current manifest. Its selected input segments must still be present and unchanged. A lost numbered put can be retried against a new manifest while those conditions hold. A changed epoch produces `fenced`; changed inputs or an exceeded time bound produce `abandoned`.
 
@@ -878,7 +880,7 @@ Every token mint checks the original completion time. A retained receipt cannot 
 
 ### 11.7 Pin cleanup
 
-User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A user pin with no expiry remains until explicit release on an active namespace. Pin deletion is direct; IDs are never reused.
+User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A user pin with no expiry remains until explicit deletion on an active namespace. Pin deletion is direct; IDs are never reused.
 
 Fork pins use this decision table:
 
@@ -892,7 +894,7 @@ Fork pins use this decision table:
 | Target cannot be read | Retain the pin. |
 | Target data is invalid | Report corruption. |
 
-The source discovers the target's current manifest through its hint; it does not read the target WAL. An absent target does not need a tombstone. A matching target's collector releases the source pin after its own retirement deadline, repeating that deletion on later passes.
+The source discovers the target's current manifest through its hint; it does not read the target WAL. An absent target does not need a tombstone. A matching target's collector deletes the source pin after its own retirement deadline, repeating that deletion on later passes.
 
 An unrecognized key, retained pin, or uncertain pin read prevents namespace retirement. A candidate pin written too late to verify must be deleted by its creator; if that creator crashes first, its installation grace and owner rules still apply.
 
@@ -1427,8 +1429,11 @@ RETIREMENT_PUBLICATION_BUDGET_MS
            METADATA_PUBLICATION_BUDGET_MS)
 
 FORK_INSTALL_BUDGET_MS
-    = GC_MIN_GRACE_WINDOW_MS - PROVIDER_OPERATION_DEADLINE_MS
-      - PROVIDER_ATTEMPT_TIMEOUT_MS - GC_SAFETY_MARGIN_MS
+    = METADATA_PUBLICATION_BUDGET_MS
+
+GC_MIN_GRACE_WINDOW_MS
+    >= FORK_INSTALL_BUDGET_MS + PROVIDER_OPERATION_DEADLINE_MS
+       + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS
 
 NAMESPACE_RETIREMENT_GRACE_MS
     = RETIREMENT_PUBLICATION_BUDGET_MS
@@ -1484,8 +1489,10 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Automatic WAL-flush threshold | 32 segments |
 | Unflushed-tail write rejection threshold | 128 segments |
 | Hint-raise threshold | 8 WAL objects |
-| Default manifest revalidation interval | 1,000 ms |
+| `RuntimeCacheConfig::manifest_revalidation_interval_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
+
+`manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the cached manifest. It also paces the writer's hint raise.
 
 A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_len` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. Request admission limits are specified in the [API specification][api-spec].
 

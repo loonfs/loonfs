@@ -10,7 +10,6 @@ import { test } from "node:test";
 import {
     LoonFS,
     LoonFSClient,
-    LoonFSError,
     type PreparedFileContent,
 } from "../../../generated/typescript/index.js";
 import {
@@ -1776,19 +1775,17 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(listed.data.length, 1);
     assert.equal(listed.data[0]?.snapshot_id, snapshot.snapshot_id);
 
-    const releaseRequest = {
+    const deleteRequest = {
         namespace_id: namespaceId,
         snapshot_id: snapshot.snapshot_id,
     };
-    const firstRelease = await client.snapshots.release(releaseRequest);
-    assert.equal(firstRelease.namespace_id, namespaceId);
-    assert.equal(firstRelease.snapshot_id, snapshot.snapshot_id);
-    // The published client predates the 404 on release and extend, so it
-    // raises the base error there until it is regenerated.
-    await assert.rejects(client.snapshots.release(releaseRequest), (error: unknown) => {
-        assert.ok(error instanceof LoonFSError);
+    const firstDelete = await client.snapshots.delete(deleteRequest);
+    assert.equal(firstDelete.namespace_id, namespaceId);
+    assert.equal(firstDelete.snapshot_id, snapshot.snapshot_id);
+    await assert.rejects(client.snapshots.delete(deleteRequest), (error: unknown) => {
+        assert.ok(error instanceof LoonFS.NotFoundError);
         assert.equal(error.statusCode, expected.snapshot_not_found.status);
-        assert.equal((error.body as { code?: string }).code, expected.snapshot_not_found.code);
+        assert.equal(error.body.code, expected.snapshot_not_found.code);
         return true;
     });
 
@@ -1812,9 +1809,9 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
             ttl_ms: request.extend_ttl_ms,
         }),
         (error: unknown) => {
-            assert.ok(error instanceof LoonFSError);
+            assert.ok(error instanceof LoonFS.NotFoundError);
             assert.equal(error.statusCode, expected.snapshot_not_found.status);
-            assert.equal((error.body as { code?: string }).code, expected.snapshot_not_found.code);
+            assert.equal(error.body.code, expected.snapshot_not_found.code);
             return true;
         },
     );

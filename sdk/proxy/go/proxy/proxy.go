@@ -43,7 +43,7 @@ var routes = []route{
 	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots"},
 	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots"},
 	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend"},
-	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/release"},
+	{method: http.MethodDelete, pattern: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}"},
 	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads"},
 	{method: http.MethodGet, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}"},
 	{method: http.MethodPost, pattern: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort"},

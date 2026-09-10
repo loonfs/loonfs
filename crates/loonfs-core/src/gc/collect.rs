@@ -1,7 +1,7 @@
 //! One namespace collection call with a fixed clock and no durable progress.
 
 use super::families::CandidateFamily;
-use super::fork_checkpoints::release_source_checkpoint;
+use super::fork_checkpoints::delete_source_checkpoint;
 use super::live_set::LiveSet;
 use super::sweep::Sweep;
 use super::uploads::{PublicationView, UploadSweepContext};
@@ -58,9 +58,8 @@ pub(super) async fn gc_namespace_with_timer<S: ObjectStore + ?Sized>(
             }
             verify_retired_owner(store, namespace_id, &live, context.now_ms).await?;
             if let Some(basis) = &anchor.read_state.fork_basis {
-                if release_source_checkpoint(store, basis).await? {
-                    report.released_checkpoints.fork += 1;
-                    report.deleted.checkpoint_records += 1;
+                if delete_source_checkpoint(store, basis).await? {
+                    report.deleted_checkpoints_by_owner.fork += 1;
                 }
             }
         }

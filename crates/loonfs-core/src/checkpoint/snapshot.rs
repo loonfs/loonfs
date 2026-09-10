@@ -1,15 +1,15 @@
 //! Snapshot-owned checkpoint reads, expiry, and pin deletion.
 
+use super::delete::{delete_owned_checkpoint, ensure_owner_is, CheckpointOwnerKind};
 use super::read_basis::{load_checkpoint_read_basis_from_record, CheckpointReadBasis};
 use super::record::{encode_checkpoint_record, load_checkpoint_record, LoadedCheckpointRecord};
-use super::release::{ensure_owner_is, release_owned_checkpoint, CheckpointOwnerKind};
 use super::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::CheckpointOwner;
-use loonfs_api::{Checkpoint, CheckpointId, NamespaceId, ReleaseSnapshotResponse};
+use loonfs_api::{Checkpoint, CheckpointId, DeleteSnapshotResponse, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -99,20 +99,20 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     .await?
 }
 
-pub(crate) async fn release_snapshot<S: ObjectStore + ?Sized>(
+pub(crate) async fn delete_snapshot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     _context: &MutationContext,
-) -> Result<ReleaseSnapshotResponse> {
-    release_owned_checkpoint(
+) -> Result<DeleteSnapshotResponse> {
+    delete_owned_checkpoint(
         store,
         namespace_id,
         checkpoint_id,
         CheckpointOwnerKind::Snapshot,
     )
     .await?;
-    Ok(ReleaseSnapshotResponse {
+    Ok(DeleteSnapshotResponse {
         namespace_id: namespace_id.clone(),
         snapshot_id: checkpoint_id.clone(),
     })

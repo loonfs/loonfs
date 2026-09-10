@@ -131,17 +131,19 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         ("deleted_wal_segments", gc.deleted.wal_segments),
         ("deleted_metadata_segments", gc.deleted.metadata_segments),
         ("deleted_manifests", gc.deleted.manifests),
-        ("deleted_checkpoint_records", gc.deleted.checkpoint_records),
-        ("released_fork_checkpoints", gc.released_checkpoints.fork),
         (
-            "released_expired_checkpoints",
-            gc.released_checkpoints.expired,
+            "deleted_fork_checkpoints",
+            gc.deleted_checkpoints_by_owner.fork,
+        ),
+        (
+            "deleted_expired_checkpoints",
+            gc.deleted_checkpoints_by_owner.expired,
         ),
         ("deleted_upload_sessions", gc.deleted.upload_sessions),
         ("deleted_content_objects", gc.deleted.content_objects),
         (
-            "released_snapshot_checkpoints",
-            gc.released_checkpoints.snapshot,
+            "deleted_snapshot_checkpoints",
+            gc.deleted_checkpoints_by_owner.snapshot,
         ),
     ] {
         assert_eq!(
@@ -597,6 +599,13 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
             .await
             .expect("remembered claim"),
         epoch
+    );
+    assert_eq!(
+        maintenance
+            .run_reorganization(&namespace, MetadataCompactionPolicy::SizeTiered)
+            .await
+            .expect("fenced reorganization"),
+        ReorganizeStepOutcome::Fenced
     );
     assert_eq!(store.counts().puts, 0);
 }

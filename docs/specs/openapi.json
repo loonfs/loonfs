@@ -428,7 +428,7 @@
         "properties": {
           "checkpoint_id": {
             "$ref": "#/components/schemas/CheckpointId",
-            "description": "Durable checkpoint id used to address the checkpoint for release."
+            "description": "Durable checkpoint id used to address the checkpoint for deletion."
           },
           "checkpoint_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -538,7 +538,7 @@
         ]
       },
       "CheckpointOwnerUser": {
-        "description": "An operator-created pin, released by id or by its own expiry.",
+        "description": "An operator-created pin, deleted by id or by its own expiry.",
         "properties": {
           "kind": {
             "enum": [
@@ -1017,7 +1017,7 @@
             "type": "string"
           },
           "ttl_ms": {
-            "description": "The checkpoint lifetime in milliseconds, or `None` for an explicit release only.",
+            "description": "The checkpoint lifetime in milliseconds, or `None` for an explicit deletion only.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -1066,6 +1066,24 @@
         ],
         "type": "object"
       },
+      "DeleteCheckpointResponse": {
+        "description": "Identifies the checkpoint record that was deleted.",
+        "properties": {
+          "checkpoint_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Deleted checkpoint record."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the checkpoint belonged to."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "checkpoint_id"
+        ],
+        "type": "object"
+      },
       "DeleteDirectoryBehavior": {
         "description": "Directory delete behavior for path-oriented deletes.",
         "enum": [
@@ -1092,15 +1110,56 @@
         ],
         "type": "object"
       },
-      "DeletedObjectCounts": {
-        "description": "Object counts deleted by one garbage-collection pass, grouped by family.",
+      "DeleteSnapshotResponse": {
+        "description": "Identifies the snapshot record that was deleted.",
         "properties": {
-          "checkpoint_records": {
-            "description": "Pin records deleted by this pass.",
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the snapshot belonged to."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Deleted snapshot record."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "snapshot_id"
+        ],
+        "type": "object"
+      },
+      "DeletedCheckpointsByOwner": {
+        "description": "Checkpoint record counts deleted by one garbage-collection pass, grouped by owner.",
+        "properties": {
+          "expired": {
+            "description": "User-owned records deleted after expiry or terminal namespace deletion.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
+          "fork": {
+            "description": "Fork-owned records deleted because their target namespaces are gone.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snapshot": {
+            "description": "Snapshot-owned records deleted after expiry or terminal namespace deletion.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "fork",
+          "expired",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      "DeletedObjectCounts": {
+        "description": "Object counts deleted by one garbage-collection pass, grouped by family.",
+        "properties": {
           "content_objects": {
             "description": "Content reclaimed through completed upload sessions.",
             "format": "int64",
@@ -1142,7 +1201,6 @@
           "wal_segments",
           "metadata_segments",
           "manifests",
-          "checkpoint_records",
           "upload_sessions",
           "content_objects",
           "retired_content_objects"
@@ -3177,78 +3235,14 @@
         ],
         "type": "object"
       },
-      "ReleaseCheckpointResponse": {
-        "description": "Result of releasing a checkpoint pin.",
-        "properties": {
-          "checkpoint_id": {
-            "$ref": "#/components/schemas/CheckpointId",
-            "description": "Checkpoint the release targeted."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace the checkpoint belonged to."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "checkpoint_id"
-        ],
-        "type": "object"
-      },
-      "ReleaseSnapshotResponse": {
-        "description": "Result of releasing a read snapshot.",
-        "properties": {
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace the snapshot belonged to."
-          },
-          "snapshot_id": {
-            "$ref": "#/components/schemas/CheckpointId",
-            "description": "Released snapshot id."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "snapshot_id"
-        ],
-        "type": "object"
-      },
-      "ReleasedCheckpointCounts": {
-        "description": "Checkpoint record counts released by one garbage-collection pass, grouped by reason.",
-        "properties": {
-          "expired": {
-            "description": "User-owned records released after expiry or terminal namespace deletion.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "fork": {
-            "description": "Fork-owned records released because their target namespaces are gone.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "snapshot": {
-            "description": "Snapshot-owned records released after expiry or terminal namespace deletion.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "fork",
-          "expired",
-          "snapshot"
-        ],
-        "type": "object"
-      },
       "ReorganizeStepOutcome": {
         "description": "The outcome of the metadata-reorganization part of a maintenance pass.",
         "discriminator": {
           "mapping": {
             "compaction_required": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired",
+            "fenced": "#/components/schemas/ReorganizeStepOutcomeFenced",
+            "manifest_advanced": "#/components/schemas/ReorganizeStepOutcomeManifestAdvanced",
             "not_needed": "#/components/schemas/ReorganizeStepOutcomeNotNeeded",
-            "root_advanced": "#/components/schemas/ReorganizeStepOutcomeRootAdvanced",
             "unit_published": "#/components/schemas/ReorganizeStepOutcomeUnitPublished"
           },
           "propertyName": "outcome"
@@ -3264,7 +3258,10 @@
             "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired"
           },
           {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeRootAdvanced"
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeManifestAdvanced"
+          },
+          {
+            "$ref": "#/components/schemas/ReorganizeStepOutcomeFenced"
           }
         ]
       },
@@ -3282,11 +3279,11 @@
         ],
         "type": "object"
       },
-      "ReorganizeStepOutcomeNotNeeded": {
+      "ReorganizeStepOutcomeFenced": {
         "properties": {
           "outcome": {
             "enum": [
-              "not_needed"
+              "fenced"
             ],
             "type": "string"
           }
@@ -3296,11 +3293,25 @@
         ],
         "type": "object"
       },
-      "ReorganizeStepOutcomeRootAdvanced": {
+      "ReorganizeStepOutcomeManifestAdvanced": {
         "properties": {
           "outcome": {
             "enum": [
-              "root_advanced"
+              "manifest_advanced"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "ReorganizeStepOutcomeNotNeeded": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "not_needed"
             ],
             "type": "string"
           }
@@ -3327,8 +3338,8 @@
       "RetainedCandidates": {
         "description": "The candidates inspected but not deleted by one garbage-collection pass.\n\nEvery field is present and contributes to [`GcResponse::retained_candidates`].",
         "properties": {
-          "checkpoint_not_releasable": {
-            "description": "Checkpoint records that could not be safely released or deleted.",
+          "checkpoint_not_deletable": {
+            "description": "Checkpoint records whose owner or grace window prevents deletion.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3375,7 +3386,7 @@
           "within_grace_window",
           "no_provider_timestamp",
           "unrecognized_key",
-          "checkpoint_not_releasable",
+          "checkpoint_not_deletable",
           "upload_session_window",
           "upload_session_undecided"
         ],
@@ -3525,6 +3536,10 @@
             "$ref": "#/components/schemas/DeletedObjectCounts",
             "description": "Objects the pass deleted, split by object family."
           },
+          "deleted_checkpoints_by_owner": {
+            "$ref": "#/components/schemas/DeletedCheckpointsByOwner",
+            "description": "The checkpoint records deleted by the pass, grouped by owner."
+          },
           "kind": {
             "enum": [
               "gc"
@@ -3547,10 +3562,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "released_checkpoints": {
-            "$ref": "#/components/schemas/ReleasedCheckpointCounts",
-            "description": "The checkpoint records released by the pass, grouped by reason."
-          },
           "retained": {
             "$ref": "#/components/schemas/RetainedCandidates",
             "description": "`retained_candidates` grouped by reason."
@@ -3565,7 +3576,7 @@
         "required": [
           "namespace_id",
           "deleted",
-          "released_checkpoints",
+          "deleted_checkpoints_by_owner",
           "retained_candidates",
           "retained",
           "kind"
@@ -4484,7 +4495,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "post": {
-        "description": "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is released, so routine maintenance should flush the WAL instead. This is a maintenance operation, not a file mutation.",
+        "description": "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is deleted, so routine maintenance should flush the WAL instead. This is a maintenance operation, not a file mutation.",
         "operationId": "create_checkpoint",
         "parameters": [
           {
@@ -4578,10 +4589,10 @@
         "x-loonfs-retry": "not_idempotent"
       }
     },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release": {
-      "post": {
+    "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}": {
+      "delete": {
         "description": "Deletes a user-owned checkpoint pin. A missing id returns checkpoint_not_found. Garbage collection can reclaim its unreferenced manifest and runs.",
-        "operationId": "release_checkpoint",
+        "operationId": "delete_checkpoint",
         "parameters": [
           {
             "description": "Namespace id",
@@ -4607,7 +4618,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReleaseCheckpointResponse"
+                  "$ref": "#/components/schemas/DeleteCheckpointResponse"
                 }
               }
             },
@@ -4647,16 +4658,16 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "summary": "Release checkpoint",
+        "summary": "Delete checkpoint",
         "tags": [
           "maintenance"
         ],
-        "x-fern-request-name": "ReleaseCheckpointRequest",
+        "x-fern-request-name": "DeleteCheckpointRequest",
         "x-fern-sdk-group-name": [
           "maintenance",
           "checkpoints"
         ],
-        "x-fern-sdk-method-name": "release",
+        "x-fern-sdk-method-name": "delete",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -5659,7 +5670,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5874,7 +5885,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "413": {
             "content": {
@@ -5985,7 +5996,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "501": {
             "content": {
@@ -6126,7 +6137,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6241,7 +6252,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7401,7 +7412,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists live snapshots in snapshot-id order. Released and expired snapshots are omitted.",
+        "description": "Lists live snapshots in snapshot-id order. Deleted and expired snapshots are omitted.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -7600,6 +7611,87 @@
         "x-loonfs-retry": "not_idempotent"
       }
     },
+    "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
+      "delete": {
+        "description": "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
+        "operationId": "delete_snapshot",
+        "parameters": [
+          {
+            "description": "Namespace id",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot id",
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteSnapshotResponse"
+                }
+              }
+            },
+            "description": "Snapshot record deleted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid id or non-snapshot record"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot not found"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Delete snapshot",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-request-name": "DeleteSnapshotRequest",
+        "x-fern-sdk-group-name": [
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "delete",
+        "x-loonfs-retry": "idempotent"
+      }
+    },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend": {
       "post": {
         "description": "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
@@ -7697,77 +7789,6 @@
           "snapshots"
         ],
         "x-fern-sdk-method-name": "extend",
-        "x-loonfs-retry": "idempotent"
-      }
-    },
-    "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release": {
-      "post": {
-        "description": "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
-        "operationId": "release_snapshot",
-        "parameters": [
-          {
-            "description": "Namespace id",
-            "in": "path",
-            "name": "namespace_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Snapshot id",
-            "in": "path",
-            "name": "snapshot_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReleaseSnapshotResponse"
-                }
-              }
-            },
-            "description": "Snapshot release accepted"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid id or non-snapshot record"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "Release snapshot",
-        "tags": [
-          "namespaces"
-        ],
-        "x-fern-request-name": "ReleaseSnapshotRequest",
-        "x-fern-sdk-group-name": [
-          "snapshots"
-        ],
-        "x-fern-sdk-method-name": "release",
         "x-loonfs-retry": "idempotent"
       }
     },

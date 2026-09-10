@@ -269,13 +269,13 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `namespace_deleted` | 410 | The namespace's current manifest records terminal deleted status. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
 | `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
 | `snapshot_not_found` | 404 | The snapshot id names no checkpoint record. Refresh state or choose another snapshot. |
-| `snapshot_gone` | 410 | The snapshot has expired, or was released while a fork was verifying its selected snapshot. |
+| `snapshot_gone` | 410 | The snapshot has expired, or was deleted while a fork was verifying its selected snapshot. |
 | `path_not_found` | 404 | No visible entry at the path. |
 | `inode_not_found` | 404 | The requested visible or retained inode does not exist. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id, or one that was aborted: an aborted session will never select content, so it reports the absence that its deletion will. |
 | `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
-| `snapshot_quota_exceeded` | 409 | Creating the snapshot would pass the namespace's live-snapshot limit. Release a snapshot or wait for a snapshot to expire. |
+| `snapshot_quota_exceeded` | 409 | Creating the snapshot would pass the namespace's live-snapshot limit. Delete a snapshot or wait for a snapshot to expire. |
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
@@ -299,7 +299,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
-| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, released during the operation, or referenced material is missing. Retry after maintenance. |
+| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, deleted during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. The WAL write-stop threshold refuses new commits. A commit id the namespace already knows is still answered from its receipt. |
 | `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
 | `storage_permission_denied` | 503 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; an unchanged retry will not succeed. |
@@ -699,9 +699,9 @@ API that implements them.
 HTTP is one transport binding for these abstract operations. It is not the
 underlying semantics.
 
-GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `release`, `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/maintenance/` is the only API group prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
+GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/maintenance/` is the only API group prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
 
-Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `release_checkpoint`. Operation IDs are the wire registry only. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, which every operation must appear in or be explicitly excluded from.
+Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `delete_checkpoint`. Operation IDs are the wire registry only. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, which every operation must appear in or be explicitly excluded from.
 
 ### Authentication and transport
 
@@ -782,13 +782,13 @@ The table below lists the retry class for every v0 operation.
 | Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`; requires `name` and `ttl_ms` |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling |
-| Release a snapshot | `release_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/release` (deletes the pin; a missing id returns `snapshot_not_found`) |
+| Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin; a missing id returns `snapshot_not_found`) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `filesystem.namespaces.delete`; the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Release a checkpoint | `release_checkpoint` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (deletes the pin; a missing id returns `checkpoint_not_found`; other owners are rejected) |
+| Delete a checkpoint | `delete_checkpoint` | `idempotent` | `DELETE /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (deletes the pin; a missing id returns `checkpoint_not_found`; other owners are rejected) |
 | Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`; the body names one job with `kind` |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
@@ -858,12 +858,13 @@ or retain.
 
 `wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold. `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
 
-`reorganize.outcome` has four values. `not_needed` means no bounded merge is
+`reorganize.outcome` has five values. `not_needed` means no bounded merge is
 due. `unit_published` means this run published one bounded merge.
 `compaction_required` means a family group needs streaming compaction; run the
-`metadata_compaction` job. `root_advanced` means another publisher changed the
+`metadata_compaction` job. `manifest_advanced` means another publisher changed the
 current manifest first. Segments this run wrote remain unreferenced, and a
-later GC pass can delete them.
+later GC pass can delete them. `fenced` means a newer runtime holds the
+compactor epoch.
 
 `compaction.outcome` has six values. `not_needed` means no family group has
 eligible input. `bounded_merge_published` means the planner selected and
@@ -902,7 +903,7 @@ For example, a create response is:
 
 `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing
 checkpoints in ascending `checkpoint_id` order. Each entry is the same
-checkpoint object returned by create. User checkpoints can be released by
+checkpoint object returned by create. User checkpoints can be deleted by
 id. Fork checkpoints retain their `fork` owner and remain while their target
 namespace still reads through them.
 
@@ -910,25 +911,25 @@ namespace still reads through them.
 {"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}]}
 ```
 
-Release deletes the pin and returns the addressed namespace and checkpoint.
+Deletion removes the pin and returns the addressed namespace and checkpoint.
 The success response is:
 
 ```json
 {"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009"}
 ```
 
-A missing id, including one already released, returns `checkpoint_not_found`.
+A missing id, including one already deleted, returns `checkpoint_not_found`.
 
 `limit` follows the advertised pagination limits. `next_cursor` is omitted
 after the final page. Cursors are opaque and tied to this namespace and
 operation; clients should only return them unchanged.
 
-This is a live listing, not a snapshot. Checkpoints created, released, or
+This is a live listing, not a snapshot. Checkpoints created, deleted, or
 collected while a client is paging can affect later pages.
 
-Release deletes the record. An expired user pin remains listed and readable
+Deletion removes the record. An expired user pin remains listed and readable
 until GC deletes it after expiry plus grace. A permanent user pin on a live
-namespace requires explicit release.
+namespace requires explicit deletion.
 
 #### Snapshots
 
@@ -943,7 +944,7 @@ never moves the expiry past `snapshot.max_lifetime_ms` from the record's
 
 Snapshot listing returns only snapshot-owned pins whose lifetimes have not
 expired. The maintenance checkpoint listing keeps expired records visible until
-collection deletes them. Snapshot release deletes the pin. A second release returns
+collection deletes them. Snapshot deletion removes the pin. A second delete returns
 `snapshot_not_found`.
 
 These operations manage the snapshot lifetime. Path stat, directory listing,
@@ -953,7 +954,7 @@ with `revision_no`; the snapshot selects the revision. A snapshot change feed
 ends at the captured sequence, and `after_seq` cannot exceed that sequence.
 
 Snapshot reads require a live snapshot. Missing snapshots return
-`snapshot_not_found`, including after release. Expired snapshots return
+`snapshot_not_found`, including after deletion. Expired snapshots return
 `snapshot_gone` while their pins still exist. Neither case falls back to the current namespace state.
 
 #### Store contract probe
@@ -1021,13 +1022,13 @@ needs no further store request. Other candidates require an age check, a
 record read, or a deletion. Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
-`metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`,
-`content_objects`, and `retired_content_objects`. `released_checkpoints`
-contains `fork`, `expired`, and `snapshot` counts for pins deleted in the
-pass. A target's release of its source pin contributes to `fork` and
-`checkpoint_records` when the pin was present before deletion. Repeating
-that deletion on an absent pin adds no count. Every count field is present,
-including zero values.
+`metadata_segments`, `manifests`, `upload_sessions`, `content_objects`, and
+`retired_content_objects`. `deleted_checkpoints_by_owner` contains `fork`,
+`expired`, and `snapshot` counts for checkpoint records deleted in the pass.
+Their sum is the total number of checkpoint records deleted. Each deletion
+is counted once. A target's deletion of its source pin contributes to `fork`
+when the pin was present before deletion. Repeating that deletion on an
+absent pin adds no count. Every count field is present, including zero values.
 
 `content_objects` counts reclamation through completed upload sessions.
 `retired_content_objects` counts successful deletion attempts under a retired
@@ -1046,7 +1047,7 @@ that reason, and the fields sum to the total:
 | `within_grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
-| `checkpoint_not_releasable` | A pin retained by its owner or its grace window. |
+| `checkpoint_not_deletable` | A pin retained by its owner or its grace window. |
 | `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, a content cleanup failure, or a deleted namespace still waiting for retirement. |
 
@@ -1459,9 +1460,9 @@ number with GET, applies any new segments, and continues until 404. Commits
 are visible on the next read even when the hint has not been raised. The
 acknowledging runtime supplies read-your-writes state without a store request.
 
-`RuntimeCacheConfig::control_revalidation_interval_ms` sets the minimum
+`RuntimeCacheConfig::manifest_revalidation_interval_ms` sets the minimum
 monotonic interval between checks for a successor to the cached manifest.
-It defaults to 1000 milliseconds; `0` checks on every read. A read after the
+It also paces the writer's hint raise after publication. It defaults to 1000 milliseconds; `0` checks on every read. A read after the
 interval probes the successor manifest with HEAD as well as the next WAL
 number, so an unchanged warm head costs two requests; within the interval
 it costs one. A present successor reloads the namespace. Warm readers
@@ -1502,7 +1503,7 @@ reads, commits, forks, status, re-creation of the id — fails with
 `namespace_deleted` (410). Deleting an already-deleted namespace is also
 `namespace_deleted`.
 
-Checkpoint listing and user-checkpoint release are explicit exceptions. They
+Checkpoint listing and user-checkpoint deletion are explicit exceptions. They
 remain available because permanent user pins must stay discoverable and
 releasable after deletion. Releasing a fork-owned checkpoint remains rejected.
 
@@ -2517,10 +2518,11 @@ Representative response:
 
 The optional `snapshot_id` request field selects a live user snapshot of the
 source namespace. Without it, the server captures the current head. The
-snapshot must remain live until the fork-owned checkpoint is written. Missing
+snapshot must remain live through verification after the fork-owned checkpoint is written. Missing
 snapshots and ids owned by another namespace or checkpoint kind return
-`snapshot_not_found`; released or expired snapshots return `snapshot_gone`.
-Forking does not extend the snapshot, and later release does not affect the fork.
+`snapshot_not_found`. Expired snapshots and snapshots deleted during fork
+verification return `snapshot_gone`.
+Forking does not extend the snapshot, and later deletion does not affect the fork.
 
 The new namespace shares the source namespace's content store and starts with
 independent future namespace metadata. The fork creates a fork-owned source checkpoint so the

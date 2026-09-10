@@ -7,13 +7,13 @@ use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_verdict, StoreProbeVerdict};
 use loonfs_api::v0::{
-    GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, ReleaseSnapshotResponse,
+    DeleteSnapshotResponse, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
     SnapshotSummary, StoreProbeResponse,
 };
 use loonfs_api::{
-    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteNamespaceResponse,
-    FileRevision, GrepMatch, InodeId, ListCheckpointsResponse, Namespace, NamespaceId, PathEntry,
-    ReleaseCheckpointResponse, RunMaintenanceResponse,
+    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteCheckpointResponse,
+    DeleteNamespaceResponse, FileRevision, GrepMatch, InodeId, ListCheckpointsResponse, Namespace,
+    NamespaceId, PathEntry, RunMaintenanceResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -199,10 +199,10 @@ pub(crate) enum CommandData {
     SnapshotCreated(SnapshotSummary),
     SnapshotsListed(ListSnapshotsResponse),
     SnapshotExtended(SnapshotSummary),
-    SnapshotReleased(ReleaseSnapshotResponse),
+    SnapshotDeleted(DeleteSnapshotResponse),
     CheckpointCreated(Checkpoint),
     CheckpointsListed(ListCheckpointsResponse),
-    CheckpointReleased(ReleaseCheckpointResponse),
+    CheckpointDeleted(DeleteCheckpointResponse),
     GrepIndexEnabled {
         /// The lifecycle and bookkeeping last observed: what enable read
         /// with `--no-wait`, otherwise the status after waiting stopped.

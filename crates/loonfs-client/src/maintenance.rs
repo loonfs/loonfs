@@ -78,17 +78,21 @@ impl Client {
 
     /// Deletes a user-owned checkpoint pin through the maintenance API.
     /// A missing id returns `checkpoint_not_found`.
-    pub async fn release_checkpoint(
+    pub async fn delete_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
-    ) -> Result<ReleaseCheckpointResponse> {
+    ) -> Result<DeleteCheckpointResponse> {
         let url = format!(
-            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
+            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
             self.base_url
         );
-        self.request_json::<(), ReleaseCheckpointResponse>(self.post(&url), None, SendPolicy::Retry)
-            .await
+        self.request_json::<(), DeleteCheckpointResponse>(
+            self.delete(&url),
+            None,
+            SendPolicy::Retry,
+        )
+        .await
     }
 
     /// Runs one maintenance job against a namespace (maintenance API group).

@@ -9,12 +9,12 @@ use crate::trace::phase_span;
 use crate::FsMaintenance;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions, ErrorCode,
-    FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenanceCancellation,
-    MaintenanceProbe, MetadataCompactionOutcome, MetadataCompactionResponse,
-    MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, RunMaintenanceRequest,
-    RunMaintenanceResponse, SharedObjectStore, WalFlushStepOutcome,
+    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions,
+    DeleteCheckpointResponse, ErrorCode, FlushWalOutcome, FlushWalResponse,
+    ListCheckpointsResponse, MaintenanceCancellation, MaintenanceProbe, MetadataCompactionOutcome,
+    MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
+    NamespaceId, ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse,
+    SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
@@ -336,7 +336,7 @@ impl FsMaintenance {
                         manifest_head_seq: flush.manifest_head_seq,
                     },
                     // In both cases, this flush did not publish a manifest.
-                    FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::RootAdvanced => {
+                    FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::ManifestAdvanced => {
                         WalFlushStepOutcome::AlreadyPublished {
                             attempted_seq: flush.target_head_seq,
                             current_manifest_no: flush.manifest_no,
@@ -376,7 +376,7 @@ impl FsMaintenance {
                 .await?
             {
                 ReorganizationStep::Concluded(outcome) => outcome,
-                ReorganizationStep::Fenced => ReorganizeStepOutcome::RootAdvanced,
+                ReorganizationStep::Fenced => ReorganizeStepOutcome::Fenced,
                 ReorganizationStep::CompactionPlanned(_) => {
                     ReorganizeStepOutcome::CompactionRequired
                 }
@@ -465,7 +465,7 @@ impl FsMaintenance {
                 tracing::info!(
                     "current manifest changed before reorganization published; a later step retries"
                 );
-                ReorganizeStepOutcome::RootAdvanced
+                ReorganizeStepOutcome::ManifestAdvanced
             }
         }))
     }
@@ -744,25 +744,25 @@ impl FsMaintenance {
     /// Deletes a user-owned pin. A missing id returns `checkpoint_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.release_checkpoint",
+        name = "loonfs.maintenance.delete_checkpoint",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.release_checkpoint",
+            operation = "maintenance.delete_checkpoint",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn release_checkpoint(
+    pub async fn delete_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
-    ) -> Result<ReleaseCheckpointResponse> {
+    ) -> Result<DeleteCheckpointResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(namespace_id)
-            .release_checkpoint(checkpoint_id)
+            .delete_checkpoint(checkpoint_id)
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)

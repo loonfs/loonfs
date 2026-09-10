@@ -130,18 +130,19 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         )
         .await?;
         let count = match decision {
-            CheckpointSweep::DeleteFork => &mut self.report.released_checkpoints.fork,
-            CheckpointSweep::DeleteUser => &mut self.report.released_checkpoints.expired,
-            CheckpointSweep::DeleteSnapshot => &mut self.report.released_checkpoints.snapshot,
+            CheckpointSweep::DeleteFork => &mut self.report.deleted_checkpoints_by_owner.fork,
+            CheckpointSweep::DeleteUser => &mut self.report.deleted_checkpoints_by_owner.expired,
+            CheckpointSweep::DeleteSnapshot => {
+                &mut self.report.deleted_checkpoints_by_owner.snapshot
+            }
             CheckpointSweep::Gone => return Ok(true),
             CheckpointSweep::Retain => {
-                self.report.retain(RetainedReason::CheckpointNotReleasable);
+                self.report.retain(RetainedReason::CheckpointNotDeletable);
                 return Ok(false);
             }
         };
         *count += 1;
         self.delete_key(key).await?;
-        self.report.deleted.checkpoint_records += 1;
         Ok(true)
     }
 

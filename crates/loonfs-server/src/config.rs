@@ -290,6 +290,7 @@ pub struct LocalCacheConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCacheConfigOverrides {
+    pub manifest_revalidation_interval_ms: Option<u64>,
     pub max_cached_namespaces: Option<usize>,
     pub max_cached_wal_tail_projection_rows: Option<usize>,
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
@@ -436,6 +437,9 @@ impl ServerConfig {
     /// Resolves runtime cache settings by applying server overrides to the defaults.
     pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
         let mut config = RuntimeCacheConfig::default();
+        if let Some(value) = self.runtime_cache.manifest_revalidation_interval_ms {
+            config.manifest_revalidation_interval_ms = value;
+        }
         if let Some(value) = self.runtime_cache.max_cached_namespaces {
             config.max_cached_namespaces = value;
         }
@@ -1662,6 +1666,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [runtime_cache]
+manifest_revalidation_interval_ms = 250
 max_cached_namespaces = 2
 max_cached_wal_tail_projection_rows = 10
 max_cached_wal_tail_projection_decoded_bytes = 4096
@@ -1675,6 +1680,7 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path)
             .expect("load config")
             .runtime_cache_config();
+        assert_eq!(config.manifest_revalidation_interval_ms, 250);
         assert_eq!(config.max_cached_namespaces, 2);
         assert_eq!(config.max_cached_wal_tail_projection_rows, 10);
         assert_eq!(config.max_cached_wal_tail_projection_decoded_bytes, 4096);

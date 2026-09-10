@@ -605,7 +605,7 @@ async fn restart_retains_its_checkpoint_when_the_manifest_write_result_is_ambigu
         .expect("enable grep");
     let previous_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
     host.maintenance
-        .release_checkpoint(&namespace_id, &previous_checkpoint_id)
+        .delete_checkpoint(&namespace_id, &previous_checkpoint_id)
         .await
         .expect("make the current backfill restart");
 
@@ -700,7 +700,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     // mid-backfill. The enumeration says so out loud instead of quietly
     // answering current state, and the worker starts over again.
     maintenance
-        .release_checkpoint(&namespace_id, &gap_checkpoint_id)
+        .delete_checkpoint(&namespace_id, &gap_checkpoint_id)
         .await
         .expect("remove checkpoint mid-backfill");
     let vanished = worker

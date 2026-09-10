@@ -15,7 +15,7 @@ The thirteen cases cover:
 - cursor pagination and resumption
 - directory children by inode (`children_by_inode`)
 - mutations by inode (`inode_mutations`)
-- snapshot creation, reads, extension, and release (`snapshots`)
+- snapshot creation, reads, extension, and deletion (`snapshots`)
 - change feed identity fields
 - an end-to-end filesystem workflow
 - namespace-alias-scoped requests through a proxy

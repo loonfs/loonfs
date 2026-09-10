@@ -113,13 +113,12 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
     gc.deleted.wal_segments > 0
         || gc.deleted.metadata_segments > 0
         || gc.deleted.manifests > 0
-        || gc.deleted.checkpoint_records > 0
         || gc.deleted.content_objects > 0
         || gc.deleted.upload_sessions > 0
         || gc.deleted.retired_content_objects > 0
-        || gc.released_checkpoints.fork > 0
-        || gc.released_checkpoints.expired > 0
-        || gc.released_checkpoints.snapshot > 0
+        || gc.deleted_checkpoints_by_owner.fork > 0
+        || gc.deleted_checkpoints_by_owner.expired > 0
+        || gc.deleted_checkpoints_by_owner.snapshot > 0
 }
 
 #[cfg(test)]

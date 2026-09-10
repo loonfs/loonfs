@@ -166,20 +166,20 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
 }
 
 #[tokio::test]
-async fn snapshot_release_reports_an_uncertain_delete_without_recreating_the_pin() {
+async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("snapshot-ambiguous-release");
+    let namespace_id = namespace_id("snapshot-ambiguous-delete");
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
             OperationClass::Delete,
-            InjectedError::Transport("lost snapshot release acknowledgement".to_owned()),
+            InjectedError::Transport("lost snapshot delete acknowledgement".to_owned()),
         )
         .apply_then_fail(),
     );
     let object_store: SharedObjectStore = store.clone();
-    let fs = open_runtime_async(object_store, "snapshot-ambiguous-release").await;
+    let fs = open_runtime_async(object_store, "snapshot-ambiguous-delete").await;
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
@@ -198,13 +198,13 @@ async fn snapshot_release_reports_an_uncertain_delete_without_recreating_the_pin
 
     assert_core_error_kind(
         fs.writer
-            .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
+            .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
             .await,
         ErrorCode::ServerError,
     );
     assert_core_error_kind(
         fs.writer
-            .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
+            .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
             .await,
         ErrorCode::SnapshotNotFound,
     );
@@ -316,7 +316,7 @@ async fn wait_for_operations(counter: &AtomicUsize, expected: usize) {
 }
 
 #[test]
-fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() {
+fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
     let fs = open_runtime(store.clone(), "checkpoint-tombstone-setup");
@@ -382,12 +382,11 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_release_available() 
         .iter()
         .any(|checkpoint| checkpoint.checkpoint_id == fork_checkpoint));
 
-    let released =
-        block_on(maintenance.release_checkpoint(&source, &user_checkpoint.checkpoint_id))
-            .expect("release user checkpoint on deleted namespace");
-    assert_eq!(released.checkpoint_id, user_checkpoint.checkpoint_id);
+    let deleted = block_on(maintenance.delete_checkpoint(&source, &user_checkpoint.checkpoint_id))
+        .expect("delete user checkpoint on deleted namespace");
+    assert_eq!(deleted.checkpoint_id, user_checkpoint.checkpoint_id);
     assert_core_error_kind(
-        block_on(maintenance.release_checkpoint(&source, &fork_checkpoint)),
+        block_on(maintenance.delete_checkpoint(&source, &fork_checkpoint)),
         ErrorCode::InvalidRequest,
     );
     assert_core_error_kind(

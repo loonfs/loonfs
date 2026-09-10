@@ -49,7 +49,7 @@ pub struct CheckpointFilesPage {
 /// Lists files visible in the state pinned by `checkpoint_id`.
 ///
 /// Later WAL entries are not replayed. Directories are omitted. Missing or
-/// released checkpoints return `checkpoint_unavailable`.
+/// deleted checkpoints return `checkpoint_unavailable`.
 pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,

@@ -5,7 +5,7 @@
 use super::collect::gc_namespace;
 use super::config::GcConfig;
 use crate::checkpoint::advance_retention_floor;
-use crate::checkpoint::record::release_checkpoint_record;
+use crate::checkpoint::record::delete_checkpoint_record;
 use crate::checkpoint::tests::{
     compact_a_family_group, create_checkpoint, mutation_context, write_test_file,
 };
@@ -310,13 +310,15 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     assert!(report.deleted.wal_segments >= 1);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 4);
-    assert_eq!(report.released_checkpoints.expired, 1);
-    assert_eq!(report.deleted.checkpoint_records, 1);
+    assert_eq!(report.deleted_checkpoints_by_owner.expired, 1);
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
         .await
         .expect("gc pass after segment grace");
-    assert_eq!(report.deleted.checkpoint_records, 0);
+    assert_eq!(
+        report.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
     assert!(report.deleted.metadata_segments >= 1);
     assert!(report.deleted.manifests >= 1);
 
@@ -398,7 +400,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect("gc pass with live clone");
-    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
     assert!(
         store.head(&basis_key).await.expect("head basis").is_some(),
         "fork basis must survive while the clone lives"
@@ -429,7 +431,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let report = gc_namespace(&store, &source, &config(), &again)
         .await
         .expect("idempotent pass");
-    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
     assert_eq!(report.deleted.manifests, 1);
     assert!(store
         .head(&basis_key)
@@ -1273,8 +1275,11 @@ async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted.checkpoint_records, 0);
-    assert_eq!(report.retained.checkpoint_not_releasable, 1);
+    assert_eq!(
+        report.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
+    assert_eq!(report.retained.checkpoint_not_deletable, 1);
     assert_eq!(reason_total(&report), report.retained_candidates);
 }
 
@@ -1511,20 +1516,26 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .await
         .expect("advance past the shared basis");
 
-    crate::checkpoint::release_checkpoint(&store, &namespace_id, &second.checkpoint_id)
+    crate::checkpoint::delete_checkpoint(&store, &namespace_id, &second.checkpoint_id)
         .await
         .expect("release one owner");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("first gc pass");
-    assert_eq!(first_pass.deleted.checkpoint_records, 0);
+    assert_eq!(
+        first_pass.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
 
     let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("second gc pass");
     assert_eq!(second_pass.deleted.manifests, 0);
-    assert_eq!(second_pass.deleted.checkpoint_records, 0);
+    assert_eq!(
+        second_pass.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
 
     let keeper =
         crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
@@ -1561,7 +1572,7 @@ async fn fork_owned_checkpoints_reject_user_release() {
 
     let fork_record = read_fork_record(&store, &source).await;
 
-    let error = crate::checkpoint::release_checkpoint(&store, &source, &fork_record.pin_id)
+    let error = crate::checkpoint::delete_checkpoint(&store, &source, &fork_record.pin_id)
         .await
         .expect_err("fork-owned release must fail");
     assert!(
@@ -1597,7 +1608,7 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
     .expect("snapshot checkpoint");
 
     let error =
-        crate::checkpoint::release_checkpoint(&store, &namespace_id, &snapshot.checkpoint_id)
+        crate::checkpoint::delete_checkpoint(&store, &namespace_id, &snapshot.checkpoint_id)
             .await
             .expect_err("snapshot-owned release must fail");
     assert!(
@@ -1637,7 +1648,10 @@ async fn gc_retains_active_checkpoint_bases() {
     // Only the unpinned bootstrap manifest is collectable; both active
     // checkpoint bases stay.
     assert_eq!(report.deleted.manifests, 3);
-    assert_eq!(report.deleted.checkpoint_records, 0);
+    assert_eq!(
+        report.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
     let first_record =
         crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
             .await
@@ -1695,7 +1709,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let target_pin = create_checkpoint(&store, &clone, &setup)
         .await
         .expect("materialize target manifest");
-    release_checkpoint_record(&store, &clone, &target_pin.checkpoint_id)
+    delete_checkpoint_record(&store, &clone, &target_pin.checkpoint_id)
         .await
         .expect("release target pin");
     let fork_record = read_fork_record(&store, &source).await;
@@ -1710,7 +1724,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let report = gc_namespace(&store, &source, &config(), &before)
         .await
         .expect("gc with live target");
-    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
 
     delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
         .await
@@ -1720,7 +1734,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let waiting = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect("wait for retirement");
-    assert_eq!(waiting.released_checkpoints.fork, 0);
+    assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
     let retired = gc_namespace(&store, &clone, &config(), &aged)
         .await
         .expect("retire materialized target");
@@ -1728,7 +1742,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let waiting = gc_namespace(&store, &source, &config(), &context(deadline - 1))
         .await
         .expect("wait for grace");
-    assert_eq!(waiting.released_checkpoints.fork, 0);
+    assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
     assert!(checkpoint_exists(&store, &source, &fork_record.pin_id).await);
     let aged = context(deadline);
 
@@ -1750,13 +1764,12 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let released = gc_namespace(&store, &clone, &config(), &aged)
         .await
         .expect("retry source pin delete");
-    assert_eq!(released.released_checkpoints.fork, 1);
-    assert_eq!(released.deleted.checkpoint_records, 1);
+    assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
     assert!(!checkpoint_exists(&store, &source, &fork_record.pin_id).await);
     let repeated = gc_namespace(&store, &clone, &config(), &aged)
         .await
         .expect("repeat source pin delete");
-    assert_eq!(repeated.released_checkpoints.fork, 0);
+    assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
     assert_eq!(store.counts().deletes, 3);
     assert!(store
         .head(&metadata_manifest_object(&source, &fork_record.manifest_no))
@@ -1797,7 +1810,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
         .expect("an unreadable target is retained conservatively");
-    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
     assert!(checkpoint_exists(store.inner(), &source, &fork_record.pin_id).await);
 
     store.clear();
@@ -1869,8 +1882,11 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         let report = gc_namespace(&store, &source, &config(), &context(now_ms))
             .await
             .expect("gc pass with a live target");
-        assert_eq!(report.released_checkpoints.fork, 0, "at {now_ms}");
-        assert_eq!(report.released_checkpoints.expired, 0, "at {now_ms}");
+        assert_eq!(report.deleted_checkpoints_by_owner.fork, 0, "at {now_ms}");
+        assert_eq!(
+            report.deleted_checkpoints_by_owner.expired, 0,
+            "at {now_ms}"
+        );
         assert!(
             checkpoint_exists(&store, &source, &fork_record.pin_id).await,
             "a live target keeps its pin at {now_ms}"
@@ -1931,7 +1947,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     let report = gc_namespace(&store, &source, &config(), &before_creation_grace)
         .await
         .expect("gc pass with a target that reads through another record");
-    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
     assert!(checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await);
     let report = gc_namespace(
         &store,
@@ -1941,7 +1957,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     )
     .await
     .expect("an aged pin the target does not name is the abandoned attempt's");
-    assert_eq!(report.released_checkpoints.fork, 1);
+    assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
     assert!(!checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await);
     assert_eq!(
         store
@@ -2124,8 +2140,11 @@ async fn gc_retains_everything_without_provider_timestamps() {
     assert_eq!(report.deleted.wal_segments, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
-    assert_eq!(report.deleted.checkpoint_records, 0);
-    assert_eq!(report.released_checkpoints.fork, 0);
+    assert_eq!(
+        report.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
+    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
     assert!(report.retained_candidates > 0);
     stat_root(&store, &namespace_id).await;
 }
@@ -2693,11 +2712,14 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     )
     .await
     .expect("before creation grace");
-    assert_eq!(before.deleted.checkpoint_records, 0);
+    assert_eq!(
+        before.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
     let abandoned = gc_namespace(&store, &namespace_id, &config(), &context(1_000 + GRACE_MS))
         .await
         .expect("creation grace");
-    assert_eq!(abandoned.released_checkpoints.fork, 1);
+    assert_eq!(abandoned.deleted_checkpoints_by_owner.fork, 1);
     assert!(!checkpoint_exists(&store, &namespace_id, &pins[3].checkpoint_id).await);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let before_expiry = gc_namespace(
@@ -2708,13 +2730,15 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     )
     .await
     .expect("before expiry grace");
-    assert_eq!(before_expiry.deleted.checkpoint_records, 0);
+    assert_eq!(
+        before_expiry.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
     let expired = gc_namespace(&store, &namespace_id, &config(), &context(2_000 + GRACE_MS))
         .await
         .expect("expiry grace");
-    assert_eq!(expired.deleted.checkpoint_records, 2);
-    assert_eq!(expired.released_checkpoints.expired, 1);
-    assert_eq!(expired.released_checkpoints.snapshot, 1);
+    assert_eq!(expired.deleted_checkpoints_by_owner.expired, 1);
+    assert_eq!(expired.deleted_checkpoints_by_owner.snapshot, 1);
     assert!(checkpoint_exists(&store, &namespace_id, &pins[0].checkpoint_id).await);
     assert!(!checkpoint_exists(&store, &namespace_id, &pins[1].checkpoint_id).await);
     assert!(!checkpoint_exists(&store, &namespace_id, &pins[2].checkpoint_id).await);
@@ -2733,7 +2757,13 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     let retired = gc_namespace(&store, &namespace_id, &config(), &context(deleted_at))
         .await
         .expect("retire");
-    assert_eq!(retired.deleted.checkpoint_records, 2);
+    assert_eq!(
+        retired.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner {
+            expired: 2,
+            ..Default::default()
+        }
+    );
     assert_eq!(retired.reclaim_after_ms, Some(deleted_at + GRACE_MS));
 }
 
@@ -2821,7 +2851,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
     )
     .await
     .expect("young pins");
-    assert_eq!(young.released_checkpoints.fork, 0);
+    assert_eq!(young.deleted_checkpoints_by_owner.fork, 0);
     assert!(store.snapshot().is_empty());
     let aged = gc_namespace(
         &store,
@@ -2831,7 +2861,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
     )
     .await
     .expect("aged pins");
-    assert_eq!(aged.released_checkpoints.fork, 1);
+    assert_eq!(aged.deleted_checkpoints_by_owner.fork, 1);
     let mut expected = vec![hint(&targets[5])];
     for (index, target) in targets[..5].iter().enumerate() {
         let manifest_no = if index == 0 {

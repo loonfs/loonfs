@@ -177,8 +177,8 @@ Snapshot management
   loonfs snapshot extend <namespace> <snapshot-id> --ttl-ms <ms>
     Keep a snapshot available for longer
 
-  loonfs snapshot release <namespace> <snapshot-id>
-    Release a snapshot. Repeating the command returns snapshot_not_found.
+  loonfs snapshot delete <namespace> <snapshot-id>
+    Delete the snapshot record. A second call returns snapshot_not_found.
 
 Pagination
   ls, grep, revisions, trash, changes, snapshot list, and maintenance checkpoint
@@ -357,15 +357,15 @@ Maintenance
 
   loonfs maintenance checkpoint create --name <label> [--ttl-ms <ms>]
     Pin the namespace's current state. --ttl-ms sets an expiry; without it,
-    the checkpoint remains until release.
+    the checkpoint remains until deletion.
 
   loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]
     List active checkpoints in ID order. Expired checkpoints remain visible
     until garbage collection removes them.
 
-  loonfs maintenance checkpoint release <checkpoint-id>
-    Release a checkpoint pin
+  loonfs maintenance checkpoint delete <checkpoint-id>
+    Delete the checkpoint record. A second call returns checkpoint_not_found.
 
   loonfs maintenance index enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
     Enable the gram index and wait until it reaches the namespace sequence

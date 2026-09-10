@@ -713,7 +713,7 @@ mod tests {
         pass.deleted.upload_sessions = 3;
         pass.deleted.content_objects = 1;
         pass.deleted.retired_content_objects = 7;
-        pass.released_checkpoints.fork = 2;
+        pass.deleted_checkpoints_by_owner.fork = 2;
         for _ in 0..4 {
             pass.retain(RetainedReason::WithinGraceWindow);
         }
@@ -725,7 +725,7 @@ mod tests {
             summary.contains("1 content objects, 7 retired content objects"),
             "{summary}"
         );
-        assert!(summary.contains("released 2 fork checkpoints"), "{summary}");
+        assert!(summary.contains("2 fork checkpoints"), "{summary}");
         assert!(!summary.contains("namespace is retired"), "{summary}");
 
         pass.reclaim_after_ms = Some(1_700_000_000_000);
@@ -753,6 +753,9 @@ mod tests {
             "{empty}"
         );
         assert!(!empty.contains("namespace is retired"), "{empty}");
-        assert!(!empty.contains("released"), "{empty}");
+        assert!(
+            empty.contains("0 fork checkpoints, 0 expired checkpoints, 0 snapshot checkpoints"),
+            "{empty}"
+        );
     }
 }

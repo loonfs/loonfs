@@ -58,7 +58,6 @@ from loonfs.server import (
     UploadSession_Aborted,
     UploadSession_Completed,
 )
-from loonfs.core.api_error import ApiError
 from loonfs.proxy import LoonFSProxy
 
 
@@ -691,13 +690,6 @@ def _list_inode_children(
     )
 
 
-def error_code(body: object) -> str:
-    """Reads the error code from a raw or parsed error body."""
-    if isinstance(body, dict):
-        return str(body["code"])
-    return str(getattr(body, "code"))
-
-
 def test_error_contract(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(
         cases["error_contract"], ErrorContractRequest, ErrorContractExpected
@@ -1245,34 +1237,32 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert len(listed.snapshots) == 1
     assert listed.snapshots[0].snapshot_id == snapshot.snapshot_id
 
-    first_release = client.snapshots.release(
+    first_delete = client.snapshots.delete(
         namespace_id, snapshot.snapshot_id
     )
-    assert first_release.namespace_id == namespace_id
-    assert first_release.snapshot_id == snapshot.snapshot_id
-    # The published client predates the 404 on release and extend, so it
-    # raises the base error there until it is regenerated.
-    with pytest.raises(ApiError) as second_release:
-        client.snapshots.release(namespace_id, snapshot.snapshot_id)
-    assert second_release.value.status_code == expected.snapshot_not_found.status
-    assert error_code(second_release.value.body) == expected.snapshot_not_found.code
+    assert first_delete.namespace_id == namespace_id
+    assert first_delete.snapshot_id == snapshot.snapshot_id
+    with pytest.raises(NotFoundError) as second_delete:
+        client.snapshots.delete(namespace_id, snapshot.snapshot_id)
+    assert second_delete.value.status_code == expected.snapshot_not_found.status
+    assert second_delete.value.body.code == expected.snapshot_not_found.code
 
-    with pytest.raises(NotFoundError) as released_read:
+    with pytest.raises(NotFoundError) as deleted_read:
         client.files.retrieve(
             namespace_id,
             path=child_path(request.replaced_file_name),
             snapshot_id=snapshot.snapshot_id,
         )
-    assert released_read.value.status_code == expected.snapshot_not_found.status
-    assert released_read.value.body.code == expected.snapshot_not_found.code
-    with pytest.raises(ApiError) as released_extend:
+    assert deleted_read.value.status_code == expected.snapshot_not_found.status
+    assert deleted_read.value.body.code == expected.snapshot_not_found.code
+    with pytest.raises(NotFoundError) as deleted_extend:
         client.snapshots.extend(
             namespace_id,
             snapshot.snapshot_id,
             ttl_ms=request.extend_ttl_ms,
         )
-    assert released_extend.value.status_code == expected.snapshot_not_found.status
-    assert error_code(released_extend.value.body) == expected.snapshot_not_found.code
+    assert deleted_extend.value.status_code == expected.snapshot_not_found.status
+    assert deleted_extend.value.body.code == expected.snapshot_not_found.code
 
     with pytest.raises(NotFoundError) as unknown_read:
         client.files.retrieve(

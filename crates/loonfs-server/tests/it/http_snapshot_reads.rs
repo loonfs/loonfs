@@ -111,12 +111,18 @@ fn create_snapshot(server_url: &str, namespace: &str, name: &str, ttl_ms: u64) -
     .expect("create snapshot")
 }
 
-fn release_snapshot(server_url: &str, namespace: &str, snapshot_id: &str) {
-    post_json::<loonfs_api::ReleaseSnapshotResponse>(
-        &format!("{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}/release"),
-        serde_json::json!({}),
-    )
-    .expect("release snapshot");
+fn delete_snapshot(server_url: &str, namespace: &str, snapshot_id: &str) {
+    retry_result_on_macos_teardown_einval(|| {
+        decode_json_response::<loonfs_api::DeleteSnapshotResponse>(
+            raw_agent()
+                .delete(&format!(
+                    "{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call(),
+        )
+    })
+    .expect("delete snapshot");
 }
 
 fn stat_url(server_url: &str, namespace: &str, snapshot_id: Option<&str>) -> String {
@@ -403,18 +409,18 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         .put_file_bytes(&keep, b"kept", &replace_file_options())
         .await
         .expect("create file");
-    let released = create_snapshot(&harness.server_url, namespace.as_str(), "released", 10_000);
-    release_snapshot(
+    let deleted = create_snapshot(&harness.server_url, namespace.as_str(), "deleted", 10_000);
+    delete_snapshot(
         &harness.server_url,
         namespace.as_str(),
-        released.snapshot_id.as_str(),
+        deleted.snapshot_id.as_str(),
     );
 
-    let released_id = released.snapshot_id.as_str();
+    let deleted_id = deleted.snapshot_id.as_str();
     let routes = [
         (
             "stat",
-            stat_url(&harness.server_url, namespace.as_str(), Some(released_id)),
+            stat_url(&harness.server_url, namespace.as_str(), Some(deleted_id)),
             None,
         ),
         (
@@ -422,7 +428,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
             listing_url(
                 &harness.server_url,
                 namespace.as_str(),
-                Some(released_id),
+                Some(deleted_id),
                 None,
                 None,
             ),
@@ -433,14 +439,14 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
             content_url(
                 &harness.server_url,
                 namespace.as_str(),
-                Some(released_id),
+                Some(deleted_id),
                 None,
             ),
             None,
         ),
         (
             "download",
-            download_url(&harness.server_url, namespace.as_str(), Some(released_id)),
+            download_url(&harness.server_url, namespace.as_str(), Some(deleted_id)),
             Some(serde_json::json!({"path": "/keep.txt"})),
         ),
         (
@@ -450,7 +456,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
                 namespace.as_str(),
                 ChangeSeq(0),
                 "2",
-                Some(released_id),
+                Some(deleted_id),
             ),
             None,
         ),
@@ -460,7 +466,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
             Some(body) => post_json::<serde_json::Value>(&url, body),
             None => get_json::<serde_json::Value>(&url),
         }
-        .expect_err("released snapshot read must fail");
+        .expect_err("deleted snapshot read must fail");
         assert_eq!(error.0, 404, "route {name}");
         assert_eq!(error.1.code, "snapshot_not_found", "route {name}");
     }

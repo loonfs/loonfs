@@ -135,28 +135,23 @@ impl MetricLabel for MaintenanceConclusion {
 /// One reclaimable family: its label, and the count a pass reports for it.
 type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 
-/// Reclaimable object families one collection pass counts.
-///
-/// Metric labels remain unchanged even though the API fields are now grouped.
-const GC_CATEGORIES: [GcCategory; 9] = [
+/// Counts each deletion once, with checkpoint records grouped by owner.
+const GC_CATEGORIES: [GcCategory; 8] = [
     ("deleted_wal_segments", |gc| gc.deleted.wal_segments),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
     }),
     ("deleted_manifests", |gc| gc.deleted.manifests),
-    ("deleted_checkpoint_records", |gc| {
-        gc.deleted.checkpoint_records
+    ("deleted_fork_checkpoints", |gc| {
+        gc.deleted_checkpoints_by_owner.fork
     }),
-    ("released_fork_checkpoints", |gc| {
-        gc.released_checkpoints.fork
-    }),
-    ("released_expired_checkpoints", |gc| {
-        gc.released_checkpoints.expired
+    ("deleted_expired_checkpoints", |gc| {
+        gc.deleted_checkpoints_by_owner.expired
     }),
     ("deleted_upload_sessions", |gc| gc.deleted.upload_sessions),
     ("deleted_content_objects", |gc| gc.deleted.content_objects),
-    ("released_snapshot_checkpoints", |gc| {
-        gc.released_checkpoints.snapshot
+    ("deleted_snapshot_checkpoints", |gc| {
+        gc.deleted_checkpoints_by_owner.snapshot
     }),
 ];
 
@@ -1623,7 +1618,11 @@ mod tests {
                 content_objects: 5,
                 ..loonfs_api::DeletedObjectCounts::default()
             },
-            released_checkpoints: loonfs_api::ReleasedCheckpointCounts::default(),
+            deleted_checkpoints_by_owner: loonfs_api::DeletedCheckpointsByOwner {
+                fork: 2,
+                expired: 3,
+                snapshot: 7,
+            },
             retained_candidates: 2,
             retained: loonfs_api::RetainedCandidates {
                 referenced: 2,
@@ -1657,6 +1656,16 @@ mod tests {
         assert_eq!(counter(&snapshot, "loonfs.gc.retained", &[]), 4);
         // Every family registers at construction, so a scrape names the
         // whole reclaimable vocabulary rather than only what has happened.
-        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
+        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 8);
+        for (category, expected) in [
+            ("deleted_fork_checkpoints", 4),
+            ("deleted_expired_checkpoints", 6),
+            ("deleted_snapshot_checkpoints", 14),
+        ] {
+            assert_eq!(
+                counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)]),
+                expected
+            );
+        }
     }
 }

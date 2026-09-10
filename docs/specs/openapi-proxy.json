@@ -871,6 +871,24 @@
         ],
         "type": "string"
       },
+      "DeleteSnapshotResponse": {
+        "description": "Identifies the snapshot record that was deleted.",
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the snapshot belonged to."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Deleted snapshot record."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "snapshot_id"
+        ],
+        "type": "object"
+      },
       "DestinationBehavior": {
         "description": "Destination-conflict behavior for path-oriented puts, moves, and copies.",
         "enum": [
@@ -2398,24 +2416,6 @@
         ],
         "type": "object"
       },
-      "ReleaseSnapshotResponse": {
-        "description": "Result of releasing a read snapshot.",
-        "properties": {
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace the snapshot belonged to."
-          },
-          "snapshot_id": {
-            "$ref": "#/components/schemas/CheckpointId",
-            "description": "Released snapshot id."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "snapshot_id"
-        ],
-        "type": "object"
-      },
       "RevisionNo": {
         "description": "Revision number for a file's content. It increases whenever the content is replaced or restored.",
         "format": "int64",
@@ -2986,7 +2986,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -3201,7 +3201,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "413": {
             "content": {
@@ -3312,7 +3312,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "501": {
             "content": {
@@ -3453,7 +3453,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -3568,7 +3568,7 @@
                 }
               }
             },
-            "description": "Namespace deleted or snapshot released or expired"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -3992,7 +3992,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/snapshots": {
       "get": {
-        "description": "Lists live snapshots in snapshot-id order. Released and expired snapshots are omitted.",
+        "description": "Lists live snapshots in snapshot-id order. Deleted and expired snapshots are omitted.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -4191,6 +4191,87 @@
         "x-loonfs-retry": "not_idempotent"
       }
     },
+    "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}": {
+      "delete": {
+        "description": "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
+        "operationId": "delete_snapshot",
+        "parameters": [
+          {
+            "description": "Application namespace alias",
+            "in": "path",
+            "name": "namespace_alias",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot id",
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteSnapshotResponse"
+                }
+              }
+            },
+            "description": "Snapshot record deleted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid id or non-snapshot record"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot not found"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Delete snapshot",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-request-name": "DeleteSnapshotRequest",
+        "x-fern-sdk-group-name": [
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "delete",
+        "x-loonfs-retry": "idempotent"
+      }
+    },
     "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend": {
       "post": {
         "description": "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
@@ -4288,77 +4369,6 @@
           "snapshots"
         ],
         "x-fern-sdk-method-name": "extend",
-        "x-loonfs-retry": "idempotent"
-      }
-    },
-    "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/release": {
-      "post": {
-        "description": "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
-        "operationId": "release_snapshot",
-        "parameters": [
-          {
-            "description": "Application namespace alias",
-            "in": "path",
-            "name": "namespace_alias",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Snapshot id",
-            "in": "path",
-            "name": "snapshot_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReleaseSnapshotResponse"
-                }
-              }
-            },
-            "description": "Snapshot release accepted"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid id or non-snapshot record"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "Release snapshot",
-        "tags": [
-          "namespaces"
-        ],
-        "x-fern-request-name": "ReleaseSnapshotRequest",
-        "x-fern-sdk-group-name": [
-          "snapshots"
-        ],
-        "x-fern-sdk-method-name": "release",
         "x-loonfs-retry": "idempotent"
       }
     },

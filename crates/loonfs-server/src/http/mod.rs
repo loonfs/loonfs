@@ -45,9 +45,9 @@ use self::handlers_inodes::{
     get_file_revision_bytes_by_inode, get_inode, list_file_revisions_by_inode, list_inode_children,
 };
 use self::handlers_namespace::{
-    create_checkpoint, create_namespace, create_snapshot, delete_namespace, extend_snapshot,
-    fork_namespace, get_namespace, get_namespace_diagnostics, list_checkpoints, list_snapshots,
-    release_checkpoint, release_snapshot, run_maintenance,
+    create_checkpoint, create_namespace, create_snapshot, delete_checkpoint, delete_namespace,
+    delete_snapshot, extend_snapshot, fork_namespace, get_namespace, get_namespace_diagnostics,
+    list_checkpoints, list_snapshots, run_maintenance,
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, get_grep_index, grep,
@@ -63,7 +63,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, post, put, MethodRouter};
+use axum::routing::{any, delete, get, post, put, MethodRouter};
 use axum::Router;
 use loonfs::ErrorCode;
 #[cfg(test)]
@@ -283,8 +283,8 @@ fn router(state: AppState) -> Router {
             post(extend_snapshot),
         )
         .route(
-            "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
-            post(release_snapshot),
+            "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
+            delete(delete_snapshot),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/entries",
@@ -412,8 +412,8 @@ fn router(state: AppState) -> Router {
                 post(create_checkpoint).get(list_checkpoints),
             )
             .route(
-                "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
-                post(release_checkpoint),
+                "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+                delete(delete_checkpoint),
             )
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/runs",

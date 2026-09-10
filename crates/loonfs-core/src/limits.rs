@@ -190,10 +190,15 @@ pub const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 pub const MAX_SIGNED_PARTS_PER_REQUEST: usize = 1_000;
 
 /// Bounds installation before an absent target's pin can be collected.
-pub const FORK_INSTALL_BUDGET_MS: u64 = GC_MIN_GRACE_WINDOW_MS
-    - PROVIDER_OPERATION_DEADLINE_MS
-    - PROVIDER_ATTEMPT_TIMEOUT_MS
-    - GC_SAFETY_MARGIN_MS;
+pub const FORK_INSTALL_BUDGET_MS: u64 = METADATA_PUBLICATION_BUDGET_MS;
+
+const _: () = assert!(
+    GC_MIN_GRACE_WINDOW_MS
+        >= FORK_INSTALL_BUDGET_MS
+            + PROVIDER_OPERATION_DEADLINE_MS
+            + PROVIDER_ATTEMPT_TIMEOUT_MS
+            + GC_SAFETY_MARGIN_MS
+);
 
 /// Lifetime resolved on the creating host; expiry checks add no clock-error margin.
 pub const UPLOAD_SESSION_LEASE_MS: u64 = 24 * 60 * 60 * 1000;

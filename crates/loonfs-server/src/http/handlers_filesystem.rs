@@ -207,7 +207,7 @@ impl ReadTarget {
             (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -261,7 +261,7 @@ pub(super) async fn list_path_entries(
             (status = 400, description = "Invalid path, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -309,7 +309,7 @@ pub(super) async fn get_path_entry(
             (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
@@ -587,7 +587,7 @@ pub(super) async fn create_commit(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or snapshot not found", body = ApiError),
             (status = 409, description = "The cursor is older than the retained change history and requires a fresh snapshot", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot released or expired", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
