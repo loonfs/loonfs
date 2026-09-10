@@ -5,7 +5,7 @@
 use crate::common::http_split_support::test_config;
 use crate::common::start_server;
 use loonfs_api::{
-    ApiError, ChangeSeq, CreateCheckpointRequest, ListSnapshotsResponse, ReleaseSnapshotResponse,
+    ApiError, ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, ListSnapshotsResponse,
     SnapshotSummary,
 };
 use loonfs_server::MaintenanceMode;
@@ -51,31 +51,31 @@ fn extend_snapshot(
     )
 }
 
-fn release_snapshot(
+fn delete_snapshot(
     server_url: &str,
     namespace: &str,
     snapshot_id: &str,
-) -> ApiResult<ReleaseSnapshotResponse> {
-    post_json(&format!(
-        "{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}/release"
+) -> ApiResult<DeleteSnapshotResponse> {
+    delete_json(&format!(
+        "{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}"
     ))
 }
 
-fn release_checkpoint(
+fn delete_checkpoint(
     server_url: &str,
     namespace: &str,
     checkpoint_id: &str,
-) -> ApiResult<loonfs_api::ReleaseCheckpointResponse> {
-    post_json(&format!(
-        "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{checkpoint_id}/release"
+) -> ApiResult<loonfs_api::DeleteCheckpointResponse> {
+    delete_json(&format!(
+        "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{checkpoint_id}"
     ))
 }
 
-fn post_json<T: DeserializeOwned>(url: &str) -> ApiResult<T> {
+fn delete_json<T: DeserializeOwned>(url: &str) -> ApiResult<T> {
     retry_result_on_macos_teardown_einval(|| {
         decode_response(
             raw_agent()
-                .post(url)
+                .delete(url)
                 .set("authorization", "Bearer test-token")
                 .call(),
         )
@@ -172,35 +172,35 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
     .expect("repeat snapshot extension");
     assert_eq!(repeated.expires_at_ms, extended.expires_at_ms);
 
-    let released = release_snapshot(
+    let deleted = delete_snapshot(
         &harness.server_url,
         namespace.as_str(),
         created.snapshot_id.as_str(),
     )
-    .expect("release snapshot");
+    .expect("delete snapshot");
     assert_eq!(
-        released,
-        ReleaseSnapshotResponse {
+        deleted,
+        DeleteSnapshotResponse {
             namespace_id: namespace.clone(),
             snapshot_id: created.snapshot_id.clone(),
         }
     );
     assert!(list_snapshots(&harness.server_url, namespace.as_str())
-        .expect("list after release")
+        .expect("list after delete")
         .snapshots
         .is_empty());
     let diagnostics = harness
         .client
         .get_namespace_diagnostics(&namespace)
         .await
-        .expect("read diagnostics after release");
+        .expect("read diagnostics after delete");
     assert_eq!(diagnostics.live_snapshots, 0);
-    let (status, error) = release_snapshot(
+    let (status, error) = delete_snapshot(
         &harness.server_url,
         namespace.as_str(),
         created.snapshot_id.as_str(),
     )
-    .expect_err("repeat release");
+    .expect_err("repeat delete");
     assert_eq!(status, 404);
     assert_eq!(error.code, "snapshot_not_found");
     let (status, error) = extend_snapshot(
@@ -209,7 +209,7 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
         created.snapshot_id.as_str(),
         20_000,
     )
-    .expect_err("released snapshot cannot extend");
+    .expect_err("deleted snapshot cannot extend");
     assert_eq!(status, 404);
     assert_eq!(error.code, "snapshot_not_found");
 
@@ -262,8 +262,8 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
         .expect_err("unknown snapshot must fail extension");
     assert_eq!(status, 404);
     assert_eq!(error.code, "snapshot_not_found");
-    let (status, error) = release_snapshot(&harness.server_url, namespace.as_str(), unknown)
-        .expect_err("unknown snapshot release");
+    let (status, error) = delete_snapshot(&harness.server_url, namespace.as_str(), unknown)
+        .expect_err("unknown snapshot delete");
     assert_eq!(status, 404);
     assert_eq!(error.code, "snapshot_not_found");
 
@@ -271,7 +271,7 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_snapshots_enforce_quota_and_release_frees_a_slot() {
+async fn http_snapshots_enforce_quota_and_delete_frees_a_slot() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config(
         temp_dir.path().join("store"),
@@ -294,14 +294,14 @@ async fn http_snapshots_enforce_quota_and_release_frees_a_slot() {
             .expect_err("quota must refuse second snapshot");
     assert_eq!(status, 409);
     assert_eq!(error.code, "snapshot_quota_exceeded");
-    release_snapshot(
+    delete_snapshot(
         &harness.server_url,
         namespace.as_str(),
         first.snapshot_id.as_str(),
     )
-    .expect("release first snapshot");
+    .expect("delete first snapshot");
     create_snapshot(&harness.server_url, namespace.as_str(), "second", 10_000)
-        .expect("released snapshot frees quota");
+        .expect("deleted snapshot frees quota");
 
     harness.server.abort();
 }
@@ -336,22 +336,22 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         .await
         .expect("create user checkpoint");
 
-    let (status, error) = release_checkpoint(
+    let (status, error) = delete_checkpoint(
         &harness.server_url,
         namespace.as_str(),
         snapshot.snapshot_id.as_str(),
     )
-    .expect_err("maintenance release must refuse snapshot");
+    .expect_err("maintenance delete must refuse snapshot");
     assert_eq!(status, 400);
-    assert!(error.message.contains("snapshot release operation"));
-    let (status, error) = release_snapshot(
+    assert!(error.message.contains("snapshot delete operation"));
+    let (status, error) = delete_snapshot(
         &harness.server_url,
         namespace.as_str(),
         checkpoint.checkpoint_id.as_str(),
     )
-    .expect_err("snapshot release must refuse user checkpoint");
+    .expect_err("snapshot delete must refuse user checkpoint");
     assert_eq!(status, 400);
-    assert!(error.message.contains("checkpoint release operation"));
+    assert!(error.message.contains("checkpoint delete operation"));
 
     let checkpoints: serde_json::Value = retry_result_on_macos_teardown_einval(|| {
         decode_response(

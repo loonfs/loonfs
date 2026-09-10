@@ -33,10 +33,10 @@ use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, ContentRef,
-    DeleteNamespaceResponse, DirectoryPageCursor, FileBytes, FileRevision, FileRevisionsPageCursor,
-    FlushWalResponse, InodeId, Namespace, NamespaceId, Page, PageRequest, PathEntry,
-    ReleaseCheckpointResponse, ReleaseSnapshotResponse, RevisionNo, TrashEntry, TrashPageCursor,
-    UploadId, WriterId,
+    DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
+    FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId, Namespace,
+    NamespaceId, Page, PageRequest, PathEntry, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
+    WriterId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -865,7 +865,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Lists one page of active checkpoints in ascending id order. Expired
-    /// records remain visible until garbage collection releases them.
+    /// records remain visible until garbage collection deletes them.
     pub async fn list_checkpoints_page(
         &self,
         request: PageRequest<CheckpointPageCursor>,
@@ -875,15 +875,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Releases a user-owned checkpoint by id.
+    /// Deletes a user-owned checkpoint by id.
     ///
     /// A missing pin returns `checkpoint_not_found`.
     /// Deletion makes its unreferenced manifest and runs collectable.
-    pub async fn release_checkpoint(
+    pub async fn delete_checkpoint(
         &self,
         checkpoint_id: &CheckpointId,
-    ) -> Result<ReleaseCheckpointResponse> {
-        crate::checkpoint::release_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
+    ) -> Result<DeleteCheckpointResponse> {
+        crate::checkpoint::delete_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
     }
 
     /// Extends a live snapshot without passing its lifetime ceiling.
@@ -905,11 +905,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
-    pub async fn release_snapshot(
+    pub async fn delete_snapshot(
         &self,
         checkpoint_id: &CheckpointId,
-    ) -> Result<ReleaseSnapshotResponse> {
-        crate::checkpoint::release_snapshot(
+    ) -> Result<DeleteSnapshotResponse> {
+        crate::checkpoint::delete_snapshot(
             &self.store,
             &self.namespace_id,
             checkpoint_id,

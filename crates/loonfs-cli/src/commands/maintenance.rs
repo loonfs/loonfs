@@ -8,7 +8,7 @@ use super::output::{
 use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
 use crate::args::{
     ChangesArgs, CommandKind, MaintenanceCheckpointArgs, MaintenanceCheckpointCommand,
-    MaintenanceCheckpointListArgs, MaintenanceCheckpointReleaseArgs, MaintenanceCommand,
+    MaintenanceCheckpointDeleteArgs, MaintenanceCheckpointListArgs, MaintenanceCommand,
     MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs, MaintenanceIndexGcArgs,
     MaintenanceJobArg, MaintenanceLoopArgs, MaintenanceMetadataArgs, MaintenanceNamespaceArgs,
     MaintenanceRetentionCommand, MaintenanceStoreCommand, MaintenanceStoreProbeArgs,
@@ -49,8 +49,8 @@ pub(crate) async fn run_maintenance_command(
             MaintenanceCheckpointCommand::List(args) => {
                 run_maintenance_checkpoint_list(kind, config_path, args).await
             }
-            MaintenanceCheckpointCommand::Release(args) => {
-                run_maintenance_checkpoint_release(kind, config_path, args).await
+            MaintenanceCheckpointCommand::Delete(args) => {
+                run_maintenance_checkpoint_delete(kind, config_path, args).await
             }
         },
         MaintenanceCommand::Index { command } => match command {
@@ -171,10 +171,10 @@ async fn run_maintenance_checkpoint_list(
     Ok(context.output(kind, CommandData::CheckpointsListed(response)))
 }
 
-async fn run_maintenance_checkpoint_release(
+async fn run_maintenance_checkpoint_delete(
     kind: CommandKind,
     config_path: &Path,
-    args: MaintenanceCheckpointReleaseArgs,
+    args: MaintenanceCheckpointDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let checkpoint_id = CheckpointId::parse(&args.checkpoint_id).map_err(|error| {
@@ -186,11 +186,11 @@ async fn run_maintenance_checkpoint_release(
     })?;
     let response = context
         .target
-        .release_checkpoint(context.namespace(), &checkpoint_id)
+        .delete_checkpoint(context.namespace(), &checkpoint_id)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    Ok(context.output(kind, CommandData::CheckpointReleased(response)))
+    Ok(context.output(kind, CommandData::CheckpointDeleted(response)))
 }
 
 /// One metadata-upkeep pass at a threshold of one segment.

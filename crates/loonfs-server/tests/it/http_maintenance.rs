@@ -6,8 +6,8 @@ use crate::common::http_split_support::*;
 use crate::common::{collect_checkpoints, start_server};
 use bytes::Bytes;
 use loonfs_api::{
-    ApiError, ChangeSeq, Checkpoint, CheckpointId, CheckpointOwnerSummary, ManifestNo,
-    ReleaseCheckpointResponse,
+    ApiError, ChangeSeq, Checkpoint, CheckpointId, CheckpointOwnerSummary,
+    DeleteCheckpointResponse, ManifestNo,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -26,17 +26,21 @@ fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
     )
 }
 
-fn post_checkpoint_release(
+fn delete_checkpoint(
     server_url: &str,
     namespace: &str,
     checkpoint_id: &str,
-) -> ApiResult<loonfs_api::ReleaseCheckpointResponse> {
-    post_maintenance_json(
-        &format!(
-            "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{checkpoint_id}/release"
-        ),
-        "test-token",
-    )
+) -> ApiResult<loonfs_api::DeleteCheckpointResponse> {
+    retry_result_on_macos_teardown_einval(|| {
+        decode_maintenance_response(
+            raw_agent()
+                .delete(&format!(
+                    "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{checkpoint_id}"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call(),
+        )
+    })
 }
 
 fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_api::GcResponse> {
@@ -238,36 +242,34 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(diagnostics.live_snapshots, 0);
     assert_eq!(diagnostics.live_checkpoints, 2);
 
-    // Release removes the record from the inventory.
-    let released = post_checkpoint_release(
+    let deleted = delete_checkpoint(
         &server_url,
         namespace.as_str(),
         first.checkpoint_id.as_str(),
     )
-    .expect("release checkpoint");
+    .expect("delete checkpoint");
     assert_eq!(
-        released,
-        ReleaseCheckpointResponse {
+        deleted,
+        DeleteCheckpointResponse {
             namespace_id: namespace.clone(),
             checkpoint_id: first.checkpoint_id.clone(),
         }
     );
-    let released_again = post_checkpoint_release(
+    let deleted_again = delete_checkpoint(
         &server_url,
         namespace.as_str(),
         first.checkpoint_id.as_str(),
     )
-    .expect_err("repeat release");
-    assert_eq!(released_again.code, "checkpoint_not_found");
+    .expect_err("repeat delete");
+    assert_eq!(deleted_again.code, "checkpoint_not_found");
     let diagnostics = client
         .get_namespace_diagnostics(&namespace)
         .await
-        .expect("read diagnostics after release");
+        .expect("read diagnostics after delete");
     assert_eq!(diagnostics.live_checkpoints, 1);
-    let bogus_release =
-        post_checkpoint_release(&server_url, namespace.as_str(), "not-a-checkpoint-id")
-            .expect_err("malformed checkpoint id");
-    assert_eq!(bogus_release.code, "invalid_request");
+    let bogus_delete = delete_checkpoint(&server_url, namespace.as_str(), "not-a-checkpoint-id")
+        .expect_err("malformed checkpoint id");
+    assert_eq!(bogus_delete.code, "invalid_request");
 
     // Reject grace periods below the safety minimum.
     let unsafe_gc = post_gc_with(
@@ -349,7 +351,10 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
     assert_eq!(report.deleted.wal_segments, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
-    assert_eq!(report.deleted.checkpoint_records, 0);
+    assert_eq!(
+        report.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
 
     let bytes = client
         .get_file_bytes(&target, &Default::default())

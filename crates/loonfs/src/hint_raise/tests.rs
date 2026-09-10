@@ -227,7 +227,7 @@ async fn readers_probe_commits_immediately_and_check_deletion_on_the_interval() 
     assert_eq!(store.counts().heads, 1);
     let always_check = FsReader::builder_with_store(store.clone())
         .runtime_cache(crate::RuntimeCacheConfig {
-            control_revalidation_interval_ms: 0,
+            manifest_revalidation_interval_ms: 0,
             ..Default::default()
         })
         .build()

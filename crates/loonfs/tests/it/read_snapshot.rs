@@ -408,7 +408,7 @@ async fn a_deleted_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
         .expect("create checkpoint");
     runtime
         .maintenance
-        .release_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        .delete_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("release checkpoint");
 
@@ -513,7 +513,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
 
     runtime
         .writer
-        .release_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
         .await
         .expect("release snapshot");
     assert_core_error_kind(

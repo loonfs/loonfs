@@ -63,7 +63,7 @@ pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore 
 ///
 /// Namespace identity and lifecycle fields come from `live_head`. Sequence
 /// data comes from the checkpoint's manifest, so later WAL entries are not
-/// replayed. Missing or released checkpoints return `checkpoint_unavailable`.
+/// replayed. Missing or deleted checkpoints return `checkpoint_unavailable`.
 pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,

@@ -541,7 +541,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         .await
         .expect("create checkpoint");
     fs.maintenance
-        .release_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        .delete_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("release checkpoint");
 

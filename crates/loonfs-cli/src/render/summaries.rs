@@ -208,7 +208,7 @@ pub(super) fn maintenance_assignment(namespaces: &[NamespaceId], jobs: &[String]
 /// Formats a checkpoint owner for the table view.
 ///
 /// User checkpoints show their label. Fork checkpoints show their target
-/// namespace because users cannot release them, and snapshots say what they
+/// namespace because users cannot delete them, and snapshots say what they
 /// are for the same reason.
 pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     match owner {
@@ -220,12 +220,16 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     }
 }
 
-fn gc_deleted_counts(deleted: &loonfs_api::DeletedObjectCounts) -> [(&'static str, u64); 7] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
+    let deleted = &report.deleted;
+    let checkpoints = &report.deleted_checkpoints_by_owner;
     [
         ("wal segments", deleted.wal_segments),
         ("metadata segments", deleted.metadata_segments),
         ("manifests", deleted.manifests),
-        ("checkpoint records", deleted.checkpoint_records),
+        ("fork checkpoints", checkpoints.fork),
+        ("expired checkpoints", checkpoints.expired),
+        ("snapshot checkpoints", checkpoints.snapshot),
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
         ("retired content objects", deleted.retired_content_objects),
@@ -239,7 +243,7 @@ fn push_top_retention_reason(summary: &mut String, response: &GcResponse) {
 }
 
 pub(super) fn gc_summary(report: &GcResponse) -> String {
-    let deleted = gc_deleted_counts(&report.deleted)
+    let deleted = gc_deleted_counts(report)
         .into_iter()
         .map(|(family, count)| format!("{count} {family}"))
         .collect::<Vec<_>>()
@@ -249,12 +253,6 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
         report.retained_candidates
     );
     push_top_retention_reason(&mut summary, report);
-    if report.released_checkpoints.fork > 0 {
-        summary.push_str(&format!(
-            "; released {} fork checkpoints",
-            report.released_checkpoints.fork
-        ));
-    }
     if let Some(deadline) = report.reclaim_after_ms {
         // A future retirement deadline always contributes to the run's earliest deadline.
         if report

@@ -26,7 +26,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "tail-projection-cache-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
-            control_revalidation_interval_ms: u64::MAX,
+            manifest_revalidation_interval_ms: u64::MAX,
             ..Default::default()
         })
     });
@@ -376,7 +376,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
-            control_revalidation_interval_ms: u64::MAX,
+            manifest_revalidation_interval_ms: u64::MAX,
             max_cached_wal_tail_projection_rows: 0,
             ..RuntimeCacheConfig::default()
         })
@@ -661,7 +661,7 @@ fn runtime_control_cache_probes_wal_after_external_commit() {
     let object_store = raw_store.store();
     let reader = open_runtime_with(object_store.clone(), "control-cache-reader", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
-            control_revalidation_interval_ms: u64::MAX,
+            manifest_revalidation_interval_ms: u64::MAX,
             ..Default::default()
         })
     });
@@ -851,7 +851,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         builder
             .stored_metadata_block_cache(stored_blocks.clone())
             .runtime_cache(RuntimeCacheConfig {
-                control_revalidation_interval_ms: 0,
+                manifest_revalidation_interval_ms: 0,
                 ..Default::default()
             })
     });

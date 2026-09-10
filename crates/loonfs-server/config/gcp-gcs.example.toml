@@ -26,3 +26,6 @@ key_prefix = "loonfs-demo"
 [store.credentials]
 kind = "service-account-file"
 path = "/path/to/service-account.json"
+
+#[runtime_cache]
+#manifest_revalidation_interval_ms = 1000

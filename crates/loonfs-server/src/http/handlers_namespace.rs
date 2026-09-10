@@ -14,18 +14,18 @@ use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     decode_namespace_cursor, CapabilityDocument, Checkpoint, CheckpointId, CreateCheckpointRequest,
-    CreateNamespaceRequest, CreateSnapshotRequest, ErrorCode, ExtendSnapshotRequest,
-    ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, PageRequest,
-    PaginationPolicy, ReleaseCheckpointResponse, ReleaseSnapshotResponse, RunMaintenanceRequest,
-    RunMaintenanceResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    CreateNamespaceRequest, CreateSnapshotRequest, DeleteCheckpointResponse,
+    DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest, ForkNamespaceRequest,
+    ListCheckpointsResponse, ListSnapshotsResponse, PageRequest, PaginationPolicy,
+    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_SNAPSHOT_MAX_LIFETIME_MS,
+    LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE, LIMIT_SNAPSHOT_MAX_TTL_MS,
+    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -455,7 +455,7 @@ pub(super) async fn create_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
-        description = "Lists live snapshots in snapshot-id order. Released and expired snapshots are omitted.",
+        description = "Lists live snapshots in snapshot-id order. Deleted and expired snapshots are omitted.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
@@ -541,35 +541,36 @@ pub(super) async fn extend_snapshot(
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
-        post,
-        operation_id = "release_snapshot",
+        delete,
+        operation_id = "delete_snapshot",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/release",
+        path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
-        summary = "Release snapshot",
+        summary = "Delete snapshot",
         description = "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("snapshot_id" = String, Path, description = "Snapshot id")
         ),
         responses(
-            (status = 200, description = "Snapshot release accepted", body = ReleaseSnapshotResponse),
+            (status = 200, description = "Snapshot record deleted", body = DeleteSnapshotResponse),
             (status = 400, description = "Invalid id or non-snapshot record", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Snapshot not found", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
 )]
-pub(super) async fn release_snapshot(
+pub(super) async fn delete_snapshot(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<ReleaseSnapshotResponse>, ApiResponseError> {
+) -> Result<Json<DeleteSnapshotResponse>, ApiResponseError> {
     let snapshot_id = parse_path_id::<CheckpointId>("snapshot_id", &snapshot_id)?;
     let response = state
         .writer
-        .release_snapshot(&namespace_id, &snapshot_id)
+        .delete_snapshot(&namespace_id, &snapshot_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
@@ -622,7 +623,7 @@ fn snapshot_expiry_from_ttl(
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
         tag = "maintenance",
         summary = "Create checkpoint",
-        description = "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is released, so routine maintenance should flush the WAL instead. This is a maintenance operation, not a file mutation.",
+        description = "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is deleted, so routine maintenance should flush the WAL instead. This is a maintenance operation, not a file mutation.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
@@ -709,19 +710,19 @@ pub(super) async fn list_checkpoints(
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
-        post,
-        operation_id = "release_checkpoint",
+        delete,
+        operation_id = "delete_checkpoint",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
+        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
         tag = "maintenance",
-        summary = "Release checkpoint",
+        summary = "Delete checkpoint",
         description = "Deletes a user-owned checkpoint pin. A missing id returns checkpoint_not_found. Garbage collection can reclaim its unreferenced manifest and runs.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("checkpoint_id" = String, Path, description = "Checkpoint id")
         ),
         responses(
-            (status = 200, description = "Checkpoint pin deleted", body = ReleaseCheckpointResponse),
+            (status = 200, description = "Checkpoint pin deleted", body = DeleteCheckpointResponse),
             (status = 400, description = "Invalid id, or the checkpoint is owned by another operation", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or checkpoint not found", body = ApiError),
@@ -729,16 +730,16 @@ pub(super) async fn list_checkpoints(
         )
     )
 )]
-pub(super) async fn release_checkpoint(
+pub(super) async fn delete_checkpoint(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<ReleaseCheckpointResponse>, ApiResponseError> {
+) -> Result<Json<DeleteCheckpointResponse>, ApiResponseError> {
     let checkpoint_id = parse_path_id::<CheckpointId>("checkpoint_id", &checkpoint_id)?;
     let response = state
         .maintenance
-        .release_checkpoint(&namespace_id, &checkpoint_id)
+        .delete_checkpoint(&namespace_id, &checkpoint_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))

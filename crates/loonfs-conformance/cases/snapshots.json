@@ -1,6 +1,6 @@
 {
   "name": "snapshots",
-  "intent": "Checks snapshot lifecycle operations, captured reads, bounded change feeds, and snapshot error contracts.",
+  "intent": "Checks snapshot creation, extension, deletion, captured reads, bounded change feeds, and not-found errors after deletion.",
   "request": {
     "namespace_id": "conf-snapshots",
     "directory": "/tree",

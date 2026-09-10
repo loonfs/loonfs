@@ -44,7 +44,7 @@ use std::sync::Arc;
 /// Lifetime of the checkpoint used by one grep backfill attempt.
 ///
 /// If the checkpoint expires before backfill finishes, garbage collection
-/// eventually releases it and the worker restarts from a fresh checkpoint.
+/// eventually deletes it and the worker restarts from a fresh checkpoint.
 /// The worker does not extend an old pin.
 pub const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -155,7 +155,7 @@ pub enum GrepReorganizeOutcome {
 /// Bounded writer for grep-owned durable state.
 ///
 /// The worker writes only grep keys. It reads namespace state through
-/// `FsReader` and creates or releases backfill checkpoints through `FsMaintenance`,
+/// `FsReader` and creates or deletes backfill checkpoints through `FsMaintenance`,
 /// preserving the maintenance handle's actor identity. Scheduling is external to
 /// this type.
 #[derive(Clone)]
@@ -248,7 +248,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         ) {
             Ok(next) => next,
             Err(error) => {
-                self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 return Err(error);
             }
@@ -262,7 +262,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 state: published.manifest_state().status().clone(),
             }),
             Err(GrepError::PublicationConflict { .. }) => {
-                self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 Ok(GrepEnableOutcome::Superseded)
             }
@@ -314,7 +314,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
-                    self.release_checkpoint_if_present(namespace_id, &checkpoint_id)
+                    self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
                         .await?;
                 }
                 Ok(GrepDisableOutcome::Disabled)
@@ -436,14 +436,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await?)
     }
 
-    async fn release_checkpoint_if_present(
+    async fn delete_checkpoint_if_present(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
     ) -> Result<()> {
         match self
             .maintenance
-            .release_checkpoint(namespace_id, checkpoint_id)
+            .delete_checkpoint(namespace_id, checkpoint_id)
             .await
         {
             Ok(_) => Ok(()),
@@ -472,7 +472,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         ) {
             Ok(next) => next,
             Err(error) => {
-                self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 return Err(error);
             }
@@ -490,7 +490,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
-                    self.release_checkpoint_if_present(namespace_id, &previous_checkpoint_id)
+                    self.delete_checkpoint_if_present(namespace_id, &previous_checkpoint_id)
                         .await?;
                 }
                 Ok(GrepBuildOutcome::BackfillRestarted {
@@ -498,7 +498,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 })
             }
             Err(GrepError::PublicationConflict { .. }) => {
-                self.release_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await?;
                 Ok(GrepBuildOutcome::Superseded)
             }
@@ -607,7 +607,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
-                    self.release_checkpoint_if_present(namespace_id, &checkpoint_id)
+                    self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
                         .await?;
                 }
                 Ok(GrepBuildOutcome::Published {

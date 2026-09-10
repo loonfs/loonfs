@@ -5,7 +5,7 @@ export interface ProxyConfig {
 }
 
 interface ProxyRoute {
-    method: "GET" | "POST" | "PUT";
+    method: "GET" | "POST" | "PUT" | "DELETE";
     pattern: RegExp;
 }
 
@@ -23,7 +23,7 @@ const HOP_BY_HOP_HEADERS = [
 
 // These routes must match docs/specs/openapi-proxy.json.
 interface ProxyRouteTemplate {
-    method: "GET" | "POST" | "PUT";
+    method: "GET" | "POST" | "PUT" | "DELETE";
     template: string;
 }
 
@@ -41,7 +41,7 @@ const PROXY_ROUTE_TABLE: readonly ProxyRouteTemplate[] = [
     { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/snapshots" },
     { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/snapshots" },
     { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend" },
-    { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/release" },
+    { method: "DELETE", template: "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}" },
     { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/uploads" },
     { method: "GET", template: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}" },
     { method: "POST", template: "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort" },

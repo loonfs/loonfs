@@ -45,7 +45,7 @@ _ROUTE_TEMPLATES: tuple[tuple[str, str], ...] = (
     ("GET", "/v0/namespace-aliases/{namespace_alias}/snapshots"),
     ("POST", "/v0/namespace-aliases/{namespace_alias}/snapshots"),
     ("POST", "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend"),
-    ("POST", "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/release"),
+    ("DELETE", "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}"),
     ("POST", "/v0/namespace-aliases/{namespace_alias}/uploads"),
     ("GET", "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}"),
     ("POST", "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/abort"),

@@ -1,4 +1,8 @@
 //! Paces attempts to raise each namespace's WAL discovery hint.
+//!
+//! The raise follows the durable put and is awaited before acknowledgement for simplicity.
+//! It costs one compare-and-swap per `HINT_RAISE_SEGMENTS` batches, or when the manifest
+//! revalidation interval elapses. Correctness requires only that it follow the put.
 
 use crate::fs::ReadCore;
 use crate::NamespaceId;
@@ -32,7 +36,9 @@ impl DiscoveryHints {
         wal_no: WalNo,
     ) {
         let now_ms = core.inner.timer.monotonic_now_ms();
-        let interval_ms = core.runtime_cache_config().control_revalidation_interval_ms;
+        let interval_ms = core
+            .runtime_cache_config()
+            .manifest_revalidation_interval_ms;
         let known = {
             let mut namespaces = self
                 .namespaces

@@ -982,7 +982,9 @@ pub struct NamespaceManifestPayload {
     pub retention_floor_wal_no: WalNo,
     /// Positive publication number matching the manifest object key.
     pub manifest_no: ManifestNo,
-    /// Fences compaction publications from earlier claims.
+    /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
+    /// Streaming compaction rebuilds a whole family group and publishes once at the end.
+    /// Grep publishes each bounded step, so a lost race costs only one step.
     pub compactor_epoch: u64,
     /// Materialized head sequence, or the final namespace sequence on deletion.
     pub head_seq: ChangeSeq,

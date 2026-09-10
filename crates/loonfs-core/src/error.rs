@@ -167,7 +167,7 @@ pub enum CoreError {
     },
     #[error(
         "namespace `{namespace_id}` already has its limit of {max_live} live snapshots; \
-         release one or wait for a snapshot to expire"
+         delete one or wait for a snapshot to expire"
     )]
     SnapshotQuotaExceeded {
         namespace_id: loonfs_api::NamespaceId,

@@ -986,7 +986,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(stdout_string(&first_page_human).contains("next_cursor:"));
 
         // The human rendering is the same table in both modes, and it names
-        // the id the release command takes.
+        // the id the delete command takes.
         let listed_human =
             harness.run(&["maintenance", "checkpoint", "list", "--profile", profile]);
         assert_success(&listed_human);
@@ -995,18 +995,18 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(listed_text.contains(&checkpoint_id));
         assert!(listed_text.contains("nightly"));
 
-        // Releasing one leaves the other listed: a release is per record,
+        // Deleting one leaves the other listed: a delete is per record,
         // never per label.
         assert_success(&harness.run(&[
             "--json",
             "maintenance",
             "checkpoint",
-            "release",
+            "delete",
             &second_checkpoint_id,
             "--profile",
             profile,
         ]));
-        let after_release = harness.run(&[
+        let after_delete = harness.run(&[
             "--json",
             "maintenance",
             "checkpoint",
@@ -1014,8 +1014,8 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "--profile",
             profile,
         ]);
-        assert_success(&after_release);
-        let remaining = json_data(&after_release);
+        assert_success(&after_delete);
+        let remaining = json_data(&after_delete);
         let remaining = remaining["checkpoints"].as_array().expect("json array");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["checkpoint_id"], checkpoint_id.as_str());
@@ -1029,33 +1029,33 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(flush_data["reorganize"]["outcome"], "not_needed");
         assert!(flush_data["wal_flush"].is_object());
 
-        let release = harness.run(&[
+        let delete = harness.run(&[
             "--json",
             "maintenance",
             "checkpoint",
-            "release",
+            "delete",
             &checkpoint_id,
             "--profile",
             profile,
         ]);
-        assert_success(&release);
-        let release_data = json_data(&release);
-        assert_eq!(release_data["kind"], "checkpoint_released");
-        assert_eq!(release_data["checkpoint_id"], checkpoint_id.as_str());
-        assert!(release_data.get("was_active").is_none());
+        assert_success(&delete);
+        let delete_data = json_data(&delete);
+        assert_eq!(delete_data["kind"], "checkpoint_deleted");
+        assert_eq!(delete_data["checkpoint_id"], checkpoint_id.as_str());
+        assert!(delete_data.get("was_active").is_none());
 
-        let release_again = harness.run(&[
+        let delete_again = harness.run(&[
             "--json",
             "maintenance",
             "checkpoint",
-            "release",
+            "delete",
             &checkpoint_id,
             "--profile",
             profile,
         ]);
-        assert_failure(&release_again);
+        assert_failure(&delete_again);
         assert_eq!(
-            parse_json(&release_again.stderr)["error"]["code"],
+            parse_json(&delete_again.stderr)["error"]["code"],
             "checkpoint_not_found"
         );
 
@@ -1133,7 +1133,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
                 .as_u64()
                 .expect("json number")
         );
-        assert!(retained.contains_key("checkpoint_not_releasable"));
+        assert!(retained.contains_key("checkpoint_not_deletable"));
 
         let quiet_gc = harness.run(&["maintenance", "gc", "--profile", profile]);
         assert_success(&quiet_gc);

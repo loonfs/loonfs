@@ -13,7 +13,7 @@ pub(super) enum ForkCheckpointReachability {
     Retained { reason: &'static str },
 }
 
-pub(super) async fn release_source_checkpoint<S: ObjectStore + ?Sized>(
+pub(super) async fn delete_source_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     basis: &ForkBasis,
 ) -> Result<bool> {
@@ -26,7 +26,7 @@ pub(super) async fn release_source_checkpoint<S: ObjectStore + ?Sized>(
         .await
         .map_err(|error| CoreError::store(&key, &error))?
         .is_some();
-    crate::checkpoint::record::release_checkpoint_record(
+    crate::checkpoint::record::delete_checkpoint_record(
         store,
         &basis.manifest.owner_namespace_id,
         &basis.source_checkpoint_id,

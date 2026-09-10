@@ -150,7 +150,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: NamespaceCommand,
     },
-    /// Create, list, extend, or release point-in-time snapshots.
+    /// Create, list, extend, or delete point-in-time snapshots.
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
@@ -1125,8 +1125,8 @@ pub(crate) enum SnapshotCommand {
     List(SnapshotListArgs),
     /// Keep a snapshot available for longer.
     Extend(SnapshotExtendArgs),
-    /// Release a snapshot.
-    Release(SnapshotReleaseArgs),
+    /// Delete the snapshot record. A second call returns not found.
+    Delete(SnapshotDeleteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1173,10 +1173,10 @@ pub(crate) struct SnapshotExtendArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SnapshotReleaseArgs {
+pub(crate) struct SnapshotDeleteArgs {
     #[command(flatten)]
     pub target: SnapshotTargetArgs,
-    /// Snapshot id to release.
+    /// Snapshot id to delete.
     #[arg(value_hint = ValueHint::Other)]
     pub snapshot_id: String,
 }
@@ -1191,7 +1191,7 @@ pub(crate) enum MaintenanceCommand {
     Flush(MaintenanceNamespaceArgs),
     /// Run one full metadata compaction.
     Compact(MaintenanceNamespaceArgs),
-    /// Create, list, or release checkpoint pins.
+    /// Create, list, or delete checkpoint pins.
     Checkpoint {
         #[command(subcommand)]
         command: MaintenanceCheckpointCommand,
@@ -1221,8 +1221,8 @@ pub(crate) enum MaintenanceCheckpointCommand {
     Create(MaintenanceCheckpointArgs),
     /// List active checkpoint pins in checkpoint-id order.
     List(MaintenanceCheckpointListArgs),
-    /// Release a checkpoint pin.
-    Release(MaintenanceCheckpointReleaseArgs),
+    /// Delete the checkpoint record. A second call returns not found.
+    Delete(MaintenanceCheckpointDeleteArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1353,10 +1353,10 @@ pub(crate) struct MaintenanceCheckpointListArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct MaintenanceCheckpointReleaseArgs {
+pub(crate) struct MaintenanceCheckpointDeleteArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Checkpoint id to release.
+    /// Checkpoint id to delete.
     #[arg(value_hint = ValueHint::Other)]
     pub checkpoint_id: String,
 }
@@ -1465,7 +1465,7 @@ command_kinds! {
     SnapshotCreate => "snapshot_create",
     SnapshotList => "snapshot_list",
     SnapshotExtend => "snapshot_extend",
-    SnapshotRelease => "snapshot_release",
+    SnapshotDelete => "snapshot_delete",
     Current => "current",
     FilesystemLs => "filesystem_ls",
     FilesystemStat => "filesystem_stat",
@@ -1487,7 +1487,7 @@ command_kinds! {
     Doctor => "doctor",
     MaintenanceCheckpointCreate => "maintenance_checkpoint_create",
     MaintenanceCheckpointList => "maintenance_checkpoint_list",
-    MaintenanceCheckpointRelease => "maintenance_checkpoint_release",
+    MaintenanceCheckpointDelete => "maintenance_checkpoint_delete",
     MaintenanceFlush => "maintenance_flush",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
     MaintenanceLoop => "maintenance_loop",
@@ -1533,7 +1533,7 @@ impl Cli {
                 SnapshotCommand::Create(_) => CommandKind::SnapshotCreate,
                 SnapshotCommand::List(_) => CommandKind::SnapshotList,
                 SnapshotCommand::Extend(_) => CommandKind::SnapshotExtend,
-                SnapshotCommand::Release(_) => CommandKind::SnapshotRelease,
+                SnapshotCommand::Delete(_) => CommandKind::SnapshotDelete,
             },
             Command::Use(_) => CommandKind::NamespaceUse,
             Command::Current(_) => CommandKind::Current,
@@ -1565,8 +1565,8 @@ impl Cli {
                         CommandKind::MaintenanceCheckpointCreate
                     }
                     MaintenanceCheckpointCommand::List(_) => CommandKind::MaintenanceCheckpointList,
-                    MaintenanceCheckpointCommand::Release(_) => {
-                        CommandKind::MaintenanceCheckpointRelease
+                    MaintenanceCheckpointCommand::Delete(_) => {
+                        CommandKind::MaintenanceCheckpointDelete
                     }
                 },
                 MaintenanceCommand::Index { command } => match command {
@@ -1902,7 +1902,7 @@ mod tests {
         assert_subcommands(namespace, &["create", "show", "delete", "fork"]);
 
         let snapshot = subcommand(&command, "snapshot");
-        assert_subcommands(snapshot, &["create", "list", "extend", "release"]);
+        assert_subcommands(snapshot, &["create", "list", "extend", "delete"]);
 
         let maintenance = subcommand(&command, "maintenance");
         assert_subcommands(
@@ -1921,7 +1921,7 @@ mod tests {
         );
         assert_subcommands(
             subcommand(maintenance, "checkpoint"),
-            &["create", "list", "release"],
+            &["create", "list", "delete"],
         );
         assert_subcommands(
             subcommand(maintenance, "index"),

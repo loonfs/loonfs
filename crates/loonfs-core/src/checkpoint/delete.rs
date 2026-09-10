@@ -1,12 +1,12 @@
-//! Releases user-owned checkpoints.
+//! Deletes user-owned checkpoints.
 //!
-//! Forks and snapshots have separate lifecycle rules and cannot be released
+//! Forks and snapshots have separate lifecycle rules and cannot be deleted
 //! through this operation.
 
-use super::record::{load_checkpoint_record, release_checkpoint_record};
+use super::record::{delete_checkpoint_record, load_checkpoint_record};
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::CheckpointOwner;
-use loonfs_api::{CheckpointId, NamespaceId, ReleaseCheckpointResponse};
+use loonfs_api::{CheckpointId, DeleteCheckpointResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,12 +25,12 @@ impl CheckpointOwnerKind {
         }
     }
 
-    fn release_guidance(self) -> &'static str {
+    fn delete_guidance(self) -> &'static str {
         match self {
-            Self::User => "release it through the checkpoint release operation",
-            Self::Fork => "it is released by deleting that namespace",
+            Self::User => "delete it through the checkpoint delete operation",
+            Self::Fork => "it is deleted by deleting that namespace",
             Self::Snapshot => {
-                "it is released through the snapshot release operation or by its expiry"
+                "it is deleted through the snapshot delete operation or by its expiry"
             }
         }
     }
@@ -48,7 +48,7 @@ pub(super) fn ensure_owner_is(
     Err(CoreError::InvalidCheckpointRequest(format!(
         "checkpoint `{checkpoint_id}` is {}; {}",
         owner_description(owner),
-        actual.release_guidance()
+        actual.delete_guidance()
     )))
 }
 
@@ -63,7 +63,7 @@ fn owner_description(owner: &CheckpointOwner) -> String {
     }
 }
 
-pub(super) async fn release_owned_checkpoint<S: ObjectStore + ?Sized>(
+pub(super) async fn delete_owned_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
@@ -82,22 +82,22 @@ pub(super) async fn release_owned_checkpoint<S: ObjectStore + ?Sized>(
         });
     };
     ensure_owner_is(checkpoint_id, &loaded.state.owner, expected)?;
-    release_checkpoint_record(store, namespace_id, checkpoint_id).await
+    delete_checkpoint_record(store, namespace_id, checkpoint_id).await
 }
 
-pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
+pub(crate) async fn delete_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-) -> Result<ReleaseCheckpointResponse> {
-    release_owned_checkpoint(
+) -> Result<DeleteCheckpointResponse> {
+    delete_owned_checkpoint(
         store,
         namespace_id,
         checkpoint_id,
         CheckpointOwnerKind::User,
     )
     .await?;
-    Ok(ReleaseCheckpointResponse {
+    Ok(DeleteCheckpointResponse {
         namespace_id: namespace_id.clone(),
         checkpoint_id: checkpoint_id.clone(),
     })

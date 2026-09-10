@@ -718,7 +718,7 @@ pub struct ListFileRevisionsResponse {
 pub struct CreateCheckpointRequest {
     /// The non-unique label recorded on the checkpoint.
     pub name: String,
-    /// The checkpoint lifetime in milliseconds, or `None` for an explicit release only.
+    /// The checkpoint lifetime in milliseconds, or `None` for an explicit deletion only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
 }
@@ -743,13 +743,13 @@ pub struct ExtendSnapshotRequest {
     pub ttl_ms: u64,
 }
 
-/// Result of releasing a checkpoint pin.
+/// Identifies the checkpoint record that was deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ReleaseCheckpointResponse {
+pub struct DeleteCheckpointResponse {
     /// Namespace the checkpoint belonged to.
     pub namespace_id: NamespaceId,
-    /// Checkpoint the release targeted.
+    /// Deleted checkpoint record.
     pub checkpoint_id: CheckpointId,
 }
 
@@ -758,7 +758,7 @@ pub struct ReleaseCheckpointResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CheckpointOwnerSummary {
-    /// An operator-created pin, released by id or by its own expiry.
+    /// An operator-created pin, deleted by id or by its own expiry.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerUser"))]
     User {
         /// The non-unique label recorded by the creator.
@@ -784,7 +784,7 @@ pub enum CheckpointOwnerSummary {
 pub struct Checkpoint {
     /// Namespace that owns the checkpoint.
     pub namespace_id: NamespaceId,
-    /// Durable checkpoint id used to address the checkpoint for release.
+    /// Durable checkpoint id used to address the checkpoint for deletion.
     pub checkpoint_id: CheckpointId,
     /// Who owns the checkpoint, including the label carried by a user pin.
     pub owner: CheckpointOwnerSummary,
@@ -867,13 +867,13 @@ pub struct ListSnapshotsResponse {
     pub next_cursor: Option<String>,
 }
 
-/// Result of releasing a read snapshot.
+/// Identifies the snapshot record that was deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ReleaseSnapshotResponse {
+pub struct DeleteSnapshotResponse {
     /// Namespace the snapshot belonged to.
     pub namespace_id: NamespaceId,
-    /// Released snapshot id.
+    /// Deleted snapshot record.
     pub snapshot_id: CheckpointId,
 }
 
@@ -887,7 +887,7 @@ pub enum FlushWalOutcome {
     /// This call published the next current manifest.
     Published,
     /// Another publisher changed the current manifest before this call could publish.
-    RootAdvanced,
+    ManifestAdvanced,
 }
 
 /// The current manifest state after one WAL flush.
@@ -933,8 +933,8 @@ pub struct RetainedCandidates {
     pub no_provider_timestamp: u64,
     /// Unrecognized keys retained from object families scanned by garbage collection.
     pub unrecognized_key: u64,
-    /// Checkpoint records that could not be safely released or deleted.
-    pub checkpoint_not_releasable: u64,
+    /// Checkpoint records whose owner or grace window prevents deletion.
+    pub checkpoint_not_deletable: u64,
     /// Upload sessions still protected by a lease or grace window.
     pub upload_session_window: u64,
     /// Upload sessions whose deletion safety could not be determined.
@@ -951,8 +951,6 @@ pub struct DeletedObjectCounts {
     pub metadata_segments: u64,
     /// Unreferenced manifests deleted.
     pub manifests: u64,
-    /// Pin records deleted by this pass.
-    pub checkpoint_records: u64,
     /// Upload-session control objects deleted after the reap window.
     pub upload_sessions: u64,
     /// Content reclaimed through completed upload sessions.
@@ -968,7 +966,6 @@ impl DeletedObjectCounts {
             wal_segments,
             metadata_segments,
             manifests,
-            checkpoint_records,
             upload_sessions,
             content_objects,
             retired_content_objects,
@@ -976,26 +973,25 @@ impl DeletedObjectCounts {
         self.wal_segments += wal_segments;
         self.metadata_segments += metadata_segments;
         self.manifests += manifests;
-        self.checkpoint_records += checkpoint_records;
         self.upload_sessions += upload_sessions;
         self.content_objects += content_objects;
         self.retired_content_objects += retired_content_objects;
     }
 }
 
-/// Checkpoint record counts released by one garbage-collection pass, grouped by reason.
+/// Checkpoint record counts deleted by one garbage-collection pass, grouped by owner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ReleasedCheckpointCounts {
-    /// Fork-owned records released because their target namespaces are gone.
+pub struct DeletedCheckpointsByOwner {
+    /// Fork-owned records deleted because their target namespaces are gone.
     pub fork: u64,
-    /// User-owned records released after expiry or terminal namespace deletion.
+    /// User-owned records deleted after expiry or terminal namespace deletion.
     pub expired: u64,
-    /// Snapshot-owned records released after expiry or terminal namespace deletion.
+    /// Snapshot-owned records deleted after expiry or terminal namespace deletion.
     pub snapshot: u64,
 }
 
-impl ReleasedCheckpointCounts {
+impl DeletedCheckpointsByOwner {
     /// Adds counts from another pass.
     pub fn add(&mut self, other: &Self) {
         let Self {
@@ -1017,8 +1013,8 @@ pub struct GcResponse {
     pub namespace_id: NamespaceId,
     /// Objects the pass deleted, split by object family.
     pub deleted: DeletedObjectCounts,
-    /// The checkpoint records released by the pass, grouped by reason.
-    pub released_checkpoints: ReleasedCheckpointCounts,
+    /// The checkpoint records deleted by the pass, grouped by owner.
+    pub deleted_checkpoints_by_owner: DeletedCheckpointsByOwner,
     /// The number of candidates retained at deletion time.
     pub retained_candidates: u64,
     /// `retained_candidates` grouped by reason.
@@ -1039,7 +1035,7 @@ impl GcResponse {
         Self {
             namespace_id,
             deleted: DeletedObjectCounts::default(),
-            released_checkpoints: ReleasedCheckpointCounts::default(),
+            deleted_checkpoints_by_owner: DeletedCheckpointsByOwner::default(),
             retained_candidates: 0,
             retained: RetainedCandidates::default(),
             next_reclamation_at_ms: None,
@@ -1069,8 +1065,8 @@ pub enum RetainedReason {
     NoProviderTimestamp,
     /// Counts into [`RetainedCandidates::unrecognized_key`].
     UnrecognizedKey,
-    /// Counts into [`RetainedCandidates::checkpoint_not_releasable`].
-    CheckpointNotReleasable,
+    /// Counts into [`RetainedCandidates::checkpoint_not_deletable`].
+    CheckpointNotDeletable,
     /// Counts into [`RetainedCandidates::upload_session_window`].
     UploadSessionWindow,
     /// Counts into [`RetainedCandidates::upload_session_undecided`].
@@ -1084,7 +1080,7 @@ impl RetainedReason {
             Self::WithinGraceWindow => &mut retained.within_grace_window,
             Self::NoProviderTimestamp => &mut retained.no_provider_timestamp,
             Self::UnrecognizedKey => &mut retained.unrecognized_key,
-            Self::CheckpointNotReleasable => &mut retained.checkpoint_not_releasable,
+            Self::CheckpointNotDeletable => &mut retained.checkpoint_not_deletable,
             Self::UploadSessionWindow => &mut retained.upload_session_window,
             Self::UploadSessionUndecided => &mut retained.upload_session_undecided,
         }
@@ -1099,7 +1095,7 @@ impl RetainedCandidates {
             within_grace_window,
             no_provider_timestamp,
             unrecognized_key,
-            checkpoint_not_releasable,
+            checkpoint_not_deletable,
             upload_session_window,
             upload_session_undecided,
         } = *self;
@@ -1108,7 +1104,7 @@ impl RetainedCandidates {
             ("within_grace_window", within_grace_window),
             ("no_provider_timestamp", no_provider_timestamp),
             ("unrecognized_key", unrecognized_key),
-            ("checkpoint_not_releasable", checkpoint_not_releasable),
+            ("checkpoint_not_deletable", checkpoint_not_deletable),
             ("upload_session_window", upload_session_window),
             ("upload_session_undecided", upload_session_undecided),
         ]
@@ -1121,7 +1117,7 @@ impl RetainedCandidates {
             within_grace_window,
             no_provider_timestamp,
             unrecognized_key,
-            checkpoint_not_releasable,
+            checkpoint_not_deletable,
             upload_session_window,
             upload_session_undecided,
         } = other;
@@ -1129,7 +1125,7 @@ impl RetainedCandidates {
         self.within_grace_window += within_grace_window;
         self.no_provider_timestamp += no_provider_timestamp;
         self.unrecognized_key += unrecognized_key;
-        self.checkpoint_not_releasable += checkpoint_not_releasable;
+        self.checkpoint_not_deletable += checkpoint_not_deletable;
         self.upload_session_window += upload_session_window;
         self.upload_session_undecided += upload_session_undecided;
     }
@@ -1233,7 +1229,9 @@ pub enum ReorganizeStepOutcome {
     /// A family group needs a streaming compaction. Run the `metadata_compaction` job.
     CompactionRequired,
     /// Another publisher changed the current manifest before this step could publish.
-    RootAdvanced,
+    ManifestAdvanced,
+    /// A newer runtime holds the compactor epoch.
+    Fenced,
 }
 
 /// The result of one maintenance job. The `kind` matches the request.
@@ -2059,11 +2057,11 @@ mod tests {
             }),
         );
         assert_eq!(
-            serde_json::to_value(ReleaseCheckpointResponse {
+            serde_json::to_value(DeleteCheckpointResponse {
                 namespace_id,
                 checkpoint_id: checkpoint.checkpoint_id,
             })
-            .expect("serialize release checkpoint response"),
+            .expect("serialize delete checkpoint response"),
             serde_json::json!({
                 "namespace_id": "demo",
                 "checkpoint_id": "pin_00000000000000000001-0000000000000001",

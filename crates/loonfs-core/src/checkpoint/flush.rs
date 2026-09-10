@@ -163,7 +163,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     {
         ManifestPublicationOutcome::Published(current) => (FlushWalOutcome::Published, current),
         ManifestPublicationOutcome::CoveredByCurrent(current) => {
-            (FlushWalOutcome::RootAdvanced, current)
+            (FlushWalOutcome::ManifestAdvanced, current)
         }
         // A same-sequence reorganization can replace the predecessor without
         // covering the newer WAL head. That manifest wins, but it has not

@@ -13,6 +13,7 @@ mod compaction_retention;
 mod compactor;
 mod create;
 mod data_block_load;
+mod delete;
 mod error;
 mod files;
 mod flush;
@@ -22,7 +23,6 @@ mod load;
 pub(crate) mod publish;
 mod read_basis;
 pub(crate) mod record;
-mod release;
 mod reorganize;
 mod retention;
 mod row;
@@ -68,6 +68,7 @@ pub use self::streaming_compaction::{
 pub(crate) use self::compactor::claim_compactor;
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::data_block_load::DecodedRowWeight;
+pub(crate) use self::delete::delete_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::list::list_checkpoints_page;
@@ -77,12 +78,11 @@ pub(crate) use self::load::{
     LoadedMetadataBasis,
 };
 pub(crate) use self::record::load_checkpoint_record;
-pub(crate) use self::release::release_checkpoint;
 pub use self::reorganize::metadata_maintenance_due;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
-pub(crate) use self::snapshot::{classify_live_snapshot, extend_snapshot_expiry, release_snapshot};
+pub(crate) use self::snapshot::{classify_live_snapshot, delete_snapshot, extend_snapshot_expiry};
 pub(crate) use self::streaming_compaction::run_metadata_compaction_job;
 
 fn checkpoint_summary(

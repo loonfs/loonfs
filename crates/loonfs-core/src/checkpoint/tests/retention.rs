@@ -494,7 +494,7 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
 async fn deletion_is_terminal_and_the_next_pin_is_a_different_record() {
     // A deleted pin id is never reused. A caller asking for
     // a pin again — even at the same instant, over the same basis, under the
-    // same owner name — gets a brand new record, so the release can never be
+    // same owner name — gets a brand new record, so the delete can never be
     // undone by racing it.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -523,15 +523,14 @@ async fn deletion_is_terminal_and_the_next_pin_is_a_different_record() {
             .is_empty()
     );
 
-    let release =
-        crate::checkpoint::release_checkpoint(&store, &namespace_id, &first.checkpoint_id);
+    let delete = crate::checkpoint::delete_checkpoint(&store, &namespace_id, &first.checkpoint_id);
     let recreate = create_checkpoint(&store, &namespace_id, &context);
-    let (release, second) = tokio::join!(release, recreate);
-    assert_eq!(release.expect("release").checkpoint_id, first.checkpoint_id);
+    let (delete, second) = tokio::join!(delete, recreate);
+    assert_eq!(delete.expect("delete").checkpoint_id, first.checkpoint_id);
     let second = second.expect("a concurrent create takes a fresh pin");
     assert_ne!(
         second.checkpoint_id, first.checkpoint_id,
-        "a new pin never lands on a released record's key"
+        "a new pin never lands on a deleted record's key"
     );
 
     assert!(
@@ -542,7 +541,7 @@ async fn deletion_is_terminal_and_the_next_pin_is_a_different_record() {
     );
     let error = read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
         .await
-        .expect_err("a released record serves no read");
+        .expect_err("a deleted record serves no read");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &second.checkpoint_id)
@@ -552,9 +551,9 @@ async fn deletion_is_terminal_and_the_next_pin_is_a_different_record() {
     );
 
     assert_eq!(
-        crate::checkpoint::release_checkpoint(&store, &namespace_id, &first.checkpoint_id)
+        crate::checkpoint::delete_checkpoint(&store, &namespace_id, &first.checkpoint_id)
             .await
-            .expect_err("second release")
+            .expect_err("second delete")
             .code(),
         ErrorCode::CheckpointNotFound
     );
@@ -616,7 +615,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     }
 
     // The very first record is untouched by any of it: a pin taken without
-    // an expiry, or with one, is held until something releases it.
+    // an expiry, or with one, is held until something deletes it.
     let original = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
         .expect("read checkpoint record")
@@ -628,8 +627,8 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 
 #[tokio::test]
 async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
-    // No clock reads on the checkpoint read path. Release is the whole
-    // authority: until a pass turns the passed expiry into a release, the
+    // No clock reads on the checkpoint read path. Delete is the whole
+    // authority: until a pass turns the passed expiry into a delete, the
     // record is still a garbage-collection root, so the state behind it is
     // provably still there and serving it is safe.
     let temp_dir = tempdir().expect("tempdir");
@@ -669,11 +668,11 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
             .await
-            .expect("an expired but unreleased pin still serves")
+            .expect("an expired but undeleted pin still serves")
             .is_empty()
     );
 
-    // The pass that releases it is what ends the reads.
+    // The pass that deletes it is what ends the reads.
     crate::gc::gc_namespace(
         &store,
         &namespace_id,
@@ -687,14 +686,14 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     .expect("gc pass");
     let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
         .await
-        .expect_err("a released pin serves nothing");
+        .expect_err("a deleted pin serves nothing");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
 }
 
 #[tokio::test]
 async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     // No expiry means no clock: the record stays a serving pin however far
-    // the wall clock moves, and only an explicit release ends it.
+    // the wall clock moves, and only an explicit delete ends it.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -740,12 +739,12 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
             .is_empty()
     );
 
-    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pin.checkpoint_id)
+    crate::checkpoint::delete_checkpoint(&store, &namespace_id, &pin.checkpoint_id)
         .await
-        .expect("release");
+        .expect("delete");
     let error = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
         .await
-        .expect_err("release ends it");
+        .expect_err("delete ends it");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
 }
 
@@ -2450,9 +2449,9 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await
         .expect("pinned manifest")
         .is_some());
-    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pin.checkpoint_id)
+    crate::checkpoint::delete_checkpoint(&store, &namespace_id, &pin.checkpoint_id)
         .await
-        .expect("release pin");
+        .expect("delete pin");
     crate::gc::gc_namespace(
         &store,
         &namespace_id,
@@ -2460,13 +2459,13 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         &aged,
     )
     .await
-    .expect("collect released basis");
+    .expect("collect deleted basis");
     assert!(store
         .head(&manifest_key)
         .await
-        .expect("released manifest")
+        .expect("deleted manifest")
         .is_none());
     for key in &only_pinned {
-        assert!(store.head(key).await.expect("released segment").is_none());
+        assert!(store.head(key).await.expect("deleted segment").is_none());
     }
 }

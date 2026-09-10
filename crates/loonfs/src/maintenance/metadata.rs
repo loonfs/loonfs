@@ -97,7 +97,9 @@ fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceConclus
     };
     let reorganize = match step.reorganize {
         ReorganizeStepOutcome::UnitPublished => Some(MaintenanceConclusion::Progressed),
-        ReorganizeStepOutcome::RootAdvanced => Some(MaintenanceConclusion::Superseded),
+        ReorganizeStepOutcome::ManifestAdvanced | ReorganizeStepOutcome::Fenced => {
+            Some(MaintenanceConclusion::Superseded)
+        }
         ReorganizeStepOutcome::CompactionRequired => Some(MaintenanceConclusion::Blocked),
         ReorganizeStepOutcome::NotNeeded => None,
     };

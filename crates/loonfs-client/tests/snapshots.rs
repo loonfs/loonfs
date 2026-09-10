@@ -116,14 +116,14 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
 
     harness
         .client
-        .release_snapshot(&namespace, &created.snapshot_id)
+        .delete_snapshot(&namespace, &created.snapshot_id)
         .await
-        .expect("release snapshot");
+        .expect("delete snapshot");
     assert!(harness
         .client
         .list_snapshots_page(&namespace, None, None)
         .await
-        .expect("list released snapshots")
+        .expect("list deleted snapshots")
         .snapshots
         .is_empty());
 }

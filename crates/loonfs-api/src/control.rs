@@ -113,13 +113,13 @@ pub struct ManifestRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CheckpointOwner {
-    /// An operator-created pin, released explicitly by checkpoint id or by
+    /// An operator-created pin, deleted explicitly by checkpoint id or by
     /// its declared expiry. The name is a label, not a key: several records
     /// may carry the same name over different bases.
     User {
         /// Operator-facing label that need not be unique.
         name: String,
-        /// When garbage collection may release the pin without an explicit request.
+        /// When garbage collection may delete the pin without an explicit request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at_ms: Option<u64>,
     },

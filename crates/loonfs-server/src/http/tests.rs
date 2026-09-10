@@ -1,6 +1,8 @@
 #![allow(clippy::panic)]
 // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
+mod pin_deletion;
+
 use super::error::{status_for_core_error_code, ServedErrorCode};
 use super::metrics::ServerMetrics;
 use super::{
@@ -64,8 +66,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "bounded_merge_published",
     "built_through_seq",
     "checkpoint_id",
-    "checkpoint_not_releasable",
-    "checkpoint_records",
+    "checkpoint_not_deletable",
     "checkpoint_seq",
     "commit_id",
     "committed_by",
@@ -151,7 +152,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "put_file_revision_by_inode",
     "request_deadline_ms",
     "request_id",
-    "released_checkpoints",
+    "deleted_checkpoints_by_owner",
     "retained_candidates",
     "retention_floor_seq",
     "retries_exhausted",
@@ -159,7 +160,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "revision_committed_at_ms",
     "revision_committed_by",
     "revision_no",
-    "root_advanced",
+    "manifest_advanced",
     "run_id",
     "service_proxied",
     "serve_and_maintain",
@@ -2138,7 +2139,7 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("GET", "/v0/namespaces/demo/snapshots"),
         ("POST", "/v0/namespaces/demo/snapshots"),
         ("POST", "/v0/namespaces/demo/snapshots/chk_test/extend"),
-        ("POST", "/v0/namespaces/demo/snapshots/chk_test/release"),
+        ("DELETE", "/v0/namespaces/demo/snapshots/chk_test"),
         ("GET", "/v0/maintenance/namespaces/demo/diagnostics"),
         ("GET", "/v0/namespaces/demo/filesystem/entries"),
         ("GET", "/v0/namespaces/demo/filesystem/entry"),
@@ -2173,8 +2174,8 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("GET", "/v0/maintenance/namespaces/demo/checkpoints"),
         ("POST", "/v0/maintenance/namespaces/demo/checkpoints"),
         (
-            "POST",
-            "/v0/maintenance/namespaces/demo/checkpoints/chk_test/release",
+            "DELETE",
+            "/v0/maintenance/namespaces/demo/checkpoints/chk_test",
         ),
         ("POST", "/v0/maintenance/namespaces/demo/runs"),
         ("POST", "/v0/maintenance/store/probe"),

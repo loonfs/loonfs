@@ -64,9 +64,9 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
     assert_success(&captured);
     assert_eq!(captured.stdout, b"captured\n");
 
-    let released = harness.run(&["--json", "snapshot", "release", "demo", &snapshot_id]);
-    assert_success(&released);
-    assert_eq!(json_data(&released)["kind"], "snapshot_released");
+    let deleted = harness.run(&["--json", "snapshot", "delete", "demo", &snapshot_id]);
+    assert_success(&deleted);
+    assert_eq!(json_data(&deleted)["kind"], "snapshot_deleted");
 
     let empty = harness.run(&["--json", "snapshot", "list", "demo"]);
     assert_success(&empty);

@@ -2,8 +2,8 @@ use super::context::{resolve_profile_context, CommandContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
 use crate::args::{
-    CommandKind, SnapshotCommand, SnapshotCreateArgs, SnapshotExtendArgs, SnapshotListArgs,
-    SnapshotReleaseArgs, SnapshotTargetArgs,
+    CommandKind, SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs,
+    SnapshotListArgs, SnapshotTargetArgs,
 };
 use crate::error::CliError;
 use crate::resolve::parse_namespace_id;
@@ -42,7 +42,7 @@ pub(crate) async fn run_snapshot_command(
         SnapshotCommand::Create(args) => run_snapshot_create(kind, config_path, args).await,
         SnapshotCommand::List(args) => run_snapshot_list(kind, config_path, args).await,
         SnapshotCommand::Extend(args) => run_snapshot_extend(kind, config_path, args).await,
-        SnapshotCommand::Release(args) => run_snapshot_release(kind, config_path, args).await,
+        SnapshotCommand::Delete(args) => run_snapshot_delete(kind, config_path, args).await,
     }
 }
 
@@ -102,18 +102,18 @@ async fn run_snapshot_extend(
     Ok(context.output(kind, CommandData::SnapshotExtended(response)))
 }
 
-async fn run_snapshot_release(
+async fn run_snapshot_delete(
     kind: CommandKind,
     config_path: &Path,
-    args: SnapshotReleaseArgs,
+    args: SnapshotDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
     let snapshot_id =
         parse_snapshot_id(&args.snapshot_id).map_err(|error| context.fail(kind, error))?;
     let response = context
         .target
-        .release_snapshot(context.namespace(), &snapshot_id)
+        .delete_snapshot(context.namespace(), &snapshot_id)
         .await
         .map_err(|error| context.fail(kind, error))?;
-    Ok(context.output(kind, CommandData::SnapshotReleased(response)))
+    Ok(context.output(kind, CommandData::SnapshotDeleted(response)))
 }

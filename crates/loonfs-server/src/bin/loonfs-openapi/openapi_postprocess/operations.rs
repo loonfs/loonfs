@@ -79,11 +79,27 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "delete_checkpoint",
+        SdkName {
+            group: &["maintenance", "checkpoints"],
+            method: "delete",
+            request: Some("DeleteCheckpointRequest"),
+        },
+    ),
+    (
         "delete_namespace",
         SdkName {
             group: &["namespaces"],
             method: "delete",
             request: Some("DeleteNamespaceRequest"),
+        },
+    ),
+    (
+        "delete_snapshot",
+        SdkName {
+            group: &["snapshots"],
+            method: "delete",
+            request: Some("DeleteSnapshotRequest"),
         },
     ),
     (
@@ -284,22 +300,6 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
             group: &["uploads"],
             method: "putContent",
             request: None,
-        },
-    ),
-    (
-        "release_checkpoint",
-        SdkName {
-            group: &["maintenance", "checkpoints"],
-            method: "release",
-            request: Some("ReleaseCheckpointRequest"),
-        },
-    ),
-    (
-        "release_snapshot",
-        SdkName {
-            group: &["snapshots"],
-            method: "release",
-            request: Some("ReleaseSnapshotRequest"),
         },
     ),
     (

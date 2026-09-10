@@ -36,3 +36,6 @@ kind = "ambient"
 # access_key_id = "YOUR_ACCESS_KEY_ID"
 # secret_access_key = "YOUR_SECRET_ACCESS_KEY"
 # session_token = "YOUR_SESSION_TOKEN" # optional
+
+#[runtime_cache]
+#manifest_revalidation_interval_ms = 1000

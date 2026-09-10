@@ -1,8 +1,8 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    Checkpoint, CheckpointId, CreateSnapshotOptions, FsReader, FsWriter, ListSnapshotsResponse,
-    NamespaceId, ReleaseSnapshotResponse, Result, RuntimeError, SnapshotSummary,
+    Checkpoint, CheckpointId, CreateSnapshotOptions, DeleteSnapshotResponse, FsReader, FsWriter,
+    ListSnapshotsResponse, NamespaceId, Result, RuntimeError, SnapshotSummary,
 };
 use loonfs_api::PageRequest;
 use loonfs_core::CheckpointPageCursor;
@@ -129,7 +129,7 @@ impl FsWriter {
 
     /// Creates a snapshot only when the namespace has quota for it.
     ///
-    /// A caller that exceeds the quota releases its tentative snapshot before
+    /// A caller that exceeds the quota deletes its tentative snapshot before
     /// returning the quota error.
     pub async fn create_snapshot_with_quota(
         &self,
@@ -143,7 +143,7 @@ impl FsWriter {
             .ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 0)
             .await
         {
-            self.release_snapshot(namespace_id, &checkpoint.checkpoint_id)
+            self.delete_snapshot(namespace_id, &checkpoint.checkpoint_id)
                 .await?;
             return Err(error);
         }
@@ -236,27 +236,27 @@ impl FsWriter {
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.snapshot_release",
+        name = "loonfs.snapshot_delete",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "snapshot_release",
+            operation = "snapshot_delete",
             namespace_id = %namespace_id,
             snapshot_id = %snapshot_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn release_snapshot(
+    pub async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
         snapshot_id: &CheckpointId,
-    ) -> Result<ReleaseSnapshotResponse> {
+    ) -> Result<DeleteSnapshotResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
             .writer_engine(&self.bits.identity, namespace_id)
-            .release_snapshot(snapshot_id)
+            .delete_snapshot(snapshot_id)
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)

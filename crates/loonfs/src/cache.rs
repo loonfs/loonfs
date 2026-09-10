@@ -261,7 +261,9 @@ impl ReadCore {
                 return Ok(head);
             }
             let check_due = now_ms.saturating_sub(head.last_control_check_ms)
-                >= self.runtime_cache_config().control_revalidation_interval_ms;
+                >= self
+                    .runtime_cache_config()
+                    .manifest_revalidation_interval_ms;
             let matches = !check_due || self.manifest_is_current(namespace_id, &head.basis).await?;
             if matches {
                 if check_due {

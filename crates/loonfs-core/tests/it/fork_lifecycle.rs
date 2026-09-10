@@ -68,7 +68,7 @@ async fn listed_names<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_snapshot_release() {
+async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_snapshot_delete() {
     let directory = tempdir().expect("tempdir");
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -155,7 +155,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         snapshot_record
     );
     engine
-        .release_snapshot(&snapshot.checkpoint_id)
+        .delete_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("release snapshot");
     aged.now_ms = u64::MAX / 2;
@@ -216,7 +216,7 @@ async fn invalid_snapshot_forks_write_nothing() {
 }
 
 #[tokio::test]
-async fn snapshot_release_during_fork_releases_the_attempt_without_installing_a_target() {
+async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_target() {
     let directory = tempdir().expect("tempdir");
     let source = namespace_id("source");
     let target = namespace_id("target");
@@ -243,7 +243,7 @@ async fn snapshot_release_during_fork_releases_the_attempt_without_installing_a_
     let engine = namespace_engine(&store, &source, &context);
     store.block_next();
     let forking = engine.fork_namespace(&target, Some(&snapshot.checkpoint_id));
-    let releasing = async {
+    let deleting = async {
         store.wait_until_blocked().await;
         store.inner().block_next();
         store.release();
@@ -257,16 +257,15 @@ async fn snapshot_release_during_fork_releases_the_attempt_without_installing_a_
             2
         );
         namespace_engine(store.inner().inner(), &source, &context)
-            .release_snapshot(&snapshot.checkpoint_id)
+            .delete_snapshot(&snapshot.checkpoint_id)
             .await
-            .expect("release snapshot after fork pin is durable");
+            .expect("delete snapshot after fork pin is durable");
         store.inner().release();
     };
-    let (result, ()) = tokio::join!(forking, releasing);
-    assert_eq!(
-        result.expect_err("snapshot gone").code(),
-        ErrorCode::SnapshotGone
-    );
+    let (result, ()) = tokio::join!(forking, deleting);
+    let error = result.expect_err("snapshot gone");
+    assert_eq!(error.code(), ErrorCode::SnapshotGone);
+    assert!(matches!(error, CoreError::SnapshotGone { reason, .. } if reason == "deleted"));
     assert!(namespace_keys(&store, &target).await.is_empty());
     let records = store
         .list_prefix(&format!("namespaces/{source}/pins/"))
@@ -992,7 +991,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let ancestor_waiting = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
         .await
         .expect("ancestor waits");
-    assert_eq!(ancestor_waiting.released_checkpoints.fork, 0);
+    assert_eq!(ancestor_waiting.deleted_checkpoints_by_owner.fork, 0);
     namespace_engine(&store, &descendant, &aged)
         .delete_namespace(Default::default())
         .await
@@ -1007,7 +1006,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let waiting = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
         .await
         .expect("wait for descendant grace");
-    assert_eq!(waiting.released_checkpoints.fork, 0);
+    assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
     aged.now_ms = descendant_deadline;
     loonfs_core::gc_namespace(&store, &descendant, &config, &aged)
         .await
@@ -1015,13 +1014,16 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let released = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
         .await
         .expect("release descendant record");
-    assert_eq!(released.released_checkpoints.fork, 0);
-    assert_eq!(released.deleted.checkpoint_records, 0);
+    assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(
+        released.deleted_checkpoints_by_owner,
+        loonfs_api::DeletedCheckpointsByOwner::default()
+    );
     let parent_deadline = released.reclaim_after_ms.expect("parent retired");
     let waiting = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
         .await
         .expect("wait for parent grace");
-    assert_eq!(waiting.released_checkpoints.fork, 0);
+    assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
     aged.now_ms = parent_deadline;
     loonfs_core::gc_namespace(&store, &parent, &config, &aged)
         .await
@@ -1029,7 +1031,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let released = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
         .await
         .expect("release parent record");
-    assert_eq!(released.released_checkpoints.fork, 0);
+    assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
     assert!(released.reclaim_after_ms.is_some());
 }
 

@@ -2,7 +2,7 @@
 
 use super::flush::{try_flush_wal, TryFlushWal};
 use super::record::{
-    release_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record,
+    delete_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record,
     CheckpointBasisVerification,
 };
 use crate::commit::WalPublishError;
@@ -94,14 +94,14 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
             // Cleanup is best effort on an error and must not replace its
             // original classification.
             if let Err(cleanup_error) =
-                release_checkpoint_record(store, namespace_id, &checkpoint_id).await
+                delete_checkpoint_record(store, namespace_id, &checkpoint_id).await
             {
                 tracing::warn!(
                     namespace_id = %namespace_id,
                     checkpoint_id = %checkpoint_id,
                     original_error = %error,
                     cleanup_error = %cleanup_error,
-                    "failed to release a checkpoint record after basis verification failed"
+                    "failed to delete a checkpoint record after basis verification failed"
                 );
             }
             return Err(error);
@@ -115,7 +115,7 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
 
     // Overrunning the budget counts as verification failure: the record
     // may have raced the grace window, so it must not stand as a root.
-    release_checkpoint_record(store, namespace_id, &checkpoint_id).await?;
+    delete_checkpoint_record(store, namespace_id, &checkpoint_id).await?;
     Err(CoreError::CheckpointUnavailable(
         "checkpoint publication retry exhausted".to_owned(),
     ))

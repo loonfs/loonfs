@@ -19,6 +19,7 @@ pub(crate) const PROXY_OPERATIONS: &[&str] = &[
     "create_download",
     "create_snapshot",
     "create_upload",
+    "delete_snapshot",
     "extend_snapshot",
     "get_capabilities",
     "get_file_bytes",
@@ -31,7 +32,6 @@ pub(crate) const PROXY_OPERATIONS: &[&str] = &[
     "list_snapshots",
     "list_trash",
     "put_upload_content",
-    "release_snapshot",
     "sign_upload_parts",
 ];
 

@@ -6,9 +6,9 @@ use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, ContentToken,
-    CreateSnapshotRequest, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
-    ListSnapshotsResponse, ReleaseSnapshotResponse, SnapshotSummary, UploadContentClaim,
-    UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
+    CreateSnapshotRequest, DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange,
+    ListChangesResponse, ListSnapshotsResponse, SnapshotSummary, UploadContentClaim, UploadMode,
+    UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
     ActorId, ApiError, BindingGeneration, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
@@ -1500,27 +1500,27 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     assert_eq!(listed.snapshots.len(), 1);
     assert_eq!(listed.snapshots[0].snapshot_id, snapshot.snapshot_id);
 
-    let release_url = format!("{snapshots_url}/{snapshot_id}/release");
-    let released: ReleaseSnapshotResponse = raw_success_json(
+    let delete_url = format!("{snapshots_url}/{snapshot_id}");
+    let deleted: DeleteSnapshotResponse = raw_success_json(
         harness
             .raw_client
-            .post(&release_url)
+            .delete(&delete_url)
             .bearer_auth(AUTH_TOKEN),
-        "release snapshot",
+        "delete snapshot",
     )
     .await;
-    assert_eq!(released.namespace_id, namespace);
-    assert_eq!(released.snapshot_id, snapshot.snapshot_id);
-    let released_again = harness
+    assert_eq!(deleted.namespace_id, namespace);
+    assert_eq!(deleted.snapshot_id, snapshot.snapshot_id);
+    let deleted_again = harness
         .raw_client
-        .post(&release_url)
+        .delete(&delete_url)
         .bearer_auth(AUTH_TOKEN)
         .send()
         .await
-        .expect("send second snapshot release");
-    assert_raw_status_error(released_again, &expected.snapshot_not_found).await;
+        .expect("send second snapshot delete");
+    assert_raw_status_error(deleted_again, &expected.snapshot_not_found).await;
 
-    let released_read = harness
+    let deleted_read = harness
         .raw_client
         .get(&entry_url)
         .bearer_auth(AUTH_TOKEN)
@@ -1530,9 +1530,9 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         ])
         .send()
         .await
-        .expect("send released snapshot read");
-    assert_raw_status_error(released_read, &expected.snapshot_not_found).await;
-    let released_extend = harness
+        .expect("send deleted snapshot read");
+    assert_raw_status_error(deleted_read, &expected.snapshot_not_found).await;
+    let deleted_extend = harness
         .raw_client
         .post(format!("{snapshots_url}/{snapshot_id}/extend"))
         .bearer_auth(AUTH_TOKEN)
@@ -1541,8 +1541,8 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         })
         .send()
         .await
-        .expect("send released snapshot extend");
-    assert_raw_status_error(released_extend, &expected.snapshot_not_found).await;
+        .expect("send deleted snapshot extend");
+    assert_raw_status_error(deleted_extend, &expected.snapshot_not_found).await;
 
     let unknown_read = harness
         .raw_client

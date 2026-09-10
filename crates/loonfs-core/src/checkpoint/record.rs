@@ -122,7 +122,7 @@ pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
-pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
+pub(crate) async fn delete_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
