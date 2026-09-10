@@ -1107,6 +1107,8 @@ The owner and segment ID determine the object key. The descriptor stores no sepa
 
 ### A.5 WAL records
 
+`MAX_WAL_SEGMENT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every segment within this limit through request and batch admission; readers refuse larger documents. A writer composes each batch so the sum of its requests' bounds plus the document overhead stays within the limit. This is a format constraint because every successful publication must remain readable with bounded decompression.
+
 A WAL segment's payload contains `namespace_id`, `wal_no`, `next_inode_id`, `writer_epoch`, `base_head_seq`, `start_seq`, `end_seq`, and `records`.
 
 For a data segment, `records` covers the sequence interval contiguously; the first commit follows `base_head_seq`. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list, equal base/start/end sequences, and an unchanged allocator. Fences participate in WAL numbering and epoch validation but produce no logical changes.
@@ -1486,6 +1488,8 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Maximum commit-message size | 4,096 bytes |
 
 A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_len` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. Request admission limits are specified in the [API specification][api-spec].
+
+The hard WAL document limit is specified in [Appendix A.5](#a5-wal-records).
 
 ## Appendix D. Grep extension format
 

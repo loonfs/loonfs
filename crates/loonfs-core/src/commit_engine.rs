@@ -158,6 +158,12 @@ impl CommitCandidate {
         Ok(bytes.0)
     }
 
+    /// Bounds the bytes this request adds to an encoded WAL document, excluding
+    /// the document envelope.
+    pub fn wal_record_bytes_upper_bound(&self) -> usize {
+        crate::commit_wal_size::estimated_wal_record_bytes(&self.request)
+    }
+
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
         // Apply limits to the complete request because the serialized publisher
         // processes every operation before releasing the write path.

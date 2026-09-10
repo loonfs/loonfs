@@ -63,7 +63,7 @@ async fn retirement_includes_listing_time_in_its_budget_and_retries_with_a_fresh
             let head = crate::namespace::control::load_head_object(&store, &namespace_id)
                 .await
                 .expect("head");
-            assert_eq!(head.state.status.reclaim_after_ms(), None);
+            assert_eq!(head.status.reclaim_after_ms(), None);
             let retry = context(clock.now_ms());
             let report = gc_namespace_with_timer(&store, &namespace_id, &config, &retry, &clock)
                 .await

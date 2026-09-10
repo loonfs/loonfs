@@ -530,12 +530,20 @@ fn try_admit_candidate(
     namespace_id: &NamespaceId,
     candidate: CommitCandidate,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
-    let commit_id = candidate.commit_id().clone();
+    try_admit_prepared_candidate(publisher, namespace_id, PreparedCandidate::new(candidate)?)
+}
+
+fn try_admit_prepared_candidate(
+    publisher: &NamespacePublisher,
+    namespace_id: &NamespaceId,
+    candidate: PreparedCandidate,
+) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
+    let commit_id = candidate.candidate.commit_id().clone();
     publisher.check_admission(&publisher.lock_state())?;
     let permit = publisher
         .admission
-        .acquire(namespace_id, candidate.estimated_retained_bytes()?)?;
-    let semantic_identity = candidate.semantic_identity(namespace_id)?;
+        .acquire_candidate(namespace_id, &candidate)?;
+    let semantic_identity = candidate.candidate.semantic_identity(namespace_id)?;
     let (sender, receiver) = oneshot::channel();
     let admission = publisher.admit(
         commit_id,
@@ -553,6 +561,73 @@ async fn recv_commit(receiver: oneshot::Receiver<CommitResult>, label: &str) -> 
         .await
         .unwrap_or_else(|err| panic!("{label} receiver dropped: {err}"))
         .unwrap_or_else(|err| panic!("{label} failed: {err}"))
+}
+
+#[tokio::test]
+async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
+    for extra_bytes in [0, 1] {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("bounded").expect("namespace");
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        ));
+        let runtime = test_runtime(store.clone());
+        create_namespace(&runtime, &namespace_id).await;
+        let mut publisher = standalone_publisher(&namespace_id, &runtime);
+        publisher.min_publish_interval = Duration::ZERO;
+        recv_commit(
+            admit_commit(
+                &publisher,
+                &namespace_id,
+                create_directory_request("warmup", "warmup"),
+            ),
+            "warmup",
+        )
+        .await;
+        store.reset();
+
+        let available_bytes = MAX_WAL_SEGMENT_BYTES - WAL_SEGMENT_OVERHEAD_BYTES;
+        let first_bound = available_bytes / 2;
+        let mut responses = Vec::new();
+        for (name, bound) in [
+            ("first", first_bound),
+            ("second", available_bytes - first_bound + extra_bytes),
+        ] {
+            let mut candidate =
+                PreparedCandidate::new(CommitCandidate::new(create_directory_request(name, name)))
+                    .expect("prepare");
+            candidate.wal_record_bytes_upper_bound = bound;
+            responses.push(
+                try_admit_prepared_candidate(&publisher, &namespace_id, candidate).expect("admit"),
+            );
+        }
+        let expected_batches = if extra_bytes == 0 {
+            vec![2]
+        } else {
+            vec![1, 1]
+        };
+        let batches = publisher_state(&publisher)
+            .queue
+            .iter()
+            .map(|item| match item {
+                WorkItem::Batch(batch) => batch.candidates.len(),
+                WorkItem::Delete(_) => panic!("expected commit batch"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batches, expected_batches);
+        for (response, expected_seq) in responses.into_iter().zip([ChangeSeq(2), ChangeSeq(3)]) {
+            assert_eq!(
+                recv_commit(response, "bounded").await.committed_seq,
+                expected_seq
+            );
+        }
+        assert_eq!(
+            store.count(OperationClass::PutCreateIfAbsent),
+            expected_batches.len()
+        );
+        publisher.wait_for_worker().await;
+    }
 }
 
 #[test]

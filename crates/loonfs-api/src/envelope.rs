@@ -49,6 +49,12 @@ pub enum EnvelopeCodecError {
     /// Reports stored bytes that the configured transport codec could not decompress.
     #[error("failed to decompress envelope: {0}")]
     Decompress(String),
+    /// Reports a WAL document that exceeds the decompressed format limit.
+    #[error("decompressed WAL document exceeds the {max_bytes}-byte limit")]
+    WalSegmentTooLarge {
+        /// Largest accepted decompressed document.
+        max_bytes: usize,
+    },
     /// Reports an unrecognized durable-family discriminator found during the envelope probe.
     #[error("unknown envelope kind `{found}`")]
     UnknownKind {
@@ -173,9 +179,15 @@ impl<T> VerifiedEnvelope<T> {
 pub struct EncodedEnvelope<T> {
     pub(crate) envelope: VerifiedEnvelope<T>,
     pub(crate) bytes: Vec<u8>,
+    pub(crate) document_len: usize,
 }
 
 impl<T> EncodedEnvelope<T> {
+    /// Returns the document length before any compression.
+    pub fn document_len(&self) -> usize {
+        self.document_len
+    }
+
     /// Envelope derived while encoding, without decoding or serializing again.
     pub fn envelope(&self) -> &VerifiedEnvelope<T> {
         &self.envelope
@@ -221,6 +233,7 @@ pub fn encode_json_envelope<T: Serialize>(
             payload_checksum,
             payload,
         },
+        document_len: bytes.len(),
         bytes,
     })
 }
