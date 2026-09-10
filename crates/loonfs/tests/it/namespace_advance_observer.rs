@@ -92,7 +92,6 @@ impl MaintenanceJob for SubscribingJob {
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         self.steps

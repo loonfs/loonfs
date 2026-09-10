@@ -48,7 +48,6 @@ impl MaintenanceJob for GarbageCollectionJob {
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         let response = match self
@@ -98,7 +97,6 @@ impl MaintenanceJob for GarbageCollectionJob {
 fn gc_run_result(gc: GcResponse) -> MaintenanceRunReport {
     MaintenanceRunReport {
         conclusion: gc_conclusion(&gc),
-        continuation: None,
         not_before_ms: gc.next_reclamation_at_ms,
         follow_up: None,
     }

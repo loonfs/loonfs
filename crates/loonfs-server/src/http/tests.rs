@@ -117,7 +117,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "inode_kind",
     "maintain_only",
     "manifest_no",
-    "max_objects",
     "max_wal_tail_segments",
     "metadata_compaction",
     "metadata_segments",
@@ -1133,7 +1132,6 @@ impl MaintenanceJob for StepCountingJob {
     async fn run(
         &self,
         _namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> loonfs::Result<MaintenanceRunReport> {
         self.steps.fetch_add(1, Ordering::SeqCst);

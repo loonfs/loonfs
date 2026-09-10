@@ -1,8 +1,8 @@
 //! Synchronous scheduling state for maintenance jobs.
 //!
 //! The runner's lock protects admission, coalescing, fairness, backoff,
-//! deadlines, continuations, and shutdown. The parent module handles async
-//! execution, permits, and timers.
+//! deadlines, and shutdown. The parent module handles async execution,
+//! permits, and timers.
 
 use super::runner::MaintenanceClock;
 use super::{MaintenanceConclusion, MaintenanceJobId, MaintenanceRunReport};
@@ -50,9 +50,6 @@ impl MaintenanceKey {
 pub(crate) struct MaintenanceDispatch {
     /// The key this permit is running.
     pub(crate) key: MaintenanceKey,
-    /// Where this key's job said its last step stopped, opaque here and
-    /// handed straight back to the step about to run.
-    pub(crate) continuation: Option<String>,
     /// How long the claimed run waited between taking its ticket and holding
     /// a permit. Read by the step's own trace.
     pub(crate) queue_wait_ms: u64,
@@ -61,12 +58,7 @@ pub(crate) struct MaintenanceDispatch {
 /// How one step ended, from admission's point of view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StepOutcome {
-    /// The executor answered. The result decides what happens to the key:
-    /// its conclusion when to run again, its continuation where to resume,
-    /// its not-before time when a deadline it saw comes due.
     Concluded(MaintenanceRunReport),
-    /// The executor failed. The key is retried after its backoff, from
-    /// wherever its last step left it.
     Failed,
 }
 
@@ -178,11 +170,6 @@ struct KeyState {
     obligations: Option<TimedObligations>,
     /// Consecutive failed steps since the last conclusion, for the backoff.
     consecutive_failures: u32,
-    /// Opaque continuation returned by the previous step.
-    ///
-    /// Admission stores it and passes it to the next step. Losing it only
-    /// restarts the scan because each step revalidates durable state.
-    continuation: Option<String>,
 }
 
 impl KeyState {
@@ -337,15 +324,6 @@ impl Admission {
             .get(key)
             .and_then(|state| state.obligations)
             .map(|owed| owed.earliest_at_ms)
-    }
-
-    /// Where the key's job stopped last time. A claim carries this to the
-    /// step it dispatches; nothing on the running path reads it back out.
-    #[cfg(test)]
-    pub(crate) fn continuation(&self, key: &MaintenanceKey) -> Option<String> {
-        self.keys
-            .get(key)
-            .and_then(|state| state.continuation.clone())
     }
 
     /// Keys holding a ticket: work admitted and waiting for a permit.
@@ -561,9 +539,6 @@ impl Admission {
         batch
     }
 
-    /// Ends the running step: what it concluded decides the key's
-    /// continuation and whether it is queued again, and the key stops
-    /// running either way.
     fn apply(&mut self, key: &MaintenanceKey, outcome: StepOutcome, now_ms: u64) {
         let result = match outcome {
             StepOutcome::Failed => {
@@ -573,9 +548,6 @@ impl Admission {
             StepOutcome::Concluded(result) => result,
         };
         if result.conclusion == MaintenanceConclusion::NotEnabled {
-            // The job has nothing to maintain here at all. Drop the key —
-            // its continuation and its obligations included — rather than
-            // reconcile it forever.
             self.keys.remove(key);
             return;
         }
@@ -583,29 +555,12 @@ impl Admission {
         if let Some(state) = self.keys.get_mut(key) {
             state.consecutive_failures = 0;
             let concluding_run = match result.conclusion {
-                // Work happened, or the step lost a race it should simply
-                // take again: eligible immediately, behind whatever else is
-                // waiting, resuming from wherever this step stopped.
                 MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded => {
-                    state.continuation = result.continuation;
                     Some(ReadyRun::queued(ticket, now_ms))
                 }
-                // Work is left and this step's policy could not move it.
-                // Parks like `Idle` — requeueing zero-progress work would
-                // only spin — but keeps where the step stopped, so a retry
-                // with room to work resumes instead of walking the same
-                // ground again.
-                MaintenanceConclusion::Blocked => {
-                    state.continuation = result.continuation;
-                    None
-                }
-                // Nothing to do. Whatever the last pass was carrying is
-                // spent, and the next step starts a fresh one.
-                MaintenanceConclusion::Idle => {
-                    state.continuation = None;
-                    None
-                }
-                MaintenanceConclusion::NotEnabled => None,
+                MaintenanceConclusion::Blocked
+                | MaintenanceConclusion::Idle
+                | MaintenanceConclusion::NotEnabled => None,
             };
             state.settle(concluding_run);
         }
@@ -617,7 +572,6 @@ impl Admission {
         }
     }
 
-    /// Applies retry backoff without changing the job's continuation.
     fn record_failure(&mut self, key: &MaintenanceKey, now_ms: u64) {
         let ticket = self.take_ticket();
         let Some(state) = self.keys.get_mut(key) else {
@@ -654,11 +608,7 @@ impl Admission {
         let key = self.pick_eligible(now_ms)?;
         let state = self.keys.get_mut(&key)?;
         let queue_wait_ms = state.claim(now_ms)?;
-        Some(MaintenanceDispatch {
-            key,
-            continuation: state.continuation.clone(),
-            queue_wait_ms,
-        })
+        Some(MaintenanceDispatch { key, queue_wait_ms })
     }
 }
 
@@ -746,16 +696,6 @@ mod tests {
 
     fn concluded(conclusion: MaintenanceConclusion) -> StepOutcome {
         StepOutcome::Concluded(MaintenanceRunReport::concluded(conclusion))
-    }
-
-    /// A conclusion that also tells the runner where the step stopped.
-    fn continuing(conclusion: MaintenanceConclusion, continuation: &str) -> StepOutcome {
-        StepOutcome::Concluded(MaintenanceRunReport {
-            conclusion,
-            continuation: Some(continuation.to_owned()),
-            not_before_ms: None,
-            follow_up: None,
-        })
     }
 
     fn idle() -> StepOutcome {
@@ -1113,122 +1053,25 @@ mod tests {
     }
 
     #[test]
-    fn the_runner_carries_a_continuation_between_steps() {
-        let mut admission = book(1);
-        let key = gc("paged");
-
-        admission.nudge(key.clone());
-        let first = admission
-            .try_dispatch(NOW)
-            .expect("the nudged key claims the permit");
-        assert_eq!(first.key, key);
-        assert_eq!(first.continuation, None, "a first step starts a fresh pass");
-
-        let resumed = admission
-            .finish(
-                &key,
-                continuing(MaintenanceConclusion::Progressed, "page-1"),
-                NOW,
-            )
-            .expect("a progressing key is eligible again");
-        assert_eq!(resumed.key, key);
-        assert_eq!(
-            resumed.continuation,
-            Some("page-1".to_owned()),
-            "and the handoff carries where this step stopped to the next one"
-        );
-
-        assert_eq!(
-            claimed(admission.finish(
-                &key,
-                continuing(MaintenanceConclusion::Blocked, "page-2"),
-                NOW
-            )),
-            None,
-            "a blocked key parks"
-        );
-        assert_eq!(
-            admission.continuation(&key),
-            Some("page-2".to_owned()),
-            "keeping its position, so a retry with a bigger budget resumes"
-        );
-
-        admission.nudge(key.clone());
-        let retried = admission
-            .try_dispatch(NOW)
-            .expect("a later nudge claims the permit again");
-        assert_eq!(retried.key, key);
-        assert_eq!(
-            retried.continuation,
-            Some("page-2".to_owned()),
-            "the parked position is what the resumed step is handed"
-        );
-        assert_eq!(claimed(admission.finish(&key, idle(), NOW)), None);
-        assert_eq!(
-            admission.continuation(&key),
-            None,
-            "an idle pass is a finished one: the next step starts over"
-        );
-    }
-
-    #[test]
-    fn an_evicted_key_drops_its_continuation() {
+    fn an_evicted_key_can_be_admitted_again() {
         let mut admission = book(1);
         let key = gc("gone");
 
         admission.nudge(key.clone());
         assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
         assert_eq!(
-            claimed(admission.finish(
-                &key,
-                continuing(MaintenanceConclusion::Progressed, "page-1"),
-                NOW
-            )),
+            claimed(admission.finish(&key, concluded(MaintenanceConclusion::Progressed), NOW)),
             Some(key.clone())
         );
         assert_eq!(
             claimed(admission.finish(&key, concluded(MaintenanceConclusion::NotEnabled), NOW)),
             None
         );
-        assert_eq!(
-            admission.continuation(&key),
-            None,
-            "the key's whole state went with it"
-        );
+        assert!(!admission.is_pending(&key));
+        assert!(admission.reconcile_batch(1).is_empty());
 
         admission.nudge(key.clone());
         assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
-        assert_eq!(
-            admission.continuation(&key),
-            None,
-            "and a re-admitted key starts a fresh pass"
-        );
-    }
-
-    #[test]
-    fn a_failed_step_keeps_where_its_last_one_stopped() {
-        let mut admission = book(1);
-        let key = gc("flaky");
-
-        admission.nudge(key.clone());
-        assert_eq!(claimed(admission.try_dispatch(NOW)), Some(key.clone()));
-        assert_eq!(
-            claimed(admission.finish(
-                &key,
-                continuing(MaintenanceConclusion::Progressed, "page-1"),
-                NOW
-            )),
-            Some(key.clone())
-        );
-        assert_eq!(
-            claimed(admission.finish(&key, StepOutcome::Failed, NOW)),
-            None
-        );
-        assert_eq!(
-            admission.continuation(&key),
-            Some("page-1".to_owned()),
-            "a failure says nothing about where the last step stopped"
-        );
     }
 
     #[test]
@@ -1243,7 +1086,6 @@ mod tests {
                 &key,
                 StepOutcome::Concluded(MaintenanceRunReport {
                     conclusion: MaintenanceConclusion::Idle,
-                    continuation: None,
                     not_before_ms: Some(NOW + 60_000),
                     follow_up: None,
                 }),
@@ -1265,7 +1107,6 @@ mod tests {
                 &key,
                 StepOutcome::Concluded(MaintenanceRunReport {
                     conclusion: MaintenanceConclusion::Progressed,
-                    continuation: None,
                     not_before_ms: Some(NOW + 30_000),
                     follow_up: None,
                 }),

@@ -523,12 +523,8 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
             .is_empty()
     );
 
-    let release = crate::checkpoint::release_checkpoint(
-        &store,
-        &namespace_id,
-        &first.checkpoint_id,
-        &context,
-    );
+    let release =
+        crate::checkpoint::release_checkpoint(&store, &namespace_id, &first.checkpoint_id);
     let recreate = create_checkpoint(&store, &namespace_id, &context);
     let (release, second) = tokio::join!(release, recreate);
     assert_eq!(release.expect("release").checkpoint_id, first.checkpoint_id);
@@ -556,15 +552,10 @@ async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
     );
 
     assert_eq!(
-        crate::checkpoint::release_checkpoint(
-            &store,
-            &namespace_id,
-            &first.checkpoint_id,
-            &context
-        )
-        .await
-        .expect_err("second release")
-        .code(),
+        crate::checkpoint::release_checkpoint(&store, &namespace_id, &first.checkpoint_id)
+            .await
+            .expect_err("second release")
+            .code(),
         ErrorCode::CheckpointNotFound
     );
 }
@@ -749,7 +740,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_released() {
             .is_empty()
     );
 
-    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pin.checkpoint_id, &distant)
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pin.checkpoint_id)
         .await
         .expect("release");
     let error = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
@@ -2459,7 +2450,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_release()
         .await
         .expect("pinned manifest")
         .is_some());
-    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pin.checkpoint_id, &aged)
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pin.checkpoint_id)
         .await
         .expect("release pin");
     crate::gc::gc_namespace(

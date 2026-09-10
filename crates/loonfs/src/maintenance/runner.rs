@@ -752,14 +752,10 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
             MaintenanceConclusion::NotEnabled,
         ));
     };
-    let continuation = dispatch.continuation.as_deref();
     let queued_ms = dispatch.queue_wait_ms;
     let started = tokio::time::Instant::now();
     let invocation = InvocationCancellation::new(inner, key);
-    match job
-        .run(&key.namespace_id, continuation, &invocation.cancellation)
-        .await
-    {
+    match job.run(&key.namespace_id, &invocation.cancellation).await {
         Ok(result) => {
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             inner
@@ -769,8 +765,6 @@ async fn run_step(inner: &Arc<RunnerInner>, dispatch: &MaintenanceDispatch) -> S
                 job = %key.job,
                 namespace_id = %key.namespace_id,
                 conclusion = result.conclusion.as_str(),
-                resumed = continuation.is_some(),
-                continues = result.continuation.is_some(),
                 not_before_ms = ?result.not_before_ms,
                 // The two halves of what a step cost: how long it waited
                 // for a permit, and how long it then took.

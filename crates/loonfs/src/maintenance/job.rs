@@ -66,8 +66,6 @@ impl MaintenanceConclusion {
 pub struct MaintenanceRunReport {
     /// How the run settled.
     pub conclusion: MaintenanceConclusion,
-    /// Resume position for the next run.
-    pub continuation: Option<String>,
     /// Earliest Unix millisecond for another run.
     pub not_before_ms: Option<u64>,
     /// A job and namespace this run wants scheduled.
@@ -75,11 +73,10 @@ pub struct MaintenanceRunReport {
 }
 
 impl MaintenanceRunReport {
-    /// Builds a report without continuation, deadline, or follow-up.
+    /// Builds a report without a deadline or follow-up.
     pub fn concluded(conclusion: MaintenanceConclusion) -> Self {
         Self {
             conclusion,
-            continuation: None,
             not_before_ms: None,
             follow_up: None,
         }
@@ -148,7 +145,6 @@ pub trait MaintenanceJob: Send + Sync + 'static {
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        continuation: Option<&str>,
         cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport>;
 

@@ -887,13 +887,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse> {
-        crate::checkpoint::release_checkpoint(
-            &self.store,
-            &self.namespace_id,
-            checkpoint_id,
-            &self.mutation_context()?,
-        )
-        .await
+        crate::checkpoint::release_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
     }
 
     /// Extends a live snapshot without passing its lifetime ceiling.

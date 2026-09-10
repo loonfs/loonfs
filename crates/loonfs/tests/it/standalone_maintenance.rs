@@ -66,7 +66,6 @@ async fn a_registry_runs_every_core_job_without_a_writer() {
             .execute(MaintenanceAssignment {
                 namespace_id: namespace_id.clone(),
                 job,
-                continuation: None,
             })
             .await;
         assert!(result.is_ok(), "{job} failed: {:?}", result.err());

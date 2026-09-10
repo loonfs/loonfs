@@ -701,7 +701,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
     );
     for _ in 0..16 {
         immediate
-            .run(&namespace, None, &MaintenanceCancellation::new())
+            .run(&namespace, &MaintenanceCancellation::new())
             .await
             .expect("run configured maintenance");
         if immediate

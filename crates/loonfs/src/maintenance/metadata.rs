@@ -41,7 +41,6 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         match self

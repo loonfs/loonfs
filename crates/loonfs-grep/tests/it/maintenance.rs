@@ -86,7 +86,7 @@ async fn a_tombstoned_namespace_concludes_not_enabled() {
 
     let job = job(&worker);
     assert_eq!(
-        job.run(&namespace_id, None, &MaintenanceCancellation::new())
+        job.run(&namespace_id, &MaintenanceCancellation::new())
             .await
             .expect("step tombstone")
             .conclusion,
@@ -115,7 +115,7 @@ async fn a_disabled_root_concludes_not_enabled_on_the_next_step() {
 
     worker.disable(&namespace_id).await.expect("disable grep");
     assert_eq!(
-        job.run(&namespace_id, None, &MaintenanceCancellation::new())
+        job.run(&namespace_id, &MaintenanceCancellation::new())
             .await
             .expect("step disabled root")
             .conclusion,
@@ -239,7 +239,7 @@ async fn catch_up<S: ObjectStore + Clone + Send + Sync + 'static>(
 ) {
     for _ in 0..64 {
         match job
-            .run(namespace_id, None, &MaintenanceCancellation::new())
+            .run(namespace_id, &MaintenanceCancellation::new())
             .await
             .expect("grep step")
             .conclusion

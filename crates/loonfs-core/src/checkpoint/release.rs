@@ -4,7 +4,6 @@
 //! through this operation.
 
 use super::record::{load_checkpoint_record, release_checkpoint_record};
-use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::{CheckpointId, NamespaceId, ReleaseCheckpointResponse};
@@ -90,7 +89,6 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-    _context: &MutationContext,
 ) -> Result<ReleaseCheckpointResponse> {
     release_owned_checkpoint(
         store,

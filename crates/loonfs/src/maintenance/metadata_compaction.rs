@@ -44,13 +44,11 @@ impl MaintenanceJob for MetadataCompactionJob {
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         let Ok(_permit) = Arc::clone(&self.permits).try_acquire_owned() else {
             return Ok(MaintenanceRunReport {
                 conclusion: MaintenanceConclusion::Blocked,
-                continuation: None,
                 not_before_ms: Some(
                     loonfs_core::time::current_time_ms()?.saturating_add(RECONCILE_INTERVAL_MS),
                 ),
@@ -75,7 +73,6 @@ impl MaintenanceJob for MetadataCompactionJob {
         };
         Ok(MaintenanceRunReport {
             conclusion,
-            continuation: None,
             not_before_ms: None,
             follow_up,
         })

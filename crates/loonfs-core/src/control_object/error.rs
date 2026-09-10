@@ -10,13 +10,6 @@ pub enum ControlObjectLoadError {
     #[error("missing control object `{object_key}`")]
     MissingObject { object_key: String },
     #[error(
-        "metadata root references seq `{root_manifest_head_seq}` beyond the reloaded head seq `{head_seq}`"
-    )]
-    RootAheadOfHead {
-        root_manifest_head_seq: loonfs_api::ChangeSeq,
-        head_seq: loonfs_api::ChangeSeq,
-    },
-    #[error(
         "control object namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
     NamespaceMismatch {
@@ -70,7 +63,6 @@ impl ControlObjectLoadError {
 
         match self {
             Self::MissingObject { .. } => ErrorCode::NamespaceNotFound,
-            Self::RootAheadOfHead { .. } => ErrorCode::StaleHead,
             Self::NamespaceMismatch { .. }
             | Self::IdentityMismatch { .. }
             | Self::ForkBasisOwnerIsSelf { .. }
