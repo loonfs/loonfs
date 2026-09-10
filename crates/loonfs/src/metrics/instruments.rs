@@ -69,7 +69,7 @@ impl<E: MetricLabel> LabeledCounters<E> {
 pub(crate) enum CompactionOutcome {
     Completed,
     Failed,
-    Superseded,
+    Abandoned,
     Cancelled,
     Fenced,
 }
@@ -78,7 +78,7 @@ impl MetricLabel for CompactionOutcome {
     const VALUES: &'static [Self] = &[
         Self::Completed,
         Self::Failed,
-        Self::Superseded,
+        Self::Abandoned,
         Self::Cancelled,
         Self::Fenced,
     ];
@@ -87,7 +87,7 @@ impl MetricLabel for CompactionOutcome {
         match self {
             Self::Completed => "completed",
             Self::Failed => "failed",
-            Self::Superseded => "superseded",
+            Self::Abandoned => "abandoned",
             Self::Cancelled => "cancelled",
             Self::Fenced => "fenced",
         }
@@ -367,7 +367,7 @@ impl RuntimeInstruments {
                 CompactionOutcome::Completed,
                 Some((*rows_read, *rows_written, *input_bytes, *output_bytes)),
             ),
-            Ok(MetadataCompactionJobOutcome::Abandoned) => (CompactionOutcome::Superseded, None),
+            Ok(MetadataCompactionJobOutcome::Abandoned) => (CompactionOutcome::Abandoned, None),
             Ok(MetadataCompactionJobOutcome::Cancelled) => (CompactionOutcome::Cancelled, None),
             Ok(MetadataCompactionJobOutcome::Fenced) => (CompactionOutcome::Fenced, None),
             Err(_) => (CompactionOutcome::Failed, None),
@@ -1541,6 +1541,7 @@ mod tests {
             }),
             25,
         );
+        instruments.compaction_finished(&Ok(MetadataCompactionJobOutcome::Abandoned), 10);
 
         let snapshot = recorder.snapshot();
         assert_eq!(
@@ -1573,6 +1574,26 @@ mod tests {
             ),
             1
         );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "loonfs.maintenance.compactions",
+                &[("outcome", "abandoned")],
+            ),
+            1
+        );
+        let duration = snapshot
+            .by_name("loonfs.maintenance.compaction_seconds")
+            .find(|entry| entry.labels == [("outcome", "abandoned")])
+            .expect("abandoned compaction duration");
+        assert!(matches!(
+            duration.value,
+            MetricValue::Histogram { count: 1, .. }
+        ));
+        assert!(snapshot
+            .all()
+            .iter()
+            .all(|entry| !entry.labels.contains(&("outcome", "superseded"))));
         assert_eq!(
             counter(
                 &snapshot,

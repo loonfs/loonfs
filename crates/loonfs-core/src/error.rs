@@ -162,7 +162,7 @@ pub enum CoreError {
     },
     #[error(
         "namespace `{namespace_id}` already has its limit of {max_live} live snapshots; \
-         release one or wait for a lease to expire"
+         release one or wait for a snapshot to expire"
     )]
     SnapshotQuotaExceeded {
         namespace_id: loonfs_api::NamespaceId,
@@ -170,7 +170,7 @@ pub enum CoreError {
     },
     #[error(
         "metadata publication budget exceeded after {elapsed_ms}ms (budget {budget_ms}ms); \
-         the root was not published"
+         the manifest was not published"
     )]
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error("invalid gc configuration: {0}")]

@@ -447,7 +447,7 @@ use tempfile::tempdir;
 
 const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
     arn:aws:iam::123456789012:role/private-role private-bucket \
-    namespaces/customer-a/head.json x-amz-request-id=provider-request \
+    namespaces/customer-a/hint.json x-amz-request-id=provider-request \
     x-amz-id-2=provider-host-id AKIAEXAMPLE";
 
 fn assert_provider_markers_absent(rendered: &str) {
@@ -455,7 +455,7 @@ fn assert_provider_markers_absent(rendered: &str) {
         "<Error>AccessDenied</Error>",
         "arn:aws:iam::123456789012:role/private-role",
         "private-bucket",
-        "namespaces/customer-a/head.json",
+        "namespaces/customer-a/hint.json",
         "x-amz-request-id=provider-request",
         "x-amz-id-2=provider-host-id",
         "AKIAEXAMPLE",
@@ -538,7 +538,7 @@ async fn provider_failure_is_projected_in_the_presign_api_envelope() {
     let response = super::REQUEST_ID
         .scope("req_presign_hygiene".to_owned(), async {
             super::handlers_uploads::presign_issuer_error(PoisonProviderStore::denied(
-                "namespaces/customer-a/head.json",
+                "namespaces/customer-a/hint.json",
             ))
             .into_response()
         })

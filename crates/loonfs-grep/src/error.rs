@@ -41,9 +41,9 @@ pub enum GrepError {
         message: String,
     },
     /// A grep manifest publication lost to another publisher.
-    #[error("grep root publication conflict for `{object_key}`; retry")]
+    #[error("grep manifest publication conflict for `{object_key}`; retry")]
     PublicationConflict {
-        /// Manifest number whose publication raced.
+        /// Object key whose manifest publication raced.
         object_key: String,
     },
     /// A genuine runtime failure encountered while grep read or wrote

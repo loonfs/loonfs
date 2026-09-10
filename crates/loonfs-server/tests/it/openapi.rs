@@ -1362,6 +1362,13 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
         .and_then(|components| components.get("schemas"))
         .and_then(Value::as_object)
         .expect("openapi schemas object");
+    let referenced = referenced_components(&spec);
+    for name in schemas.keys() {
+        assert!(
+            referenced.contains(&("schemas".to_owned(), name.clone())),
+            "OpenAPI schema `{name}` is not referenced by a path"
+        );
+    }
     let content_id = schemas.get("ContentId").expect("ContentId schema");
 
     assert_eq!(

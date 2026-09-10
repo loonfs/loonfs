@@ -1,7 +1,6 @@
-//! Structural acceptance tests for the namespace layout redesign (format
-//! spec, "Final design summary"): live visibility comes only from the WAL
-//! head, nothing correct depends on listing, and maintenance never touches
-//! the head.
+//! Namespace layout acceptance tests: numbered WAL objects make commits visible,
+//! readers discover state without listing, and maintenance publishes manifests
+//! without advancing the head sequence.
 
 use crate::common::{mutation_context, namespace_engine, read_context};
 use bytes::Bytes;

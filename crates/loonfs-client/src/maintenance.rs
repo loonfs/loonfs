@@ -153,10 +153,8 @@ impl Client {
             .await
     }
 
-    /// Runs one explicit grep index garbage-collection pass for a namespace.
+    /// Runs one complete grep index garbage-collection pass for a namespace.
     ///
-    /// `max_objects` bounds the reads the pass spends; when keys remain the
-    /// response carries a `next_cursor` to resume from.
     /// Retrying this request starts a distinct attempt.
     pub async fn gc_grep_index(
         &self,

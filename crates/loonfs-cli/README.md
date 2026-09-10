@@ -178,7 +178,7 @@ Snapshot management
     Keep a snapshot available for longer
 
   loonfs snapshot release <namespace> <snapshot-id>
-    Release a snapshot. Repeating the command succeeds.
+    Release a snapshot. Repeating the command returns snapshot_not_found.
 
 Pagination
   ls, grep, revisions, trash, changes, snapshot list, and maintenance checkpoint
@@ -341,8 +341,9 @@ Maintenance
     below the flushed manifest head but does not remove file revisions.
 
   loonfs maintenance gc [--grace-window-ms <ms>]
-    Run one complete pass and print its report. Each call reads current roots,
-    lists every family from the beginning, and sweeps it to the end.
+    Run one complete pass and print its report. Each call reads the current
+    manifest and hint, lists every family from the beginning, and sweeps it
+    to the end.
     --grace-window-ms protects objects younger than the window.
     --json includes every retention reason.
     Repeated GC runs reclaim a deleted namespace's own content once it retires,
@@ -379,8 +380,8 @@ Maintenance
 
   loonfs maintenance index gc
     Complete one collection pass over the namespace's gram-index objects.
-    Read durable roots before deletion. Reap aged index objects for an absent
-    or deleted namespace.
+    Read the current manifest and hint before deletion. Reap aged index
+    objects for an absent or deleted namespace.
 
 Profile create options
   Used by:

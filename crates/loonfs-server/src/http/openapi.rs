@@ -151,7 +151,6 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         loonfs_api::AttributeValue,
         loonfs_api::Attributes,
         loonfs_api::AttributeRevisionNo,
-        loonfs_api::InodeKind,
         loonfs_api::PathEntry,
         loonfs_api::PathEntryKind,
         loonfs_api::AttributesProjection,

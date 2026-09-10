@@ -237,7 +237,7 @@ The codes that populate it:
 
 | Code | Detail fields |
 | --- | --- |
-| `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
+| `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the current manifest records a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `writer_capacity_exceeded` | `max_writer_sessions` |
 | `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `assertion_index` for a failed request assertion |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `assertion_index` for a failed request assertion |
@@ -275,7 +275,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id, or one that was aborted: an aborted session will never select content, so it reports the absence that its deletion will. |
 | `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
-| `snapshot_quota_exceeded` | 409 | Creating the snapshot would pass the namespace's live-snapshot limit. Release a snapshot or wait for a lease to expire. |
+| `snapshot_quota_exceeded` | 409 | Creating the snapshot would pass the namespace's live-snapshot limit. Release a snapshot or wait for a snapshot to expire. |
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
@@ -855,14 +855,14 @@ its reclaimable state is collected; naming anything else is refused with
 `namespace_deleted`, because a tombstone has nothing to flush, reorganize,
 or retain.
 
-`wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold. `flushed` means this step published a manifest and updated the root. `already_published` means the root already referenced a different manifest, so this step did not update it. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
+`wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold. `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
 
 `reorganize.outcome` has four values. `not_needed` means no bounded merge is
 due. `unit_published` means this run published one bounded merge.
 `compaction_required` means a family group needs streaming compaction; run the
-`metadata_compaction` job. `root_advanced` means another publisher updated the
-metadata root first. A manifest this run wrote remains unreferenced, and a
-later GC pass can delete it.
+`metadata_compaction` job. `root_advanced` means another publisher changed the
+current manifest first. Segments this run wrote remain unreferenced, and a
+later GC pass can delete them.
 
 `compaction.outcome` has six values. `not_needed` means no family group has
 eligible input. `bounded_merge_published` means the planner selected and
@@ -1011,13 +1011,13 @@ is irrevocable and the deadline never changes. A call whose clock is before
 the deadline reports it through `next_reclamation_at_ms`. Retirement itself
 deletes no content.
 
-Every call reads current durable roots and uses one fixed clock. It keeps
+Every call reads the current manifest and uses one fixed clock. It keeps
 its live set in memory and writes no collection progress. Every family lists
-from the beginning and sweeps to the end. Root discovery reads a separate
-complete pin listing. A retained pin, an unrecognized pin key, or an uncertain
-pin load prevents namespace retirement. A candidate the live set retains
+from the beginning and sweeps to the end. The collector uses a separate
+complete pin listing to find retained manifests. A retained pin, an unrecognized
+pin key, or an uncertain pin load prevents namespace retirement. A candidate the live set retains
 needs no further store request. Other candidates require an age check, a
-record read, or a deletion. Root read failures fail the call before sweeping.
+record read, or a deletion. Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `checkpoint_records`, `upload_sessions`,
@@ -2657,15 +2657,15 @@ A conforming server must:
 
 1. treat object storage as the authoritative durable foundation;
 2. publish visible metadata only through logical commits stored in visible
-   WAL segments plus a successful head update;
+   numbered WAL objects;
 3. validate that referenced content is already durable before publish;
 4. preserve `(namespace_id, inode_id)` as canonical identity;
 5. resolve namespace content through the immutable `content_store_id` in the
-   namespace head;
+   current manifest;
 6. implement tombstone-first delete;
 7. serve replay from the highest numbered verified manifest found through
-   `hint.json`, plus the visible WAL segment chain, replayed as
-   logical commits; checkpoints pin manifest versions for retention, stable
+   `hint.json`, plus the numbered WAL objects after the folded boundary, replayed
+   as logical commits; checkpoints pin manifest versions for retention, stable
    reads, restore, and forks;
 8. fold sibling names into name keys by the v0 rule ([format: names and paths](format.md#14-names-and-paths));
 9. keep control-plane sessions and any implementation-specific coordinators

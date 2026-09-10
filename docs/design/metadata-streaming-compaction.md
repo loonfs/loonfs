@@ -105,7 +105,7 @@ The new manifest replaces only the selected inputs and preserves newer or unrela
 
 Unreferenced segments are collectable only when their provider age is strictly greater than 24 hours. A streaming job must initiate publication within 23 hours, 39 minutes, and 30 seconds, reserving the minimum GC grace inside that day. The remaining interval covers provider operations, clock error, and scheduling allowance. Bounded merges use the ordinary 15-minute metadata publication budget.
 
-A changed epoch returns `fenced`. Changed inputs or an exceeded streaming bound return `abandoned`. None of these outcomes publishes a partial replacement. Unreferenced output follows the same age rule whether the job failed, was cancelled, or was superseded by another publication.
+A changed epoch returns `fenced`. Changed inputs or an exceeded streaming bound return `abandoned`. None of these outcomes publishes a partial replacement. Unreferenced output follows the same age rule whether the job failed, was cancelled, or was abandoned.
 
 ## Scheduling and restart
 
