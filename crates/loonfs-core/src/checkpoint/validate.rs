@@ -175,6 +175,18 @@ fn validate_segment_block_layout(
     for run in runs {
         for family_segments in ordered_manifest_segments(object_key, &run.segments)? {
             for descriptor in &family_segments.segments {
+                for handle in [descriptor.filter_block, descriptor.index_block] {
+                    if handle
+                        .offset
+                        .checked_add(u64::from(handle.stored_len))
+                        .is_none()
+                    {
+                        return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                            object_key: metadata_segment_object_key(descriptor),
+                            message: "section byte range exceeds address space".to_owned(),
+                        });
+                    }
+                }
                 let filter_end =
                     descriptor.filter_block.offset + u64::from(descriptor.filter_block.stored_len);
                 if filter_end != descriptor.index_block.offset {
@@ -187,8 +199,8 @@ fn validate_segment_block_layout(
                     });
                 }
                 if let Some(inline) = &descriptor.filter_inline {
-                    let expected_hex_len = 2 * descriptor.filter_block.stored_len as usize;
-                    if inline.len() != expected_hex_len {
+                    let expected_hex_len = 2 * u64::from(descriptor.filter_block.stored_len);
+                    if inline.len() as u64 != expected_hex_len {
                         return Err(ManifestLoadError::SegmentDescriptorMismatch {
                             object_key: metadata_segment_object_key(descriptor),
                             message: format!(

@@ -10,6 +10,12 @@ use crate::{
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
+
+/// Reader limit on a decompressed WAL segment. A valid segment holds one
+/// publish batch, which admission keeps far below this; the limit stops a
+/// corrupt object from expanding without end.
+pub const MAX_WAL_SEGMENT_DECODED_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Version 1: a zstd-compressed CBOR envelope document carrying the payload
 /// as an opaque CBOR byte string. `payload_checksum` covers exactly those
@@ -257,8 +263,24 @@ pub fn encode_wal_segment_envelope_zstd(
 pub fn decode_wal_segment_envelope_zstd(
     bytes: &[u8],
 ) -> Result<WalSegmentEnvelope, EnvelopeCodecError> {
-    let decompressed = zstd::stream::decode_all(bytes)
+    decode_wal_segment_envelope_zstd_bounded(bytes, MAX_WAL_SEGMENT_DECODED_BYTES)
+}
+
+fn decode_wal_segment_envelope_zstd_bounded(
+    bytes: &[u8],
+    limit_bytes: u64,
+) -> Result<WalSegmentEnvelope, EnvelopeCodecError> {
+    let mut decompressed = Vec::new();
+    zstd::Decoder::new(bytes)
+        .and_then(|decoder| {
+            decoder
+                .take(limit_bytes.saturating_add(1))
+                .read_to_end(&mut decompressed)
+        })
         .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
+    if decompressed.len() as u64 > limit_bytes {
+        return Err(EnvelopeCodecError::DecompressedSizeExceeded { limit_bytes });
+    }
     let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     let expected_kind = WalEnvelopeKind::NamespaceWalSegment;
@@ -275,4 +297,19 @@ pub fn decode_wal_segment_envelope_zstd(
         payload_checksum: document.payload_checksum,
         payload,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wal_segment_expanding_past_the_reader_limit_is_refused() {
+        let bytes = zstd::stream::encode_all(&[0u8; 1024][..], crate::sst_blocks::ZSTD_LEVEL)
+            .expect("compress");
+        assert!(matches!(
+            decode_wal_segment_envelope_zstd_bounded(&bytes, 16),
+            Err(EnvelopeCodecError::DecompressedSizeExceeded { limit_bytes: 16 })
+        ));
+    }
 }

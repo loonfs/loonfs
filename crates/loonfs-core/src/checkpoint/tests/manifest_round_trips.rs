@@ -3,6 +3,48 @@
 use super::*;
 
 #[tokio::test]
+async fn overflowing_section_handles_are_rejected_before_segment_reads() {
+    let manifest = loonfs_api::wire::manifest::decode_namespace_manifest_json(include_bytes!(
+        "../../../../loonfs-api/tests/golden/namespace_manifest.v1.json"
+    ))
+    .expect("manifest fixture");
+    let temp_dir = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    for overflow_filter in [true, false] {
+        let mut payload = manifest.payload().clone();
+        let namespace_id = payload.namespace_id.clone();
+        let manifest_no = payload.manifest_no;
+        let manifest_key = metadata_manifest_object(&namespace_id, &manifest_no);
+        let descriptor = &mut payload.runs[0].segments[0];
+        if overflow_filter {
+            descriptor.filter_block.offset = u64::MAX;
+        } else {
+            descriptor.index_block.offset = u64::MAX;
+            descriptor.filter_block.offset =
+                u64::MAX - u64::from(descriptor.filter_block.stored_len);
+        }
+        let encoded = encode_namespace_manifest_json(payload).expect("encode hostile manifest");
+        store
+            .put_overwrite(&manifest_key, Bytes::from(encoded.into_bytes()))
+            .await
+            .expect("store fixture");
+        store.reset();
+        assert!(matches!(
+            load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_no)
+                .await,
+            Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. })
+                if message == "section byte range exceeds address space"
+        ));
+        assert_eq!(store.counts().gets, 1);
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.take_gets(), vec![(manifest_key, None)]);
+    }
+}
+
+#[tokio::test]
 async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

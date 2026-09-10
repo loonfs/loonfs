@@ -1219,7 +1219,7 @@ Each handle is an encoded object with the following fields:
 | `decoded_len` | `u32` | Expected length after decompression, or the uncompressed length for a filter. |
 | `crc32c` | `u32` | CRC32C of the exact stored section bytes. |
 
-For each section, the returned byte count must match `stored_len`, the stored-byte CRC must match `crc32c`, and the decoded length must match `decoded_len`. These fields describe valid section lengths. They do not establish a maximum allocation for a decoder.
+For each section, the returned byte count must match `stored_len`, the stored-byte CRC must match `crc32c`, and the decoded length must match `decoded_len`. Both lengths fit in `u32`. Readers stop decompression after at most `decoded_len + 1` bytes. The extra byte reports a decoded-length mismatch without expanding the rest of an invalid section. This caps decompressed output, not vector capacity or the total memory of decoded rows and parser state. Appendix C.4 describes initial allocation sizing.
 
 #### Data blocks
 
@@ -1235,7 +1235,7 @@ row                    row_len CBOR bytes
 
 The key is the first `shared_prefix_len` bytes of the preceding key followed by `key_suffix`. The prefix must end on a valid UTF-8 boundary. Keys are in ascending order. The generic block grammar can represent adjacent equal keys; the metadata-run uniqueness rule still applies to metadata producers.
 
-The first entry and every sixteenth entry thereafter begin a restart and encode the full key with a zero shared-prefix length. The restart array contains their offsets relative to the start of the entry region, each as a little-endian `u32`. The array is followed by its count, also a little-endian `u32`. Entries and restart data are compressed together as one zstd section.
+The first entry and every sixteenth entry thereafter begin a restart and encode the full key with a zero shared-prefix length. The restart array contains their offsets relative to the start of the entry region, each as a little-endian `u32`. Readers verify each offset and reject missing or unused offsets. These restarts limit shared-prefix reconstruction to groups of sixteen rows. The array is followed by its count, also a little-endian `u32`. Entries and restart data are compressed together as one zstd section.
 
 The same entry and restart layout applies to metadata and grep data blocks.
 
@@ -1251,7 +1251,7 @@ bit_len               u64, little-endian
 bits                  ceil(bit_len / 8) bytes
 ```
 
-The reference producer uses seven probes and ten bits per inserted filter key, with a minimum of 64 bits. Repeated filter keys count as separate insertions for sizing. Readers use the stored `n_hashes` and `bit_len`.
+Version 1 requires `n_hashes` to be seven and `bit_len` to be at least 64. Readers reject other header values before probing. The reference producer reserves ten bits per inserted filter key, with a minimum of 64 bits. Repeated filter keys count as separate insertions for sizing. The number of stored bit-array bytes must equal `ceil(bit_len / 8)`.
 
 Hashing is XXH64 over the filter key's UTF-8 bytes, with two fixed seeds:
 
@@ -1478,7 +1478,7 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Default manifest revalidation interval | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
 
-A decoder cannot use target block or segment sizes as hard allocation bounds. Request admission limits are specified in the [API specification][api-spec].
+A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_len` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. A reader refuses a WAL segment whose decompressed size exceeds `MAX_WAL_SEGMENT_DECODED_BYTES`, 256 MiB. That is a reader limit, not a format constraint: a valid segment holds one publish batch, which admission keeps far below it. Request admission limits are specified in the [API specification][api-spec].
 
 ## Appendix D. Grep extension format
 
