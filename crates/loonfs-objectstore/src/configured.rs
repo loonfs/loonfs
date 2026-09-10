@@ -239,16 +239,16 @@ mod tests {
         let store = ConfiguredObjectStore::local_fs(temp_dir.path(), Some("tenant-a"))
             .expect("construct configured local fs store")
             .into_shared();
-        let head_key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let hint_key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
 
         store
-            .put_overwrite(&head_key, Bytes::from_static(br#"{"ok":true}"#))
+            .put_overwrite(&hint_key, Bytes::from_static(br#"{"ok":true}"#))
             .await
             .expect("write scoped object");
 
         let raw_store = LocalFsStore::new(temp_dir.path()).expect("open raw store");
         assert!(raw_store
-            .head(&format!("tenant-a/{head_key}"))
+            .head(&format!("tenant-a/{hint_key}"))
             .await
             .expect("head raw scoped object")
             .is_some());
@@ -257,7 +257,7 @@ mod tests {
                 .list_prefix("namespaces/ns-1/")
                 .await
                 .expect("list scoped prefix"),
-            vec![head_key]
+            vec![hint_key]
         );
     }
 

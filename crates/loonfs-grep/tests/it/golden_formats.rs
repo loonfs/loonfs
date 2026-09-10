@@ -15,7 +15,7 @@
 //!   sample they hold, so a decoder change fails even while the encoder still
 //!   matches.
 //!
-//! The decode-rejection rules sit in `root_format`, which builds its inputs
+//! The decode-rejection rules sit in `manifest_format`, which builds its inputs
 //! from these same files.
 
 #![allow(clippy::panic)]
@@ -26,7 +26,7 @@ use loonfs_api::wire::sst_blocks::{
 };
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, RevisionNo, RunNo};
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
-use loonfs_grep::root::{
+use loonfs_grep::manifest::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest, GrepHint,
     GrepIndexState, GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef,
 };

@@ -254,7 +254,7 @@ fn gated(
 fn router(state: AppState) -> Router {
     // Searching an index and keeping one built are separate jobs, so they
     // are separately deployable: the query route exists where this server
-    // serves grep, and the three routes that mutate a grep root exist where
+    // serves grep, and the three routes that mutate a grep manifest exist where
     // it maintains one.
     let serves_grep = state.config.grep.mode.serves_grep();
     let maintains_index = state.config.grep.mode.maintains_index();

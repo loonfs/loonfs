@@ -131,7 +131,7 @@ pub mod control {
     };
     pub use crate::namespace::control::{
         load_namespace_checkpoint_record_control, load_namespace_current_manifest,
-        load_namespace_head_control, load_namespace_hint, load_namespace_read_anchor,
+        load_namespace_hint, load_namespace_read_anchor, load_namespace_read_state,
         raise_namespace_hint, CurrentManifest, LoadedHint, LoadedManifest,
     };
     pub use crate::namespace::freshness::probe_namespace_wal;
@@ -143,11 +143,11 @@ pub mod control {
 /// publisher, and re-exported as `loonfs::publish` for the server's
 /// filesystem handlers.
 pub mod publish {
-    pub use crate::commit::{CommitFingerprint, CommitHeadPublishError};
+    pub use crate::commit::{CommitFingerprint, WalPublishError};
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionState,
-        WalFoldSnapshot, WriterSessionState,
+        WalFoldInput, WriterSessionState,
     };
     pub use crate::path::write::{CommitRequest, FilesystemOperation};
     pub use crate::protocol::{PublishTailOptions, PublishTailWeight};
@@ -165,7 +165,7 @@ pub use checkpoint::{
     MetadataFamilyGroup, MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader,
     SegmentRowIterator,
 };
-pub use commit_engine::WalFoldSnapshot;
+pub use commit_engine::WalFoldInput;
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{

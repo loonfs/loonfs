@@ -7,7 +7,7 @@ use crate::control_update::{
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control_snapshot::NamespaceControlSnapshot;
+use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
@@ -21,31 +21,31 @@ use tokio::sync::OnceCell;
 pub(super) struct PublicationView<'a, 'store, S: ObjectStore + ?Sized> {
     store: &'store S,
     namespace_id: &'a NamespaceId,
-    snapshot: Option<&'a NamespaceControlSnapshot>,
+    anchor: Option<&'a NamespaceReadAnchor>,
     basis: &'a MetadataBasis,
     view: OnceCell<LoadedMetadataView<'store, S>>,
 }
 
 impl<'a, 'store, S: ObjectStore + ?Sized> PublicationView<'a, 'store, S> {
-    /// `snapshot` is `None` on a deleted namespace, whose metadata answers
+    /// `anchor` is `None` on a deleted namespace, whose metadata answers
     /// nothing.
     pub(super) fn new(
         store: &'store S,
         namespace_id: &'a NamespaceId,
-        snapshot: Option<&'a NamespaceControlSnapshot>,
+        anchor: Option<&'a NamespaceReadAnchor>,
         basis: &'a MetadataBasis,
     ) -> Self {
         Self {
             store,
             namespace_id,
-            snapshot,
+            anchor,
             basis,
             view: OnceCell::new(),
         }
     }
 
     async fn load(&self) -> Result<Option<&LoadedMetadataView<'store, S>>> {
-        let Some(snapshot) = self.snapshot else {
+        let Some(anchor) = self.anchor else {
             return Ok(None);
         };
         self.view
@@ -53,7 +53,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> PublicationView<'a, 'store, S> {
                 load_metadata_view(
                     self.store,
                     self.namespace_id,
-                    ReadLoadContext::pinned_head(&snapshot.head, self.basis, None, None),
+                    ReadLoadContext::pinned_head(&anchor.read_state, self.basis, None, None),
                 )
             })
             .await

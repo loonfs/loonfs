@@ -1,11 +1,11 @@
-//! Loads namespace heads and discovers numbered manifests through their hints.
+//! Derives namespace read state from numbered manifests and the WAL tail.
 
 use crate::control_object::{
     expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
 use crate::error::CoreError;
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control_snapshot::load_head_and_metadata_basis;
+use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::{ControlObjectKind, HintState, ManifestRef};
 use loonfs_api::NamespaceId;
@@ -233,14 +233,14 @@ pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
     }))
 }
 
-pub(crate) async fn load_head_object<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_read_state<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceReadState, ControlObjectLoadError> {
     Ok(
-        crate::namespace::control_snapshot::load_control_snapshot(store, expected_namespace_id)
+        crate::namespace::read_anchor::load_read_anchor(store, expected_namespace_id)
             .await?
-            .head,
+            .read_state,
     )
 }
 
@@ -270,13 +270,6 @@ pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
 ) -> Result<(NamespaceReadState, MetadataBasis), ControlObjectLoadError> {
     let loaded = load_head_and_metadata_basis(store, expected_namespace_id).await?;
     Ok((loaded.head, loaded.basis))
-}
-
-pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceReadState, ControlObjectLoadError> {
-    load_head_object(store, expected_namespace_id).await
 }
 
 /// Raises the discovery start without changing the committed WAL tip.

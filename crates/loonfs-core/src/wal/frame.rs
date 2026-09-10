@@ -1,4 +1,4 @@
-//! WAL segment and chain framing types, shared by the writer, reader, and
+//! WAL segment and tail framing types, shared by the writer, reader, and
 //! replay paths.
 
 use crate::namespace::state::NamespaceReadState;
@@ -47,9 +47,9 @@ pub enum WalSegmentError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WalChainLoadRequest<'a> {
+pub(crate) struct WalTailLoadRequest<'a> {
     pub(crate) namespace_id: &'a NamespaceId,
-    pub(crate) chain_base_seq: ChangeSeq,
+    pub(crate) base_seq: ChangeSeq,
     pub(crate) head_seq: ChangeSeq,
     pub(crate) base_wal_no: WalNo,
     pub(crate) tip_wal_no: WalNo,
@@ -113,11 +113,11 @@ impl ValidatedWalSegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidatedWalChain {
+pub(crate) struct ValidatedWalTail {
     segments: Vec<ValidatedWalSegment>,
 }
 
-impl ValidatedWalChain {
+impl ValidatedWalTail {
     pub(crate) fn new(segments: Vec<ValidatedWalSegment>) -> Self {
         Self { segments }
     }
@@ -128,7 +128,7 @@ impl ValidatedWalChain {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum WalChainLoadError {
+pub enum WalTailLoadError {
     #[error("failed to read WAL object `{object_key}`: {message}")]
     ReadWal {
         object_key: String,
@@ -148,7 +148,7 @@ pub enum WalChainLoadError {
     Replay(#[from] WalSegmentError),
 }
 
-impl WalChainLoadError {
+impl WalTailLoadError {
     pub fn code(&self) -> loonfs_api::ErrorCode {
         match self {
             Self::ReadWal {

@@ -3,7 +3,7 @@
 use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
-use crate::namespace::control::{load_current_manifest, load_head_object};
+use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{AcquiredWriter, WriterBlock};
@@ -55,7 +55,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         }
     };
     loop {
-        let head = load_head_object(store, namespace_id).await?;
+        let head = load_namespace_read_state(store, namespace_id).await?;
         ensure_writer_not_fenced(&head, &acquired)?;
         super::control::ensure_namespace_live(&head)?;
         let wal_no = head
@@ -79,7 +79,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
         match crate::commit::publish_wal(store, &fence).await {
             Ok(()) => return Ok(acquired),
-            Err(CoreError::HeadPublish(crate::commit::CommitHeadPublishError::StaleHead)) => {}
+            Err(CoreError::WalPublish(crate::commit::WalPublishError::StaleHead)) => {}
             Err(error) => return Err(error),
         }
     }

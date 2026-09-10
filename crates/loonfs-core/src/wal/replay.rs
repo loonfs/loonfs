@@ -1,7 +1,7 @@
-//! Replays a validated WAL chain onto metadata state, record by record.
+//! Replays a validated WAL tail onto metadata state, record by record.
 
 pub(crate) use super::frame::WalSegmentError;
-use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
+use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalTail};
 use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
@@ -13,7 +13,7 @@ pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,
     base_metadata_state: &MetadataState,
     expected_writer_epoch: Option<WriterEpoch>,
-    wal_tail: &ValidatedWalChain,
+    wal_tail: &ValidatedWalTail,
 ) -> Result<ReplayedWalTail, WalSegmentError> {
     let mut replayed = ReplayedWalTail {
         resulting_head: base_head.clone(),

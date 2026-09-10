@@ -1,4 +1,4 @@
-//! Typed failures for grep root state, encoding, loading, and publication.
+//! Typed failures for grep manifest state, encoding, loading, and publication.
 
 use loonfs::StoreFailureClass;
 use loonfs_api::wire::envelope::EnvelopeCodecError;
@@ -55,10 +55,10 @@ pub enum GrepEnvelopeCodecError {
     InvalidState(#[from] GrepManifestStateError),
 }
 
-/// Failure to load or publish a grep root.
+/// Failure to load or publish a grep manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
-pub enum GrepRootError {
+pub enum GrepManifestError {
     #[error("object-store operation failed for grep state `{object_key}`: {message}")]
     Store {
         object_key: String,
@@ -80,4 +80,4 @@ pub enum GrepRootError {
     Conflict { object_key: String },
 }
 
-pub(super) type Result<T> = std::result::Result<T, GrepRootError>;
+pub(super) type Result<T> = std::result::Result<T, GrepManifestError>;

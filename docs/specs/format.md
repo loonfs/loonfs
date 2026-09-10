@@ -1569,7 +1569,7 @@ The tokenizer, posting representation, and row-key meaning are governed by grep 
 
 Each explicit call discovers the current grep manifest, builds its live segment set, and lists `manifests/` and `segments/` from beginning to end using one supplied `now_ms`. The collector stores no durable progress cursor.
 
-The current manifest protects all listed segments, including pending reorganization inputs and outputs. Manifest numbers at or above the observed hint remain available for discovery, but intermediate manifests do not protect additional segments. An invalid or unreadable current root stops the call before deletion.
+The current manifest protects all listed segments, including pending reorganization inputs and outputs. Manifest numbers at or above the observed hint remain available for discovery, but intermediate manifests do not protect additional segments. An invalid or unreadable current manifest stops the call before deletion.
 
 | Candidate on a live namespace | Collection rule |
 | --- | --- |

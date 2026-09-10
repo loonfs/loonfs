@@ -9,7 +9,7 @@ use super::candidates::{
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
-    materialize_commit, publish_wal, wal_payload_from_materialized_commit, CommitHeadPublishError,
+    materialize_commit, publish_wal, wal_payload_from_materialized_commit, WalPublishError,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
@@ -247,7 +247,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if tip_age_ms > WAL_PUBLISH_BUDGET_MS {
         return abort_batch(
             slots,
-            &CoreError::HeadPublish(CommitHeadPublishError::PublishBudgetExceeded {
+            &CoreError::WalPublish(WalPublishError::PublishBudgetExceeded {
                 elapsed_ms: tip_age_ms,
                 budget_ms: WAL_PUBLISH_BUDGET_MS,
             }),
@@ -367,7 +367,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn sequence_exhaustion_writes_neither_wal_nor_head() {
+    async fn sequence_exhaustion_writes_neither_wal_nor_hint() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -392,12 +392,12 @@ mod tests {
         .await
         .expect("load publish view");
 
-        let head_key = hint(&namespace_id);
-        let head_before = store
-            .get(&head_key, None)
+        let hint_key = hint(&namespace_id);
+        let hint_before = store
+            .get(&hint_key, None)
             .await
-            .expect("read head")
-            .expect("head exists");
+            .expect("read hint")
+            .expect("hint exists");
         let wal_before = store
             .list_prefix(&wal_segment_prefix(&namespace_id))
             .await
@@ -437,11 +437,11 @@ mod tests {
         assert!(matches!(result.effect, PublishViewEffect::Unchanged));
         assert_eq!(
             store
-                .get(&head_key, None)
+                .get(&hint_key, None)
                 .await
-                .expect("read head after")
-                .expect("head exists"),
-            head_before
+                .expect("read hint after")
+                .expect("hint exists"),
+            hint_before
         );
         assert_eq!(
             store

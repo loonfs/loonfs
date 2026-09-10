@@ -57,12 +57,12 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .await
         .expect("build WAL tail");
     let expected_tail = Arc::clone(
-        &flush::load_root_projection(&store, &namespace_id)
+        &flush::load_manifest_projection(&store, &namespace_id)
             .await
             .expect("load store projection")
             .tail_state,
     );
-    let head = load_head_object(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("load head");
     let acquired_writer = loonfs_api::wire::control::AcquiredWriter {
@@ -80,7 +80,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     .await
     .expect("load publish projection");
 
-    let snapshot = crate::WalFoldSnapshot {
+    let input = crate::WalFoldInput {
         head: projection.head.clone(),
         basis: projection.basis().clone(),
         retention_floor_seq: projection.retention_floor_seq,
@@ -91,7 +91,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         &store,
         None,
         &namespace_id,
-        Some(snapshot),
+        Some(input),
         &context,
         &crate::time::StdMonotonicTimer::default(),
     )
@@ -183,7 +183,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
         .await
         .expect("materialization after");
 
-    assert_eq!(after.root.manifest.manifest_no, checkpoint.manifest_no);
+    assert_eq!(after.manifest.manifest.manifest_no, checkpoint.manifest_no);
     assert_eq!(before.head.seq, after.head.seq);
     assert!(metadata_states_equivalent(
         &before.metadata_state,
@@ -266,7 +266,9 @@ async fn manifest_round_trip_supports_empty_namespace() {
     .await
     .expect("load genesis from manifest one");
     assert!(genesis.segments.manifest().payload().runs.is_empty());
-    let head = load_head_object(&store, &namespace_id).await.expect("head");
+    let head = load_namespace_read_state(&store, &namespace_id)
+        .await
+        .expect("head");
     assert_eq!(genesis.replay_head(&head), head);
     for family in CHECKPOINT_ROW_FAMILIES {
         assert!(genesis
@@ -286,7 +288,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest.manifest_no, ManifestNo(1));
+    assert_eq!(materialization.manifest.manifest.manifest_no, ManifestNo(1));
     let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
@@ -373,10 +375,10 @@ async fn current_reads_report_a_missing_hint_as_absent_after_retention_advances(
     store
         .delete(&loonfs_objectstore::keys::hint(&namespace_id))
         .await
-        .expect("lose the recovery root");
+        .expect("lose the recovery manifest");
 
     let error = match load_current_metadata_view(&store, &namespace_id).await {
-        Ok(_) => panic!("retained WAL must not mask a root lost after floor advancement"),
+        Ok(_) => panic!("retained WAL must not mask a manifest lost after floor advancement"),
         Err(error) => error,
     };
     assert_eq!(error.code(), ErrorCode::NamespaceNotFound);
@@ -938,13 +940,13 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    let covering_manifest_no = ManifestNo(materialization.root.manifest.manifest_no.0 + 1);
+    let covering_manifest_no = ManifestNo(materialization.manifest.manifest.manifest_no.0 + 1);
     let manifest_without_checkpoint = build_namespace_manifest_from_metadata_state(
         &store,
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_no: Some(materialization.root.manifest.manifest_no),
+            basis_manifest_no: Some(materialization.manifest.manifest.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
@@ -957,7 +959,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         &store,
         &namespace_id,
         &manifest_without_checkpoint,
-        Some(materialization.root.manifest.manifest_no),
+        Some(materialization.manifest.manifest.manifest_no),
     )
     .await
     .expect("publish manifest");
@@ -1010,7 +1012,7 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_no: Some(materialization.root.manifest.manifest_no),
+            basis_manifest_no: Some(materialization.manifest.manifest.manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },

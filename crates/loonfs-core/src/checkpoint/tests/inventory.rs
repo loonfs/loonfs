@@ -105,7 +105,7 @@ async fn two_pins_under_one_label_list_as_two_records() {
 }
 
 #[tokio::test]
-async fn an_expired_record_is_listed_with_its_expiry_until_it_is_released() {
+async fn an_expired_record_is_listed_with_its_expiry_until_it_is_deleted() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -200,7 +200,7 @@ async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
 }
 
 #[tokio::test]
-async fn released_pins_are_absent_from_later_pages() {
+async fn deleted_pins_are_absent_from_later_pages() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");

@@ -207,7 +207,7 @@ pub enum KeyClass {
     Metadata,
     /// Groups immutable WAL segment payloads.
     WalSegment,
-    /// Groups namespace manifests and their mutable root pointer.
+    /// Groups namespace manifests.
     NamespaceManifest,
     /// Groups immutable metadata segments.
     MetadataSegment,

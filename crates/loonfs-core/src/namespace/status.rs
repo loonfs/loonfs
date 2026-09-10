@@ -1,7 +1,7 @@
 //! Reads namespace state and storage diagnostics.
 
 use crate::error::{CoreError, Result};
-use crate::namespace::control_snapshot::{load_control_snapshot, load_head_and_retention_floor};
+use crate::namespace::read_anchor::{load_head_and_retention_floor, load_read_anchor};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -36,12 +36,12 @@ async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadBasis> {
-    let snapshot = load_control_snapshot(store, expected_namespace_id)
+    let anchor = load_read_anchor(store, expected_namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let basis = snapshot.basis();
-    let retention_floor_seq = snapshot.retention_floor_seq;
-    let head = snapshot.head;
+    let basis = anchor.basis();
+    let retention_floor_seq = anchor.retention_floor_seq;
+    let head = anchor.read_state;
     super::control::ensure_namespace_live(&head)?;
     let current_manifest_no = Some(basis.manifest_no());
     Ok(LoadedHeadBasis {

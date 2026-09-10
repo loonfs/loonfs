@@ -5,10 +5,10 @@
 use bytes::Bytes;
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use loonfs_grep::keyspace::{grep_prefix, hint_key, manifest_key, manifests_prefix};
-use loonfs_grep::root::{
+use loonfs_grep::manifest::{
     encode_grep_hint, encode_grep_manifest, load_current_grep_manifest, load_grep_manifest,
     publish_grep_manifest, raise_grep_hint, GrepHint, GrepIndexState, GrepIndexStatus,
-    GrepManifestState, GrepRootError,
+    GrepManifestError, GrepManifestState,
 };
 use loonfs_grep::GrepError;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -157,7 +157,7 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
     write_hint(&store, &namespace_id, ManifestNo(4)).await;
     assert!(matches!(
         load_current_grep_manifest(&store, &namespace_id).await,
-        Err(GrepRootError::Corrupt { .. })
+        Err(GrepManifestError::Corrupt { .. })
     ));
     let wrong = state(namespace_id.clone(), ManifestNo(5), RunNo(0));
     store
@@ -169,7 +169,7 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
         .expect("misnamed manifest");
     assert!(matches!(
         load_grep_manifest(&store, &namespace_id, ManifestNo(4)).await,
-        Err(GrepRootError::Corrupt { .. })
+        Err(GrepManifestError::Corrupt { .. })
     ));
 }
 

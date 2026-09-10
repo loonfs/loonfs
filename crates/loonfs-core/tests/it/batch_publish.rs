@@ -14,7 +14,7 @@ use loonfs_api::{
 };
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
-use loonfs_core::control::load_namespace_head_control;
+use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
@@ -63,11 +63,11 @@ fn ack_lost_wal_put_store(
     root: impl AsRef<Path>,
     namespace_id: &NamespaceId,
 ) -> FailStore<LocalFsStore> {
-    let head_key = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
+    let wal_prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
     let store = FailStore::matching(
         LocalFsStore::new(root.as_ref()).expect("store"),
         move |operation: &OperationContext<'_>| {
-            if !operation.key().starts_with(&head_key) {
+            if !operation.key().starts_with(&wal_prefix) {
                 return false;
             }
             let bytes = match operation.kind() {
@@ -299,7 +299,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
 }
 
 #[tokio::test]
-async fn change_feed_validates_wal_chain_before_current_manifest() {
+async fn change_feed_validates_wal_tail_before_current_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -326,7 +326,7 @@ async fn change_feed_validates_wal_chain_before_current_manifest() {
         .expect("checkpoint-backed read should not read pre-checkpoint wal");
     let error = list_changes_after(&store, &namespace_id, ChangeSeq(0))
         .await
-        .expect_err("corrupt wal chain");
+        .expect_err("corrupt WAL tail");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
@@ -355,11 +355,11 @@ async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
         )
     };
 
-    // The CAS landed but its acknowledgment was lost: this must surface as
+    // The WAL put landed but its acknowledgment was lost: this must surface as
     // an unknown outcome, never as definite failure.
     let error = submit_commit(&store, &namespace_id, put(), &context)
         .await
-        .expect_err("ack-lost head CAS is not definite failure");
+        .expect_err("ack-lost WAL put is not definite failure");
     assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
     assert!(store.injected_ack_loss());
 
@@ -370,7 +370,7 @@ async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
         .expect("same-commit-id retry replays the committed mutation");
     assert_eq!(result.committed_seq, ChangeSeq(1));
 
-    let head = load_namespace_head_control(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("load head");
     assert_eq!(head.seq, ChangeSeq(1));
@@ -477,7 +477,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         .expect_err("alias of an accepted candidate fails with it");
     assert!(matches!(accepted_alias, CoreError::WalWrite { .. }));
 
-    let head = load_namespace_head_control(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("load head");
     assert_eq!(head.seq, ChangeSeq(0));
@@ -1193,7 +1193,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         ));
     }
 
-    let head = load_namespace_head_control(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("load head");
     assert_eq!(head.seq, ChangeSeq(8));
@@ -1416,7 +1416,7 @@ async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
             results[2].as_ref().expect("next commit").committed_seq,
             ChangeSeq(next_seq)
         );
-        let head = load_namespace_head_control(&store, &namespace_id)
+        let head = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("head");
         assert_eq!(head.next_inode_id, InodeId(next_seq + 2));
@@ -1545,7 +1545,7 @@ async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_a
         results[6].as_ref().expect("later").committed_seq,
         ChangeSeq(6)
     );
-    let head = load_namespace_head_control(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("head");
     assert_eq!(head.next_inode_id, InodeId(6));

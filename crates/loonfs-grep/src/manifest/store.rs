@@ -4,7 +4,7 @@ use super::codec::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest,
     GrepManifestEnvelope,
 };
-use super::error::{GrepRootError, Result};
+use super::error::{GrepManifestError, Result};
 use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
 use bytes::Bytes;
@@ -54,7 +54,7 @@ pub async fn load_grep_hint<S: ObjectStore + ?Sized>(
     let envelope = decode_grep_hint(&body.bytes).map_err(|error| corrupt(&object_key, error))?;
     let state = envelope.payload();
     if &state.namespace_id != namespace_id {
-        return Err(GrepRootError::IdentityMismatch {
+        return Err(GrepManifestError::IdentityMismatch {
             object_key,
             expected_namespace_id: namespace_id.clone(),
             actual_namespace_id: state.namespace_id.clone(),
@@ -84,7 +84,7 @@ pub async fn load_grep_manifest<S: ObjectStore + ?Sized>(
     };
     let envelope = decode_grep_manifest(&bytes).map_err(|error| corrupt(&object_key, error))?;
     if envelope.payload().namespace_id() != namespace_id {
-        return Err(GrepRootError::IdentityMismatch {
+        return Err(GrepManifestError::IdentityMismatch {
             object_key,
             expected_namespace_id: namespace_id.clone(),
             actual_namespace_id: envelope.payload().namespace_id().clone(),
@@ -141,7 +141,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
     let expected_manifest_no = match current {
         Some(current) => {
             if current.manifest_state().namespace_id() != namespace_id {
-                return Err(GrepRootError::IdentityMismatch {
+                return Err(GrepManifestError::IdentityMismatch {
                     object_key,
                     expected_namespace_id: current.manifest_state().namespace_id().clone(),
                     actual_namespace_id: namespace_id.clone(),
@@ -177,7 +177,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
         Ok(_) => {}
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            return Err(GrepRootError::Conflict { object_key }.into())
+            return Err(GrepManifestError::Conflict { object_key }.into())
         }
         Err(error) => return Err(store_error(&object_key, &error).into()),
     }
@@ -267,15 +267,15 @@ pub async fn raise_grep_hint<S: ObjectStore + ?Sized>(
     Ok(current)
 }
 
-fn corrupt(object_key: &str, error: impl ToString) -> GrepRootError {
-    GrepRootError::Corrupt {
+fn corrupt(object_key: &str, error: impl ToString) -> GrepManifestError {
+    GrepManifestError::Corrupt {
         object_key: object_key.to_owned(),
         message: error.to_string(),
     }
 }
 
-fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepRootError {
-    GrepRootError::Store {
+fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepManifestError {
+    GrepManifestError::Store {
         object_key: object_key.to_owned(),
         message: error.public_message().into_owned(),
         class: StoreFailureClass::of(error),

@@ -23,7 +23,7 @@ impl Client {
     /// Creates a named, user-owned checkpoint pinning the namespace's
     /// current view (maintenance API group). Every call creates a new checkpoint; the
     /// name is a label, not a key. This is a maintenance operation, not a
-    /// file mutation. The record is a garbage-collection root until released
+    /// file mutation. The record is a garbage-collection root until deleted
     /// or expired.
     /// Retrying this request starts a distinct attempt.
     pub async fn create_checkpoint(
@@ -131,7 +131,7 @@ impl Client {
             .await
     }
 
-    /// Enables the namespace's grep root (maintenance API group); embedded mode starts
+    /// Enables the namespace's grep manifest (maintenance API group); embedded mode starts
     /// that namespace's event-driven backfill. Idempotent.
     pub async fn enable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
@@ -142,7 +142,7 @@ impl Client {
             .await
     }
 
-    /// Disables the namespace's grep root (maintenance API group); garbage collection
+    /// Disables the namespace's grep manifest (maintenance API group); garbage collection
     /// reclaims the segments. Idempotent.
     pub async fn disable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(

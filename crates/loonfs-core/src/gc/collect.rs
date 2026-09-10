@@ -9,8 +9,8 @@ use super::GcConfig;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::load_head_object;
-use crate::namespace::control_snapshot::load_control_snapshot;
+use crate::namespace::control::load_namespace_read_state;
+use crate::namespace::read_anchor::load_read_anchor;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use futures::StreamExt;
 use loonfs_api::{GcResponse, NamespaceId};
@@ -36,17 +36,17 @@ pub(super) async fn gc_namespace_with_timer<S: ObjectStore + ?Sized>(
     let started_ms = timer.monotonic_now_ms();
     config.validate()?;
     let mut report = GcResponse::empty(namespace_id.clone());
-    let snapshot = match load_control_snapshot(store, namespace_id).await {
-        Ok(snapshot) => snapshot,
+    let anchor = match load_read_anchor(store, namespace_id).await {
+        Ok(anchor) => anchor,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
         Err(error) => return Err(error.into()),
     };
-    let live = LiveSet::load(store, namespace_id, &snapshot).await?;
-    let basis = snapshot.basis();
+    let live = LiveSet::load(store, namespace_id, &anchor).await?;
+    let basis = anchor.basis();
     let view = PublicationView::new(
         store,
         namespace_id,
-        (!live.namespace_deleted).then_some(&snapshot),
+        (!live.namespace_deleted).then_some(&anchor),
         &basis,
     );
     let retired_content = live.retired_content(context.now_ms);
@@ -57,7 +57,7 @@ pub(super) async fn gc_namespace_with_timer<S: ObjectStore + ?Sized>(
                 continue;
             }
             verify_retired_owner(store, namespace_id, &live, context.now_ms).await?;
-            if let Some(basis) = &snapshot.head.fork_basis {
+            if let Some(basis) = &anchor.read_state.fork_basis {
                 if release_source_checkpoint(store, basis).await? {
                     report.released_checkpoints.fork += 1;
                     report.deleted.checkpoint_records += 1;
@@ -117,7 +117,7 @@ async fn verify_retired_owner<S: ObjectStore + ?Sized>(
     live: &LiveSet,
     now_ms: u64,
 ) -> Result<()> {
-    let head = load_head_object(store, namespace_id)
+    let head = load_namespace_read_state(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     if !head.status.is_deleted()
@@ -140,7 +140,7 @@ async fn retirement_report<S: ObjectStore + ?Sized>(
     now_ms: u64,
     mut report: GcResponse,
 ) -> Result<GcResponse> {
-    let head = load_head_object(store, namespace_id)
+    let head = load_namespace_read_state(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     report.reclaim_after_ms = head.status.reclaim_after_ms();

@@ -11,9 +11,9 @@ use super::super::row::manifest_row_commit_seq;
 use super::super::runs::MetadataFamilyGroup;
 use super::super::scan::VerifiedMetadataSegments;
 use super::super::streaming_compaction::{
-    finalize_metadata_compaction, merge_group_in_step, run_metadata_compaction,
-    snapshot_segment_keys, CompactionPublication, MetadataCompactionCancellation,
-    MetadataCompactionJobOutcome, MetadataCompactionSpec, MetadataMergeResult,
+    finalize_metadata_compaction, input_segment_keys, merge_group_in_step, run_metadata_compaction,
+    CompactionPublication, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
+    MetadataCompactionSpec, MetadataMergeResult,
 };
 use super::*;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
@@ -118,7 +118,7 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
         .await
         .expect("checkpoint the deletions");
 
-    // Fold everything into one base run, so the snapshot has a base under its
+    // Fold everything into one base run, so the input has a base under its
     // delta runs the way a real over-budget group does. The base is cut into
     // small segments on purpose: an iterator walks whole segments, so small
     // segments make it open and close several of them.
@@ -531,7 +531,7 @@ fn small_segment_policy() -> MetadataLsmPolicy {
     }
 }
 
-/// Loads the segments referenced by the current root manifest.
+/// Loads the segments referenced by the current manifest.
 async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
@@ -542,9 +542,9 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
         .expect("load the current manifest's segments")
 }
 
-/// The runs a job snapshots: every run of the manifest that holds rows of the
+/// The runs a job reads: every run of the manifest that holds rows of the
 /// group, which is what makes the input bottom-anchored and its drops legal.
-fn snapshot_runs_for_group(
+fn input_runs_for_group(
     manifest: &NamespaceManifestEnvelope,
     group: MetadataFamilyGroup,
 ) -> Vec<MetadataRunManifest> {
@@ -607,15 +607,15 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
         .expect("run the streaming compaction")
 }
 
-/// The segments the group's snapshot runs hold right now, which is what
+/// The segments the group's input runs hold right now, which is what
 /// finalization compares the manifest against.
-async fn snapshot_keys_now<S: ObjectStore + ?Sized>(
+async fn input_keys_now<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
 ) -> BTreeSet<String> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
-    snapshot_segment_keys(&segments, spec).expect("the snapshot must be present")
+    input_segment_keys(&segments, spec).expect("the input must be present")
 }
 
 /// The production finalizer, called the way the job driver calls it.
@@ -627,14 +627,14 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    snapshot_keys: &BTreeSet<String>,
+    input_keys: &BTreeSet<String>,
     result: &MetadataMergeResult,
 ) -> MetadataCompactionJobOutcome {
     finalize_streaming_compaction_under(
         store,
         namespace_id,
         spec,
-        snapshot_keys,
+        input_keys,
         result,
         &MetadataCompactionCancellation::default(),
     )
@@ -646,7 +646,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    snapshot_keys: &BTreeSet<String>,
+    input_keys: &BTreeSet<String>,
     result: &MetadataMergeResult,
     cancellation: &MetadataCompactionCancellation,
 ) -> MetadataCompactionJobOutcome {
@@ -660,7 +660,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         spec,
-        snapshot_keys,
+        input_keys,
         result.clone(),
         cancellation,
         &publication,
@@ -674,10 +674,10 @@ async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    snapshot_keys: &BTreeSet<String>,
+    input_keys: &BTreeSet<String>,
     result: &MetadataMergeResult,
 ) -> ManifestNo {
-    match finalize_streaming_compaction(store, namespace_id, spec, snapshot_keys, result).await {
+    match finalize_streaming_compaction(store, namespace_id, spec, input_keys, result).await {
         MetadataCompactionJobOutcome::Published { manifest_no, .. } => manifest_no,
         other => panic!("no concurrent publisher exists in this test, got {other:?}"),
     }
@@ -718,7 +718,7 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
         namespace_id,
         load_current_manifest(store, namespace_id)
             .await
-            .expect("read root")
+            .expect("read manifest")
             .state
             .manifest
             .manifest_no,
@@ -834,17 +834,14 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     );
     assert_eq!(spec.group(), group);
     assert_eq!(spec.frozen_floor_seq(), floor_seq);
-    let snapshot = snapshot_runs_for_group(segments.manifest(), group);
+    let input = input_runs_for_group(segments.manifest(), group);
     assert_eq!(
         spec.inputs().iter().copied().collect::<BTreeSet<_>>(),
-        snapshot
-            .iter()
-            .map(|run| run.run_no)
-            .collect::<BTreeSet<_>>(),
+        input.iter().map(|run| run.run_no).collect::<BTreeSet<_>>(),
         "a compaction takes every run the group holds, which is what anchors it at the bottom"
     );
     assert!(
-        snapshot.len() > 1,
+        input.len() > 1,
         "this workload must leave a base under at least one delta run"
     );
 }
@@ -1056,7 +1053,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
     let folded_state = current_metadata_state(&fold_store, &namespace_id).await;
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let outcome = run_compaction(
         &store,
         &namespace_id,
@@ -1094,7 +1091,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
     );
     assert_eq!(result.unbind_probes, reverse_rows_at_or_below_floor);
 
-    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
     let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
     assert_eq!(
@@ -1124,7 +1121,7 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
     // The loader's invariants must accept the result, and the group must be
     // left in one base run.
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let runs = snapshot_runs_for_group(segments.manifest(), group);
+    let runs = input_runs_for_group(segments.manifest(), group);
     assert_eq!(runs.len(), 1, "the job must leave the group in one run");
     assert_eq!(runs[0].tier, RunTier::Base);
 
@@ -1186,7 +1183,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
     let spec = compaction_spec_for_group(&store, &namespace_id, group)
         .await
         .with_frozen_floor_seq(ChangeSeq(0));
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let Ok(result) = run_compaction(
         &store,
         &namespace_id,
@@ -1199,7 +1196,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
         panic!("nothing cancelled this job");
     };
     assert_eq!(result.unbind_probes, 0, "a floor of zero covers no row");
-    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
 
     let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
     assert_ne!(
@@ -1226,7 +1223,7 @@ async fn compaction_preserves_every_revision_and_publication_below_the_floor() {
         let before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
         let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-        let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+        let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
         let Ok(result) = run_compaction(
             &store,
             &namespace_id,
@@ -1246,7 +1243,7 @@ async fn compaction_preserves_every_revision_and_publication_below_the_floor() {
             result.unbind_probes, 0,
             "history rebuilds do not read unbinds"
         );
-        publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+        publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
 
         assert_eq!(
             group_rows_of_current_manifest(&store, &namespace_id, group).await,
@@ -1267,7 +1264,7 @@ async fn group_segment_keys<S: ObjectStore + ?Sized>(
     group: MetadataFamilyGroup,
 ) -> BTreeSet<String> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
-    snapshot_runs_for_group(segments.manifest(), group)
+    input_runs_for_group(segments.manifest(), group)
         .iter()
         .flat_map(|run| group_run_descriptors(run, group))
         .map(metadata_segment_object_key)
@@ -1938,7 +1935,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
 
     // The uninterrupted run, for the comparison.
     let spec = compaction_spec_for_group(&straight_store, &namespace_id, group).await;
-    let snapshot_keys = snapshot_keys_now(&straight_store, &namespace_id, &spec).await;
+    let input_keys = input_keys_now(&straight_store, &namespace_id, &spec).await;
     let Ok(straight_result) = run_compaction(
         &straight_store,
         &namespace_id,
@@ -1954,7 +1951,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
         &straight_store,
         &namespace_id,
         &spec,
-        &snapshot_keys,
+        &input_keys,
         &straight_result,
     )
     .await;
@@ -2018,7 +2015,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
 
     // The re-run from the same spec, against the same durable state.
     let store = LocalFsStore::new(interrupted_dir.path()).expect("store");
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let Ok(result) = run_compaction(
         &store,
         &namespace_id,
@@ -2044,7 +2041,7 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
         .iter()
         .map(metadata_segment_object_key)
         .collect();
-    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
 
     assert_eq!(
         group_rows_of_current_manifest(&store, &namespace_id, group).await,
@@ -2131,7 +2128,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         "the job overlapped {} reads at once",
         reads.peak_in_flight
     );
-    assert!(reads.total > 0, "the job must have read the snapshot");
+    assert!(reads.total > 0, "the job must have read the input");
     // Two blocks per iterator, and a bindings cluster opens one iterator per
     // run per forward family. The bound is a property of the job, not of the
     // group: the group here holds far more rows than the blocks ever hold.
@@ -2256,7 +2253,7 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     );
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let Ok(result) = run_compaction(
         &store,
         &namespace_id,
@@ -2274,7 +2271,7 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
         result.peak_operator_rows
     );
 
-    publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+    publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
     assert_eq!(
         group_rows_of_current_manifest(&store, &namespace_id, group).await,
         folded,
@@ -2289,7 +2286,7 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     );
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     assert_eq!(
-        snapshot_runs_for_group(segments.manifest(), group).len(),
+        input_runs_for_group(segments.manifest(), group).len(),
         1,
         "the job must leave the group in one run"
     );
@@ -2334,7 +2331,7 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
         let folded = group_rows_of_current_manifest(&fold_store, &namespace_id, group).await;
 
         let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-        let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+        let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
         let Ok(result) = run_compaction(
             &store,
             &namespace_id,
@@ -2351,7 +2348,7 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
             "a {group:?} retention operator held {} rows",
             result.peak_operator_rows
         );
-        publish_streaming_compaction(&store, &namespace_id, &spec, &snapshot_keys, &result).await;
+        publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
 
         let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
         assert_eq!(
@@ -2511,7 +2508,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                     active = Some(spec.clone());
                     if arrived_keys.is_empty() {
                         // A run arrives while the first job runs. It is
-                        // outside that job's snapshot, so the job never reads
+                        // outside that job's input, so the job never reads
                         // it and the publication must land underneath it.
                         write_file_bytes(
                             &store,
@@ -2585,7 +2582,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
     assert!(settled, "maintenance must settle with nothing left to fold");
 
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let base_runs = snapshot_runs_for_group(segments.manifest(), group)
+    let base_runs = input_runs_for_group(segments.manifest(), group)
         .into_iter()
         .filter(|run| run.tier == RunTier::Base)
         .count();
@@ -2715,7 +2712,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         "the rebuild must leave what a read answers where it was"
     );
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let runs = snapshot_runs_for_group(segments.manifest(), group);
+    let runs = input_runs_for_group(segments.manifest(), group);
     drop(segments);
     assert_eq!(runs.len(), 1, "the group must end in one run");
     assert_eq!(runs[0].tier, RunTier::Base);
@@ -2730,7 +2727,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
 /// Publishes a competing manifest the first time the finalizer writes its
 /// replacement manifest object.
 ///
-/// That is the window the retry is for: the finalizer has reloaded the root
+/// That is the window the retry is for: the finalizer has reloaded the manifest
 /// and decided its swap, and a flush lands before its compare-and-swap does.
 #[derive(Debug)]
 struct FlushDuringFinalizationStore {
@@ -2799,7 +2796,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
     let group = MetadataFamilyGroup::Bindings;
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let Ok(result) = run_compaction(
         &store,
         &namespace_id,
@@ -2835,7 +2832,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
         &racing_store,
         &namespace_id,
         &spec,
-        &snapshot_keys,
+        &input_keys,
         &result,
     )
     .await
@@ -2850,11 +2847,11 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
 
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     assert_eq!(segments.manifest().payload().manifest_no, manifest_no);
-    let runs = snapshot_runs_for_group(segments.manifest(), group);
+    let runs = input_runs_for_group(segments.manifest(), group);
     drop(segments);
     // Two runs: the base run the job built, and the delta run the flush
-    // published above the job's snapshot. The flush's run survives because
-    // the swap replaces only what the snapshot held.
+    // published above the job's input. The flush's run survives because
+    // the swap replaces only what the input held.
     assert_eq!(
         runs.iter().filter(|run| run.tier == RunTier::Base).count(),
         1,
@@ -2866,7 +2863,7 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
         "the flush's run must survive the swap"
     );
     // Nothing the job rebuilt moved, and the file the flush published is
-    // there: the swap replaced its own snapshot and preserved the rest.
+    // there: the swap replaced its own input and preserved the rest.
     let visible_after = visible_namespace(&store, &namespace_id).await;
     assert_eq!(
         visible_after.len(),
@@ -2892,7 +2889,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     seed_bindings_workload(&store, &namespace_id).await;
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
     let Ok(result) = run_compaction(
         &store,
@@ -2913,7 +2910,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
         &store,
         &namespace_id,
         &spec,
-        &snapshot_keys,
+        &input_keys,
         &result,
         &cancellation,
     )
@@ -2945,7 +2942,7 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     );
 }
 
-/// Cancels the job when its first root compare-and-swap fails. Lease updates
+/// Cancels the job when its first manifest put-if-absent fails. Epoch updates
 /// still succeed so cancellation, rather than fencing, stops the job.
 #[derive(Debug)]
 struct CancelAtTheFirstPublicationStore {
@@ -3013,7 +3010,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
     seed_bindings_workload(&store, &namespace_id).await;
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let snapshot_keys = snapshot_keys_now(&store, &namespace_id, &spec).await;
+    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
     let Ok(result) = run_compaction(
         &store,
@@ -3037,7 +3034,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         &cancelling_store,
         &namespace_id,
         &spec,
-        &snapshot_keys,
+        &input_keys,
         &result,
         &cancellation,
     )
@@ -3089,10 +3086,10 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
         spec.input_runs(),
         super::super::reorganize::MAX_COMPACTION_INPUT_RUNS
     );
-    let snapshot = snapshot_keys_now(&store, &namespace, &spec).await;
+    let input = input_keys_now(&store, &namespace, &spec).await;
     let untouched = referenced_segment_keys(&store, &namespace)
         .await
-        .difference(&snapshot)
+        .difference(&input)
         .cloned()
         .collect::<BTreeSet<_>>();
     assert!(!untouched.is_empty());
@@ -3109,7 +3106,7 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
         result.peak_resident_blocks <= 2 * 2 * spec.input_runs(),
         "two blocks per iterator, at most two families per cluster"
     );
-    publish_streaming_compaction(&store, &namespace, &spec, &snapshot, &result).await;
+    publish_streaming_compaction(&store, &namespace, &spec, &input, &result).await;
     let referenced = referenced_segment_keys(&store, &namespace).await;
     assert!(untouched.is_subset(&referenced));
     let after = current_metadata_state(&store, &namespace).await;
@@ -3239,7 +3236,7 @@ async fn a_new_compactor_epoch_and_an_expired_job_each_prevent_publication() {
         .await
         .expect("claim");
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
-    let snapshot = snapshot_keys_now(&store, &namespace, &spec).await;
+    let input = input_keys_now(&store, &namespace, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
     let result = run_compaction(
         &store,
@@ -3265,7 +3262,7 @@ async fn a_new_compactor_epoch_and_an_expired_job_each_prevent_publication() {
         &store,
         &namespace,
         &spec,
-        &snapshot,
+        &input,
         result.clone(),
         &cancellation,
         &publication,
@@ -3294,7 +3291,7 @@ async fn a_new_compactor_epoch_and_an_expired_job_each_prevent_publication() {
         &store,
         &namespace,
         &spec,
-        &snapshot,
+        &input,
         result,
         &cancellation,
         &publication,
@@ -3320,8 +3317,8 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     let first = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let second =
         compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Revisions).await;
-    let first_keys = snapshot_keys_now(&store, &namespace, &first).await;
-    let second_keys = snapshot_keys_now(&store, &namespace, &second).await;
+    let first_keys = input_keys_now(&store, &namespace, &first).await;
+    let second_keys = input_keys_now(&store, &namespace, &second).await;
     let cancellation = MetadataCompactionCancellation::default();
     let timer = StdMonotonicTimer::default();
     let publication = CompactionPublication {

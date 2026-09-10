@@ -600,7 +600,7 @@ fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     )
     .expect("put file");
 
-    raw_store.fail_root_cas();
+    raw_store.fail_manifest_publish();
     let step = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("maintenance pass should not fail on metadata root publish race");

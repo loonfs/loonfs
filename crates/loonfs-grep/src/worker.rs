@@ -12,11 +12,11 @@ use crate::codec::{
 };
 use crate::index_read::{load_data_block, load_index_block};
 use crate::keyspace::{hint_key, segment_key};
-use crate::reads::{published_revision, NamespaceReads};
-use crate::root::{
+use crate::manifest::{
     load_current_grep_manifest, publish_grep_manifest, ChangeFeedResume, GrepIndexState,
     GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef, LoadedGrepManifest,
 };
+use crate::reads::{published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
@@ -236,9 +236,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         }
         let manifest_no = next_manifest_no(current.as_ref())?;
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let next_run_no = current
-            .as_ref()
-            .map_or(RunNo(0), |root| root.manifest_state().index().next_run_no);
+        let next_run_no = current.as_ref().map_or(RunNo(0), |manifest| {
+            manifest.manifest_state().index().next_run_no
+        });
         let next = match backfilling_manifest(
             namespace_id,
             manifest_no,
@@ -398,17 +398,17 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     ) -> Result<Option<GrepManifestState>> {
         Ok(load_current_grep_manifest(&self.store, namespace_id)
             .await?
-            .map(|root| root.manifest_state().clone()))
+            .map(|manifest| manifest.manifest_state().clone()))
     }
 
     /// Returns the grep index's state and maintenance progress.
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
-        let root = self.manifest_state(namespace_id).await?;
-        let (lifecycle, next_run_no, reorganize_pending) = match &root {
-            Some(root) => (
-                GrepIndexLifecycle::from(root.status()),
-                root.index().next_run_no,
-                root.index().reorganize.is_some(),
+        let manifest = self.manifest_state(namespace_id).await?;
+        let (lifecycle, next_run_no, reorganize_pending) = match &manifest {
+            Some(manifest) => (
+                GrepIndexLifecycle::from(manifest.status()),
+                manifest.index().next_run_no,
+                manifest.index().reorganize.is_some(),
             ),
             None => (GrepIndexLifecycle::Disabled, RunNo(0), false),
         };
@@ -773,7 +773,7 @@ async fn collect_backfill_unit(
             .list_checkpoint_files_page(checkpoint_id, cursor, files_remaining)
             .await?;
         if page.checkpoint_seq != target_seq {
-            // The root and its checkpoint disagree about which state is
+            // The manifest and its checkpoint disagree about which state is
             // being walked; the walk cannot be resumed against either.
             return Err(CoreError::CheckpointUnavailable(format!(
                 "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep manifest is \
@@ -807,7 +807,7 @@ async fn collect_backfill_unit(
         }
         if page_exhausted_family {
             // Every file the checkpoint pins is indexed; the next published
-            // root leaves backfill for the change feed.
+            // manifest leaves backfill for the change feed.
             next_cursor = None;
             break;
         }
@@ -1149,7 +1149,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let rows = gram_postings_rows(merged.postings)?;
         // Only an empty snapshot falls through, and an empty one merges no
         // rows and writes no segment for this to stamp. The lifecycle's
-        // watermark is not a substitute: a backfilling root has none.
+        // watermark is not a substitute: a backfilling manifest has none.
         let run_seq = snapshot
             .iter()
             .map(|segment| segment.run_seq)
@@ -1382,7 +1382,7 @@ async fn live_namespace_probe(reads: &NamespaceReads<'_>) -> Result<()> {
 
 fn core_state_error(
     namespace_id: &NamespaceId,
-    error: crate::root::GrepManifestStateError,
+    error: crate::manifest::GrepManifestStateError,
 ) -> GrepError {
     CoreError::Codec {
         object_key: hint_key(namespace_id),

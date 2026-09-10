@@ -6,14 +6,14 @@
 //! chains where these constraints do not apply.
 
 use crate::checkpoint::ManifestLoadError;
-use crate::commit::{CommitHeadPublishError, CommitValidationError};
+use crate::commit::{CommitValidationError, WalPublishError};
 use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::metadata::VisiblePathError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::DurableContentValidationError;
-use crate::wal::{WalChainLoadError, WalSegmentError};
+use crate::wal::{WalSegmentError, WalTailLoadError};
 use loonfs_api::{
     ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, RevisionNo, UploadId,
     WriterEpoch, WriterId,
@@ -55,8 +55,8 @@ pub enum CoreError {
     CommitValidation(#[from] CommitValidationError),
     #[error("WAL build failed: {0}")]
     WalBuild(#[from] WalSegmentError),
-    #[error("head publish failed: {0}")]
-    HeadPublish(#[from] CommitHeadPublishError),
+    #[error("WAL publication failed: {0}")]
+    WalPublish(#[from] WalPublishError),
     #[error("failed to write WAL object `{object_key}`: {message}")]
     WalWrite {
         object_key: String,
@@ -232,7 +232,7 @@ pub enum CoreError {
     NamespaceDeleted { namespace_id: NamespaceId },
     /// A caller-supplied `expected_head_seq` did not match the current head.
     ///
-    /// Unlike [`CommitHeadPublishError::StaleHead`], this error reports a failed
+    /// Unlike [`WalPublishError::StaleHead`], this error reports a failed
     /// explicit precondition. It includes both sequence numbers so the caller can
     /// decide whether to retry. Both errors use the `stale_head` code.
     #[error("expected head sequence {expected}, found {actual}")]
@@ -292,7 +292,7 @@ pub enum MetadataProjectionLoadError {
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error(transparent)]
-    WalChainLoad(#[from] WalChainLoadError),
+    WalTailLoad(#[from] WalTailLoadError),
     #[error(transparent)]
     ManifestLoad(#[from] ManifestLoadError),
     #[error("WAL replay failed: {0}")]
@@ -311,7 +311,7 @@ impl MetadataProjectionLoadError {
         match self {
             Self::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             Self::LoadHead(error) => error.code(),
-            Self::WalChainLoad(error) => error.code(),
+            Self::WalTailLoad(error) => error.code(),
             Self::WalReplay(_) | Self::ReplayedHeadMismatch { .. } => ErrorCode::NamespaceCorrupt,
             Self::ManifestLoad(error) => match error.failure_class() {
                 crate::checkpoint::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
@@ -404,7 +404,7 @@ impl CoreError {
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
                 classify_store_failure(*class)
             }
-            CoreError::HeadPublish(error) => error.code(),
+            CoreError::WalPublish(error) => error.code(),
             CoreError::InvalidPath(_)
             | CoreError::RootMutationForbidden
             | CoreError::InvalidCommitRequest(_)
@@ -484,7 +484,7 @@ impl CoreError {
             CoreError::DurableContent(DurableContentValidationError::Store { message, .. }) => {
                 Some(std::borrow::Cow::Owned(message.clone()))
             }
-            CoreError::HeadPublish(CommitHeadPublishError::OutcomeUnknown(message)) => {
+            CoreError::WalPublish(WalPublishError::OutcomeUnknown(message)) => {
                 Some(std::borrow::Cow::Owned(message.clone()))
             }
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
@@ -497,9 +497,8 @@ impl CoreError {
                 | DurableContentValidationError::ContentLengthMismatch { .. }
                 | DurableContentValidationError::ContentChecksumMismatch { .. },
             )
-            | CoreError::HeadPublish(
-                CommitHeadPublishError::StaleHead
-                | CommitHeadPublishError::PublishBudgetExceeded { .. },
+            | CoreError::WalPublish(
+                WalPublishError::StaleHead | WalPublishError::PublishBudgetExceeded { .. },
             )
             | CoreError::MetadataView(_)
             | CoreError::VisiblePath(_)
@@ -638,9 +637,7 @@ fn metadata_projection_store_message(
 ) -> Option<std::borrow::Cow<'static, str>> {
     match error {
         MetadataProjectionLoadError::LoadHead(error) => control_object_store_message(error),
-        MetadataProjectionLoadError::WalChainLoad(WalChainLoadError::ReadWal {
-            message, ..
-        })
+        MetadataProjectionLoadError::WalTailLoad(WalTailLoadError::ReadWal { message, .. })
         | MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ReadManifest { message, .. }
             | ManifestLoadError::ReadSegment { message, .. },

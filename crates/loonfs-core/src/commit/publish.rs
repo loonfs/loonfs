@@ -1,6 +1,6 @@
 //! Commits a batch by creating its next numbered WAL object.
 
-use super::CommitHeadPublishError;
+use super::WalPublishError;
 use crate::wal::PreparedWalSegment;
 use bytes::Bytes;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -23,11 +23,11 @@ pub(crate) async fn publish_wal<S: ObjectStore + ?Sized>(
         .map_err(|error| {
             match error {
                 // Another batch took this number; the caller re-plans at the tip.
-                ObjectStoreError::PreconditionFailed { .. } => CommitHeadPublishError::StaleHead.into(),
+                ObjectStoreError::PreconditionFailed { .. } => WalPublishError::StaleHead.into(),
                 error => {
                     tracing::error!(namespace_id = %payload.namespace_id, %object_key, %error, "WAL publication failed");
                     match error {
-                        error @ ObjectStoreError::Transport { .. } => CommitHeadPublishError::OutcomeUnknown(error.public_message().into_owned()).into(),
+                        error @ ObjectStoreError::Transport { .. } => WalPublishError::OutcomeUnknown(error.public_message().into_owned()).into(),
                         error => crate::error::CoreError::WalWrite { object_key, message: error.public_message().into_owned(), class: crate::error::StoreFailureClass::of(&error) },
                     }
                 }

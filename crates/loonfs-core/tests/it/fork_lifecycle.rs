@@ -1,6 +1,6 @@
 //! Namespace creation, fork installation, and terminal lifecycle guards.
 //!
-//! Tests cover descriptor creation, conditional head installation, and
+//! Tests cover descriptor creation, conditional manifest installation, and
 //! namespace state before the first metadata publication.
 
 #![allow(clippy::panic)]
@@ -17,7 +17,7 @@ use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId,
 };
 use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::control::load_namespace_head_control;
+use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{
@@ -299,7 +299,7 @@ async fn head_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> loonfs_core::control::NamespaceReadState {
-    load_namespace_head_control(store, namespace_id)
+    load_namespace_read_state(store, namespace_id)
         .await
         .expect("load head")
 }
@@ -335,7 +335,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
         ],
         "creation installs manifest one"
     );
-    let head = load_namespace_head_control(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("load head");
     assert_eq!(
@@ -1378,7 +1378,7 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     bootstrap_namespace(&store, &source, &context, false)
         .await
         .expect("bootstrap");
-    let head = load_namespace_head_control(&store, &source)
+    let head = load_namespace_read_state(&store, &source)
         .await
         .expect("head");
     let descriptor_key = content_store(&head.content_store_id);
@@ -1444,7 +1444,7 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
             metadata_manifest_object(&target, &ManifestNo(1))
         ]
     );
-    let fork_head = load_namespace_head_control(&store, &target)
+    let fork_head = load_namespace_read_state(&store, &target)
         .await
         .expect("fork head");
     assert_eq!(fork_head.content_store_id, descriptor.content_store_id);
@@ -1498,10 +1498,10 @@ async fn bootstrap_of_a_deleted_namespace_writes_nothing() {
 }
 
 #[tokio::test]
-async fn bootstrap_head_read_failures_never_create_a_descriptor() {
+async fn bootstrap_hint_read_failures_never_create_a_descriptor() {
     for injected in [
-        InjectedError::Transport("head read failed".to_owned()),
-        InjectedError::PermissionDenied("head read denied".to_owned()),
+        InjectedError::Transport("hint read failed".to_owned()),
+        InjectedError::PermissionDenied("hint read denied".to_owned()),
     ] {
         let directory = tempdir().expect("tempdir");
         let namespace_id = namespace_id("demo");
@@ -1517,7 +1517,7 @@ async fn bootstrap_head_read_failures_never_create_a_descriptor() {
             let error =
                 bootstrap_namespace(&store, &namespace_id, &mutation_context(), allow_existing)
                     .await
-                    .expect_err("head read failed");
+                    .expect_err("hint read failed");
             assert!(matches!(
                 error,
                 loonfs_core::BootstrapNamespaceError::Core(CoreError::ControlObjectLoad(_))
@@ -1532,7 +1532,7 @@ async fn bootstrap_head_read_failures_never_create_a_descriptor() {
 }
 
 #[tokio::test]
-async fn bootstrap_of_a_corrupt_head_writes_nothing() {
+async fn bootstrap_of_a_corrupt_hint_writes_nothing() {
     let directory = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -1540,14 +1540,14 @@ async fn bootstrap_of_a_corrupt_head_writes_nothing() {
     );
     let namespace_id = namespace_id("demo");
     store
-        .put_if_absent(&hint(&namespace_id), Bytes::from_static(b"invalid head"))
+        .put_if_absent(&hint(&namespace_id), Bytes::from_static(b"invalid hint"))
         .await
-        .expect("corrupt head");
+        .expect("corrupt hint");
     store.reset();
     for allow_existing in [false, true] {
         let error = bootstrap_namespace(&store, &namespace_id, &mutation_context(), allow_existing)
             .await
-            .expect_err("corrupt head");
+            .expect_err("corrupt hint");
         assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
     let counts = store.counts();
@@ -1558,7 +1558,7 @@ async fn bootstrap_of_a_corrupt_head_writes_nothing() {
 }
 
 #[tokio::test]
-async fn a_creator_losing_after_the_head_read_leaves_only_an_orphan_descriptor() {
+async fn a_creator_losing_after_namespace_discovery_leaves_only_an_orphan_descriptor() {
     let directory = tempdir().expect("tempdir");
     let store = loonfs_test_support::stores::BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),

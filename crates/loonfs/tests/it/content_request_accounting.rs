@@ -164,7 +164,7 @@ async fn build_initialized_writer(
 
 /// Points a namespace at another namespace's content store, standing in for
 /// a deployment that provisioned both against one shared keyspace. The
-/// binding lives in the head, so this rewrites the head.
+/// binding lives in the manifest, so this rewrites the test manifest.
 async fn bind_namespace_to_content_store(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
@@ -574,7 +574,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
     // One blob PUT and nothing else: the namespace's content store is a
-    // field in its head, so staging never reads the content-store keyspace.
+    // field in its manifest, so staging never reads the content-store keyspace.
     assert_eq!(
         upload_counts.operations(KeyClass::Content),
         OperationCounts {

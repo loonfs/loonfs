@@ -50,7 +50,7 @@ use super::{
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::catalog::load_namespace_catalog_entry;
-use crate::namespace::control::{load_current_manifest, load_head_object};
+use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
@@ -99,7 +99,7 @@ async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> crate::error::Result<(NamespaceReadState, MetadataState)> {
-    let projection = super::flush::load_root_projection(store, namespace_id).await?;
+    let projection = super::flush::load_manifest_projection(store, namespace_id).await?;
     let mut metadata_state = MetadataStateBuilder::default();
     for family in CHECKPOINT_ROW_FAMILIES {
         let mut rows = projection
@@ -192,7 +192,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
 #[derive(Debug)]
 pub(crate) struct CurrentProjection {
     pub(crate) head: NamespaceReadState,
-    pub(crate) root: crate::namespace::control::CurrentManifest,
+    pub(crate) manifest: crate::namespace::control::CurrentManifest,
     pub(crate) metadata_state: MetadataState,
 }
 
@@ -225,10 +225,10 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    let head = load_head_object(store, namespace_id)
+    let head = load_namespace_read_state(store, namespace_id)
         .await
         .expect("read head");
-    crate::namespace::control_snapshot::resolve_retention_floor_seq(store, &head)
+    crate::namespace::read_anchor::resolve_retention_floor_seq(store, &head.namespace_id)
         .await
         .expect("resolve retention floor")
 }
@@ -359,7 +359,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
     }
     load_current_manifest(store, namespace_id)
         .await
-        .expect("read metadata root")
+        .expect("read metadata manifest")
         .state
         .manifest
         .manifest_no
@@ -401,7 +401,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
 ) -> Vec<CurrentFileState> {
     let manifest_no = load_current_manifest(store, namespace_id)
         .await
-        .expect("read metadata root")
+        .expect("read metadata manifest")
         .state
         .manifest
         .manifest_no;
@@ -518,7 +518,7 @@ async fn current_manifest_number<S: ObjectStore + ?Sized>(
 ) -> ManifestNo {
     load_current_manifest(store, namespace_id)
         .await
-        .expect("read metadata root")
+        .expect("read metadata manifest")
         .state
         .manifest
         .manifest_no
@@ -540,13 +540,13 @@ pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
 ) -> Result<CurrentProjection, CoreError> {
     let (head, metadata_state) =
         load_checkpoint_projection_metadata_state(store, namespace_id).await?;
-    let root = load_current_manifest(store, namespace_id)
+    let manifest = load_current_manifest(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .state;
     Ok(CurrentProjection {
         head,
-        root,
+        manifest,
         metadata_state,
     })
 }

@@ -301,7 +301,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         ),
         Err(ContentTokenError::ContentRefMismatch)
     );
-    let head_before = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
+    let head_before = loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("head");
     store.reset();
@@ -332,7 +332,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     assert_eq!(store.inner().counts().compare_and_swaps, 0);
     assert_eq!(store.inner().counts().deletes, 0);
     assert_eq!(
-        loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
+        loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("head"),
         head_before

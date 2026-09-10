@@ -103,7 +103,7 @@ async fn reader_reuses_published_projection_after_control_cache_eviction() {
         .await
         .expect("publish directory");
     fs.writer.publisher().drain().await.expect("finish hints");
-    let head = loonfs_core::control::load_namespace_head_control(&object_store, &namespace_id)
+    let head = loonfs_core::control::load_namespace_read_state(&object_store, &namespace_id)
         .await
         .expect("published head");
     loonfs_core::control::raise_namespace_hint(&object_store, &namespace_id, head.wal_no, None)
@@ -407,7 +407,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 }
 
 #[test]
-fn stale_head_write_error_recovers_and_reseeds_caches() {
+fn wal_publication_conflict_recovers_and_reseeds_caches() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
@@ -425,7 +425,7 @@ fn stale_head_write_error_recovers_and_reseeds_caches() {
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime read cache");
 
-    raw_store.fail_head_cas();
+    raw_store.fail_wal_publish();
     assert_core_error_kind(
         fs.create_directory_blocking(
             &namespace_id,
@@ -435,13 +435,13 @@ fn stale_head_write_error_recovers_and_reseeds_caches() {
         ErrorCode::StaleHead,
     );
 
-    raw_store.allow_head_cas();
+    raw_store.allow_wal_publish();
     fs.create_directory_blocking(
         &namespace_id,
         "/after-stale",
         CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
     )
-    .expect("write after stale head succeeds (the engine revalidates its projection by etag)");
+    .expect("write succeeds after the WAL publication conflict");
 
     raw_store.reset_wal_get_count();
     fs.stat_path_blocking(&namespace_id, "/after-stale")
@@ -605,7 +605,7 @@ fn runtime_control_cache_reuses_head_for_materialization_validation() {
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("second cached materialization validation reuses cached head state");
 
-    assert_eq!(raw_store.head_get_count(), 0);
+    assert_eq!(raw_store.hint_get_count(), 0);
 }
 
 #[test]
@@ -650,7 +650,7 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("reload first namespace materialization and head cache");
 
-    assert_eq!(raw_store.head_get_count(), 1);
+    assert_eq!(raw_store.hint_get_count(), 1);
 }
 
 #[test]
@@ -687,7 +687,7 @@ fn runtime_control_cache_probes_wal_after_external_commit() {
     reader
         .stat_path_blocking(&namespace_id, "/docs")
         .expect("reuse unchanged control cache");
-    assert_eq!(raw_store.head_get_count(), 0);
+    assert_eq!(raw_store.hint_get_count(), 0);
 
     writer
         .create_directory_blocking(
@@ -700,7 +700,7 @@ fn runtime_control_cache_probes_wal_after_external_commit() {
     reader
         .stat_path_blocking(&namespace_id, "/docs/new")
         .expect("probe changed head");
-    assert_eq!(raw_store.head_get_count(), 0);
+    assert_eq!(raw_store.hint_get_count(), 0);
 }
 
 #[test]

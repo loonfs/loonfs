@@ -335,7 +335,7 @@ impl FsMaintenance {
                     FlushWalOutcome::Published => WalFlushStepOutcome::Flushed {
                         manifest_head_seq: flush.manifest_head_seq,
                     },
-                    // In both cases, this flush did not update the root.
+                    // In both cases, this flush did not publish a manifest.
                     FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::RootAdvanced => {
                         WalFlushStepOutcome::AlreadyPublished {
                             attempted_seq: flush.target_head_seq,
@@ -633,7 +633,7 @@ impl FsMaintenance {
     /// Creates a checkpoint for the current namespace head.
     ///
     /// A checkpoint pins a manifest version for retention and provenance.
-    /// Every call is its own pin under its own id, held until released — the
+    /// Every call is its own pin under its own id, held until deleted — the
     /// name is a label, not a key. If the current head has no manifest yet,
     /// one is published first for the current durable namespace state; this
     /// is not a request to compact metadata.

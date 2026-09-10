@@ -8,15 +8,15 @@ use crate::wal::load_wal_segment;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
-pub(crate) struct NamespaceControlSnapshot {
-    pub(crate) head: NamespaceReadState,
-    pub(crate) root: LoadedManifest,
+pub(crate) struct NamespaceReadAnchor {
+    pub(crate) read_state: NamespaceReadState,
+    pub(crate) manifest: LoadedManifest,
     pub(crate) retention_floor_seq: ChangeSeq,
 }
 
-impl NamespaceControlSnapshot {
+impl NamespaceReadAnchor {
     pub(crate) fn basis(&self) -> MetadataBasis {
-        MetadataBasis(self.root.state.manifest.clone())
+        MetadataBasis(self.manifest.state.manifest.clone())
     }
 }
 
@@ -30,31 +30,31 @@ pub(crate) async fn load_head_and_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<(NamespaceReadState, ChangeSeq), ControlObjectLoadError> {
-    let snapshot = load_control_snapshot(store, namespace_id).await?;
-    Ok((snapshot.head, snapshot.retention_floor_seq))
+    let anchor = load_read_anchor(store, namespace_id).await?;
+    Ok((anchor.read_state, anchor.retention_floor_seq))
 }
 
 pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceBasis, ControlObjectLoadError> {
-    let snapshot = load_control_snapshot(store, namespace_id).await?;
+    let anchor = load_read_anchor(store, namespace_id).await?;
     Ok(LoadedNamespaceBasis {
-        basis: snapshot.basis(),
-        retention_floor_seq: Some(snapshot.retention_floor_seq),
-        head: snapshot.head,
+        basis: anchor.basis(),
+        retention_floor_seq: Some(anchor.retention_floor_seq),
+        head: anchor.read_state,
     })
 }
 
-pub(crate) async fn load_control_snapshot<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<NamespaceControlSnapshot, ControlObjectLoadError> {
-    let mut root = load_current_manifest(store, namespace_id).await?;
+) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
+    let mut manifest = load_current_manifest(store, namespace_id).await?;
     loop {
-        match discover_head(store, namespace_id, &root).await {
+        match discover_head(store, namespace_id, &manifest).await {
             Ok(state) => {
-                if let Ok(next) = root.state.manifest.manifest_no.successor() {
+                if let Ok(next) = manifest.state.manifest.manifest_no.successor() {
                     let key =
                         loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &next);
                     if store
@@ -67,22 +67,22 @@ pub(crate) async fn load_control_snapshot<S: ObjectStore + ?Sized>(
                         })?
                         .is_some()
                     {
-                        root = load_current_manifest(store, namespace_id).await?;
+                        manifest = load_current_manifest(store, namespace_id).await?;
                         continue;
                     }
                 }
-                return Ok(NamespaceControlSnapshot {
-                    retention_floor_seq: root.state.retention_floor_seq,
-                    head: state,
-                    root,
+                return Ok(NamespaceReadAnchor {
+                    retention_floor_seq: manifest.state.retention_floor_seq,
+                    read_state: state,
+                    manifest,
                 });
             }
             Err(error @ ControlObjectLoadError::Codec { .. }) => {
                 let current = load_current_manifest(store, namespace_id).await?;
-                if current.state.manifest.manifest_no == root.state.manifest.manifest_no {
+                if current.state.manifest.manifest_no == manifest.state.manifest.manifest_no {
                     return Err(error);
                 }
-                root = current;
+                manifest = current;
             }
             Err(error) => return Err(error),
         }
@@ -92,13 +92,13 @@ pub(crate) async fn load_control_snapshot<S: ObjectStore + ?Sized>(
 async fn discover_head<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    root: &LoadedManifest,
+    manifest: &LoadedManifest,
 ) -> Result<NamespaceReadState, ControlObjectLoadError> {
-    let mut state = NamespaceReadState::from(root.envelope.payload());
+    let mut state = NamespaceReadState::from(manifest.envelope.payload());
     if state.status.is_deleted() {
         return Ok(state);
     }
-    let start = root.hinted_wal_no.max(state.last_folded_wal_no);
+    let start = manifest.hinted_wal_no.max(state.last_folded_wal_no);
     let mut number = start;
     let mut previous_epoch = loonfs_api::WriterEpoch(0);
     let mut last_record = None;
@@ -109,30 +109,30 @@ async fn discover_head<S: ObjectStore + ?Sized>(
             namespace_id,
             payload.base_head_seq,
             &segment,
-            &root.object_key,
+            &manifest.object_key,
         )?;
-        apply_segment(&mut state, &segment, &mut last_record, &root.object_key)?;
+        apply_segment(&mut state, &segment, &mut last_record, &manifest.object_key)?;
         previous_epoch = payload.writer_epoch;
     }
     while let Ok(next) = number.successor() {
         let Some(segment) = load_wal_segment(store, namespace_id, next)
             .await
-            .map_err(|error| wal_error(&root.object_key, error))?
+            .map_err(|error| wal_error(&manifest.object_key, error))?
         else {
             break;
         };
         let payload = segment.payload();
         if previous_epoch > payload.writer_epoch {
-            return Err(corrupt(&root.object_key, "WAL writer epoch decreases"));
+            return Err(corrupt(&manifest.object_key, "WAL writer epoch decreases"));
         }
-        validate_segment(namespace_id, state.seq, &segment, &root.object_key)?;
-        apply_segment(&mut state, &segment, &mut last_record, &root.object_key)?;
+        validate_segment(namespace_id, state.seq, &segment, &manifest.object_key)?;
+        apply_segment(&mut state, &segment, &mut last_record, &manifest.object_key)?;
         previous_epoch = payload.writer_epoch;
         number = next;
     }
     let mut prior = start;
     while last_record.is_none()
-        && state.seq > root.envelope.payload().head_seq
+        && state.seq > manifest.envelope.payload().head_seq
         && prior > state.last_folded_wal_no
     {
         let segment = load_required_segment(store, namespace_id, prior).await?;
@@ -192,10 +192,10 @@ pub(super) fn apply_segment(
 
 pub(super) fn wal_error(
     object_key: &str,
-    error: crate::wal::WalChainLoadError,
+    error: crate::wal::WalTailLoadError,
 ) -> ControlObjectLoadError {
     match error {
-        crate::wal::WalChainLoadError::ReadWal {
+        crate::wal::WalTailLoadError::ReadWal {
             object_key,
             message,
             class,
@@ -217,9 +217,9 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
 
 pub(crate) async fn resolve_retention_floor_seq<S: ObjectStore + ?Sized>(
     store: &S,
-    head: &NamespaceReadState,
+    namespace_id: &NamespaceId,
 ) -> Result<ChangeSeq, ControlObjectLoadError> {
-    Ok(load_current_manifest(store, &head.namespace_id)
+    Ok(load_current_manifest(store, namespace_id)
         .await?
         .state
         .retention_floor_seq)

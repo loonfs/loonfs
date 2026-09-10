@@ -11,7 +11,7 @@ use loonfs::{
     MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
-use loonfs_grep::root::load_current_grep_manifest;
+use loonfs_grep::manifest::load_current_grep_manifest;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -225,8 +225,8 @@ async fn gram_segment_levels(
 ) -> BTreeSet<u32> {
     load_current_grep_manifest(&**store, namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists")
+        .expect("load grep manifest")
+        .expect("grep manifest exists")
         .manifest_state()
         .segments()
         .iter()
@@ -259,9 +259,10 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         )
         .await
         .expect("flush materialized commit");
-    let materialized_root = control::metadata_root(&fixture.store, &fixture.namespace_id).await;
+    let materialized_manifest =
+        control::metadata_manifest(&fixture.store, &fixture.namespace_id).await;
     assert_eq!(
-        materialized_root.manifest.manifest_head_seq,
+        materialized_manifest.manifest.manifest_head_seq,
         materialized_head.seq
     );
 
@@ -276,11 +277,11 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .await
         .expect("write WAL-only file");
     let head = control::head(&fixture.store, &fixture.namespace_id).await;
-    let root = control::metadata_root(&fixture.store, &fixture.namespace_id).await;
-    assert_eq!(root.manifest.manifest_head_seq, materialized_head.seq);
+    let manifest = control::metadata_manifest(&fixture.store, &fixture.namespace_id).await;
+    assert_eq!(manifest.manifest.manifest_head_seq, materialized_head.seq);
     assert_eq!(
         head.seq.0,
-        root.manifest.manifest_head_seq.0 + 1,
+        manifest.manifest.manifest_head_seq.0 + 1,
         "the WAL-only file must be committed immediately after the materialized boundary"
     );
 

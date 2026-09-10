@@ -22,7 +22,7 @@ pub(crate) use self::ops::CommitOp;
 pub use self::plan::{CommitPlan, ResolvedBinding};
 pub(crate) use self::plan::{ValidatedCommitPlan, ValidatedOp};
 pub(crate) use self::publish::publish_wal;
-pub use self::publish_error::CommitHeadPublishError;
+pub use self::publish_error::WalPublishError;
 pub(crate) use self::validate::{validate_ops, CommitNumbering, PublishValidationView};
 pub use self::validate::{CommitOperand, CommitValidationError};
 pub(crate) use self::wal_payload::wal_payload_from_materialized_commit;

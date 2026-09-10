@@ -20,9 +20,9 @@ mod gc;
 mod index_read;
 pub mod keyspace;
 mod maintenance;
+pub mod manifest;
 mod query;
 mod reads;
-pub mod root;
 mod service;
 mod worker;
 

@@ -255,7 +255,7 @@ pub struct NamespaceCommitEnginePublishResult {
 /// the manifest builds on, and the rows themselves. Cheap to take: an `Arc`
 /// clone and two small clones.
 #[derive(Debug, Clone)]
-pub struct WalFoldSnapshot {
+pub struct WalFoldInput {
     pub head: NamespaceReadState,
     pub basis: MetadataBasis,
     pub retention_floor_seq: Option<ChangeSeq>,
@@ -309,8 +309,7 @@ pub struct NamespaceCommitEngine {
     /// Local monotonic source for the self-enforced publish budget.
     timer: Arc<dyn MonotonicTimer>,
     /// Shared cache of decoded blocks used by publish-view reads. Blocks are
-    /// keyed by segment digest, while the head ETag check verifies that the view
-    /// is current.
+    /// keyed by segment digest. Successor probes verify that the view is current.
     segment_cache: Option<Arc<MetadataSegmentCache>>,
 }
 
@@ -371,10 +370,10 @@ impl NamespaceCommitEngine {
     /// The retained projection as a fold input, or `None` when the engine
     /// holds no projection.
     ///
-    pub fn wal_fold_snapshot(&self) -> Option<WalFoldSnapshot> {
+    pub fn wal_fold_input(&self) -> Option<WalFoldInput> {
         self.publish_tail_projection
             .as_ref()
-            .map(|projection| WalFoldSnapshot {
+            .map(|projection| WalFoldInput {
                 head: projection.head.clone(),
                 basis: projection.basis().clone(),
                 retention_floor_seq: projection.retention_floor_seq,
@@ -453,8 +452,8 @@ impl NamespaceCommitEngine {
             if !result.results.iter().any(|result| {
                 matches!(
                     result,
-                    Err(CoreError::HeadPublish(
-                        crate::commit::CommitHeadPublishError::StaleHead
+                    Err(CoreError::WalPublish(
+                        crate::commit::WalPublishError::StaleHead
                     ))
                 )
             }) {
@@ -500,7 +499,7 @@ impl NamespaceCommitEngine {
             .publish_tail_projection
             .as_ref()
             .is_some_and(|projection| {
-                projection.wal_tail_segments >= crate::limits::CHECKPOINT_AT_WAL_SEGMENTS
+                projection.wal_tail_segments >= crate::limits::FOLD_AT_WAL_SEGMENTS
             })
         {
             self.invalidate_projection();
@@ -633,7 +632,7 @@ mod tests {
     use crate::error::ErrorCode;
     use crate::limits::WAL_PUBLISH_BUDGET_MS;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::control::load_head_object;
+    use crate::namespace::control::load_namespace_read_state;
     use futures::StreamExt;
     use loonfs_api::{ChangeSeq, ContentRef, ContentStoreId, WriterEpoch};
     use loonfs_objectstore::keys::wal_segment_prefix;
@@ -897,7 +896,7 @@ mod tests {
         takeover.results[0]
             .as_ref()
             .expect("writer b takeover commit");
-        let epoch_after_takeover = load_head_object(&store, &namespace_id)
+        let epoch_after_takeover = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("read head")
             .writer_epoch;
@@ -917,7 +916,7 @@ mod tests {
             let error = fenced.results[0].as_ref().expect_err("fenced publish");
             assert_eq!(error.code(), ErrorCode::WriterFenced, "attempt {attempt}");
         }
-        let head = load_head_object(&store, &namespace_id)
+        let head = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("read head");
         assert_eq!(head.writer_epoch, epoch_after_takeover);
@@ -936,7 +935,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer_a = context("writer-a");
 
-        // Block the WAL tail read: it sits between the head snapshot that the
+        // Block the WAL tail read: it sits between the read state that the
         // fence check uses and the closing etag recheck.
         let store = StdArc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -978,7 +977,7 @@ mod tests {
             result.results[0].as_ref().err().map(|error| error.code())
         });
 
-        // A has snapshotted a head that still names it. Writer B takes the
+        // A has read a head that still names it. Writer B takes the
         // epoch while A is parked mid-load, so A is fenced by the time it
         // rechecks the etag.
         store.wait_until_blocked().await;
@@ -1050,7 +1049,7 @@ mod tests {
             .await;
         let error = fenced.results[0].as_ref().expect_err("fenced publish");
         assert_eq!(error.code(), ErrorCode::WriterFenced);
-        let epoch_after_fencing = load_head_object(&store, &namespace_id)
+        let epoch_after_fencing = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("read head")
             .writer_epoch;
@@ -1073,7 +1072,7 @@ mod tests {
             .as_ref()
             .expect_err("rebuilt engine stays fenced");
         assert_eq!(error.code(), ErrorCode::WriterFenced);
-        let head = load_head_object(&store, &namespace_id)
+        let head = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("read head");
         assert_eq!(head.writer_epoch, epoch_after_fencing);
@@ -1110,7 +1109,9 @@ mod tests {
             .session_writer_epoch(&store, &writer)
             .await
             .expect("acquire");
-        let head_before = load_head_object(&store, &namespace_id).await.expect("head");
+        let head_before = load_namespace_read_state(&store, &namespace_id)
+            .await
+            .expect("head");
         let abandoned = over_budget
             .publish_batch(
                 &store,
@@ -1125,9 +1126,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CoreError::HeadPublish(
-                    crate::commit::CommitHeadPublishError::PublishBudgetExceeded { .. }
-                )
+                CoreError::WalPublish(crate::commit::WalPublishError::PublishBudgetExceeded { .. })
             ),
             "unexpected error: {error:?}"
         );
@@ -1135,7 +1134,7 @@ mod tests {
         // rebuild the commit.
         assert_eq!(error.code(), ErrorCode::StaleHead);
 
-        let head_after = load_head_object(&store, &namespace_id)
+        let head_after = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("read head");
         assert_eq!(head_after.seq, head_before.seq);
@@ -1154,7 +1153,7 @@ mod tests {
         let response = retried.results[0].as_ref().expect("rebuilt publish");
         assert_eq!(response.committed_seq, ChangeSeq(1));
         assert_eq!(wal_segment_count(&store, &namespace_id).await, 3);
-        let head_final = load_head_object(&store, &namespace_id)
+        let head_final = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("read head");
         assert_eq!(head_final.seq, ChangeSeq(1));

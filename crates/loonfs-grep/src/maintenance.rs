@@ -5,7 +5,7 @@
 //! a scheduling conclusion. The shared runner provides admission, permits,
 //! backoff, and shutdown; grep does not create another scheduler.
 
-use crate::root::{load_current_grep_manifest, GrepIndexStatus};
+use crate::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker};
 use loonfs::{
     current_time_ms, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
@@ -82,16 +82,16 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
     }
 
     /// Reports whether the index is behind its namespace. This reads the
-    /// grep root and, for an active index at a commit boundary, at most one
+    /// grep manifest and, for an active index at a commit boundary, at most one
     /// page of the change feed.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        let Some(root) = load_current_grep_manifest(self.worker.store(), namespace_id)
+        let Some(manifest) = load_current_grep_manifest(self.worker.store(), namespace_id)
             .await
             .map_err(|error| probe_failure(namespace_id, GrepError::from(error)))?
         else {
             return Ok(MaintenanceProbe::Idle);
         };
-        match root.manifest_state().status() {
+        match manifest.manifest_state().status() {
             // Nothing to maintain: the runner forgets this namespace until
             // an enable nudges it back.
             GrepIndexStatus::Disabled {} => Ok(MaintenanceProbe::Idle),

@@ -14,7 +14,7 @@ pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<u64> {
-    let head = crate::namespace::control::load_head_object(store, namespace_id)
+    let head = crate::namespace::control::load_namespace_read_state(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     crate::namespace::control::ensure_namespace_live(&head)?;

@@ -7,11 +7,11 @@ use loonfs_api::{ManifestNo, UploadId};
 /// [durable object key grammar]: ../../../docs/specs/format.md#a8-object-keys
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableObjectFamily {
-    /// Classifies an immutable segment in a namespace's WAL chain.
+    /// Classifies an immutable segment in a namespace's numbered WAL.
     WalSegment,
     /// Starts forward discovery of namespace manifests.
     Hint,
-    /// Classifies an immutable namespace-manifest candidate.
+    /// Classifies an immutable numbered namespace manifest.
     MetadataManifest,
     /// Classifies an immutable metadata segment.
     MetadataSegment,

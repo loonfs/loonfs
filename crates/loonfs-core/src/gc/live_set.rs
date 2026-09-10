@@ -3,7 +3,7 @@
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::checkpoint::record::checkpoint_key_ids;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::control_snapshot::NamespaceControlSnapshot;
+use crate::namespace::read_anchor::NamespaceReadAnchor;
 use futures::StreamExt;
 use loonfs_api::{ContentStoreId, ManifestNo, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
@@ -25,15 +25,15 @@ impl LiveSet {
     pub(super) async fn load<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        snapshot: &NamespaceControlSnapshot,
+        anchor: &NamespaceReadAnchor,
     ) -> Result<Self> {
-        let head = &snapshot.head;
+        let head = &anchor.read_state;
         let mut live = Self {
             content_store_id: head.content_store_id.clone(),
             namespace_deleted: head.status.is_deleted(),
             reclaim_after_ms: head.status.reclaim_after_ms(),
-            discovery_start_manifest_no: snapshot.root.discovery_start_manifest_no,
-            objects: BTreeSet::from([snapshot.root.object_key.clone()]),
+            discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no,
+            objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
             folded_and_floor_wal_no: (!head.status.is_deleted())
                 .then_some(head.last_folded_wal_no.min(head.retention_floor_wal_no)),
         };
@@ -42,8 +42,8 @@ impl LiveSet {
             live.load_manifest(
                 store,
                 namespace_id,
-                snapshot.basis().manifest().manifest_no,
-                &snapshot.root.object_key,
+                anchor.basis().manifest().manifest_no,
+                &anchor.manifest.object_key,
                 &mut manifests,
             )
             .await?;

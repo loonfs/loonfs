@@ -316,7 +316,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     .expect("put file bytes");
 
     // The put writes the blob exactly once and never reads it back: the
-    // write's own ack is the durability proof the head CAS waits on, so
+    // write's own ack is the durability proof the WAL put-if-absent waits on, so
     // validation issues no probe for content the put itself is writing.
     assert_eq!(raw_store.count(OperationClass::Put), 1);
     assert_eq!(raw_store.count(OperationClass::Read), 0);

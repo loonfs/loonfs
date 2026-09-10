@@ -72,7 +72,7 @@ impl MaintenanceJob for GarbageCollectionJob {
             )));
         };
         let follow_up = if gc.reclaim_after_ms.is_some() {
-            loonfs_core::control::load_namespace_head_control(
+            loonfs_core::control::load_namespace_read_state(
                 self.maintenance.core.store(),
                 namespace_id,
             )

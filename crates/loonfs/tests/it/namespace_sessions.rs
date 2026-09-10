@@ -21,7 +21,7 @@ async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId) {
 }
 
 async fn writer_epoch(store: &SharedObjectStore, namespace_id: &NamespaceId) -> u64 {
-    loonfs::control::load_namespace_head_control(store, namespace_id)
+    loonfs::control::load_namespace_read_state(store, namespace_id)
         .await
         .expect("load namespace head")
         .writer_epoch

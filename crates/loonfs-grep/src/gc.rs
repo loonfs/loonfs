@@ -4,7 +4,7 @@ use crate::keyspace::{
     grep_prefix, manifest_key, manifests_prefix, parse_key, segment_key, segments_prefix,
     GrepKeyKind,
 };
-use crate::root::load_current_grep_manifest;
+use crate::manifest::load_current_grep_manifest;
 use crate::{GrepError, GrepWorker, Result};
 use futures::StreamExt as _;
 use loonfs::{

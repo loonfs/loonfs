@@ -60,7 +60,7 @@ async fn retirement_includes_listing_time_in_its_budget_and_retries_with_a_fresh
             ));
             assert_eq!(store.counts().puts, 0);
             assert_eq!(store.counts().deletes, 0);
-            let head = crate::namespace::control::load_head_object(&store, &namespace_id)
+            let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
                 .await
                 .expect("head");
             assert_eq!(head.status.reclaim_after_ms(), None);

@@ -5,7 +5,7 @@ use super::record::{
     release_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record,
     CheckpointBasisVerification,
 };
-use crate::commit::CommitHeadPublishError;
+use crate::commit::WalPublishError;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
@@ -35,8 +35,8 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             let basis = match try_flush_wal(store, namespace_id, context, timer).await? {
                 TryFlushWal::Settled(basis) => basis,
                 TryFlushWal::RaceLost => {
-                    return Ok(CasAttempt::Contended(CoreError::HeadPublish(
-                        CommitHeadPublishError::StaleHead,
+                    return Ok(CasAttempt::Contended(CoreError::WalPublish(
+                        WalPublishError::StaleHead,
                     )))
                 }
             };

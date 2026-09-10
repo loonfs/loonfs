@@ -87,7 +87,7 @@ impl FsWriter {
     /// handle's own traffic is.
     ///
     /// Server integrations that read LoonFS-owned objects outside the handle
-    /// surface — the grep root and the grep worker's keyspace — use this so
+    /// surface — the grep manifest and the grep worker's keyspace — use this so
     /// their requests are measured like every other request instead of
     /// escaping instrumentation on a second, raw client.
     pub fn object_store(&self) -> SharedObjectStore {
@@ -440,7 +440,7 @@ impl FsWriterBuilder {
         let runtime = owning_runtime()?;
         let core = self.core.open_read_core()?;
         let bits = Arc::new(WriterBits {
-            discovery_hints: crate::discovery_hints::DiscoveryHints::default(),
+            hint_raise: crate::hint_raise::DiscoveryHints::default(),
             identity,
             wal_fold_permits: Semaphore::new(self.max_concurrent_folds.get()),
             wal_folds_waiting: AtomicUsize::new(0),

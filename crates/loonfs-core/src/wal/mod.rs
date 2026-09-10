@@ -1,4 +1,4 @@
-//! The write-ahead log: segment framing, chain loading, replay onto
+//! The write-ahead log: segment framing, tail loading, replay onto
 //! metadata state, and segment preparation for publication.
 
 mod frame;
@@ -7,10 +7,10 @@ mod replay;
 mod writer;
 
 pub(crate) use self::frame::{
-    DecodedWalRecord, PreparedWalSegment, ReplayedWalTail, ValidatedWalChain, ValidatedWalSegment,
-    WalChainLoadError, WalChainLoadRequest, WalSegmentError,
+    DecodedWalRecord, PreparedWalSegment, ReplayedWalTail, ValidatedWalSegment, ValidatedWalTail,
+    WalSegmentError, WalTailLoadError, WalTailLoadRequest,
 };
-pub(crate) use self::reader::{load_wal_chain, load_wal_segment};
+pub(crate) use self::reader::{load_wal_segment, load_wal_tail};
 pub(crate) use self::replay::{
     ensure_replayed_head_matches, project_validated_wal_tail, validate_wal_segment_for_replay,
 };

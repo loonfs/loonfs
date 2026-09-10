@@ -18,7 +18,7 @@ use loonfs_api::{
 use loonfs_grep::keyspace::{
     grep_prefix, hint_key, manifest_key, manifests_prefix, segment_key, segments_prefix,
 };
-use loonfs_grep::root::{
+use loonfs_grep::manifest::{
     encode_grep_hint, load_current_grep_manifest, publish_grep_manifest, GrepHint, GrepIndexState,
     GrepIndexStatus, GrepManifestState,
 };
@@ -236,14 +236,15 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         again,
         loonfs_grep::GrepEnableOutcome::AlreadyEnabled { .. }
     ));
-    let root = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load root")
-        .expect("root exists");
-    let GrepIndexStatus::Backfilling { checkpoint_id, .. } = root.manifest_state().status() else {
+        .expect("load manifest")
+        .expect("manifest exists");
+    let GrepIndexStatus::Backfilling { checkpoint_id, .. } = manifest.manifest_state().status()
+    else {
         panic!(
             "enable must publish checkpointed backfill: {:?}",
-            root.manifest_state()
+            manifest.manifest_state()
         );
     };
     let checkpoint_id = checkpoint_id.clone();
@@ -272,13 +273,13 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("materialized query");
     assert_eq!(response.matches.len(), 3);
-    let materialized_root = load_current_grep_manifest(&*store, &namespace_id)
+    let materialized_manifest = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load materialized root")
-        .expect("root exists");
+        .expect("load materialized manifest")
+        .expect("manifest exists");
     let materialized_segment = segment_key(
         &namespace_id,
-        &materialized_root.manifest_state().segments()[0].segment_id,
+        &materialized_manifest.manifest_state().segments()[0].segment_id,
     );
 
     assert_eq!(
@@ -297,12 +298,12 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
             .is_none(),
         "disable must leave segments for grep-owned GC"
     );
-    let disabled_root = load_current_grep_manifest(&*store, &namespace_id)
+    let disabled_manifest = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load disabled root")
-        .expect("disabled root remains");
+        .expect("load disabled manifest")
+        .expect("disabled manifest remains");
     assert!(matches!(
-        disabled_root.manifest_state().status(),
+        disabled_manifest.manifest_state().status(),
         GrepIndexStatus::Disabled {}
     ));
     assert_eq!(
@@ -317,20 +318,20 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         reenabled,
         loonfs_grep::GrepEnableOutcome::Enabled { .. }
     ));
-    let root = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load re-enabled root")
-        .expect("root exists");
-    assert!(root.manifest_state().segments().is_empty());
+        .expect("load re-enabled manifest")
+        .expect("manifest exists");
+    assert!(manifest.manifest_state().segments().is_empty());
     assert!(matches!(
-        root.manifest_state().status(),
+        manifest.manifest_state().status(),
         GrepIndexStatus::Backfilling { .. }
     ));
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() {
+async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -361,8 +362,8 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
 
     let current = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load current root")
-        .expect("current root");
+        .expect("load current manifest")
+        .expect("current manifest");
     let current_state = current.manifest_state();
     let maximum_state = GrepManifestState::new(
         namespace_id.clone(),
@@ -374,11 +375,11 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
         },
         current_state.segments().to_vec(),
     )
-    .expect("valid root at the public maximum");
+    .expect("valid manifest at the public maximum");
     let timer = loonfs_objectstore::timing::StdMonotonicTimer::default();
     let maximum = publish_grep_manifest(&*store, Some(&current), &maximum_state, &timer, 0)
         .await
-        .expect("install root at the public maximum");
+        .expect("install manifest at the public maximum");
 
     writer
         .put_file_bytes(
@@ -429,8 +430,8 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
 
     let after = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load root after failures")
-        .expect("root remains");
+        .expect("load manifest after failures")
+        .expect("manifest remains");
     assert_eq!(after.manifest_no(), maximum.manifest_no());
     assert_eq!(
         after.manifest_state().index().next_run_no,
@@ -463,13 +464,13 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_root() 
 }
 
 #[tokio::test]
-async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
+async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("enable-root-failure").expect("namespace id");
+    let namespace_id = NamespaceId::parse("enable-manifest-failure").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("enable-root-failure-writer")
+        .writer_id("enable-manifest-failure-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -478,18 +479,18 @@ async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    let host = GrepHost::new(&store, "enable-root-failure-maintenance").await;
+    let host = GrepHost::new(&store, "enable-manifest-failure-maintenance").await;
     let grep_hint_key = hint_key(&namespace_id);
-    let root_loads = Arc::new(AtomicUsize::new(0));
-    let observed_root_loads = Arc::clone(&root_loads);
+    let manifest_loads = Arc::new(AtomicUsize::new(0));
+    let observed_manifest_loads = Arc::clone(&manifest_loads);
     let failing_store = Arc::new(FailStore::matching(
         store.clone(),
         move |context: &OperationContext<'_>| {
             context.key() == grep_hint_key
                 && matches!(context.kind(), OperationKind::GetWithMetadata)
-                && observed_root_loads.fetch_add(1, Ordering::SeqCst) == 0
+                && observed_manifest_loads.fetch_add(1, Ordering::SeqCst) == 0
         },
-        InjectedError::Transport("injected grep-root reload failure".to_owned()),
+        InjectedError::Transport("injected grep-manifest reload failure".to_owned()),
     ));
     failing_store.fail_all();
     let worker = GrepWorker::with_block_cache(
@@ -502,7 +503,7 @@ async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
     let error = worker
         .enable(&namespace_id)
         .await
-        .expect_err("the root load fails before checkpoint creation");
+        .expect_err("the manifest load fails before checkpoint creation");
     assert!(matches!(error, GrepError::StoreUnavailable { .. }));
     assert_eq!(failing_store.attempts(), 1);
 
@@ -522,13 +523,13 @@ async fn enable_creates_no_checkpoint_when_the_root_load_fails() {
         .expect("list checkpoints after failed enable");
     assert!(
         checkpoints.checkpoints.is_empty(),
-        "a failure before root publication must not leave an active checkpoint"
+        "a failure before manifest publication must not leave an active checkpoint"
     );
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous() {
+async fn enable_retains_its_checkpoint_when_the_manifest_write_result_is_ambiguous() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -558,7 +559,7 @@ async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous()
                         }
                     )
             },
-            InjectedError::Transport("injected failure after root publication".to_owned()),
+            InjectedError::Transport("injected failure after manifest publication".to_owned()),
         )
         .apply_then_fail(),
     );
@@ -573,7 +574,7 @@ async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous()
     let error = worker
         .enable(&namespace_id)
         .await
-        .expect_err("root publication acknowledgement fails");
+        .expect_err("manifest publication acknowledgement fails");
     assert!(matches!(error, GrepError::StoreUnavailable { .. }));
     assert_eq!(failing_store.attempts(), 1);
 
@@ -582,7 +583,7 @@ async fn enable_retains_its_checkpoint_when_the_root_write_result_is_ambiguous()
 }
 
 #[tokio::test]
-async fn restart_retains_its_checkpoint_when_the_root_write_result_is_ambiguous() {
+async fn restart_retains_its_checkpoint_when_the_manifest_write_result_is_ambiguous() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -622,7 +623,7 @@ async fn restart_retains_its_checkpoint_when_the_root_write_result_is_ambiguous(
                         }
                     )
             },
-            InjectedError::Transport("injected failure after root publication".to_owned()),
+            InjectedError::Transport("injected failure after manifest publication".to_owned()),
         )
         .apply_then_fail(),
     );
@@ -710,7 +711,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         vanished,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
-    // A released record is finished for good, so the new attempt takes a
+    // A deleted record is finished for good, so the new attempt takes a
     // pin of its own: a new id, pinning its basis, with the walk starting
     // from nothing.
     let fresh_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
@@ -842,7 +843,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
 }
 
 #[tokio::test]
-async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
+async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -911,26 +912,26 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Asserts the namespace's grep root is at the start of a backfill attempt
+/// Asserts the namespace's grep manifest is at the start of a backfill attempt
 /// — nothing indexed, nothing walked, an active checkpoint pinning its basis
 /// — and returns the checkpoint that attempt holds.
 async fn assert_fresh_backfill_attempt(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> loonfs_api::CheckpointId {
-    let root = load_current_grep_manifest(&**store, namespace_id)
+    let manifest = load_current_grep_manifest(&**store, namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists");
+        .expect("load grep manifest")
+        .expect("grep manifest exists");
     let GrepIndexStatus::Backfilling {
         cursor_inode_id,
         checkpoint_id,
         ..
-    } = root.manifest_state().status()
+    } = manifest.manifest_state().status()
     else {
         panic!(
             "expected a checkpointed backfill: {:?}",
-            root.manifest_state()
+            manifest.manifest_state()
         );
     };
     assert_eq!(
@@ -938,7 +939,7 @@ async fn assert_fresh_backfill_attempt(
         "a fresh backfill starts the walk from the beginning"
     );
     assert!(
-        root.manifest_state().segments().is_empty(),
+        manifest.manifest_state().segments().is_empty(),
         "a rebootstrap discards the incomplete projection"
     );
     assert!(
@@ -949,7 +950,7 @@ async fn assert_fresh_backfill_attempt(
     checkpoint_id.clone()
 }
 
-/// Every grep segment the namespace's root names, for asserting that an
+/// Every grep segment the namespace's manifest names, for asserting that an
 /// event changed no postings.
 async fn grep_segment_ids(
     store: &SharedObjectStore,
@@ -957,8 +958,8 @@ async fn grep_segment_ids(
 ) -> BTreeSet<IndexSegmentId> {
     load_current_grep_manifest(&**store, namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists")
+        .expect("load grep manifest")
+        .expect("grep manifest exists")
         .manifest_state()
         .segments()
         .iter()
@@ -972,12 +973,12 @@ async fn grep_built_through_seq(
 ) -> ChangeSeq {
     load_current_grep_manifest(&**store, namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists")
+        .expect("load grep manifest")
+        .expect("grep manifest exists")
         .manifest_state()
         .status()
         .active_watermark()
-        .expect("an active grep root has a watermark")
+        .expect("an active grep manifest has a watermark")
         .built_through_seq()
 }
 
@@ -1389,7 +1390,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
             Bytes::from_static(b"corrupt hint"),
         )
         .await
-        .expect("poison the grep root");
+        .expect("poison the grep manifest");
 
     let (build, commit) = tokio::join!(
         worker.build_step(&namespace_id, GramIndexBuildPolicy::default()),
@@ -1400,7 +1401,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         ),
     );
-    let error = build.expect_err("an unreadable grep root fails the step");
+    let error = build.expect_err("an unreadable grep manifest fails the step");
     assert_eq!(error.code(), ErrorCode::IndexCorrupt);
     commit.expect("the filesystem commit is unaffected by grep");
     let read = reader
@@ -1412,7 +1413,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
 }
 
 #[tokio::test]
-async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
+async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -1479,7 +1480,7 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
 }
 
 #[tokio::test]
-async fn backfilling_root_without_checkpoint_id_is_index_corrupt() {
+async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -1495,12 +1496,12 @@ async fn backfilling_root_without_checkpoint_id_is_index_corrupt() {
         .expect("create namespace");
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    let root = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load backfilling root")
-        .expect("backfilling root exists");
+        .expect("load backfilling manifest")
+        .expect("backfilling manifest exists");
     let manifest_bytes = store
-        .get(&manifest_key(&namespace_id, &root.manifest_no()), None)
+        .get(&manifest_key(&namespace_id, &manifest.manifest_no()), None)
         .await
         .expect("read backfilling manifest")
         .expect("backfilling manifest exists");
@@ -1602,17 +1603,17 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let head = control::head(&store, &namespace_id).await;
-    let metadata_root = control::metadata_root(&store, &namespace_id).await;
+    let metadata_manifest = control::metadata_manifest(&store, &namespace_id).await;
     assert!(
-        metadata_root.manifest.manifest_head_seq < head.seq,
+        metadata_manifest.manifest.manifest_head_seq < head.seq,
         "the WAL-only revision must sit past metadata materialization"
     );
-    let grep_root = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
+    let grep_manifest = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists");
+        .expect("load grep manifest")
+        .expect("grep manifest exists");
     assert_eq!(
-        grep_root
+        grep_manifest
             .manifest_state()
             .status()
             .active_watermark()
@@ -1736,11 +1737,11 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .await
         .expect("write tail file");
 
-    let root = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load root")
-        .expect("root exists");
-    let levels: BTreeSet<u32> = root
+        .expect("load manifest")
+        .expect("manifest exists");
+    let levels: BTreeSet<u32> = manifest
         .manifest_state()
         .segments()
         .iter()
@@ -1845,10 +1846,10 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     let worker = worker(&store).await;
     worker.enable(&source).await.expect("enable source");
     drive_worker_to_current(&worker, &source, GramIndexBuildPolicy::default()).await;
-    let source_root_before = load_current_grep_manifest(&*store, &source)
+    let source_manifest_before = load_current_grep_manifest(&*store, &source)
         .await
-        .expect("load source root")
-        .expect("source root exists")
+        .expect("load source manifest")
+        .expect("source manifest exists")
         .manifest_state()
         .clone();
 
@@ -1860,9 +1861,9 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     assert!(
         load_current_grep_manifest(&*store, &target)
             .await
-            .expect("load target root")
+            .expect("load target manifest")
             .is_none(),
-        "fork target must have no grep root until explicitly enabled"
+        "fork target must have no grep manifest until explicitly enabled"
     );
     assert_not_enabled_error(
         "fork target",
@@ -1890,13 +1891,13 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     assert!(!payload.contains_key("index_files"));
     assert!(!payload.contains_key("features"));
 
-    let source_root_after = load_current_grep_manifest(&*store, &source)
+    let source_manifest_after = load_current_grep_manifest(&*store, &source)
         .await
-        .expect("reload source root")
-        .expect("source root still exists")
+        .expect("reload source manifest")
+        .expect("source manifest still exists")
         .manifest_state()
         .clone();
-    assert_eq!(source_root_after, source_root_before);
+    assert_eq!(source_manifest_after, source_manifest_before);
     let source_response = new_query(&store, &source, &request("fork needle"))
         .await
         .expect("source query after fork");
@@ -1983,7 +1984,7 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
 }
 
 #[tokio::test]
-async fn a_backfilling_root_never_reports_a_built_through_sequence() {
+async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -2040,18 +2041,18 @@ async fn a_backfilling_root_never_reports_a_built_through_sequence() {
         "the enable response reports the lifecycle it published"
     );
 
-    // Re-enabling an active root reports the same phase, still without a
+    // Re-enabling an active manifest reports the same phase, still without a
     // watermark.
     let loonfs_grep::GrepEnableOutcome::AlreadyEnabled { state: again } = worker
         .enable(&namespace_id)
         .await
         .expect("idempotent enable")
     else {
-        panic!("re-enabling an active root reports it as already enabled");
+        panic!("re-enabling an active manifest reports it as already enabled");
     };
     assert_eq!(again, state);
 
-    // Once the walk finishes, the API reports the root as active with the
+    // Once the walk finishes, the API reports the manifest as active with the
     // target it reached as its own watermark, and no target field survives.
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let active = loonfs_api::v0::GrepIndexLifecycle::from(
@@ -2168,7 +2169,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
 async fn gc_preserves_discovery_and_applies_successor_and_segment_age_rules() {
     use loonfs::UNREFERENCED_SEGMENT_MIN_AGE_MS;
     use loonfs_api::ManifestNo;
-    use loonfs_grep::root::encode_grep_manifest;
+    use loonfs_grep::manifest::encode_grep_manifest;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("numbered-gc").expect("namespace");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
