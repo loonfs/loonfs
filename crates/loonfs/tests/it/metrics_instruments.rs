@@ -209,7 +209,7 @@ fn a_collection_step_reports_what_the_pass_retained() {
             .register(Arc::new(GarbageCollectionJob::new(fs.maintenance.clone())))
             .expect("garbage collection job");
         registry
-            .run(MaintenanceJobId::GC, &namespace_id, None)
+            .run(MaintenanceJobId::GC, &namespace_id)
             .await
             .expect("run one collection pass");
         recorder.snapshot()

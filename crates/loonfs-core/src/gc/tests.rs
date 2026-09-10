@@ -1511,7 +1511,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .await
         .expect("advance past the shared basis");
 
-    crate::checkpoint::release_checkpoint(&store, &namespace_id, &second.checkpoint_id, &setup)
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &second.checkpoint_id)
         .await
         .expect("release one owner");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -1561,7 +1561,7 @@ async fn fork_owned_checkpoints_reject_user_release() {
 
     let fork_record = read_fork_record(&store, &source).await;
 
-    let error = crate::checkpoint::release_checkpoint(&store, &source, &fork_record.pin_id, &setup)
+    let error = crate::checkpoint::release_checkpoint(&store, &source, &fork_record.pin_id)
         .await
         .expect_err("fork-owned release must fail");
     assert!(
@@ -1596,14 +1596,10 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
     .await
     .expect("snapshot checkpoint");
 
-    let error = crate::checkpoint::release_checkpoint(
-        &store,
-        &namespace_id,
-        &snapshot.checkpoint_id,
-        &setup,
-    )
-    .await
-    .expect_err("snapshot-owned release must fail");
+    let error =
+        crate::checkpoint::release_checkpoint(&store, &namespace_id, &snapshot.checkpoint_id)
+            .await
+            .expect_err("snapshot-owned release must fail");
     assert!(
         matches!(
             &error,

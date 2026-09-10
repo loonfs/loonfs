@@ -325,7 +325,7 @@ impl EmbeddedBackend {
             },
             || async {
                 let conclusion = job
-                    .run(namespace_id, None, &MaintenanceCancellation::new())
+                    .run(namespace_id, &MaintenanceCancellation::new())
                     .await
                     .scoped(namespace_id)?
                     .conclusion;
@@ -395,7 +395,7 @@ impl EmbeddedBackend {
     /// a budget to spend and per-key progress to report, and admission
     /// offers neither. It shuts the runner down first so a second scheduler
     /// cannot race these steps, then closes the writer and walks the
-    /// assignment. Each key's continuation passes from one run to the next.
+    /// assignment.
     pub(super) async fn drain_maintenance(
         &self,
         namespaces: &[NamespaceId],
@@ -417,21 +417,18 @@ impl EmbeddedBackend {
                     steps: 0,
                     conclusion: None,
                 };
-                let mut continuation = None;
                 while !budget.spent(steps, timer.monotonic_now_ms().saturating_sub(started_ms)) {
                     let result = self
                         .jobs
                         .execute(MaintenanceAssignment {
                             namespace_id: namespace_id.clone(),
                             job: *job,
-                            continuation,
                         })
                         .await
                         .scoped(namespace_id)?;
                     steps += 1;
                     key.steps += 1;
                     key.conclusion = Some(result.conclusion);
-                    continuation = result.continuation;
                     if key.settled() {
                         break;
                     }

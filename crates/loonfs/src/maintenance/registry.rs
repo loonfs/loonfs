@@ -20,8 +20,6 @@ pub struct MaintenanceAssignment {
     pub namespace_id: NamespaceId,
     /// Registered job to run.
     pub job: MaintenanceJobId,
-    /// Process-local resume position.
-    pub continuation: Option<String>,
 }
 
 impl MaintenanceRegistry {
@@ -67,21 +65,15 @@ impl MaintenanceRegistry {
         &self,
         id: MaintenanceJobId,
         namespace_id: &NamespaceId,
-        continuation: Option<&str>,
     ) -> Result<MaintenanceRunReport> {
         self.require(id)?
-            .run(namespace_id, continuation, &MaintenanceCancellation::new())
+            .run(namespace_id, &MaintenanceCancellation::new())
             .await
     }
 
     /// Runs one assignment with a fresh cancellation token.
     pub async fn execute(&self, assignment: MaintenanceAssignment) -> Result<MaintenanceRunReport> {
-        self.run(
-            assignment.job,
-            &assignment.namespace_id,
-            assignment.continuation.as_deref(),
-        )
-        .await
+        self.run(assignment.job, &assignment.namespace_id).await
     }
 
     fn require(&self, id: MaintenanceJobId) -> Result<Arc<dyn MaintenanceJob>> {

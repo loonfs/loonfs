@@ -61,7 +61,6 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         let build = match self.worker.build_step(namespace_id, self.policy).await {
@@ -152,7 +151,6 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         self.worker

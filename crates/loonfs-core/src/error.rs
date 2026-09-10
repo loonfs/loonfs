@@ -284,18 +284,8 @@ impl MetadataViewError {
 pub enum MetadataProjectionLoadError {
     #[error(transparent)]
     LoadHead(#[from] ControlObjectLoadError),
-    #[error("missing head etag for `{object_key}`")]
-    MissingHeadEtag { object_key: String },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
-    #[error(
-        "namespace head changed during metadata projection load for `{object_key}`: loaded `{loaded_head_etag}`, current `{current_head_etag}`"
-    )]
-    HeadChangedDuringLoad {
-        object_key: String,
-        loaded_head_etag: String,
-        current_head_etag: String,
-    },
     #[error(transparent)]
     WalChainLoad(#[from] WalChainLoadError),
     #[error(transparent)]
@@ -322,8 +312,6 @@ impl MetadataProjectionLoadError {
                 crate::checkpoint::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
                 crate::checkpoint::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
             },
-            Self::MissingHeadEtag { .. } => ErrorCode::ServerError,
-            Self::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
         }
     }
 }

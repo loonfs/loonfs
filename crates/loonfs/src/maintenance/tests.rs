@@ -54,8 +54,6 @@ impl MaintenanceClock for ManualClock {
 #[derive(Debug, Clone)]
 enum ScriptedStep {
     Conclude(MaintenanceConclusion),
-    /// Conclude, and tell the runner where this step stopped.
-    Continue(MaintenanceConclusion, Option<String>),
     /// Conclude, and tell the runner when what this step left behind
     /// becomes eligible — what a collection pass reports for what it
     /// retained.
@@ -111,8 +109,6 @@ struct TestJob {
     trailing_answer: ScriptedStep,
     probe_answer: StdMutex<MaintenanceProbe>,
     steps: StdMutex<Vec<NamespaceId>>,
-    /// The continuation each step was handed, in order.
-    resumed_from: StdMutex<Vec<Option<String>>>,
     probes: StdMutex<Vec<NamespaceId>>,
     gate: Option<Gate>,
 }
@@ -124,7 +120,6 @@ impl TestJob {
             trailing_answer,
             probe_answer: StdMutex::new(MaintenanceProbe::Idle),
             steps: StdMutex::new(Vec::new()),
-            resumed_from: StdMutex::new(Vec::new()),
             probes: StdMutex::new(Vec::new()),
             gate: None,
         })
@@ -149,7 +144,6 @@ impl TestJob {
             trailing_answer: trailing,
             probe_answer: StdMutex::new(MaintenanceProbe::Idle),
             steps: StdMutex::new(Vec::new()),
-            resumed_from: StdMutex::new(Vec::new()),
             probes: StdMutex::new(Vec::new()),
             gate: None,
         };
@@ -167,11 +161,6 @@ impl TestJob {
 
     fn stepped(&self) -> Vec<String> {
         names(&self.steps)
-    }
-
-    /// What the runner handed each step, in order.
-    fn resumed_from(&self) -> Vec<Option<String>> {
-        self.resumed_from.lock().expect("resumed from").clone()
     }
 
     fn probed(&self) -> Vec<String> {
@@ -196,17 +185,12 @@ impl MaintenanceJob for TestJob {
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         if let Some(gate) = &self.gate {
             gate.enter().await;
         }
         self.steps.lock().expect("steps").push(namespace_id.clone());
-        self.resumed_from
-            .lock()
-            .expect("resumed from")
-            .push(continuation.map(str::to_owned));
         let answer = self
             .answers
             .lock()
@@ -215,15 +199,8 @@ impl MaintenanceJob for TestJob {
             .unwrap_or_else(|| self.trailing_answer.clone());
         match answer {
             ScriptedStep::Conclude(conclusion) => Ok(MaintenanceRunReport::concluded(conclusion)),
-            ScriptedStep::Continue(conclusion, continuation) => Ok(MaintenanceRunReport {
-                conclusion,
-                continuation,
-                not_before_ms: None,
-                follow_up: None,
-            }),
             ScriptedStep::Due(conclusion, not_before_ms) => Ok(MaintenanceRunReport {
                 conclusion,
-                continuation: None,
                 not_before_ms: Some(not_before_ms),
                 follow_up: None,
             }),
@@ -280,7 +257,6 @@ impl MaintenanceJob for SubscribingJob {
     async fn run(
         &self,
         namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         self.steps.lock().expect("steps").push(namespace_id.clone());
@@ -373,66 +349,22 @@ async fn progressed_requeues_immediately_and_stays_fair_at_the_cap() {
 }
 
 #[tokio::test]
-async fn a_progressing_job_resumes_from_where_its_last_step_stopped() {
-    let job = TestJob::scripted(
-        [
-            ScriptedStep::Continue(MaintenanceConclusion::Progressed, Some("page-1".to_owned())),
-            ScriptedStep::Continue(MaintenanceConclusion::Progressed, Some("page-2".to_owned())),
-        ],
-        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
-    );
-    let runner = enabled_runner(job.clone());
-    let namespace_id = namespace_id("paged");
-
-    runner.handle().nudge(TEST_JOB, &namespace_id);
-    runner.drain().await.expect("the pass settles");
-
-    assert_eq!(
-        job.resumed_from(),
-        vec![None, Some("page-1".to_owned()), Some("page-2".to_owned())],
-        "a fresh pass, then each step resuming from the one before it"
-    );
-
-    // The idle step that ended the pass spent the position, so the next
-    // nudge starts over rather than resuming a finished walk.
-    runner.handle().nudge(TEST_JOB, &namespace_id);
-    runner.drain().await.expect("the fresh pass settles");
-    assert_eq!(
-        job.resumed_from().last().expect("a fourth step ran"),
-        &None,
-        "an idle conclusion clears the continuation"
-    );
-}
-
-#[tokio::test]
-async fn a_blocked_job_resumes_from_where_it_parked() {
-    let job = TestJob::scripted(
-        [ScriptedStep::Continue(
-            MaintenanceConclusion::Blocked,
-            Some("page-7".to_owned()),
-        )],
-        ScriptedStep::Conclude(MaintenanceConclusion::Idle),
-    );
+async fn a_blocked_job_parks() {
+    let job = TestJob::answering(ScriptedStep::Conclude(MaintenanceConclusion::Blocked));
     let runner = enabled_runner(job.clone());
     let namespace_id = namespace_id("parked");
 
     runner.handle().nudge(TEST_JOB, &namespace_id);
     runner.drain().await.expect("the blocked step settles");
-    runner.handle().nudge(TEST_JOB, &namespace_id);
-    runner.drain().await.expect("the retry settles");
 
-    assert_eq!(
-        job.resumed_from(),
-        vec![None, Some("page-7".to_owned())],
-        "a retry with room to work resumes where the blocked step stopped"
-    );
+    assert_eq!(job.stepped(), vec!["parked".to_owned()]);
 }
 
 #[tokio::test]
-async fn a_not_enabled_conclusion_drops_the_continuation() {
+async fn a_not_enabled_conclusion_evicts_the_key() {
     let job = TestJob::scripted(
         [
-            ScriptedStep::Continue(MaintenanceConclusion::Progressed, Some("page-1".to_owned())),
+            ScriptedStep::Conclude(MaintenanceConclusion::Progressed),
             ScriptedStep::Conclude(MaintenanceConclusion::NotEnabled),
         ],
         ScriptedStep::Conclude(MaintenanceConclusion::Idle),
@@ -442,14 +374,13 @@ async fn a_not_enabled_conclusion_drops_the_continuation() {
 
     runner.handle().nudge(TEST_JOB, &namespace_id);
     runner.drain().await.expect("both steps settle");
+    assert_eq!(job.stepped().len(), 2);
+    runner.reconcile_now().await;
+    assert!(job.probed().is_empty());
+
     runner.handle().nudge(TEST_JOB, &namespace_id);
     runner.drain().await.expect("the re-admitted step settles");
-
-    assert_eq!(
-        job.resumed_from(),
-        vec![None, Some("page-1".to_owned()), None],
-        "a key re-admitted after eviction starts a fresh pass"
-    );
+    assert_eq!(job.stepped().len(), 3);
 }
 
 #[tokio::test]
@@ -829,7 +760,6 @@ impl MaintenanceJob for BlockingJob {
     async fn run(
         &self,
         _namespace_id: &NamespaceId,
-        _continuation: Option<&str>,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         self.runs.fetch_add(1, Ordering::SeqCst);
@@ -842,7 +772,6 @@ impl MaintenanceJob for BlockingJob {
             .forget();
         Ok(MaintenanceRunReport {
             conclusion: MaintenanceConclusion::Blocked,
-            continuation: None,
             not_before_ms: None,
             follow_up: self.follow_up.map(|job| (job, _namespace_id.clone())),
         })

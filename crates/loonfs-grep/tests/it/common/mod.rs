@@ -128,7 +128,7 @@ impl GrepHost {
                 return Ok(lifecycle);
             }
             match job
-                .run(namespace_id, None, &loonfs::MaintenanceCancellation::new())
+                .run(namespace_id, &loonfs::MaintenanceCancellation::new())
                 .await
                 .map_err(GrepError::Runtime)?
                 .conclusion

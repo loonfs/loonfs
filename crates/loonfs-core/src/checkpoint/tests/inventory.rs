@@ -94,7 +94,7 @@ async fn two_pins_under_one_label_list_as_two_records() {
 
     // Release is what takes a record out of the answer, and it takes out
     // exactly the one named.
-    super::super::release::release_checkpoint(&store, &namespace_id, &first, &context)
+    super::super::release::release_checkpoint(&store, &namespace_id, &first)
         .await
         .expect("release checkpoint");
     let after_release = list_all_checkpoints(&store, &namespace_id)
@@ -224,7 +224,7 @@ async fn released_pins_are_absent_from_later_pages() {
     }
     ids.sort();
     for checkpoint_id in &ids[1..6] {
-        super::super::release::release_checkpoint(&store, &namespace_id, checkpoint_id, &context)
+        super::super::release::release_checkpoint(&store, &namespace_id, checkpoint_id)
             .await
             .expect("release checkpoint in filtered run");
     }
