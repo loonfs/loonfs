@@ -237,7 +237,8 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         load_section_bytes(store, &object_key, fetch_offset, object_len - fetch_offset).await?;
     let section = |handle: &BlockHandle| -> Option<&[u8]> {
         let start = usize::try_from(handle.offset.checked_sub(fetch_offset)?).ok()?;
-        bytes.get(start..start + handle.stored_len as usize)
+        let end = start.checked_add(handle.stored_len as usize)?;
+        bytes.get(start..end)
     };
 
     let index_entries = match section(&index_handle) {

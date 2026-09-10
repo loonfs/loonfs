@@ -436,15 +436,36 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
         .checked_mul(4)
         .filter(|len| *len <= body.len())
         .ok_or_else(|| SstBlockCodecError::Malformed("restart array exceeds block".to_owned()))?;
-    let entries = &body[..body.len() - restarts_len];
+    let (entries, restarts) = body.split_at(body.len() - restarts_len);
+    let mut restarts = restarts.chunks_exact(4);
 
     let mut row_keys = Vec::new();
     let mut rows = Vec::new();
     let mut cursor = 0usize;
     let mut previous_key = String::new();
     while cursor < entries.len() {
-        let shared_len = read_varint(entries, &mut cursor)? as usize;
-        let suffix_len = read_varint(entries, &mut cursor)? as usize;
+        let restart = rows.len() % RESTART_INTERVAL == 0;
+        if restart {
+            let offset = restarts.next().map(|bytes| {
+                u32::from_le_bytes(
+                    bytes
+                        .try_into()
+                        .expect("restart offsets should have four bytes"),
+                )
+            });
+            if offset.map(u64::from) != Some(cursor as u64) {
+                return Err(SstBlockCodecError::Malformed(
+                    "restart offset disagrees with its entry".to_owned(),
+                ));
+            }
+        }
+        let shared_len = read_entry_length(entries, &mut cursor)?;
+        let suffix_len = read_entry_length(entries, &mut cursor)?;
+        if restart && shared_len != 0 {
+            return Err(SstBlockCodecError::Malformed(
+                "restart entry has a shared prefix".to_owned(),
+            ));
+        }
         if shared_len > previous_key.len() || !previous_key.is_char_boundary(shared_len) {
             return Err(SstBlockCodecError::Malformed(
                 "shared prefix exceeds previous key".to_owned(),
@@ -453,10 +474,13 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
         let suffix = take_slice(entries, &mut cursor, suffix_len)?;
         let suffix = std::str::from_utf8(suffix)
             .map_err(|_| SstBlockCodecError::Malformed("row key is not utf-8".to_owned()))?;
-        let mut key = String::with_capacity(shared_len + suffix.len());
+        let key_len = shared_len.checked_add(suffix.len()).ok_or_else(|| {
+            SstBlockCodecError::Malformed("row key length exceeds address space".to_owned())
+        })?;
+        let mut key = String::with_capacity(key_len);
         key.push_str(&previous_key[..shared_len]);
         key.push_str(suffix);
-        let row_len = read_varint(entries, &mut cursor)? as usize;
+        let row_len = read_entry_length(entries, &mut cursor)?;
         let row_bytes = take_slice(entries, &mut cursor, row_len)?;
         let row: R = ciborium::de::from_reader(row_bytes)
             .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
@@ -471,6 +495,11 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
         previous_key.push_str(&key);
         row_keys.push(key);
         rows.push(row);
+    }
+    if restarts.next().is_some() {
+        return Err(SstBlockCodecError::Malformed(
+            "restart array contains unused offsets".to_owned(),
+        ));
     }
     Ok(DecodedDataBlock { row_keys, rows })
 }
@@ -496,7 +525,17 @@ pub fn decode_filter_block(
             .try_into()
             .expect("header length should be checked above"),
     );
-    let bits = payload[12..].to_vec();
+    if n_hashes != FILTER_HASH_COUNT {
+        return Err(SstBlockCodecError::Malformed(
+            "filter hash count must be seven".to_owned(),
+        ));
+    }
+    if bit_len < 64 {
+        return Err(SstBlockCodecError::Malformed(
+            "filter bit length must be at least 64".to_owned(),
+        ));
+    }
+    let bits = &payload[12..];
     if bit_len.div_ceil(8) != bits.len() as u64 {
         return Err(SstBlockCodecError::Malformed(
             "filter bit length disagrees with its bytes".to_owned(),
@@ -505,7 +544,7 @@ pub fn decode_filter_block(
     Ok(SegmentFilter {
         n_hashes,
         bit_len,
-        bits,
+        bits: bits.to_vec(),
     })
 }
 
@@ -513,9 +552,6 @@ impl SegmentFilter {
     /// False means no row with this filter key is in the segment; true
     /// means one may be.
     pub fn may_contain(&self, filter_key: &str) -> bool {
-        if self.bit_len == 0 {
-            return false;
-        }
         let (h1, h2) = filter_key_hashes(filter_key);
         for probe in 0..u64::from(self.n_hashes) {
             let bit = h1.wrapping_add(probe.wrapping_mul(h2)) % self.bit_len;
@@ -604,12 +640,23 @@ fn decode_section(
         });
     }
     let payload = if compressed {
-        let mut payload = Vec::with_capacity(handle.decoded_len as usize);
+        let mut payload =
+            Vec::with_capacity((handle.decoded_len as usize).min(DEFAULT_TARGET_BLOCK_BYTES));
         zstd::Decoder::new(stored)
-            .and_then(|mut decoder| decoder.read_to_end(&mut payload))
+            .and_then(|decoder| {
+                decoder
+                    .take(u64::from(handle.decoded_len) + 1)
+                    .read_to_end(&mut payload)
+            })
             .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
         payload
     } else {
+        if stored.len() != handle.decoded_len as usize {
+            return Err(SstBlockCodecError::DecodedLengthMismatch {
+                expected: handle.decoded_len,
+                actual: stored.len(),
+            });
+        }
         stored.to_vec()
     };
     if payload.len() != handle.decoded_len as usize {
@@ -681,7 +728,7 @@ pub fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SstBlockCode
             SstBlockCodecError::Malformed("varint runs past the block".to_owned())
         })?;
         *cursor += 1;
-        if shift >= 64 {
+        if shift == 63 && byte > 1 {
             return Err(SstBlockCodecError::Malformed(
                 "varint exceeds 64 bits".to_owned(),
             ));
@@ -692,6 +739,11 @@ pub fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SstBlockCode
         }
         shift += 7;
     }
+}
+
+fn read_entry_length(bytes: &[u8], cursor: &mut usize) -> Result<usize, SstBlockCodecError> {
+    usize::try_from(read_varint(bytes, cursor)?)
+        .map_err(|_| SstBlockCodecError::Malformed("entry length exceeds address space".to_owned()))
 }
 
 fn take_slice<'a>(
@@ -1026,6 +1078,133 @@ mod tests {
     }
 
     #[test]
+    fn block_expansion_stops_after_the_first_byte_beyond_the_declared_length() {
+        let mut bytes = Vec::new();
+        let mut handle = append_section(&mut bytes, &[0; 1024], true).expect("compress block");
+        handle.decoded_len = 8;
+        assert_eq!(
+            decode_data_block(&bytes, &handle).expect_err("expansion exceeds the handle"),
+            SstBlockCodecError::DecodedLengthMismatch {
+                expected: 8,
+                actual: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn a_large_declared_length_does_not_require_a_large_initial_allocation() {
+        let mut bytes = Vec::new();
+        let mut handle = append_section(&mut bytes, &[0; 4], true).expect("compress block");
+        handle.decoded_len = u32::MAX;
+        assert_eq!(
+            decode_index_block(&bytes, &handle).expect_err("declared length exceeds expansion"),
+            SstBlockCodecError::DecodedLengthMismatch {
+                expected: u32::MAX,
+                actual: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn truncated_index_and_filter_sections_are_rejected_before_decoding() {
+        let built = shared_segment();
+        let index = section(&built.bytes, &built.index);
+        let filter = section(&built.bytes, &built.filter);
+        for (handle, error) in [
+            (
+                built.index,
+                decode_index_block(&index[..index.len() - 1], &built.index)
+                    .expect_err("truncated index"),
+            ),
+            (
+                built.filter,
+                decode_filter_block(&filter[..filter.len() - 1], &built.filter)
+                    .expect_err("truncated filter"),
+            ),
+        ] {
+            assert_eq!(
+                error,
+                SstBlockCodecError::StoredLengthMismatch {
+                    expected: handle.stored_len,
+                    actual: handle.stored_len as usize - 1,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn filter_headers_reject_zero_bits_and_invalid_hash_counts() {
+        for (n_hashes, bit_len) in [(FILTER_HASH_COUNT, 0u64), (u32::MAX, 64), (0, 64)] {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&n_hashes.to_le_bytes());
+            payload.extend_from_slice(&bit_len.to_le_bytes());
+            payload.resize(12 + bit_len.div_ceil(8) as usize, 0xff);
+            let mut bytes = Vec::new();
+            let handle = append_section(&mut bytes, &payload, false).expect("filter section");
+            assert!(matches!(
+                decode_filter_block(&bytes, &handle),
+                Err(SstBlockCodecError::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn restart_entries_bound_shared_prefix_reconstruction() {
+        let mut payload = Vec::new();
+        let mut restart_offsets = Vec::new();
+        for index in 0..=RESTART_INTERVAL {
+            if index % RESTART_INTERVAL == 0 {
+                restart_offsets.push(payload.len() as u32);
+            }
+            write_varint(&mut payload, u64::from(index != 0));
+            write_varint(&mut payload, u64::from(index == 0));
+            if index == 0 {
+                payload.push(b'a');
+            }
+            write_varint(&mut payload, 1);
+            payload.push(0);
+        }
+        for offset in restart_offsets {
+            payload.extend_from_slice(&offset.to_le_bytes());
+        }
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        let mut bytes = Vec::new();
+        let handle = append_section(&mut bytes, &payload, true).expect("data section");
+        assert_eq!(
+            decode_data_block_rows::<u8>(&bytes, &handle).expect_err("shared restart prefix"),
+            SstBlockCodecError::Malformed("restart entry has a shared prefix".to_owned())
+        );
+    }
+
+    #[test]
+    fn restart_offsets_must_name_their_entries() {
+        let payload = [0, 1, b'a', 1, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+        let mut bytes = Vec::new();
+        let handle = append_section(&mut bytes, &payload, true).expect("data section");
+        assert_eq!(
+            decode_data_block_rows::<u8>(&bytes, &handle).expect_err("wrong restart offset"),
+            SstBlockCodecError::Malformed("restart offset disagrees with its entry".to_owned())
+        );
+    }
+
+    #[test]
+    fn varints_reject_overflow_in_the_tenth_byte() {
+        let mut bytes = [0xff; 10];
+        for last in [2, 0x80] {
+            bytes[9] = last;
+            assert_eq!(
+                read_varint(&bytes, &mut 0).expect_err("overflowing varint"),
+                SstBlockCodecError::Malformed("varint exceeds 64 bits".to_owned())
+            );
+        }
+        bytes[9] = 1;
+        assert_eq!(
+            read_varint(&bytes, &mut 0).expect("largest varint"),
+            u64::MAX
+        );
+    }
+
+    #[test]
     fn filter_has_no_false_negatives_and_few_false_positives() {
         let rows = 2_000;
         let built = build_segment(rows);
@@ -1064,7 +1243,7 @@ mod tests {
         }
         let mut payload = entries;
         payload.extend_from_slice(&0u32.to_le_bytes());
-        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
         let mut bytes = Vec::new();
         let handle = append_section(&mut bytes, &payload, true).expect("append section");
 
@@ -1092,6 +1271,7 @@ mod tests {
         write_varint(&mut payload, row_bytes.len() as u64);
         payload.extend_from_slice(&row_bytes);
         payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
 
         let mut bytes = Vec::new();
         let handle = append_section(&mut bytes, &payload, true).expect("append section");
