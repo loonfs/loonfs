@@ -16,7 +16,7 @@ use crate::protocol::{
     load_publish_metadata_view, PublishTailOptions, PublishTailProjection, PublishTailWeight,
     PublishViewEffect,
 };
-use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
+use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::control::AcquiredWriter;
@@ -37,7 +37,7 @@ pub struct CommitCandidate {
 /// The result of preparing external content referenced by a mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContentPreparation {
-    Ready(Vec<ContentAdmission>),
+    Ready(Vec<PreparedContent>),
     Rejected(ContentPreparationError),
 }
 

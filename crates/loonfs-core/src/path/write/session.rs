@@ -110,7 +110,7 @@ mod tests {
     use crate::namespace::control::load_namespace_head_control;
     use crate::path::read::load_current_metadata_view;
     use crate::storage::content::store_bytes_as_content;
-    use crate::storage::content_admission::{ContentAdmission, PreparedContent};
+    use crate::storage::content_admission::PreparedContent;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
@@ -144,7 +144,7 @@ mod tests {
         content_store_id: &loonfs_api::ContentStoreId,
         content_ref: loonfs_api::ContentRef,
     ) -> CommitCandidate {
-        let admission = ContentAdmission::for_durable_content_write(
+        let admission = PreparedContent::for_durable_content_write(
             NamespaceId::parse("demo").expect("namespace id"),
             content_store_id.clone(),
             content_ref.clone(),
@@ -162,7 +162,7 @@ mod tests {
                     expected_revision_no: None,
                 },
             ),
-            vec![PreparedContent::from_admission(admission)],
+            vec![admission],
         )
     }
 

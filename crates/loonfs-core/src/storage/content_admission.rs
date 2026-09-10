@@ -120,14 +120,7 @@ impl PreparedContent {
     pub fn content_ref(&self) -> &ContentRef {
         &self.content_ref
     }
-
-    #[cfg(test)]
-    pub(crate) fn from_admission(admission: Self) -> Self {
-        admission
-    }
 }
-
-pub(crate) type ContentAdmission = PreparedContent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ContentTokenPayload {

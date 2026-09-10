@@ -408,15 +408,15 @@ Provider-specific checksum headers, completion APIs, and response encodings belo
 
 ### 5.5 Admission proofs
 
-A checksum establishes which bytes were verified. It does not establish how long an unpublished upload remains protected from collection. Publication also needs the applicable content-admission evidence.
+Content is admitted only with evidence that the named bytes were verified in a completed upload. The evidence is bound to the namespace, the content store, and the complete content reference, even when several namespaces share a content store. A match on the content ID alone is not enough.
 
-The server can mint signed content tokens from a durably completed upload during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS`. Each token issuance checks the original completion time, including when the completion result was cached. Tokens cannot be issued at or after the end of that window.
+The evidence expires. A completed session can produce evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after its original completion time. A status read or cached response does not restart that window, and nothing is issued at or after its end. A signed token lasts `CONTENT_RECEIPT_TTL_MS` from issuance. Evidence prepared in process without a token expires no later than the last token its session could have issued.
 
-A signed token expires after `CONTENT_RECEIPT_TTL_MS`. In-process prepared content has an admission deadline no later than the last token that its completed session could issue. Evidence is namespace-bound, even when multiple namespaces share a content store.
+The reference HTTP server mints signed content tokens as its representation of this evidence. An embedded implementation need not mint tokens. Token encoding, signing, and HTTP responses are defined in the [API specification][api-spec].
 
 Immediately before publishing newly accepted requests, the writer checks that externally supplied content references have matching, unexpired admission evidence. The check includes time spent acquiring or checking the writer, loading the view, planning, and preparing the WAL. It uses the request clock plus the attempt's elapsed monotonic time, rather than the original request timestamp alone.
 
-Replaying an already committed receipt does not require new content-admission evidence. Internal copy and restore operations retain references already established by the validated namespace state; they do not authorize arbitrary cross-namespace imports. An import outside the pinned fork relationship writes verified bytes under a fresh destination-owned identity.
+A retained matching commit receipt replays without new content-admission evidence. Internal copy and restore operations retain references already established by the validated namespace state; they do not authorize arbitrary cross-namespace imports. An import outside the pinned fork relationship writes verified bytes under a fresh destination-owned identity.
 
 The receipt window, token lifetime, and publication bound determine the earliest safe collection time for a completed but unreferenced upload. The exact calculation appears in section 11.6 and Appendix C.
 
@@ -970,7 +970,7 @@ An extension must remain rebuildable from authoritative core state. Its absence 
 
 The current inode kinds are `file` and `dir`. Mount creation and traversal are not defined by this version; no standard operation creates a mount.
 
-ACL and share APIs are also reserved. Authorization changes belong to a separate control plane: they do not advance namespace sequence or appear in the change feed. Grants would target namespace or inode-rooted subtree identity, rather than path text. No ACL record shape, inheritance rule, or authorization protocol is defined here.
+This format version does not define ACL or sharing records, inheritance, or authorization-change semantics. The ordering, history, and notification behavior of future authorization changes are unspecified.
 
 ## Appendix A. Durable records and byte encodings
 

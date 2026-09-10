@@ -10,7 +10,7 @@ use crate::error::{CoreError, MetadataViewError, Result};
 use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
-use crate::storage::content_admission::ContentAdmission;
+use crate::storage::content_admission::PreparedContent;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{CommitId, ContentId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -247,12 +247,12 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
 /// Checks that each put has a matching content preparation proof.
 fn validate_commit_content_references(
     request: &CommitRequest,
-    admissions: &[ContentAdmission],
+    admissions: &[PreparedContent],
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     now_ms: u64,
 ) -> Result<()> {
-    let mut admissions_by_content_id: HashMap<&ContentId, Vec<&ContentAdmission>> =
+    let mut admissions_by_content_id: HashMap<&ContentId, Vec<&PreparedContent>> =
         HashMap::with_capacity(admissions.len());
     for admission in admissions {
         admissions_by_content_id
