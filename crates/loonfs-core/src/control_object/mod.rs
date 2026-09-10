@@ -1,4 +1,4 @@
-//! Shared loading and validation for mutable durable control objects.
+//! Shared loading and validation for durable control objects.
 
 mod error;
 mod load;

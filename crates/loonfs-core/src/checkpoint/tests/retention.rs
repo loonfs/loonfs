@@ -9,7 +9,7 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
 ) -> ManifestNo {
     load_current_manifest(store, namespace_id)
         .await
-        .expect("read metadata root")
+        .expect("read metadata manifest")
         .state
         .manifest
         .manifest_no
@@ -235,15 +235,15 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let root = load_current_manifest(&store, &namespace_id)
+    let manifest = load_current_manifest(&store, &namespace_id)
         .await
-        .expect("load metadata root")
+        .expect("load metadata manifest")
         .state;
     let referenced_segment_count = load_manifest_segments_for_inspection(
         &store,
         None,
         &namespace_id,
-        &root.manifest.manifest_no,
+        &manifest.manifest.manifest_no,
     )
     .await
     .expect("load current manifest")
@@ -310,15 +310,15 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .await
         .expect("create checkpoint");
 
-    let root = load_current_manifest(&store, &namespace_id)
+    let manifest = load_current_manifest(&store, &namespace_id)
         .await
-        .expect("load metadata root")
+        .expect("load metadata manifest")
         .state;
     let segments = load_manifest_segments_for_inspection(
         &store,
         None,
         &namespace_id,
-        &root.manifest.manifest_no,
+        &manifest.manifest.manifest_no,
     )
     .await
     .expect("load current manifest");
@@ -375,15 +375,15 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         .await
         .expect("create checkpoint");
 
-    let root = load_current_manifest(&setup_store, &namespace_id)
+    let manifest = load_current_manifest(&setup_store, &namespace_id)
         .await
-        .expect("load metadata root")
+        .expect("load metadata manifest")
         .state;
     let segments = load_manifest_segments_for_inspection(
         &setup_store,
         None,
         &namespace_id,
-        &root.manifest.manifest_no,
+        &manifest.manifest.manifest_no,
     )
     .await
     .expect("load current manifest");
@@ -491,8 +491,8 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
-    // Nothing turns a released record back into a pin. A caller asking for
+async fn deletion_is_terminal_and_the_next_pin_is_a_different_record() {
+    // A deleted pin id is never reused. A caller asking for
     // a pin again — even at the same instant, over the same basis, under the
     // same owner name — gets a brand new record, so the release can never be
     // undone by racing it.
@@ -627,7 +627,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 }
 
 #[tokio::test]
-async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
+async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     // No clock reads on the checkpoint read path. Release is the whole
     // authority: until a pass turns the passed expiry into a release, the
     // record is still a garbage-collection root, so the state behind it is
@@ -692,7 +692,7 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
 }
 
 #[tokio::test]
-async fn a_pin_without_a_ttl_is_held_until_it_is_released() {
+async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     // No expiry means no clock: the record stays a serving pin however far
     // the wall clock moves, and only an explicit release ends it.
     let temp_dir = tempdir().expect("tempdir");
@@ -758,7 +758,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let initial = crate::namespace::control_snapshot::load_control_snapshot(&store, &namespace_id)
+    let initial = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
         .await
         .expect("initial manifest");
     write_file_bytes(&store, &namespace_id, "/file", b"content", &context, None)
@@ -782,7 +782,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
             expires_at_ms: None,
         },
         initial.basis().manifest().clone(),
-        initial.head.head_commit_id.clone(),
+        initial.read_state.head_commit_id.clone(),
         &context,
     )
     .await
@@ -851,7 +851,7 @@ async fn checkpoint_basis_verification_store_failure_deletes_the_record() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let initial = crate::namespace::control_snapshot::load_control_snapshot(&store, &namespace_id)
+    let initial = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
         .await
         .expect("initial manifest");
     let store = loonfs_test_support::stores::FailStore::new(
@@ -871,7 +871,7 @@ async fn checkpoint_basis_verification_store_failure_deletes_the_record() {
             expires_at_ms: None,
         },
         initial.basis().manifest().clone(),
-        initial.head.head_commit_id.clone(),
+        initial.read_state.head_commit_id.clone(),
         &context,
     )
     .await
@@ -928,11 +928,11 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             .remove(0)
             .expect("write within backpressure window");
     }
-    let head_key = hint(&namespace_id);
+    let hint_key = hint(&namespace_id);
     let segment_prefix = wal_segment_prefix(&namespace_id);
     let store = RecordingStore::new(
         store,
-        KeyPredicate::new(move |key| key == head_key || key.starts_with(&segment_prefix)),
+        KeyPredicate::new(move |key| key == hint_key || key.starts_with(&segment_prefix)),
     );
     let request = CommitRequest::single(
         CommitId::parse("at-the-boundary").expect("commit id"),
@@ -1173,7 +1173,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
             .expect("create checkpoint");
     }
 
-    let root_before = current_manifest_no(&store, &namespace_id).await;
+    let manifest_before = current_manifest_no(&store, &namespace_id).await;
     let tiny_byte_policy = MetadataLsmPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
@@ -1195,7 +1195,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     };
     assert_eq!(
         current_manifest_no(&store, &namespace_id).await,
-        root_before,
+        manifest_before,
         "a step that plans a compaction must not publish"
     );
     assert_eq!(store.count(OperationClass::Put), 0);
@@ -1669,12 +1669,13 @@ async fn a_namespace_retains_from_birth_before_retention_advances() {
         .await
         .expect("bootstrap");
 
-    let head = crate::namespace::control::load_head_object(&store, &namespace_id)
+    let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("head");
-    let floor = crate::namespace::control_snapshot::resolve_retention_floor_seq(&store, &head)
-        .await
-        .expect("missing floor defaults");
+    let floor =
+        crate::namespace::read_anchor::resolve_retention_floor_seq(&store, &head.namespace_id)
+            .await
+            .expect("missing floor defaults");
     assert_eq!(floor, ChangeSeq(0));
 }
 
@@ -1701,9 +1702,9 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     )
     .await
     .expect("seed file");
-    let root_before = load_current_manifest(&store, &namespace_id)
+    let manifest_before = load_current_manifest(&store, &namespace_id)
         .await
-        .expect("read root")
+        .expect("read manifest")
         .state;
 
     // Every reading advances 20 minutes against the 15-minute budget: the
@@ -1717,13 +1718,13 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         "expected budget error, got {error:?}"
     );
 
-    let root_after = load_current_manifest(&store, &namespace_id)
+    let manifest_after = load_current_manifest(&store, &namespace_id)
         .await
-        .expect("read root")
+        .expect("read manifest")
         .state;
     assert_eq!(
-        root_after, root_before,
-        "an aborted publication must not move the root"
+        manifest_after, manifest_before,
+        "an aborted publication must not publish a manifest"
     );
 
     // The in-budget retry publishes normally over fresh outputs.
@@ -1731,7 +1732,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         .await
         .expect("in-budget retry succeeds");
     assert_eq!(advanced.outcome, loonfs_api::FlushWalOutcome::Published);
-    assert!(advanced.manifest_no > root_before.manifest.manifest_no);
+    assert!(advanced.manifest_no > manifest_before.manifest.manifest_no);
 }
 
 #[tokio::test]
@@ -1760,9 +1761,9 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     super::flush::flush_wal(&store, &namespace_id, &context)
         .await
         .expect("publish a delta run to fold");
-    let root_before = load_current_manifest(&store, &namespace_id)
+    let manifest_before = load_current_manifest(&store, &namespace_id)
         .await
-        .expect("read root")
+        .expect("read manifest")
         .state;
 
     let fold_everything = MetadataLsmPolicy {
@@ -1785,11 +1786,11 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         "expected budget error, got {error:?}"
     );
 
-    let root_after = load_current_manifest(&store, &namespace_id)
+    let manifest_after = load_current_manifest(&store, &namespace_id)
         .await
-        .expect("read root")
+        .expect("read manifest")
         .state;
-    assert_eq!(root_after, root_before);
+    assert_eq!(manifest_after, manifest_before);
 
     let report = super::reorganize::reorganize_metadata_step(
         &store,
@@ -2234,7 +2235,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
          rather than assemble one across the wide run"
     );
 
-    let root_before = current_manifest_no(&store, &namespace_id).await;
+    let manifest_before = current_manifest_no(&store, &namespace_id).await;
     let report = super::reorganize_metadata_step(
         &store,
         &namespace_id,
@@ -2254,7 +2255,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     );
     assert_eq!(
         current_manifest_no(&store, &namespace_id).await,
-        root_before,
+        manifest_before,
         "a step that plans a compaction must not publish"
     );
 }
@@ -2391,7 +2392,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
 }
 
 #[tokio::test]
-async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_release() {
+async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("retained-pin").expect("namespace");

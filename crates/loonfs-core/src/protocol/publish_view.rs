@@ -8,11 +8,11 @@ use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-use crate::namespace::control_snapshot::load_head_and_metadata_basis;
+use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::{
-    ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
+    ensure_replayed_head_matches, load_wal_tail, project_validated_wal_tail, WalTailLoadRequest,
 };
 use loonfs_api::v0::CommittedChange;
 use loonfs_api::wire::control::AcquiredWriter;
@@ -151,7 +151,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     options: &PublishTailOptions,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
     let loaded = if let Some(cached) = cached_projection {
-        crate::namespace::control_snapshot::LoadedNamespaceBasis {
+        crate::namespace::read_anchor::LoadedNamespaceBasis {
             head: cached.head.clone(),
             basis: cached.basis().clone(),
             retention_floor_seq: cached.retention_floor_seq,
@@ -211,11 +211,11 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<PublishTailProjection> {
     let manifest_head = loaded_basis.replay_head(head);
-    let wal_chain = load_wal_chain(
+    let wal_tail = load_wal_tail(
         store,
-        WalChainLoadRequest {
+        WalTailLoadRequest {
             namespace_id: &key.namespace_id,
-            chain_base_seq: manifest_head.seq,
+            base_seq: manifest_head.seq,
             head_seq: head.seq,
             base_wal_no: head.last_folded_wal_no,
             tip_wal_no: head.wal_no,
@@ -224,19 +224,19 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalTailLoad(error))
     })?;
     let replayed = project_validated_wal_tail(
         &manifest_head,
         &loaded_basis.base_state,
         Some(head.writer_epoch),
-        &wal_chain,
+        &wal_tail,
     )
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
     })?;
     ensure_replayed_head_matches(head, &replayed.resulting_head)?;
-    let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
+    let wal_tail_segments = u64::try_from(wal_tail.segments().len()).unwrap_or(u64::MAX);
     let projection = PublishTailProjection {
         key,
         head: head.clone(),

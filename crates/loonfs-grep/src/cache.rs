@@ -1,7 +1,7 @@
 //! Grep-private cache for immutable manifests and decoded segment blocks.
 
 use crate::codec::IndexRow;
-use crate::root::GrepManifestState;
+use crate::manifest::GrepManifestState;
 use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
 use loonfs::{
     DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver, DecodedBlockWeight,

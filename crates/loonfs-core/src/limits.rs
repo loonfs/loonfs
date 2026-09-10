@@ -3,7 +3,7 @@
 //!
 //! The GC grace window's safety proof (format spec, Appendix C) is an
 //! inequality over these constants: every publication measures itself
-//! against a budget here and refuses to publish its root once the
+//! against a budget here and refuses to publish its manifest once the
 //! budget is spent, provider operations consume one deadline across retries,
 //! and the minimum grace window is derived — not tuned — from those bounds
 //! plus a margin for clock error and scheduling delay. Callers may configure
@@ -43,16 +43,16 @@ pub const CONTENTION_RETRY_LIMIT: usize = 8;
 /// so a landed publication never leaves more than this behind.
 pub const MAX_UNFLUSHED_WAL_SEGMENTS: u64 = 128;
 
-/// Bounds the WAL probes a cold open makes above the hinted number.
+/// WAL publications since the last successful hint raise that trigger another attempt.
 pub const HINT_RAISE_SEGMENTS: u64 = 8;
 
-/// Visible WAL-tail length, in segments, at which maintenance publishes a
-/// checkpoint.
-pub const CHECKPOINT_AT_WAL_SEGMENTS: u64 = 32;
+const _: () = assert!(0 < HINT_RAISE_SEGMENTS && HINT_RAISE_SEGMENTS < MAX_UNFLUSHED_WAL_SEGMENTS);
 
-const _: () = assert!(
-    0 < CHECKPOINT_AT_WAL_SEGMENTS && CHECKPOINT_AT_WAL_SEGMENTS < MAX_UNFLUSHED_WAL_SEGMENTS
-);
+/// Visible WAL-tail length, in segments, that starts an automatic WAL fold.
+pub const FOLD_AT_WAL_SEGMENTS: u64 = 32;
+
+const _: () =
+    assert!(0 < FOLD_AT_WAL_SEGMENTS && FOLD_AT_WAL_SEGMENTS < MAX_UNFLUSHED_WAL_SEGMENTS);
 
 /// Provider operation deadline, in milliseconds (`loonfs-objectstore`
 /// consumes it across every retry of one single-request operation).
@@ -121,7 +121,7 @@ const _: () = assert!(
         )
 );
 
-/// Minimum provider age of a metadata segment no root manifest lists before
+/// Minimum provider age of a metadata segment no manifest lists before
 /// garbage collection may delete it. A streaming compaction writes its
 /// output under `segments/` as it goes and publishes at the end, so its
 /// earliest segment is unreferenced for the whole run. One day is the bound
@@ -212,8 +212,8 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
 /// Minimum age of unreferenced content from a completed upload before
 /// collection. The value covers the receipt window, receipt lifetime, and a
 /// final publication with the clock-error and scheduling allowance. Every mint
-/// checks the upload's receipt issuance window. Immediately before the head
-/// swap, content proofs are checked against the request clock plus the whole
+/// checks the upload's receipt issuance window. Immediately before the WAL
+/// put-if-absent, content proofs are checked against the request clock plus the whole
 /// attempt's elapsed monotonic time.
 pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;

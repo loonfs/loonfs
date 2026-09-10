@@ -815,7 +815,7 @@ async fn wal_fold_finished_hints_coalesce_and_follow_ups_admit_once() {
         .hint(MaintenanceHint::Published(NamespacePublication {
             namespace_id: namespace_id.clone(),
             committed_through_seq: Some(ChangeSeq(1)),
-            wal_tail_segments: loonfs_core::limits::CHECKPOINT_AT_WAL_SEGMENTS,
+            wal_tail_segments: loonfs_core::limits::FOLD_AT_WAL_SEGMENTS,
         }));
     runner.drain().await.expect("publication schedules nothing");
     assert_eq!(

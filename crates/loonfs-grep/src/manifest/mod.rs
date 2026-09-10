@@ -10,7 +10,7 @@ pub use codec::{
     GrepHintEnvelope, GrepManifestEnvelope, GREP_HINT_FORMAT_VERSION, GREP_HINT_KIND,
     GREP_MANIFEST_FORMAT_VERSION, GREP_MANIFEST_KIND,
 };
-pub use error::{GrepEnvelopeCodecError, GrepManifestStateError, GrepRootError};
+pub use error::{GrepEnvelopeCodecError, GrepManifestError, GrepManifestStateError};
 pub use state::{
     ChangeFeedResume, GrepHint, GrepIndexState, GrepIndexStatus, GrepManifestState,
     GrepReorganizeState, GrepSegmentRef,

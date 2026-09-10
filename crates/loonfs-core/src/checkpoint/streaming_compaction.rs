@@ -207,7 +207,7 @@ pub(super) struct MetadataMergeResult {
     pub(super) input_bytes: u64,
     pub(super) output_bytes: u64,
     pub(super) rows_written_by_family: BTreeMap<MetadataRowFamily, u64>,
-    /// Point reads into the snapshot's unbind family, one per reverse bind
+    /// Point reads into the input's unbind family, one per reverse bind
     /// row at or below the frozen floor. Zero for a merge that resolves the
     /// reverse index from what it streamed
     /// ([`ReverseBindResolution::CollectedUnbinds`]).
@@ -283,12 +283,12 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
         spec.placement,
         spec.frozen_floor_seq,
         policy,
-        resolve_snapshot_runs(segments, spec)?,
+        resolve_input_runs(segments, spec)?,
         &probe_cache,
         // A job has no bound on the group it rebuilds, so it reads the
-        // snapshot per reverse row rather than holding a set that would follow
+        // input per reverse row rather than holding a set that would follow
         // the group's size.
-        ReverseBindResolution::PointProbeSnapshot,
+        ReverseBindResolution::PointProbeInput,
         Some(ProgressReporter::new(spec.input_rows())),
     );
     let mut control = MergeControl {
@@ -300,7 +300,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
 /// How one background compaction job ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataCompactionJobOutcome {
-    /// The rebuilt group replaced its snapshot in a published manifest.
+    /// The rebuilt group replaced its input in a published manifest.
     Published {
         manifest_no: ManifestNo,
         rows_read: u64,
@@ -337,7 +337,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     // What the job is about to read, recorded before it reads anything.
     // Finalization compares the manifest against this, so the run it publishes
     // stands in for exactly the segments it merged.
-    let Some(snapshot_keys) = snapshot_segment_keys(&segments, spec) else {
+    let Some(input_keys) = input_segment_keys(&segments, spec) else {
         return Ok(MetadataCompactionJobOutcome::Abandoned);
     };
     tracing::info!(
@@ -358,7 +358,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
                     store,
                     namespace_id,
                     spec,
-                    &snapshot_keys,
+                    &input_keys,
                     result,
                     cancellation,
                     &publication,
@@ -432,10 +432,10 @@ impl CompactionPublication<'_> {
     }
 }
 
-/// Swaps the rebuilt run in for the snapshot it replaces.
+/// Swaps the rebuilt run in for the input it replaces.
 ///
 /// The current manifest must still contain the segments used by the job. New
-/// runs are preserved. Unrelated compare-and-swap conflicts are retried, while
+/// runs are preserved. Unrelated manifest publication conflicts are retried, while
 /// changes to the job's input abandon the output.
 ///
 /// The publication budget starts during finalization rather than at the start
@@ -444,7 +444,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    snapshot_keys: &BTreeSet<String>,
+    input_keys: &BTreeSet<String>,
     result: MetadataMergeResult,
     cancellation: &MetadataCompactionCancellation,
     publication: &CompactionPublication<'_>,
@@ -463,18 +463,18 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             return Ok(MetadataCompactionJobOutcome::Cancelled);
         }
         let publication_started_ms = timer.monotonic_now_ms();
-        let Some(root) = load_current_manifest_if_present(store, namespace_id)
+        let Some(current_manifest) = load_current_manifest_if_present(store, namespace_id)
             .await
             .map_err(CoreError::ControlObjectLoad)?
             .map(|loaded| loaded.state)
         else {
             return Ok(MetadataCompactionJobOutcome::Abandoned);
         };
-        if root.compactor_epoch != publication.compactor_epoch {
+        if current_manifest.compactor_epoch != publication.compactor_epoch {
             return Ok(MetadataCompactionJobOutcome::Fenced);
         }
-        let segments = load_manifest_segments(store, None, &root.manifest).await?;
-        if snapshot_segment_keys(&segments, spec).as_ref() != Some(snapshot_keys) {
+        let segments = load_manifest_segments(store, None, &current_manifest.manifest).await?;
+        if input_segment_keys(&segments, spec).as_ref() != Some(input_keys) {
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
                 families = ?spec.families(),
@@ -491,7 +491,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             .filter_map(|run| {
                 let mut run = run.clone();
                 run.segments.retain(|descriptor| {
-                    !snapshot_keys.contains(&metadata_segment_object_key(descriptor))
+                    !input_keys.contains(&metadata_segment_object_key(descriptor))
                 });
                 (!run.segments.is_empty()).then_some(run)
             })
@@ -520,7 +520,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             store,
             namespace_id,
             &manifest,
-            Some(root.manifest.manifest_no),
+            Some(current_manifest.manifest.manifest_no),
             timer,
             publication_started_ms,
         )
@@ -566,19 +566,19 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     Ok(MetadataCompactionJobOutcome::Abandoned)
 }
 
-/// Loads the segments in the current root manifest, or `None` if no root exists.
+/// Loads the current manifest segments, or `None` if the namespace is absent.
 async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<Option<VerifiedMetadataSegments<'a, S>>> {
-    let Some(root) = load_current_manifest_if_present(store, namespace_id)
+    let Some(current_manifest) = load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .map(|loaded| loaded.state)
     else {
         return Ok(None);
     };
-    load_manifest_segments(store, None, &root.manifest)
+    load_manifest_segments(store, None, &current_manifest.manifest)
         .await
         .map(Some)
 }
@@ -590,7 +590,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
 /// agreeing on this set agree on every row the job read. Runs the manifest
 /// gained meanwhile are not in it — the job never read them, and they survive
 /// the publication untouched.
-pub(super) fn snapshot_segment_keys<S: ObjectStore + ?Sized>(
+pub(super) fn input_segment_keys<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     spec: &MetadataCompactionSpec,
 ) -> Option<BTreeSet<String>> {
@@ -611,8 +611,8 @@ pub(super) fn snapshot_segment_keys<S: ObjectStore + ?Sized>(
 /// point reads to keep memory bounded. Step-contained merges reuse a bounded
 /// set collected while processing forward binds.
 enum ReverseBindResolution {
-    /// Probe the snapshot for each reverse row, with a bounded cache.
-    PointProbeSnapshot,
+    /// Probe the input for each reverse row, with a bounded cache.
+    PointProbeInput,
     /// Use unbound generations collected from the bounded forward-bind input.
     CollectedUnbinds(BTreeSet<BindingIdentity>),
 }
@@ -703,7 +703,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
     policy: MetadataLsmPolicy,
-    snapshot: VerifiedMetadataSegments<'a, S>,
+    input: VerifiedMetadataSegments<'a, S>,
     reverse_binds: ReverseBindResolution,
     result: MetadataMergeResult,
     canonical_digest: RowDigest,
@@ -754,12 +754,12 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
         policy: MetadataLsmPolicy,
-        snapshot_runs: Vec<MetadataRunManifest>,
+        input_runs: Vec<MetadataRunManifest>,
         probe_cache: &'a MetadataSegmentCache,
         reverse_binds: ReverseBindResolution,
         progress: Option<ProgressReporter>,
     ) -> Self {
-        let input_bytes = snapshot_runs
+        let input_bytes = input_runs
             .iter()
             .flat_map(|run| group_run_descriptors(run, group))
             .map(segment_object_len)
@@ -771,7 +771,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             placement,
             frozen_floor_seq,
             policy,
-            snapshot: VerifiedMetadataSegments::from_runs(store, probe_cache, snapshot_runs),
+            input: VerifiedMetadataSegments::from_runs(store, probe_cache, input_runs),
             reverse_binds,
             result: MetadataMergeResult {
                 input_bytes,
@@ -857,7 +857,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         // One iterator per input run and family. The planner caps run fan-in;
         // each iterator advances through that run's segments sequentially.
         let mut iterators = Vec::new();
-        for run in self.snapshot.scan_runs.iter() {
+        for run in self.input.scan_runs.iter() {
             for family in cluster.families {
                 let segments: Vec<MetadataSegmentRef> = group_run_descriptors(run, self.group)
                     .filter(|descriptor| descriptor.family == *family)
@@ -921,7 +921,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.collect_unbinding(&row);
             let kept = match rule {
                 // The reverse index is the one family no grouping can decide,
-                // so the merge reads the snapshot for it rather than holding
+                // so the merge reads the input for it rather than holding
                 // state.
                 RetentionRule::ReverseBindProbe => self
                     .reverse_bind_survives(&row)
@@ -1018,10 +1018,10 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// Remembers a below-floor unbind for the reverse pass, when the merge is
     /// resolving reverse rows from what it streamed rather than from the store.
     ///
-    /// Every unbind row of the snapshot goes through here, because the forward
+    /// Every unbind row of the input goes through here, because the forward
     /// cluster streams the whole unbind family before the reverse cluster
     /// starts. That is what makes the collected set answer exactly what a
-    /// point read into the same snapshot would answer.
+    /// point read into the same input would answer.
     fn collect_unbinding(&mut self, row: &MetadataRow) {
         let ReverseBindResolution::CollectedUnbinds(unbound_at_floor) = &mut self.reverse_binds
         else {
@@ -1040,7 +1040,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// the unbind that retires it. Both resolutions close that the same way:
     /// they run [`bind_survives_frozen_floor`] against the generations
     /// [`unbinding_at_or_below_floor`] retired, out of the same immutable
-    /// snapshot and against the same frozen floor as the forward pass. So the
+    /// input and against the same frozen floor as the forward pass. So the
     /// two bind families drop in lockstep — which they must, because the format
     /// gives every bind row exactly one reverse row and a run whose two counts
     /// disagree does not load.
@@ -1091,7 +1091,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         ))
     }
 
-    /// One point read into the snapshot's unbind family.
+    /// One point read into the input's unbind family.
     ///
     /// The unbind key grammar leads with the binding a row names, so the
     /// prefix selects the unbinds of that one binding and nothing else. The
@@ -1105,7 +1105,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         prefix: &str,
         filter_probe: &str,
     ) -> Result<Vec<MetadataRow>> {
-        self.snapshot
+        self.input
             .scan_prefix_for_lookup(
                 MetadataRowFamily::DirentryUnbinds,
                 prefix,
@@ -1198,7 +1198,7 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
 }
 
 /// Turns the run ids a spec names back into the manifest's runs.
-fn resolve_snapshot_runs<S: ObjectStore + ?Sized>(
+fn resolve_input_runs<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     spec: &MetadataCompactionSpec,
 ) -> Result<Vec<MetadataRunManifest>> {

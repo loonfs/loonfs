@@ -8,7 +8,7 @@
 
 use crate::{EffectiveLimit, GcConfig, MetadataCompactionPolicy, Result, RuntimeError};
 use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};
-use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, MAX_UNFLUSHED_WAL_SEGMENTS};
+use loonfs_core::limits::{FOLD_AT_WAL_SEGMENTS, MAX_UNFLUSHED_WAL_SEGMENTS};
 use std::num::NonZeroU64;
 
 pub use loonfs_api::options::{
@@ -30,7 +30,7 @@ pub struct MetadataMaintenanceOptions {
 impl Default for MetadataMaintenanceOptions {
     fn default() -> Self {
         Self {
-            max_wal_tail_segments: const { NonZeroU64::new(CHECKPOINT_AT_WAL_SEGMENTS).unwrap() },
+            max_wal_tail_segments: const { NonZeroU64::new(FOLD_AT_WAL_SEGMENTS).unwrap() },
             compaction_policy: MetadataCompactionPolicy::SizeTiered,
         }
     }
@@ -86,7 +86,7 @@ pub struct CreateCheckpointOptions {
     /// Label recorded on the checkpoint record.
     pub name: String,
     /// Optional lifetime; the record's expiry is computed from the runtime's
-    /// clock. Absent means the pin holds until explicitly released.
+    /// clock. Absent means the pin holds until deleted.
     pub ttl_ms: Option<u64>,
 }
 

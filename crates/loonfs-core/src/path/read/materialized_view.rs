@@ -16,12 +16,12 @@ use crate::metadata::{
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 #[cfg(test)]
-use crate::namespace::control_snapshot::load_head_and_metadata_basis;
+use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
 use crate::wal::{
-    ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
+    ensure_replayed_head_matches, load_wal_tail, project_validated_wal_tail, WalTailLoadRequest,
 };
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::{
@@ -201,11 +201,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 });
             }
         }
-        let wal_chain = load_wal_chain(
+        let wal_tail = load_wal_tail(
             store,
-            WalChainLoadRequest {
+            WalTailLoadRequest {
                 namespace_id,
-                chain_base_seq: manifest_head.seq,
+                base_seq: manifest_head.seq,
                 head_seq: head.seq,
                 base_wal_no: head.last_folded_wal_no,
                 tip_wal_no: head.wal_no,
@@ -214,7 +214,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         )
         .await
         .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::WalTailLoad(error))
         })?;
         let replayed = {
             let _span =
@@ -223,7 +223,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 &manifest_head,
                 &loaded_basis.base_state,
                 Some(head.writer_epoch),
-                &wal_chain,
+                &wal_tail,
             )
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
@@ -906,7 +906,7 @@ mod tests {
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::control::load_head_object;
+    use crate::namespace::control::load_namespace_read_state;
     use crate::path::write::{CommitRequest, FilesystemOperation};
     use bytes::Bytes;
     use loonfs_api::{AttributeRevisionNo, AttributeValue, CommitId, ErrorCode};
@@ -993,7 +993,7 @@ mod tests {
     #[tokio::test]
     async fn a_tail_that_replays_to_another_head_is_refused_by_reads_and_publishes_alike() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let head = load_head_object(&store, &namespace_id)
+        let head = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("state");
         let key = loonfs_objectstore::keys::wal_segment(&namespace_id, &head.wal_no);

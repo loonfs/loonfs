@@ -107,7 +107,7 @@ mod tests {
     use crate::context::MutationContext;
     use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::control::load_namespace_head_control;
+    use crate::namespace::control::load_namespace_read_state;
     use crate::path::read::load_current_metadata_view;
     use crate::storage::content::store_bytes_as_content;
     use crate::storage::content_admission::PreparedContent;
@@ -391,7 +391,7 @@ mod tests {
             visible_inode_id(&store, &namespace_id, "/wide/b.txt").await,
             InodeId(4)
         );
-        let head = load_namespace_head_control(&store, &namespace_id)
+        let head = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("load head");
         assert_eq!(head.next_inode_id, InodeId(5));
@@ -418,7 +418,7 @@ mod tests {
             visible_inode_id(&store, &namespace_id, "/kept").await,
             InodeId(2)
         );
-        let head = load_namespace_head_control(&store, &namespace_id)
+        let head = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("load head");
         assert_eq!(head.next_inode_id, InodeId(3));
@@ -445,7 +445,7 @@ mod tests {
             visible_inode_id(&store, &namespace_id, "/kept").await,
             InodeId(2)
         );
-        let head = load_namespace_head_control(&store, &namespace_id)
+        let head = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("load head");
         assert_eq!(head.next_inode_id, InodeId(3));

@@ -1,5 +1,4 @@
-//! The writer's periodic raise of each namespace hint's WAL number, which
-//! bounds the WAL probes a cold open makes above the hinted number.
+//! Paces attempts to raise each namespace's WAL discovery hint.
 
 use crate::fs::ReadCore;
 use crate::NamespaceId;

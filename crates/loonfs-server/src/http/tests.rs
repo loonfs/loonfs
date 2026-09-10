@@ -29,7 +29,7 @@ use loonfs_api::{
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{hint_key as grep_hint_key, manifest_key as grep_manifest_key};
-use loonfs_grep::root::{encode_grep_hint, load_current_grep_manifest, GrepHint};
+use loonfs_grep::manifest::{encode_grep_hint, load_current_grep_manifest, GrepHint};
 use loonfs_grep::{GrepWorker, NamespaceReads};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
@@ -1338,17 +1338,17 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
 async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> ChangeSeq {
     load_current_grep_manifest(&*state.writer.object_store(), namespace_id)
         .await
-        .expect("load grep root")
-        .expect("an enabled namespace has a grep root")
+        .expect("load grep manifest")
+        .expect("an enabled namespace has a grep manifest")
         .manifest_state()
         .status()
         .active_watermark()
-        .expect("an active grep root has a watermark")
+        .expect("an active grep manifest has a watermark")
         .built_through_seq()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_disabled_root_is_not_materialized_and_core_reads_survive() {
+async fn grep_error_disabled_manifest_is_not_materialized_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let namespace_id = namespace_id("grep-error-disabled");
@@ -1411,7 +1411,7 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
         KeyPredicate::exact(grep_hint_key(&namespace_id)),
         OperationClass::GetWithMetadata,
-        InjectedError::Transport("injected grep-root outage".to_owned()),
+        InjectedError::Transport("injected grep manifest outage".to_owned()),
     ));
     let store = fault_store.clone() as SharedObjectStore;
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
@@ -1435,7 +1435,7 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_unreadable_roots_are_index_corrupt_and_core_reads_survive() {
+async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let corrupt_pointer = namespace_id("grep-error-pointer");
@@ -2052,12 +2052,10 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
         .expect("first write takes over the namespace");
     assert_eq!(result.committed_seq, ChangeSeq(1));
 
-    let head = loonfs::control::load_namespace_head_control(
-        store_for_check.as_ref(),
-        &namespace_id("demo"),
-    )
-    .await
-    .expect("read head");
+    let head =
+        loonfs::control::load_namespace_read_state(store_for_check.as_ref(), &namespace_id("demo"))
+            .await
+            .expect("read head");
     assert_eq!(
         head.writer.expect("writer block").writer_id,
         loonfs_api::WriterId::parse("server-writer").expect("writer id")
@@ -3493,7 +3491,7 @@ async fn start_grep_error_server(
     start_server_with_config(store, config).await
 }
 
-/// Administering a grep root belongs to a deployment that maintains one.
+/// Administering a grep manifest belongs to a deployment that maintains one.
 async fn start_grep_maintenance_error_server(
     store: SharedObjectStore,
     root: &Path,

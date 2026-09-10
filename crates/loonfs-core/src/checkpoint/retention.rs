@@ -7,7 +7,7 @@ use super::runs::MAX_MAINTENANCE_SEGMENT_IO;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::control_snapshot::load_control_snapshot;
+use crate::namespace::read_anchor::load_read_anchor;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
@@ -58,10 +58,10 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         || async {
             let timer = StdMonotonicTimer::default();
             let started_ms = timer.monotonic_now_ms();
-            let snapshot = load_control_snapshot(store, namespace_id)
+            let anchor = load_read_anchor(store, namespace_id)
                 .await
                 .map_err(CoreError::ControlObjectLoad)?;
-            let current = snapshot.root;
+            let current = anchor.manifest;
             let target = current.envelope.payload().head_seq;
             if current.state.retention_floor_seq >= target
                 && current.envelope.payload().retention_floor_wal_no

@@ -11,7 +11,7 @@ use loonfs::{
 };
 use loonfs_api::{ChangeSeq, IndexSegmentId, NamespaceId};
 use loonfs_grep::keyspace::{hint_key, segment_key};
-use loonfs_grep::root::load_current_grep_manifest;
+use loonfs_grep::manifest::load_current_grep_manifest;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepGcJob, GrepMaintenanceJob, GrepWorker, GREP_GC_JOB, GREP_INDEX_JOB,
 };
@@ -28,7 +28,7 @@ use tempfile::tempdir;
 const WAIT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
-async fn the_probe_reports_work_from_the_root_and_the_feed() {
+async fn the_probe_reports_work_from_the_manifest_and_the_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("probe").expect("namespace id");
@@ -37,9 +37,11 @@ async fn the_probe_reports_work_from_the_root_and_the_feed() {
     let job = job(&worker);
 
     assert_eq!(
-        job.probe(&namespace_id).await.expect("probe absent root"),
+        job.probe(&namespace_id)
+            .await
+            .expect("probe absent manifest"),
         MaintenanceProbe::Idle,
-        "a namespace with no grep root has nothing to maintain"
+        "a namespace with no grep manifest has nothing to maintain"
     );
 
     worker.enable(&namespace_id).await.expect("enable grep");
@@ -65,9 +67,11 @@ async fn the_probe_reports_work_from_the_root_and_the_feed() {
     catch_up(&job, &namespace_id).await;
     worker.disable(&namespace_id).await.expect("disable grep");
     assert_eq!(
-        job.probe(&namespace_id).await.expect("probe disabled root"),
+        job.probe(&namespace_id)
+            .await
+            .expect("probe disabled manifest"),
         MaintenanceProbe::Idle,
-        "a disabled root is what the runner evicts the key on"
+        "a disabled manifest is what the runner evicts the key on"
     );
 }
 
@@ -96,13 +100,13 @@ async fn a_tombstoned_namespace_concludes_not_enabled() {
     assert_eq!(
         job.probe(&namespace_id).await.expect("probe tombstone"),
         MaintenanceProbe::Due,
-        "the probe reads grep's own root and no more, so a root left behind by a deleted \
+        "the probe reads grep's own manifest and no more, so a manifest left behind by a deleted \
          namespace still looks like work — and the step is what settles it, once"
     );
 }
 
 #[tokio::test]
-async fn a_disabled_root_concludes_not_enabled_on_the_next_step() {
+async fn a_disabled_manifest_concludes_not_enabled_on_the_next_step() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("disabled").expect("namespace id");
@@ -117,7 +121,7 @@ async fn a_disabled_root_concludes_not_enabled_on_the_next_step() {
     assert_eq!(
         job.run(&namespace_id, &MaintenanceCancellation::new())
             .await
-            .expect("step disabled root")
+            .expect("step disabled manifest")
             .conclusion,
         MaintenanceConclusion::NotEnabled
     );
@@ -145,7 +149,7 @@ async fn a_nudge_indexes_a_namespace_while_a_poisoned_sibling_backs_off() {
     store
         .put_overwrite(&hint_key(&poisoned), Bytes::from_static(b"poison"))
         .await
-        .expect("poison root");
+        .expect("poison manifest");
 
     let (jobs, host) = host_runner(2);
     jobs.register(Arc::new(job(&worker)))
@@ -163,10 +167,10 @@ async fn a_nudge_indexes_a_namespace_while_a_poisoned_sibling_backs_off() {
         store
             .get(&hint_key(&poisoned), None)
             .await
-            .expect("read poisoned root")
-            .expect("poisoned root bytes"),
+            .expect("read poisoned manifest")
+            .expect("poisoned manifest bytes"),
         Bytes::from_static(b"poison"),
-        "a step that cannot read its root publishes nothing"
+        "a step that cannot read its manifest publishes nothing"
     );
     host.shutdown().await.expect("settle host maintenance");
 }
@@ -280,7 +284,7 @@ async fn a_nudge_collects_what_indexing_left_behind() {
         store
             .head(&hint_key(&namespace_id))
             .await
-            .expect("head root")
+            .expect("head manifest")
             .is_some(),
         "the pointer a live namespace still names is never a candidate"
     );
@@ -345,7 +349,7 @@ async fn wait_for_deletion<S: ObjectStore + 'static>(store: &Arc<S>, key: &str) 
     .unwrap_or_else(|_| panic!("`{key}` was never collected"));
 }
 
-/// Waits for the runner's steps to publish a root at `built_through_seq`.
+/// Waits for the runner's steps to publish a manifest at `built_through_seq`.
 #[allow(clippy::disallowed_methods)]
 async fn wait_for_watermark<S: ObjectStore + 'static>(
     store: &Arc<S>,
@@ -356,11 +360,11 @@ async fn wait_for_watermark<S: ObjectStore + 'static>(
     // that durable state under a bounded timeout.
     tokio::time::timeout(WAIT, async {
         loop {
-            if let Some(root) = load_current_grep_manifest(&**store, namespace_id)
+            if let Some(manifest) = load_current_grep_manifest(&**store, namespace_id)
                 .await
-                .expect("load grep root")
+                .expect("load grep manifest")
             {
-                if root
+                if manifest
                     .manifest_state()
                     .status()
                     .active_watermark()

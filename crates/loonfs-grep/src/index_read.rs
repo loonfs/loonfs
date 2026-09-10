@@ -2,7 +2,7 @@
 
 use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind};
 use crate::codec::IndexRow;
-use crate::root::GrepSegmentRef;
+use crate::manifest::GrepSegmentRef;
 use crate::{GrepError, Result};
 use loonfs::StoreFailureClass;
 use loonfs_api::wire::sst_blocks::{

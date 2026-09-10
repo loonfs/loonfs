@@ -836,7 +836,7 @@ pub(crate) async fn publish_batch_with_engine(
         Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options)).await;
     if let Some(state) = &publish.resulting_read_state {
         writer
-            .discovery_hints
+            .hint_raise
             .raise_if_due(core, namespace_id, state.head.wal_no)
             .await;
     }

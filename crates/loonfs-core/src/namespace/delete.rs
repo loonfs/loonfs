@@ -4,7 +4,7 @@ use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPubl
 use crate::error::{CoreError, Result};
 use crate::limits::RETIREMENT_PUBLICATION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest;
-use crate::namespace::control_snapshot::load_control_snapshot;
+use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::options::DeleteNamespaceOptions;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
@@ -21,8 +21,8 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     loop {
-        let snapshot = load_control_snapshot(store, namespace_id).await?;
-        let head = &snapshot.head;
+        let anchor = load_read_anchor(store, namespace_id).await?;
+        let head = &anchor.read_state;
         super::control::ensure_namespace_live(head)?;
         ensure_writer_not_fenced(head, &acquired_writer)?;
         if let Some(expected) = options.expected_head_seq {
@@ -34,7 +34,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 });
             }
         }
-        let mut payload = snapshot.root.envelope.payload().clone();
+        let mut payload = anchor.manifest.envelope.payload().clone();
         payload.manifest_no = payload
             .manifest_no
             .successor()
@@ -51,7 +51,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 store,
                 namespace_id,
                 &manifest,
-                Some(snapshot.root.state.manifest.manifest_no),
+                Some(anchor.manifest.state.manifest.manifest_no),
                 &timer,
                 started_ms
             )

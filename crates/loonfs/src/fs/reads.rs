@@ -278,7 +278,7 @@ impl FsReader {
 
     /// Pins the namespace state captured by a checkpoint.
     ///
-    /// Missing or released checkpoints return `checkpoint_unavailable`.
+    /// Missing or deleted checkpoints return `checkpoint_unavailable`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.pin_namespace",

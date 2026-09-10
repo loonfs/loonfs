@@ -55,7 +55,7 @@ impl<'a> NamespaceReads<'a> {
     /// Reads one page of the files a checkpoint pins, in ascending inode-id
     /// order.
     ///
-    /// Returns `checkpoint_unavailable` if the checkpoint was released,
+    /// Returns `checkpoint_unavailable` if the checkpoint was deleted,
     /// expired, or removed. The caller must then restart the backfill from a
     /// new checkpoint.
     pub async fn list_checkpoint_files_page(

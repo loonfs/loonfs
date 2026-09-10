@@ -1,6 +1,6 @@
 //! Public grep failures and their wire-code classification.
 
-use crate::root::GrepRootError;
+use crate::manifest::GrepManifestError;
 use loonfs::{CoreError, RuntimeError, StoreFailureClass};
 use loonfs_api::{ErrorCode, ErrorKind};
 use thiserror::Error;
@@ -8,15 +8,15 @@ use thiserror::Error;
 /// Failure returned by grep queries or maintenance.
 ///
 /// The variants preserve only distinctions that change caller or operator
-/// action. Detailed root loading and publication failures remain available
-/// internally as [`GrepRootError`].
+/// action. Detailed manifest loading and publication failures remain available
+/// internally as [`GrepManifestError`].
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum GrepError {
     // Both messages name the capability key clients gate on (`query.grep`),
     // the same one capability discovery advertises and the `feature` field
     // of a `not_supported` response carries.
-    /// The namespace has no active grep root.
+    /// The namespace has no active grep manifest.
     #[error("feature `query.grep` is not enabled on this namespace")]
     NotEnabled,
     /// The namespace's grep backfill has not completed.
@@ -37,7 +37,7 @@ pub enum GrepError {
     /// Grep's rebuildable derived state failed validation.
     #[error("grep index is corrupt: {message}; disable and re-enable grep to rebuild it")]
     CorruptIndex {
-        /// Root, manifest, or segment validation failure.
+        /// Hint, manifest, or segment validation failure.
         message: String,
     },
     /// A grep manifest publication lost to another publisher.
@@ -94,10 +94,10 @@ impl GrepError {
     }
 }
 
-impl From<GrepRootError> for GrepError {
-    fn from(error: GrepRootError) -> Self {
+impl From<GrepManifestError> for GrepError {
+    fn from(error: GrepManifestError) -> Self {
         match error {
-            GrepRootError::Store {
+            GrepManifestError::Store {
                 object_key,
                 message,
                 class,
@@ -106,12 +106,11 @@ impl From<GrepRootError> for GrepError {
                 message,
                 class,
             },
-            GrepRootError::Conflict { object_key } => Self::PublicationConflict { object_key },
-            error @ (GrepRootError::Corrupt { .. } | GrepRootError::IdentityMismatch { .. }) => {
-                Self::CorruptIndex {
-                    message: error.to_string(),
-                }
-            }
+            GrepManifestError::Conflict { object_key } => Self::PublicationConflict { object_key },
+            error @ (GrepManifestError::Corrupt { .. }
+            | GrepManifestError::IdentityMismatch { .. }) => Self::CorruptIndex {
+                message: error.to_string(),
+            },
         }
     }
 }

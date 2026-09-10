@@ -8,8 +8,8 @@ use super::publish::{
 };
 use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
-use crate::commit::CommitHeadPublishError;
-use crate::commit_engine::WalFoldSnapshot;
+use crate::commit::WalPublishError;
+use crate::commit_engine::WalFoldInput;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::CoreError;
@@ -19,11 +19,11 @@ use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::load_current_manifest;
-use crate::namespace::control_snapshot::{load_control_snapshot, resolve_retention_floor_seq};
+use crate::namespace::read_anchor::{load_read_anchor, resolve_retention_floor_seq};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
-    ensure_replayed_head_matches, load_wal_chain, project_validated_wal_tail, WalChainLoadRequest,
+    ensure_replayed_head_matches, load_wal_tail, project_validated_wal_tail, WalTailLoadRequest,
 };
 use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
@@ -46,9 +46,9 @@ pub(super) struct FlushedBasis {
     /// Head sequence the attempt targeted.
     pub(super) target_head_seq: ChangeSeq,
     /// Current manifest after the attempt.
-    pub(super) root_after_manifest_no: ManifestNo,
-    /// Sequence covered by `root_after_manifest_no`.
-    pub(super) root_after_head_seq: ChangeSeq,
+    pub(super) current_manifest_no: ManifestNo,
+    /// Sequence covered by `current_manifest_no`.
+    pub(super) current_manifest_head_seq: ChangeSeq,
     pub(super) outcome: FlushWalOutcome,
 }
 
@@ -56,7 +56,7 @@ pub(super) enum TryFlushWal {
     /// The attempt finished with a valid basis, whether or not it published
     /// that basis itself.
     Settled(Box<FlushedBasis>),
-    /// The root moved to a manifest that does not cover this attempt's
+    /// A concurrent manifest publication does not cover this attempt's
     /// target; retry against a fresh projection.
     RaceLost,
 }
@@ -84,9 +84,9 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
                     TryFlushWal::Settled(basis) => {
                         CasAttempt::Settled(flush_wal_response(namespace_id, *basis))
                     }
-                    TryFlushWal::RaceLost => CasAttempt::Contended(CoreError::HeadPublish(
-                        CommitHeadPublishError::StaleHead,
-                    )),
+                    TryFlushWal::RaceLost => {
+                        CasAttempt::Contended(CoreError::WalPublish(WalPublishError::StaleHead))
+                    }
                 },
             )
         },
@@ -107,7 +107,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<TryFlushWal> {
-    let projection = load_root_projection(store, namespace_id)
+    let projection = load_manifest_projection(store, namespace_id)
         .instrument(tracing::debug_span!(
             "loonfs.phase",
             phase = "scan_namespace_state"
@@ -119,7 +119,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
 async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    projection: &RootProjection<'_, S>,
+    projection: &ManifestProjection<'_, S>,
     _context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<TryFlushWal> {
@@ -138,8 +138,8 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
             manifest: basis_manifest.clone(),
             head_commit_id: projection.head.head_commit_id.clone(),
             target_head_seq: head_seq,
-            root_after_manifest_no: basis_manifest.manifest_no,
-            root_after_head_seq: head_seq,
+            current_manifest_no: basis_manifest.manifest_no,
+            current_manifest_head_seq: head_seq,
             outcome: FlushWalOutcome::AlreadyCurrent,
         })));
     }
@@ -166,7 +166,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
             (FlushWalOutcome::RootAdvanced, current)
         }
         // A same-sequence reorganization can replace the predecessor without
-        // covering the newer WAL head. That root safely wins, but it has not
+        // covering the newer WAL head. That manifest wins, but it has not
         // satisfied the flush: reload its runs, replay the tail, try again.
         ManifestPublicationOutcome::PredecessorChanged(_) => {
             return Ok(TryFlushWal::RaceLost);
@@ -191,8 +191,8 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         winner.payload().head_commit_id.clone()
     };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
-        root_after_manifest_no: current.manifest.manifest_no,
-        root_after_head_seq: current.manifest.manifest_head_seq,
+        current_manifest_no: current.manifest.manifest_no,
+        current_manifest_head_seq: current.manifest.manifest_head_seq,
         manifest: current.manifest,
         head_commit_id,
         target_head_seq: head_seq,
@@ -204,36 +204,38 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    snapshot: Option<WalFoldSnapshot>,
+    input: Option<WalFoldInput>,
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<FlushWalResponse> {
-    let Some(snapshot) = snapshot else {
+    let Some(input) = input else {
         return flush_wal(store, namespace_id, context).await;
     };
-    let loaded_basis = load_basis_metadata_segments(store, segment_cache, &snapshot.basis).await?;
-    let current_root = load_current_manifest(store, namespace_id)
+    let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
+    let current_manifest = load_current_manifest(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let current_basis = MetadataBasis(current_root.state.manifest);
-    if current_basis != snapshot.basis {
+    let current_basis = MetadataBasis(current_manifest.state.manifest);
+    if current_basis != input.basis {
         return flush_wal(store, namespace_id, context).await;
     }
-    let floor_seq = match snapshot.retention_floor_seq {
+    let floor_seq = match input.retention_floor_seq {
         Some(floor_seq) => floor_seq,
-        None => resolve_retention_floor_seq(store, &snapshot.head)
+        None => resolve_retention_floor_seq(store, &input.head.namespace_id)
             .await
             .map_err(CoreError::ControlObjectLoad)?,
     };
-    let root_projection = RootProjection {
-        head: snapshot.head,
-        basis: snapshot.basis,
+    let manifest_projection = ManifestProjection {
+        head: input.head,
+        basis: input.basis,
         floor_seq,
         manifest_segments: loaded_basis.segments,
-        tail_state: snapshot.tail_state,
+        tail_state: input.tail_state,
     };
     // A fold publishes metadata without updating the namespace head.
-    match try_flush_wal_projection(store, namespace_id, &root_projection, context, timer).await? {
+    match try_flush_wal_projection(store, namespace_id, &manifest_projection, context, timer)
+        .await?
+    {
         TryFlushWal::Settled(basis) => Ok(flush_wal_response(namespace_id, *basis)),
         TryFlushWal::RaceLost => flush_wal(store, namespace_id, context).await,
     }
@@ -243,13 +245,13 @@ fn flush_wal_response(namespace_id: &NamespaceId, basis: FlushedBasis) -> FlushW
     FlushWalResponse {
         namespace_id: namespace_id.clone(),
         target_head_seq: basis.target_head_seq,
-        manifest_no: basis.root_after_manifest_no,
-        manifest_head_seq: basis.root_after_head_seq,
+        manifest_no: basis.current_manifest_no,
+        manifest_head_seq: basis.current_manifest_head_seq,
         outcome: basis.outcome,
     }
 }
 
-pub(super) struct RootProjection<'a, S: ObjectStore + ?Sized> {
+pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     pub(super) basis: MetadataBasis,
     pub(super) floor_seq: ChangeSeq,
@@ -259,16 +261,16 @@ pub(super) struct RootProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) tail_state: Arc<MetadataState>,
 }
 
-pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
+pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
-) -> Result<RootProjection<'a, S>> {
-    let snapshot = load_control_snapshot(store, namespace_id)
+) -> Result<ManifestProjection<'a, S>> {
+    let anchor = load_read_anchor(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let basis = snapshot.basis();
-    let floor_seq = snapshot.retention_floor_seq;
-    let head = snapshot.head;
+    let basis = anchor.basis();
+    let floor_seq = anchor.retention_floor_seq;
+    let head = anchor.read_state;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -279,11 +281,11 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     let loaded_basis = load_basis_metadata_segments(store, None, &basis).await?;
     let manifest_head = loaded_basis.replay_head(&head);
     let manifest_segments = loaded_basis.segments;
-    let wal_chain = load_wal_chain(
+    let wal_tail = load_wal_tail(
         store,
-        WalChainLoadRequest {
+        WalTailLoadRequest {
             namespace_id,
-            chain_base_seq: manifest_head.seq,
+            base_seq: manifest_head.seq,
             head_seq: head.seq,
             base_wal_no: head.last_folded_wal_no,
             tip_wal_no: head.wal_no,
@@ -292,7 +294,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalTailLoad(error))
     })?;
     let replayed = {
         let _span =
@@ -301,13 +303,13 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
             &manifest_head,
             &loaded_basis.base_state,
             Some(head.writer_epoch),
-            &wal_chain,
+            &wal_tail,
         )
         .map_err(MetadataProjectionLoadError::WalReplay)
         .map_err(CoreError::MetadataProjection)?
     };
     ensure_replayed_head_matches(&head, &replayed.resulting_head)?;
-    Ok(RootProjection {
+    Ok(ManifestProjection {
         head,
         basis,
         floor_seq,
@@ -360,7 +362,7 @@ pub fn ensure_metadata_publication_budget(
 async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    projection: &RootProjection<'_, S>,
+    projection: &ManifestProjection<'_, S>,
     manifest_no: ManifestNo,
 ) -> Result<NamespaceManifestPayload> {
     let head_seq = projection.head.seq;

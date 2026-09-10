@@ -384,11 +384,11 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
 }
 
 #[tokio::test]
-async fn a_released_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
+async fn a_deleted_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime =
         open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-release-test").await;
-    let namespace_id = NamespaceId::parse("snapshot-released-checkpoint").expect("namespace id");
+    let namespace_id = NamespaceId::parse("snapshot-deleted-checkpoint").expect("namespace id");
     runtime
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await

@@ -1,12 +1,11 @@
-//! [`CommitHeadPublishError`]: failures of the segment PUT and head
-//! compare-and-swap.
+//! Failures while publishing a numbered WAL object.
 
 use loonfs_api::ErrorCode;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum CommitHeadPublishError {
-    #[error("namespace head changed since the publish view was loaded")]
+pub enum WalPublishError {
+    #[error("WAL number was taken by another publication")]
     StaleHead,
     #[error("publish budget exceeded: elapsed {elapsed_ms}ms over budget {budget_ms}ms")]
     PublishBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
@@ -14,7 +13,7 @@ pub enum CommitHeadPublishError {
     OutcomeUnknown(String),
 }
 
-impl CommitHeadPublishError {
+impl WalPublishError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::StaleHead | Self::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,

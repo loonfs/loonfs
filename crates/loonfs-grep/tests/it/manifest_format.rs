@@ -1,4 +1,4 @@
-//! What the grep root and manifest decoders accept and refuse.
+//! What the grep hint and manifest decoders accept and refuse.
 //!
 //! The bytes these tests start from are the golden fixtures the
 //! `golden_formats` module pins, so no rejection probe carries its own copy
@@ -14,7 +14,7 @@ use crate::golden_formats::{
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::{ChangeSeq, RunNo};
-use loonfs_grep::root::{
+use loonfs_grep::manifest::{
     decode_grep_hint, decode_grep_manifest, encode_grep_manifest, GrepEnvelopeCodecError,
     GrepIndexState, GrepIndexStatus, GrepManifestState, GrepManifestStateError,
     GrepReorganizeState,

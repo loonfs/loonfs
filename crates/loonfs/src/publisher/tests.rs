@@ -76,7 +76,7 @@ fn blocking_publication_store(
 #[derive(Debug)]
 struct PanicWalPutStore {
     inner: LocalFsStore,
-    head_key: String,
+    namespace_prefix: String,
     gate: Arc<PanicGate>,
 }
 
@@ -97,7 +97,7 @@ impl PanicWalPutStore {
     fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: loonfs_objectstore::keys::namespace_prefix(namespace_id),
+            namespace_prefix: loonfs_objectstore::keys::namespace_prefix(namespace_id),
             gate: Arc::new(PanicGate {
                 state: Mutex::new(PanicGateState {
                     armed: false,
@@ -158,7 +158,7 @@ impl ObjectStore for PanicWalPutStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key.starts_with(&self.head_key)
+        if key.starts_with(&self.namespace_prefix)
             && matches!(mode, PutMode::CreateIfAbsent)
             && is_publication(&bytes)
         {
@@ -213,7 +213,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
 
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
-        discovery_hints: crate::discovery_hints::DiscoveryHints::default(),
+        hint_raise: crate::hint_raise::DiscoveryHints::default(),
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
         wal_fold_permits: tokio::sync::Semaphore::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS),
         wal_folds_waiting: AtomicUsize::new(0),
@@ -345,7 +345,7 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
 }
 
 /// Pacing for standalone test publishers, long enough that
-/// `wait_past_cas_pacing` outlasting it is meaningful.
+/// `wait_past_publish_pacing` outlasting it is meaningful.
 const TEST_STANDALONE_PACING: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default)]
@@ -481,7 +481,7 @@ fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> Na
 }
 
 #[allow(clippy::disallowed_methods)]
-async fn wait_past_cas_pacing() {
+async fn wait_past_publish_pacing() {
     // Deliberate wall-clock wait past the per-namespace CAS pacing
     // interval. A work loop that were not single-flight would let a
     // racing second task release a queued delete after exactly that
@@ -2067,7 +2067,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     append_wal_segments(
         store.as_ref(),
         &namespace_id,
-        CHECKPOINT_AT_WAL_SEGMENTS - 1,
+        FOLD_AT_WAL_SEGMENTS - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
@@ -2097,7 +2097,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         .expect("inspect the folded namespace");
     assert!(status.current_manifest_no.is_some(), "{status:?}");
     assert!(
-        status.wal_tail_segments < CHECKPOINT_AT_WAL_SEGMENTS,
+        status.wal_tail_segments < FOLD_AT_WAL_SEGMENTS,
         "{status:?}"
     );
     {
@@ -2106,7 +2106,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
             hint,
             MaintenanceHint::Published(publication)
                 if publication.namespace_id == namespace_id
-                    && publication.wal_tail_segments >= CHECKPOINT_AT_WAL_SEGMENTS
+                    && publication.wal_tail_segments >= FOLD_AT_WAL_SEGMENTS
         )));
         assert!(hints.iter().any(|hint| matches!(
             hint,
@@ -2142,7 +2142,7 @@ async fn a_failed_fold_notifies_maintenance_when_the_attempt_finishes() {
     append_wal_segments(
         failing.as_ref(),
         &namespace_id,
-        CHECKPOINT_AT_WAL_SEGMENTS - 1,
+        FOLD_AT_WAL_SEGMENTS - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
@@ -2207,7 +2207,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         append_wal_segments(
             blocking.as_ref(),
             namespace_id,
-            CHECKPOINT_AT_WAL_SEGMENTS - 1,
+            FOLD_AT_WAL_SEGMENTS - 1,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
@@ -2296,7 +2296,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         append_wal_segments(
             recording.as_ref(),
             namespace_id,
-            CHECKPOINT_AT_WAL_SEGMENTS - 1,
+            FOLD_AT_WAL_SEGMENTS - 1,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
@@ -2375,7 +2375,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     append_wal_segments(
         blocking.inner(),
         &namespace_id,
-        CHECKPOINT_AT_WAL_SEGMENTS - 1,
+        FOLD_AT_WAL_SEGMENTS - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
@@ -2612,7 +2612,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     let single_worker_while_blocked = single_live_worker(&publisher);
     // With the queued batch still blocked at its WAL put, outlast the
     // pacing interval: the delete must still not have run.
-    wait_past_cas_pacing().await;
+    wait_past_publish_pacing().await;
     let (deleted_while_blocked, delete_queued_while_blocked) = {
         let state = publisher_state(&publisher);
         (

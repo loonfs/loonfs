@@ -12,7 +12,7 @@ use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
     ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse, NamespaceId, PaginationPolicy, RunNo,
 };
-use loonfs_grep::root::GrepIndexStatus;
+use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
     GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
@@ -159,12 +159,12 @@ impl GrepHost {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndex, GrepError> {
-        let root = self.worker.manifest_state(namespace_id).await?;
-        let (lifecycle, next_run_no, reorganize_pending) = match &root {
-            Some(root) => (
-                GrepIndexLifecycle::from(root.status()),
-                root.index().next_run_no,
-                root.index().reorganize.is_some(),
+        let manifest = self.worker.manifest_state(namespace_id).await?;
+        let (lifecycle, next_run_no, reorganize_pending) = match &manifest {
+            Some(manifest) => (
+                GrepIndexLifecycle::from(manifest.status()),
+                manifest.index().next_run_no,
+                manifest.index().reorganize.is_some(),
             ),
             None => (GrepIndexLifecycle::Disabled, RunNo(0), false),
         };
@@ -204,12 +204,12 @@ pub(crate) mod control {
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
     ) -> NamespaceReadState {
-        loonfs::control::load_namespace_head_control(store, namespace_id)
+        loonfs::control::load_namespace_read_state(store, namespace_id)
             .await
             .expect("namespace state")
     }
 
-    pub(crate) async fn metadata_root(
+    pub(crate) async fn metadata_manifest(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
     ) -> loonfs::control::CurrentManifest {

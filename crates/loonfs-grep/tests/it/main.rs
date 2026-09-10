@@ -8,6 +8,6 @@ mod grams_index;
 mod grep_service_differential;
 mod grep_worker;
 mod maintenance;
-mod root_format;
-mod root_store;
+mod manifest_format;
+mod manifest_store;
 mod test_seeding;

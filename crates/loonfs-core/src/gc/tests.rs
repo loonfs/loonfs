@@ -1279,7 +1279,7 @@ async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
 }
 
 #[tokio::test]
-async fn gc_never_deletes_the_live_replay_chain() {
+async fn gc_never_deletes_the_live_replay_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1311,7 +1311,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .expect("gc pass");
 
     assert_eq!(report.deleted.wal_segments, 4);
-    // Latest reads replay the retained tail over the root basis.
+    // Latest reads replay the retained tail over the manifest basis.
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("load view");
@@ -1418,14 +1418,14 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .expect("gc pass");
 
     // The first flush materialized the namespace's first manifest and the
-    // next two superseded it; only the root's manifest is reachable. Its
+    // next two superseded it; only the current manifest is reachable. Its
     // segments are all still referenced (a flush only appends delta runs).
     assert_eq!(report.deleted.manifests, 6);
     let manifests_left = store
         .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
         .expect("list manifests");
-    assert_eq!(manifests_left.len(), 1, "only the live root manifest stays");
+    assert_eq!(manifests_left.len(), 1, "only the current manifest stays");
 
     // Reorganization folds the delta runs into fresh base segments; the
     // superseded run segments then age out on the next pass.
@@ -1694,17 +1694,17 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .expect("fork");
     let target_pin = create_checkpoint(&store, &clone, &setup)
         .await
-        .expect("materialize target root");
+        .expect("materialize target manifest");
     release_checkpoint_record(&store, &clone, &target_pin.checkpoint_id)
         .await
         .expect("release target pin");
     let fork_record = read_fork_record(&store, &source).await;
-    // Advance the source root past the fork basis so the basis is
+    // Advance the source manifest past the fork basis so the basis is
     // reachable only through the fork-owned record.
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &source, &setup)
         .await
-        .expect("advance root past the fork basis");
+        .expect("advance manifest past the fork basis");
 
     let before = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &source, &config(), &before)
@@ -1772,7 +1772,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
 }
 
 #[tokio::test]
-async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains_the_record() {
+async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_retains_the_record() {
     let temp_dir = tempdir().expect("tempdir");
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
@@ -1780,7 +1780,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::exact(hint(&clone)),
         OperationClass::Read,
-        InjectedError::Transport("target head timed out".to_owned()),
+        InjectedError::Transport("target hint timed out".to_owned()),
     );
     let setup = context(1_000);
     bootstrap_namespace(&store, &source, &setup, false)
@@ -1804,7 +1804,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
     let current = crate::namespace::control::load_current_manifest(store.inner(), &clone)
         .await
         .expect("target manifest");
-    let head_key = current.object_key;
+    let manifest_key = current.object_key;
     let mut payload = current.envelope.into_payload();
     let basis = payload.fork_basis.as_mut().expect("fork basis");
     basis.manifest.manifest_no = ManifestNo(basis.manifest.manifest_no.0 + 1);
@@ -1812,7 +1812,7 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
         .expect("manifest")
         .into_bytes();
     store
-        .put_overwrite(&head_key, Bytes::from(bytes))
+        .put_overwrite(&manifest_key, Bytes::from(bytes))
         .await
         .expect("write drifted manifest");
     let error = gc_namespace(&store, &source, &config(), &aged)
@@ -1824,11 +1824,11 @@ async fn a_corrupt_fork_target_head_fails_the_pass_and_an_unreadable_one_retains
     store
         .put_overwrite(&hint(&clone), Bytes::from_static(b"not json"))
         .await
-        .expect("corrupt target head");
+        .expect("corrupt target manifest");
     let before = namespace_keys(store.inner(), &source).await;
     let error = gc_namespace(&store, &source, &config(), &aged)
         .await
-        .expect_err("a corrupt target head must fail the source pass");
+        .expect_err("a corrupt target manifest must fail the source pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
     assert!(error.message().contains(&hint(&clone)));
     assert_eq!(namespace_keys(store.inner(), &source).await, before);
@@ -1857,7 +1857,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &source, &setup)
         .await
-        .expect("advance root past the fork basis");
+        .expect("advance manifest past the fork basis");
 
     let grace_deadline = fork_record.created_at_ms + GRACE_MS;
     for now_ms in [
@@ -2078,7 +2078,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     let error = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
-        .expect_err("a corrupt root manifest fails the pass");
+        .expect_err("a corrupt manifest fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
     assert!(
         manifest_keys
@@ -2275,7 +2275,7 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_fu
         let store = RecordingStore::new(store, KeyPredicate::any());
         let result = gc_namespace(&store, &namespace_id, &config(), &context(GRACE_MS)).await;
         assert_eq!(result.is_ok(), landed);
-        let head = crate::namespace::control::load_head_object(&store, &namespace_id)
+        let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("head");
         assert_eq!(

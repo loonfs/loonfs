@@ -20,7 +20,7 @@ use super::runs::{
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::control_snapshot::load_control_snapshot;
+use crate::namespace::read_anchor::load_read_anchor;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
@@ -75,7 +75,7 @@ pub enum MetadataReorganizeOutcome {
         group: MetadataFamilyGroup,
         spec: MetadataCompactionSpec,
     },
-    /// A concurrent publication moved the root while this unit ran; its
+    /// A concurrent manifest publication completed while this unit ran; its
     /// output is unreferenced (garbage collection reclaims it) and the next
     /// step retries against the fresh manifest.
     Superseded,
@@ -140,16 +140,16 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // before any segment object is written and gates the manifest
     // put-if-absent below.
     let publication_started_ms = timer.monotonic_now_ms();
-    // A streaming compaction keeps the floor read with this root.
-    let snapshot = load_control_snapshot(store, namespace_id)
+    // A streaming compaction keeps the floor read with this manifest.
+    let anchor = load_read_anchor(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let floor_seq = snapshot.retention_floor_seq;
-    let root = snapshot.root.state;
-    if root.compactor_epoch != compactor_epoch {
+    let floor_seq = anchor.retention_floor_seq;
+    let current_manifest = anchor.manifest.state;
+    if current_manifest.compactor_epoch != compactor_epoch {
         return Ok(report(namespace_id, MetadataReorganizeOutcome::Fenced));
     }
-    let segments = load_manifest_segments(store, None, &root.manifest).await?;
+    let segments = load_manifest_segments(store, None, &current_manifest.manifest).await?;
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(previous.payload());
@@ -244,7 +244,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         store,
         namespace_id,
         &manifest,
-        Some(root.manifest.manifest_no),
+        Some(current_manifest.manifest.manifest_no),
         timer,
         publication_started_ms,
     )
@@ -284,17 +284,18 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     max_wal_tail_segments: u64,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Result<bool> {
-    let snapshot = load_control_snapshot(store, namespace_id)
+    let anchor = load_read_anchor(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    crate::namespace::control::ensure_namespace_live(&snapshot.head)?;
-    let head = &snapshot.head;
+    crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
+    let head = &anchor.read_state;
     let wal_tail_segments = head.wal_no.0 - head.last_folded_wal_no.0;
     if wal_tail_segments >= max_wal_tail_segments {
         return Ok(true);
     }
-    let root = snapshot.root;
-    let segments = load_manifest_segments(store, segment_cache, &root.state.manifest).await?;
+    let current_manifest = anchor.manifest;
+    let segments =
+        load_manifest_segments(store, segment_cache, &current_manifest.state.manifest).await?;
     Ok(manifest_has_reorganization_work(
         segments.manifest().payload(),
         segments.scan_runs.as_ref(),

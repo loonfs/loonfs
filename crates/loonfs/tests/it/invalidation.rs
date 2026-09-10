@@ -81,7 +81,7 @@ fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &st
 }
 
 async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> NamespaceReadState {
-    loonfs_core::control::load_namespace_head_control(store, namespace_id)
+    loonfs_core::control::load_namespace_read_state(store, namespace_id)
         .await
         .expect("load head")
 }
@@ -346,7 +346,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         .await
         .expect("writer a keeps publishing to the other namespace");
 
-    let head_cas_after_fencing = counting.count(OperationClass::CompareAndSwap);
+    let hint_raises_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
         writer_a
             .put_file_bytes(
@@ -360,8 +360,8 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     );
     assert_eq!(
         counting.count(OperationClass::CompareAndSwap),
-        head_cas_after_fencing,
-        "a fenced session must not touch the fenced namespace's head"
+        hint_raises_after_fencing,
+        "a fenced session must not raise the fenced namespace's hint"
     );
     let head = head_state(&store, &ns_fence).await;
     assert_eq!(head.status, NamespaceStatus::Active {});
@@ -425,7 +425,7 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
         "superseded writer surfaces fencing",
     );
 
-    let head_cas_after_fencing = counting.count(OperationClass::CompareAndSwap);
+    let hint_raises_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
         writer_a
             .put_file_bytes(
@@ -439,8 +439,8 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
     );
     assert_eq!(
         counting.count(OperationClass::CompareAndSwap),
-        head_cas_after_fencing,
-        "a fenced session must not touch the namespace's head"
+        hint_raises_after_fencing,
+        "a fenced session must not raise the namespace's hint"
     );
     writer_b
         .put_file_bytes(

@@ -1,4 +1,4 @@
-//! Snapshot-owned checkpoint reads, expiry, and release transitions.
+//! Snapshot-owned checkpoint reads, expiry, and pin deletion.
 
 use super::read_basis::{load_checkpoint_read_basis_from_record, CheckpointReadBasis};
 use super::record::{encode_checkpoint_record, load_checkpoint_record, LoadedCheckpointRecord};

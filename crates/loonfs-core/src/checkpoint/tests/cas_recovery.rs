@@ -240,7 +240,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     assert_eq!(after.envelope.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, expected.head_seq);
     let (_, writer_floor) =
-        crate::namespace::control_snapshot::load_head_and_retention_floor(&store, &namespace_id)
+        crate::namespace::read_anchor::load_head_and_retention_floor(&store, &namespace_id)
             .await
             .expect("writer floor");
     assert_eq!(writer_floor, expected.head_seq);
@@ -395,8 +395,8 @@ impl ObjectStore for StaleObjectOnceStore {
 }
 
 #[tokio::test]
-async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
-    // A reader that loads a stale head next to a fresher root must reload
+async fn read_anchor_reloads_the_head_when_the_manifest_is_ahead() {
+    // A reader that loads a stale head next to a fresher manifest must reload
     // the head instead of treating the pair as corruption.
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -434,7 +434,7 @@ async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
         .await
         .expect("read anchor resolves the stale-head race by reloading");
     assert_eq!(projection.head.seq, ChangeSeq(1));
-    assert_eq!(projection.root.manifest.manifest_head_seq, ChangeSeq(1));
+    assert_eq!(projection.manifest.manifest.manifest_head_seq, ChangeSeq(1));
 }
 
 #[tokio::test]

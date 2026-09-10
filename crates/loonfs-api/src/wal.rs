@@ -59,7 +59,7 @@ const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
-    /// Marks an immutable segment in one namespace's authoritative WAL chain.
+    /// Marks an immutable segment in one namespace's numbered WAL.
     NamespaceWalSegment,
 }
 
@@ -208,7 +208,7 @@ pub struct WalCommitPayload {
     pub deltas: Vec<WalCommitDelta>,
 }
 
-/// Carries the namespace-specific chain metadata and commits stored in one WAL object.
+/// Carries the namespace identity, numbered range, and commits stored in one WAL object.
 ///
 /// See [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

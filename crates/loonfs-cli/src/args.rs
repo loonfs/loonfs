@@ -1339,7 +1339,7 @@ pub(crate) struct MaintenanceCheckpointArgs {
     #[arg(long)]
     pub name: String,
     /// Optional lifetime; the record expires this many milliseconds from
-    /// now. Omitted means the pin holds until explicitly released.
+    /// now. Omitted means the pin holds until deleted.
     #[arg(long)]
     pub ttl_ms: Option<u64>,
 }

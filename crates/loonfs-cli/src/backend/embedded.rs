@@ -1096,7 +1096,7 @@ mod tests {
         );
         assert_eq!(progress.keys.len(), 10, "five jobs over two namespaces");
         assert!(progress.steps >= 10, "every key took at least one step");
-        // A namespace with no grep root has nothing for that job to
+        // A namespace with no grep manifest has nothing for that job to
         // maintain, and saying so is a settled conclusion like any other.
         let unindexed_grep = progress
             .keys

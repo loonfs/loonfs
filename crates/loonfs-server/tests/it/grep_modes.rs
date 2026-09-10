@@ -13,7 +13,7 @@ use loonfs_api::{
     FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
-use loonfs_grep::root::{load_current_grep_manifest, GrepIndexStatus};
+use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
@@ -212,7 +212,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     assert_eq!(
         index_status(&router, &namespace_id).await.lifecycle,
         enabled.lifecycle,
-        "the status route and the enable response describe the same root"
+        "the status route and the enable response describe the same manifest"
     );
     settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
@@ -226,7 +226,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     );
     assert!(!active.reorganize_pending);
 
-    // Re-enabling an active root reports the phase it found, still tagged.
+    // Re-enabling an active manifest reports the phase it found, still tagged.
     let again: GrepIndex = response_json(
         send(
             &router,
@@ -286,8 +286,8 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     assert!(!disabled_response.reorganize_pending);
     let disabled = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load disabled root")
-        .expect("disabled root");
+        .expect("load disabled manifest")
+        .expect("disabled manifest");
     assert!(matches!(
         disabled.manifest_state().status(),
         GrepIndexStatus::Disabled {}
@@ -297,13 +297,13 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         matches!(
             load_current_grep_manifest(&*store, &namespace_id)
                 .await
-                .expect("reload disabled root")
-                .expect("disabled root")
+                .expect("reload disabled manifest")
+                .expect("disabled manifest")
                 .manifest_state()
                 .status(),
             GrepIndexStatus::Disabled {}
         ),
-        "no step may resurrect a root the operator disabled"
+        "no step may resurrect a manifest the operator disabled"
     );
 
     let gc: GrepGcResponse = response_json(
@@ -395,13 +395,13 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
             },
         )
         .await
-        .expect("leave mid-backfill root");
-    let root = load_current_grep_manifest(&*store, &backfill)
+        .expect("leave mid-backfill manifest");
+    let manifest = load_current_grep_manifest(&*store, &backfill)
         .await
-        .expect("load root")
-        .expect("backfill root");
+        .expect("load manifest")
+        .expect("backfill manifest");
     assert!(matches!(
-        root.manifest_state().status(),
+        manifest.manifest_state().status(),
         GrepIndexStatus::Backfilling { .. }
     ));
     writer.shutdown().await.expect("shutdown writer");
@@ -435,7 +435,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
             not_materialized.status(),
             StatusCode::OK | StatusCode::NOT_IMPLEMENTED
         ),
-        "first touch either observes backfill or its concurrently completed root"
+        "first touch either observes backfill or its concurrently completed manifest"
     );
     settle(&server).await;
     assert_eq!(watermark(&store, &backfill).await, ChangeSeq(3));
@@ -476,7 +476,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
          maintains one"
     );
 
-    // Every route that would mutate a grep root belongs where the index is
+    // Every route that would mutate a grep manifest belongs where the index is
     // maintained, so this deployment refuses all three.
     for path in maintenance_grep_paths(&namespace_id) {
         let error = assert_not_supported(
@@ -598,16 +598,16 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
-    let root = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load root")
-        .expect("maintained root");
+        .expect("load manifest")
+        .expect("maintained manifest");
     assert!(matches!(
-        root.manifest_state().status(),
+        manifest.manifest_state().status(),
         GrepIndexStatus::Active { .. }
     ));
     assert!(
-        !root.manifest_state().segments().is_empty(),
+        !manifest.manifest_state().segments().is_empty(),
         "the index this deployment maintains holds real segments"
     );
     server
@@ -759,7 +759,7 @@ async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Cha
     lifecycle_of(store, namespace_id)
         .await
         .active_watermark()
-        .expect("an active grep root has a watermark")
+        .expect("an active grep manifest has a watermark")
         .built_through_seq()
 }
 
@@ -767,8 +767,8 @@ async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Cha
 async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepIndexStatus {
     load_current_grep_manifest(&**store, namespace_id)
         .await
-        .expect("load grep root")
-        .expect("an enabled namespace has a grep root")
+        .expect("load grep manifest")
+        .expect("an enabled namespace has a grep manifest")
         .manifest_state()
         .status()
         .clone()

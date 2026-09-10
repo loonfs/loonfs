@@ -1,10 +1,10 @@
 //! Advances a runtime read context through newly published WAL segments.
 
-use super::control_snapshot::{apply_segment, corrupt, validate_segment, wal_error};
+use super::read_anchor::{apply_segment, corrupt, validate_segment, wal_error};
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
 use crate::wal::{
-    load_wal_segment, project_validated_wal_tail, ValidatedWalChain, ValidatedWalSegment,
+    load_wal_segment, project_validated_wal_tail, ValidatedWalSegment, ValidatedWalTail,
 };
 use crate::RuntimeReadContext;
 use loonfs_objectstore::{keys::wal_segment, ObjectStore};
@@ -44,10 +44,9 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         let before = state.clone();
         apply_segment(&mut state, &segment, &mut last_record, &key)?;
         if let Some(current) = rows {
-            let chain =
-                ValidatedWalChain::new(vec![ValidatedWalSegment::new(key.clone(), segment)]);
+            let tail = ValidatedWalTail::new(vec![ValidatedWalSegment::new(key.clone(), segment)]);
             let replayed =
-                project_validated_wal_tail(&before, &current, Some(state.writer_epoch), &chain)
+                project_validated_wal_tail(&before, &current, Some(state.writer_epoch), &tail)
                     .map_err(|error| corrupt(&key, error))?;
             rows = Some(Arc::new(replayed.resulting_metadata_state));
         }

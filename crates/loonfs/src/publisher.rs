@@ -24,8 +24,8 @@ use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::cache::Recency;
-use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
-use loonfs_core::limits::{CHECKPOINT_AT_WAL_SEGMENTS, CONTENTION_RETRY_LIMIT};
+use loonfs_core::commit::{CommitFingerprint, WalPublishError};
+use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_SEGMENTS};
 use loonfs_core::publish::{
     NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
 };
@@ -807,7 +807,7 @@ struct NamespacePublisherState {
     next_fold_generation: u64,
     /// Earliest instant the next WAL put may start. `None` is
     /// a cold namespace: it publishes immediately.
-    next_allowed_cas_at: Option<u64>,
+    next_allowed_publish_at: Option<u64>,
 }
 
 struct WorkerHandle {
@@ -936,7 +936,7 @@ impl NamespacePublisher {
                 worker: None,
                 fold: None,
                 next_fold_generation: 0,
-                next_allowed_cas_at: None,
+                next_allowed_publish_at: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
                 engine: None,
@@ -1206,7 +1206,7 @@ impl NamespacePublisher {
             // Do not add a separate batching delay. The first request for an idle
             // namespace publishes immediately; requests arriving during a publish or
             // pacing interval form the next batch.
-            self.await_cas_slot().await;
+            self.await_publish_slot().await;
             // Queue ownership and admission remain intact while another
             // namespace uses the shared publication slots. No engine is held.
             let _publication = self
@@ -1259,7 +1259,7 @@ impl NamespacePublisher {
             return None;
         }
         let item = state.queue.pop_front();
-        self.reserve_next_cas_slot(&mut state);
+        self.reserve_next_publish_slot(&mut state);
         let queue_depth = queued_candidates(&state);
         drop(state);
         self.read_core
@@ -1297,9 +1297,9 @@ impl NamespacePublisher {
                 .collect::<Vec<_>>()
         };
         for waiter in orphaned_waiters {
-            let _ = waiter.send(Err(CoreError::HeadPublish(
-                CommitHeadPublishError::OutcomeUnknown("publish task aborted mid-batch".to_owned()),
-            )
+            let _ = waiter.send(Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
+                "publish task aborted mid-batch".to_owned(),
+            ))
             .into()));
         }
     }
@@ -1341,14 +1341,14 @@ impl NamespacePublisher {
                     break;
                 };
                 results = self.publish_through_engine(&writer, batch_candidates).await;
-                if !results.iter().any(is_retryable_head_publish) {
+                if !results.iter().any(is_retryable_wal_publish) {
                     break;
                 }
                 if attempt + 1 == CONTENTION_RETRY_LIMIT {
                     break;
                 }
                 retry_count += 1;
-                self.claim_cas_slot().await;
+                self.claim_publish_slot().await;
             }
             (results, retry_count)
         }
@@ -1382,8 +1382,7 @@ impl NamespacePublisher {
         if write_stopped {
             self.read_core.instruments().publisher_write_stop_refusal();
         }
-        let fold_start = if publish.wal_tail_segments >= CHECKPOINT_AT_WAL_SEGMENTS || write_stopped
-        {
+        let fold_start = if publish.wal_tail_segments >= FOLD_AT_WAL_SEGMENTS || write_stopped {
             self.start_fold()
         } else {
             None
@@ -1460,19 +1459,19 @@ impl NamespacePublisher {
             .await
             .expect("fold permit semaphore should remain open");
         drop(waiting);
-        let snapshot = {
+        let input = {
             let slot = self.engine.lock().await;
-            let snapshot = slot
+            let input = slot
                 .engine
                 .as_ref()
-                .and_then(NamespaceCommitEngine::wal_fold_snapshot);
-            if snapshot
+                .and_then(NamespaceCommitEngine::wal_fold_input);
+            if input
                 .as_ref()
-                .is_some_and(|snapshot| snapshot.wal_tail_segments < CHECKPOINT_AT_WAL_SEGMENTS)
+                .is_some_and(|input| input.wal_tail_segments < FOLD_AT_WAL_SEGMENTS)
             {
                 return;
             }
-            snapshot
+            input
         };
         let context = match writer.identity.mutation_context() {
             Ok(context) => context,
@@ -1494,7 +1493,7 @@ impl NamespacePublisher {
             self.read_core.store(),
             Some(segment_cache.as_ref()),
             &self.namespace_id,
-            snapshot,
+            input,
             &context,
             self.timer.as_ref(),
         )
@@ -1678,26 +1677,26 @@ impl NamespacePublisher {
     }
 
     /// Waits until the namespace may start another WAL put.
-    async fn await_cas_slot(&self) {
+    async fn await_publish_slot(&self) {
         loop {
-            let Some(sleep_until) = self.lock_state().next_allowed_cas_at else {
+            let Some(sleep_until) = self.lock_state().next_allowed_publish_at else {
                 break;
             };
             let now_ms = self.timer.monotonic_now_ms();
             if sleep_until <= now_ms {
                 break;
             }
-            wait_for_cas_pacing(Duration::from_millis(sleep_until - now_ms)).await;
+            wait_for_publish_pacing(Duration::from_millis(sleep_until - now_ms)).await;
         }
     }
 
-    async fn claim_cas_slot(&self) {
-        self.await_cas_slot().await;
-        self.reserve_next_cas_slot(&mut self.lock_state());
+    async fn claim_publish_slot(&self) {
+        self.await_publish_slot().await;
+        self.reserve_next_publish_slot(&mut self.lock_state());
     }
 
-    fn reserve_next_cas_slot(&self, state: &mut NamespacePublisherState) {
-        state.next_allowed_cas_at = Some(
+    fn reserve_next_publish_slot(&self, state: &mut NamespacePublisherState) {
+        state.next_allowed_publish_at = Some(
             self.timer
                 .monotonic_now_ms()
                 .saturating_add(duration_ms(self.min_publish_interval)),
@@ -1806,7 +1805,7 @@ where
             enqueued_at,
         )?;
         let result = receiver.await.map_err(|_| {
-            CoreError::HeadPublish(CommitHeadPublishError::OutcomeUnknown(
+            CoreError::WalPublish(WalPublishError::OutcomeUnknown(
                 "publisher task stopped before reporting an outcome".to_owned(),
             ))
         })?;
@@ -1842,12 +1841,10 @@ where
 
 async fn receive_delete(receiver: oneshot::Receiver<DeleteResult>) -> DeleteResult {
     receiver.await.unwrap_or_else(|_| {
-        Err(
-            CoreError::HeadPublish(CommitHeadPublishError::OutcomeUnknown(
-                "publisher task stopped mid-delete".to_owned(),
-            ))
-            .into(),
-        )
+        Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
+            "publisher task stopped mid-delete".to_owned(),
+        ))
+        .into())
     })
 }
 
@@ -1883,11 +1880,11 @@ fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
 /// Retrying with the same commit IDs is safe because committed candidates
 /// replay their durable receipts. Both stale-head and unknown-outcome errors
 /// are retried to obtain a definite result.
-fn is_retryable_head_publish(result: &CommitResult) -> bool {
+fn is_retryable_wal_publish(result: &CommitResult) -> bool {
     matches!(
         result,
-        Err(RuntimeError::Core(CoreError::HeadPublish(
-            CommitHeadPublishError::StaleHead | CommitHeadPublishError::OutcomeUnknown(_)
+        Err(RuntimeError::Core(CoreError::WalPublish(
+            WalPublishError::StaleHead | WalPublishError::OutcomeUnknown(_)
         )))
     )
 }
@@ -1938,8 +1935,8 @@ fn duration_ms(duration: Duration) -> u64 {
 }
 
 #[allow(clippy::disallowed_methods)]
-// The configured CAS pacing delay does not affect publication validity.
-async fn wait_for_cas_pacing(delay: Duration) {
+// The configured publication pacing delay does not affect publication validity.
+async fn wait_for_publish_pacing(delay: Duration) {
     tokio::time::sleep(delay).await;
 }
 

@@ -173,7 +173,7 @@ async fn maintenance_preserves_namespace_identity_and_writer() {
     )
     .await;
 
-    let before = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
+    let before = loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("namespace state");
 
@@ -205,7 +205,7 @@ async fn maintenance_preserves_namespace_identity_and_writer() {
         .await
         .expect("second upload complete");
 
-    let after = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
+    let after = loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("namespace state");
     assert_eq!(after.namespace_id, before.namespace_id);

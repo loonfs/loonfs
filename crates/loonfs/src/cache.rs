@@ -505,10 +505,8 @@ impl ReadCore {
             .invalidate_namespace(namespace_id);
     }
 
-    /// Drops the read caches after a publication batch that may have moved
-    /// the namespace on. The publisher's own engine needs no invalidation
-    /// here: it is the engine that just published, and it revalidates
-    /// against the live head on its next unit of work.
+    /// A successful publication or a WAL number conflict can leave read caches
+    /// stale. The publisher revalidates its own view before its next batch.
     pub(crate) fn invalidate_read_cache_after_batch(
         &self,
         namespace_id: &NamespaceId,

@@ -27,11 +27,11 @@ struct ParkedPuts {
     second: BoxFuture<'static, loonfs::Result<CommitResponse>>,
 }
 
-/// Parks one put at the blocked head CAS with a second put admitted behind
+/// Parks one put at the blocked WAL put-if-absent with a second put admitted behind
 /// it, so tests can cancel callers at both positions.
 ///
 /// Both positions are arranged, not timed. The first put has provably been
-/// admitted because its head CAS is observably in flight. The second put's
+/// admitted because its WAL put-if-absent is observably in flight. The second put's
 /// content is staged up front through the upload API, and its submission
 /// future is polled exactly once: submission is synchronous through the
 /// publisher's admission and its only await is the result channel, so a

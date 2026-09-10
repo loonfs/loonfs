@@ -9,12 +9,12 @@ use crate::index_read::{
     index_segment_corrupt, load_data_block, load_filter_block, load_index_block,
 };
 use crate::keyspace::{manifest_key, segment_key};
-use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
-use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
-use crate::root::{
+use crate::manifest::{
     load_current_grep_manifest, ChangeFeedResume, GrepIndexStatus, GrepManifestState,
     GrepSegmentRef,
 };
+use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
+use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs::{CoreError, CurrentFileState, MetadataViewError};

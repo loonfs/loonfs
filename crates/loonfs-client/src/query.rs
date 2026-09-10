@@ -7,7 +7,7 @@ impl Client {
     /// Content search over the namespace's grep index (query API group).
     /// Gate on the `query.grep` capability before calling against unknown
     /// deployments; the namespace must also have a materialized active
-    /// grep root or the server answers `not_supported`.
+    /// grep manifest or the server answers `not_supported`.
     pub async fn grep(
         &self,
         namespace_id: &NamespaceId,

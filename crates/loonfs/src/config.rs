@@ -93,7 +93,8 @@ pub struct RuntimeCacheConfig {
     /// retention floor, or a new manifest. Defaults to 1000 milliseconds;
     /// zero checks on every read. Commits are observed on every read by
     /// probing the next WAL number, so a read after the interval costs two
-    /// requests and a read within it costs one.
+    /// requests and a read within it costs one. The interval also paces
+    /// attempts to raise the namespace hint after publication.
     pub control_revalidation_interval_ms: u64,
     /// Maximum namespaces retained by entry-counted runtime caches. Zero
     /// disables those caches. This does not affect maintenance scheduling.

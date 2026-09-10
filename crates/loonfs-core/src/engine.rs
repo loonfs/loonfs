@@ -51,8 +51,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
     pub head: NamespaceReadState,
-    /// Metadata basis referenced by the pinned head. This is the namespace's own
-    /// root after one is published, or its genesis or fork basis before then.
+    /// Verified manifest used to replay the pinned WAL tail.
     pub basis: MetadataBasis,
     pub segment_cache: Arc<MetadataSegmentCache>,
     pub tail_cache: Arc<WalTailProjectionCache>,
@@ -215,7 +214,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates the namespace if it does not already exist.
     ///
     /// Use this before normal reads and writes for a new namespace. Returns
-    /// the namespace's status after its head is installed.
+    /// the namespace's status after manifest 1 is installed.
     pub async fn bootstrap_namespace(
         &self,
         options: BootstrapOptions,
@@ -248,9 +247,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Deletes the namespace by atomically changing its head to the terminal
-    /// deleted state. Earlier committed changes remain durable, and later
-    /// operations return `namespace_deleted`.
+    /// Deletes the namespace by publishing a manifest with terminal deleted status.
+    /// Earlier committed changes remain durable. Later operations return `namespace_deleted`.
     pub async fn delete_namespace(
         &self,
         options: DeleteNamespaceOptions,
@@ -833,7 +831,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// The checkpoint pins a manifest for retention and provenance. If the head
     /// has no manifest, the method first publishes one without compacting
     /// metadata. `ttl_ms` sets an expiration time; `None` keeps the checkpoint
-    /// until it is released.
+    /// until it is deleted.
     pub async fn create_checkpoint(&self, name: String, ttl_ms: Option<u64>) -> Result<Checkpoint> {
         let context = self.mutation_context()?;
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
@@ -924,7 +922,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// manifest covering the current head.
     ///
     /// This is the latest-state maintenance operation: it absorbs the visible
-    /// WAL tail into a published manifest and advances the root, creating no
+    /// WAL tail into a new manifest, creating no
     /// checkpoint record. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
     pub async fn flush_wal(&self) -> Result<FlushWalResponse> {

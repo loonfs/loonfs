@@ -63,19 +63,19 @@ async fn drive_worker_step(
         .expect("grep reorganization step");
 }
 
-/// The watermark from the namespace's verified grep root.
+/// The watermark from the namespace's verified grep manifest.
 async fn grams_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    loonfs_grep::root::load_current_grep_manifest(&**store, namespace_id)
+    loonfs_grep::manifest::load_current_grep_manifest(&**store, namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists")
+        .expect("load grep manifest")
+        .expect("grep manifest exists")
         .manifest_state()
         .status()
         .active_watermark()
-        .expect("an active grep root has a watermark")
+        .expect("an active grep manifest has a watermark")
         .built_through_seq()
 }
 
@@ -202,7 +202,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    // Worker-level enable publishes the backfilling root without driving
+    // Worker-level enable publishes the backfilling manifest without driving
     // it (a host drives it to quiescence), so the test can observe that
     // nothing else drives it either.
     match host.worker.enable(&namespace_id).await.expect("enable") {
@@ -219,13 +219,13 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         )
         .await
         .expect("write delta");
-    let root = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists");
+        .expect("load grep manifest")
+        .expect("grep manifest exists");
     assert!(matches!(
-        root.manifest_state().status(),
-        loonfs_grep::root::GrepIndexStatus::Backfilling { .. }
+        manifest.manifest_state().status(),
+        loonfs_grep::manifest::GrepIndexStatus::Backfilling { .. }
     ));
     let error = host
         .grep(&namespace_id, &request("needle"), default_page_limit())
@@ -411,15 +411,15 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
          {max_content_bytes_per_step}-byte budget"
     );
 
-    let partial = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
+    let partial = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load partial grep root")
-        .expect("partial grep root");
+        .expect("load partial grep manifest")
+        .expect("partial grep manifest");
     let partial_resume = partial
         .manifest_state()
         .status()
         .active_watermark()
-        .expect("the partial root is active");
+        .expect("the partial manifest is active");
     assert_eq!(partial_resume.built_through_seq(), commit.committed_seq);
     assert!(
         partial_resume.next_event_index() > 0,
@@ -487,15 +487,15 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     );
     assert_eq!(first_keys.len() + second_keys.len(), FILES);
 
-    let complete = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
+    let complete = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load complete grep root")
-        .expect("complete grep root");
+        .expect("load complete grep manifest")
+        .expect("complete grep manifest");
     let complete_resume = complete
         .manifest_state()
         .status()
         .active_watermark()
-        .expect("the complete root is active");
+        .expect("the complete manifest is active");
     assert_eq!(complete_resume.built_through_seq(), commit.committed_seq);
     assert_eq!(complete_resume.next_event_index(), 0);
     let complete_segment_ids: BTreeSet<_> = complete
@@ -608,11 +608,11 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
     }
 
     // The premise of the test: the rounds really did tier the layout.
-    let root = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists");
-    let grams_levels: Vec<u32> = root
+        .expect("load grep manifest")
+        .expect("grep manifest exists");
+    let grams_levels: Vec<u32> = manifest
         .manifest_state()
         .segments()
         .iter()
@@ -1079,11 +1079,11 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     );
 
     // Confirm that the observed reads produced a mid-level run.
-    let root = loonfs_grep::root::load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)
         .await
-        .expect("load grep root")
-        .expect("grep root exists");
-    let grams: Vec<u32> = root
+        .expect("load grep manifest")
+        .expect("grep manifest exists");
+    let grams: Vec<u32> = manifest
         .manifest_state()
         .segments()
         .iter()

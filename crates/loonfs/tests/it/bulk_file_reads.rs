@@ -496,13 +496,14 @@ async fn foreign_metadata_segment_owners(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<NamespaceId> {
-    let root = loonfs_core::control::load_namespace_current_manifest(store.as_ref(), namespace_id)
-        .await
-        .expect("load metadata root")
-        .state;
+    let manifest =
+        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), namespace_id)
+            .await
+            .expect("load metadata manifest")
+            .state;
     let key = loonfs_objectstore::keys::metadata_manifest_object(
         namespace_id,
-        &root.manifest.manifest_no,
+        &manifest.manifest.manifest_no,
     );
     let bytes = store
         .get(&key, None)
@@ -520,7 +521,7 @@ async fn foreign_metadata_segment_owners(
 }
 
 #[tokio::test]
-async fn a_released_checkpoint_refuses_enumeration_instead_of_answering_current_state() {
+async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_state() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-release-test").await;
     let namespace_id = namespace_id("demo");
@@ -555,7 +556,7 @@ async fn a_released_checkpoint_refuses_enumeration_instead_of_answering_current_
             },
         )
         .await
-        .expect_err("a released checkpoint pins nothing to enumerate");
+        .expect_err("a deleted checkpoint pins nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
 
     let missing = loonfs::CheckpointId::parse("pin_00000000000000000001-0123456789abcdef")

@@ -389,8 +389,7 @@ fn sample_deleted_manifest() -> NamespaceManifestPayload {
     }
 }
 
-/// A fork target's head: the same shape plus the permanent fork basis that
-/// authorizes reading the source's manifest before the target's first flush.
+/// A fork manifest records its source pin and manifest.
 fn sample_fork_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         fork_basis: Some(ForkBasis {
@@ -503,16 +502,16 @@ where
 
 #[test]
 fn manifest_status_reading_is_fail_closed_on_unknown_statuses() {
-    // Every head writes the field, active heads included, and an active
-    // head round-trips through the tagged object it writes.
+    // Every manifest writes the field, active manifests included, and an active
+    // manifest round-trips through the tagged object it writes.
     let active = sample_manifest_payload();
-    let encoded = serde_json::to_string(&active).expect("encode active head");
+    let encoded = serde_json::to_string(&active).expect("encode active manifest");
     assert!(
         encoded.contains("\"status\":{\"kind\":\"active\"}"),
-        "an active head writes its status: {encoded}"
+        "an active manifest writes its status: {encoded}"
     );
     let round_tripped = serde_json::from_str::<NamespaceManifestPayload>(&encoded)
-        .expect("an active head round-trips");
+        .expect("an active manifest round-trips");
     assert_eq!(round_tripped, active);
 
     // A status this build does not know must fail decode, never default:
@@ -532,15 +531,15 @@ fn manifest_status_reading_is_fail_closed_on_unknown_statuses() {
 
 #[test]
 fn manifest_without_a_status_is_rejected() {
-    let mut document =
-        serde_json::to_value(sample_manifest_payload()).expect("encode active head as a document");
+    let mut document = serde_json::to_value(sample_manifest_payload())
+        .expect("encode active manifest as a document");
     document
         .as_object_mut()
-        .expect("head document")
+        .expect("manifest document")
         .remove("status");
 
     let error = serde_json::from_value::<NamespaceManifestPayload>(document)
-        .expect_err("a head without its status must be rejected");
+        .expect_err("a manifest without its status must be rejected");
     assert!(
         error.to_string().contains("status"),
         "the rejection should name the field: {error}"
@@ -549,8 +548,8 @@ fn manifest_without_a_status_is_rejected() {
 
 #[test]
 fn manifest_status_rejects_unknown_fields_as_corruption() {
-    let mut document =
-        serde_json::to_value(sample_manifest_payload()).expect("encode active head as a document");
+    let mut document = serde_json::to_value(sample_manifest_payload())
+        .expect("encode active manifest as a document");
     document["status"]["field_from_the_future"] = serde_json::Value::from(true);
 
     let error = serde_json::from_value::<NamespaceManifestPayload>(document)
@@ -805,13 +804,11 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
 
 #[test]
 fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
-    // Both head pointer fields must reject data that a rewrite would drop.
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
         |payload| payload["owner"]["field_from_the_future"] = serde_json::Value::from(true),
     );
-    // Manifest references reject unknown fields in every control object.
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
@@ -871,7 +868,7 @@ fn checkpoint_records_reject_an_untagged_or_unknown_owner() {
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
-        |payload| payload["owner"]["kind"] = serde_json::Value::from("lease"),
+        |payload| payload["owner"]["kind"] = serde_json::Value::from("unknown_owner"),
     );
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",
