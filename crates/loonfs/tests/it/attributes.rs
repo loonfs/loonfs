@@ -40,7 +40,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let options = owner_update();
     let explicit = CommitRequest::single(
         options.commit.commit_id.clone().expect("commit id"),
-        options.commit.actor.clone(),
+        options.commit.actor_id.clone(),
         options.commit.message.clone(),
         FilesystemOperation::UpdateAttributes {
             path: parse_mutation_path("/docs/report.txt").expect("path"),
@@ -52,7 +52,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     );
     let explicit_fingerprint = semantic_commit_fingerprint(
         &namespace_id,
-        &explicit.actor,
+        &explicit.actor_id,
         explicit.message.as_deref(),
         &explicit.operations,
         &[],
@@ -93,7 +93,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     assert_ne!(
         semantic_commit_fingerprint(
             &namespace_id,
-            &different.actor,
+            &different.actor_id,
             different.message.as_deref(),
             &different.operations,
             &[]

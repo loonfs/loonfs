@@ -208,7 +208,7 @@ impl VisibilityHarness {
         self.publish(CommitCandidate::new(CommitRequest {
             assertions: Vec::new(),
             commit_id: CommitId::generate(),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations,
         }))

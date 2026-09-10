@@ -252,7 +252,7 @@ type commitReplayRequest struct {
 	Assertions  []*loonfs.CommitAssertion `json:"assertions"`
 	NamespaceID string                    `json:"namespace_id"`
 	CommitID    string                    `json:"commit_id"`
-	Actor       loonfs.ActorRef           `json:"actor"`
+	ActorID     loonfs.ActorID            `json:"actor_id"`
 	Message     string                    `json:"message"`
 	Path        string                    `json:"path"`
 }
@@ -268,7 +268,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	commit := createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitID,
-		&request.Actor,
+		request.ActorID,
 		request.Path,
 		&request.Message,
 	)
@@ -321,13 +321,13 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("prepare: %v", err)
 	}
 	input := files.PreparedUploadInput{NamespaceID: loonfs.NamespaceID(request.NamespaceID), Path: "/prepared", Prepared: prepared,
-		Actor: &request.Actor, CommitID: "prepared-put"}
+		ActorID: request.ActorID, CommitID: "prepared-put"}
 	published, err := h.client.Files.PutFilePrepared(context.Background(), input)
 	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	_, err = h.client.Commits.Create(context.Background(), &loonfs.CommitRequest{
-		NamespaceID: request.NamespaceID, Actor: &request.Actor, CommitID: "prepared-rename",
+		NamespaceID: request.NamespaceID, ActorID: request.ActorID, CommitID: "prepared-rename",
 		Operations: []*loonfs.FilesystemOperation{{MovePath: &loonfs.FilesystemOperationMovePath{FromPath: input.Path, ToPath: "/renamed"}}},
 	})
 	if err != nil {
@@ -377,11 +377,11 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type directPutRequest struct {
-	NamespaceID string          `json:"namespace_id"`
-	Path        string          `json:"path"`
-	CommitID    string          `json:"commit_id"`
-	Actor       loonfs.ActorRef `json:"actor"`
-	ContentUTF8 string          `json:"content_utf8"`
+	NamespaceID string         `json:"namespace_id"`
+	Path        string         `json:"path"`
+	CommitID    string         `json:"commit_id"`
+	ActorID     loonfs.ActorID `json:"actor_id"`
+	ContentUTF8 string         `json:"content_utf8"`
 }
 
 type directPutExpected struct {
@@ -448,7 +448,7 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 		request.NamespaceID,
 		request.Path,
 		request.CommitID,
-		&request.Actor,
+		request.ActorID,
 		completedStatus.ContentRef,
 		completedStatus.ContentToken,
 	)
@@ -465,12 +465,12 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type multipartRequest struct {
-	NamespaceID    string          `json:"namespace_id"`
-	Path           string          `json:"path"`
-	CommitID       string          `json:"commit_id"`
-	Actor          loonfs.ActorRef `json:"actor"`
-	PartSizeBytes  int64           `json:"part_size_bytes"`
-	ContentPattern bytePattern     `json:"content_pattern"`
+	NamespaceID    string         `json:"namespace_id"`
+	Path           string         `json:"path"`
+	CommitID       string         `json:"commit_id"`
+	ActorID        loonfs.ActorID `json:"actor_id"`
+	PartSizeBytes  int64          `json:"part_size_bytes"`
+	ContentPattern bytePattern    `json:"content_pattern"`
 }
 
 type bytePattern struct {
@@ -596,7 +596,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		request.NamespaceID,
 		request.Path,
 		request.CommitID,
-		&request.Actor,
+		request.ActorID,
 		firstStatus.ContentRef,
 		replayedStatus.ContentToken,
 	)
@@ -615,7 +615,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(helperPath),
 		Content:     payload,
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID(request.CommitID + "-helper"),
 	})
 	if err != nil {
@@ -689,11 +689,11 @@ func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type downloadRequest struct {
-	NamespaceID string          `json:"namespace_id"`
-	Path        string          `json:"path"`
-	CommitID    string          `json:"commit_id"`
-	Actor       loonfs.ActorRef `json:"actor"`
-	ContentUTF8 string          `json:"content_utf8"`
+	NamespaceID string         `json:"namespace_id"`
+	Path        string         `json:"path"`
+	CommitID    string         `json:"commit_id"`
+	ActorID     loonfs.ActorID `json:"actor_id"`
+	ContentUTF8 string         `json:"content_utf8"`
 }
 
 type downloadExpected struct {
@@ -712,7 +712,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(request.Path),
 		Content:     payload,
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    commitID,
 	})
 	if err != nil {
@@ -755,7 +755,7 @@ type endToEndRequest struct {
 	Directory   string            `json:"directory"`
 	UploadPath  string            `json:"upload_path"`
 	MovedPath   string            `json:"moved_path"`
-	Actor       loonfs.ActorRef   `json:"actor"`
+	ActorID     loonfs.ActorID    `json:"actor_id"`
 	ContentUTF8 string            `json:"content_utf8"`
 	CommitIDs   endToEndCommitIDs `json:"commit_ids"`
 }
@@ -784,7 +784,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	mkdir := applyCommit(t, h.client, createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitIDs.Mkdir,
-		&request.Actor,
+		request.ActorID,
 		request.Directory,
 		nil,
 	))
@@ -797,7 +797,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(request.UploadPath),
 		Content:     []byte(request.ContentUTF8),
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    uploadCommitID,
 	})
 	if err != nil {
@@ -825,7 +825,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	moved := applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID(request.CommitIDs.Move),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -866,7 +866,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
 	removed := applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID(request.CommitIDs.Remove),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -895,8 +895,8 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		if string(change.CommitID) != expectedIDs[index] {
 			t.Errorf("change %d commit_id = %q, want %q", index, change.CommitID, expectedIDs[index])
 		}
-		if !actorsEqual(change.CommittedBy, &request.Actor) {
-			t.Errorf("change %d committed_by = %#v, want %#v", index, change.CommittedBy, request.Actor)
+		if change.CommittedBy != request.ActorID {
+			t.Errorf("change %d committed_by = %#v, want %#v", index, change.CommittedBy, request.ActorID)
 		}
 	}
 
@@ -922,12 +922,12 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type paginationRequest struct {
-	NamespaceID     string          `json:"namespace_id"`
-	Directory       string          `json:"directory"`
-	Actor           loonfs.ActorRef `json:"actor"`
-	EntryNames      []string        `json:"entry_names"`
-	PageSize        int             `json:"page_size"`
-	ResumeAfterPage int             `json:"resume_after_page"`
+	NamespaceID     string         `json:"namespace_id"`
+	Directory       string         `json:"directory"`
+	ActorID         loonfs.ActorID `json:"actor_id"`
+	EntryNames      []string       `json:"entry_names"`
+	PageSize        int            `json:"page_size"`
+	ResumeAfterPage int            `json:"resume_after_page"`
 }
 
 type paginationExpected struct {
@@ -937,15 +937,15 @@ type paginationExpected struct {
 }
 
 type childrenByInodeRequest struct {
-	NamespaceID      string          `json:"namespace_id"`
-	Directory        string          `json:"directory"`
-	RenamedDirectory string          `json:"renamed_directory"`
-	RenameCommitID   string          `json:"rename_commit_id"`
-	Actor            loonfs.ActorRef `json:"actor"`
-	EntryNames       []string        `json:"entry_names"`
-	PageSize         int             `json:"page_size"`
-	RenameAfterPage  int             `json:"rename_after_page"`
-	ResumeAfterPage  int             `json:"resume_after_page"`
+	NamespaceID      string         `json:"namespace_id"`
+	Directory        string         `json:"directory"`
+	RenamedDirectory string         `json:"renamed_directory"`
+	RenameCommitID   string         `json:"rename_commit_id"`
+	ActorID          loonfs.ActorID `json:"actor_id"`
+	EntryNames       []string       `json:"entry_names"`
+	PageSize         int            `json:"page_size"`
+	RenameAfterPage  int            `json:"rename_after_page"`
+	ResumeAfterPage  int            `json:"resume_after_page"`
 }
 
 type childrenByInodeExpected struct {
@@ -964,7 +964,7 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 		h.client,
 		request.NamespaceID,
 		"conf-children-by-inode-directory",
-		&request.Actor,
+		request.ActorID,
 		request.Directory,
 	)
 	for index := len(request.EntryNames) - 1; index >= 0; index-- {
@@ -974,7 +974,7 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 			h.client,
 			request.NamespaceID,
 			fmt.Sprintf("conf-children-by-inode-entry-%02d", index),
-			&request.Actor,
+			request.ActorID,
 			request.Directory+"/"+name,
 		)
 	}
@@ -1029,7 +1029,7 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 			noReplace := loonfs.DestinationBehaviorNoReplace
 			renamed := applyCommit(t, h.client, &loonfs.CommitRequest{
 				NamespaceID: request.NamespaceID,
-				Actor:       &request.Actor,
+				ActorID:     request.ActorID,
 				CommitID:    loonfs.CommitID(request.RenameCommitID),
 				Operations: []*loonfs.FilesystemOperation{
 					{
@@ -1116,18 +1116,18 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type inodeMutationsRequest struct {
-	NamespaceID                string          `json:"namespace_id"`
-	Directory                  string          `json:"directory"`
-	Actor                      loonfs.ActorRef `json:"actor"`
-	PathDirectoryName          string          `json:"path_directory_name"`
-	PathFileName               string          `json:"path_file_name"`
-	InodeDirectoryName         string          `json:"inode_directory_name"`
-	InodeFileName              string          `json:"inode_file_name"`
-	RenamedFileName            string          `json:"renamed_file_name"`
-	MovedFileName              string          `json:"moved_file_name"`
-	ContentUTF8                string          `json:"content_utf8"`
-	RevisedContentUTF8         string          `json:"revised_content_utf8"`
-	MalformedBindingGeneration string          `json:"malformed_binding_generation"`
+	NamespaceID                string         `json:"namespace_id"`
+	Directory                  string         `json:"directory"`
+	ActorID                    loonfs.ActorID `json:"actor_id"`
+	PathDirectoryName          string         `json:"path_directory_name"`
+	PathFileName               string         `json:"path_file_name"`
+	InodeDirectoryName         string         `json:"inode_directory_name"`
+	InodeFileName              string         `json:"inode_file_name"`
+	RenamedFileName            string         `json:"renamed_file_name"`
+	MovedFileName              string         `json:"moved_file_name"`
+	ContentUTF8                string         `json:"content_utf8"`
+	RevisedContentUTF8         string         `json:"revised_content_utf8"`
+	MalformedBindingGeneration string         `json:"malformed_binding_generation"`
 }
 
 type inodeMutationsExpected struct {
@@ -1149,7 +1149,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		h.client,
 		request.NamespaceID,
 		"conf-inode-mutations-directory",
-		&request.Actor,
+		request.ActorID,
 		request.Directory,
 	)
 	applyCreateDirectory(
@@ -1157,14 +1157,14 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		h.client,
 		request.NamespaceID,
 		"conf-inode-mutations-path-directory",
-		&request.Actor,
+		request.ActorID,
 		childPath(request.PathDirectoryName),
 	)
 	if _, err := h.client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.PathFileName)),
 		Content:     []byte(request.ContentUTF8),
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-path-file"),
 	}); err != nil {
 		t.Fatalf("put path-addressed file: %v", err)
@@ -1173,7 +1173,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	parentInodeID := identityOf(statPath(t, h.client, request.NamespaceID, request.Directory)).inodeID
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-inode-directory"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -1187,7 +1187,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	contentRef, contentToken := stageContent(t, h.client, request.NamespaceID, []byte(request.ContentUTF8))
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID:   request.NamespaceID,
-		Actor:         &request.Actor,
+		ActorID:       request.ActorID,
 		CommitID:      loonfs.CommitID("conf-inode-mutations-inode-file"),
 		ContentTokens: contentTokens(contentToken),
 		Operations: []*loonfs.FilesystemOperation{
@@ -1243,7 +1243,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	contentRef, contentToken = stageContent(t, h.client, request.NamespaceID, []byte(request.RevisedContentUTF8))
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID:   request.NamespaceID,
-		Actor:         &request.Actor,
+		ActorID:       request.ActorID,
 		CommitID:      loonfs.CommitID("conf-inode-mutations-revision"),
 		ContentTokens: contentTokens(contentToken),
 		Operations: []*loonfs.FilesystemOperation{
@@ -1272,7 +1272,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-rename"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -1287,7 +1287,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	moveByInode := func(commitID string, generation string) *loonfs.CommitRequest {
 		return &loonfs.CommitRequest{
 			NamespaceID: request.NamespaceID,
-			Actor:       &request.Actor,
+			ActorID:     request.ActorID,
 			CommitID:    loonfs.CommitID(commitID),
 			Operations: []*loonfs.FilesystemOperation{
 				{
@@ -1379,7 +1379,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
 	deleted := applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-delete"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -1446,20 +1446,20 @@ func contentTokens(token *loonfs.ContentToken) []*loonfs.ContentToken {
 }
 
 type snapshotsRequest struct {
-	NamespaceID         string          `json:"namespace_id"`
-	Directory           string          `json:"directory"`
-	Actor               loonfs.ActorRef `json:"actor"`
-	SnapshotName        string          `json:"snapshot_name"`
-	ReplacedFileName    string          `json:"replaced_file_name"`
-	DeletedFileName     string          `json:"deleted_file_name"`
-	AddedFileName       string          `json:"added_file_name"`
-	CapturedContentUTF8 string          `json:"captured_content_utf8"`
-	CurrentContentUTF8  string          `json:"current_content_utf8"`
-	DeletedContentUTF8  string          `json:"deleted_content_utf8"`
-	AddedContentUTF8    string          `json:"added_content_utf8"`
-	CreateTTLMs         int64           `json:"create_ttl_ms"`
-	ExtendTTLMs         int64           `json:"extend_ttl_ms"`
-	UnknownSnapshotID   string          `json:"unknown_snapshot_id"`
+	NamespaceID         string         `json:"namespace_id"`
+	Directory           string         `json:"directory"`
+	ActorID             loonfs.ActorID `json:"actor_id"`
+	SnapshotName        string         `json:"snapshot_name"`
+	ReplacedFileName    string         `json:"replaced_file_name"`
+	DeletedFileName     string         `json:"deleted_file_name"`
+	AddedFileName       string         `json:"added_file_name"`
+	CapturedContentUTF8 string         `json:"captured_content_utf8"`
+	CurrentContentUTF8  string         `json:"current_content_utf8"`
+	DeletedContentUTF8  string         `json:"deleted_content_utf8"`
+	AddedContentUTF8    string         `json:"added_content_utf8"`
+	CreateTTLMs         int64          `json:"create_ttl_ms"`
+	ExtendTTLMs         int64          `json:"extend_ttl_ms"`
+	UnknownSnapshotID   string         `json:"unknown_snapshot_id"`
 }
 
 type snapshotsExpected struct {
@@ -1487,7 +1487,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		createDirectoryCommit(
 			request.NamespaceID,
 			"conf-snapshots-create-directory",
-			&request.Actor,
+			request.ActorID,
 			request.Directory,
 			nil,
 		),
@@ -1496,7 +1496,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
 		Content:     []byte(request.CapturedContentUTF8),
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-create-replaced"),
 	})
 	if err != nil {
@@ -1506,7 +1506,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.DeletedFileName)),
 		Content:     []byte(request.DeletedContentUTF8),
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-create-deleted"),
 	})
 	if err != nil {
@@ -1539,7 +1539,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
 		Content:     []byte(request.CurrentContentUTF8),
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-replace-file"),
 		Behavior:    replace,
 	})
@@ -1550,7 +1550,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.AddedFileName)),
 		Content:     []byte(request.AddedContentUTF8),
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-add-file"),
 	})
 	if err != nil {
@@ -1559,7 +1559,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		Actor:       &request.Actor,
+		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-delete-file"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -1799,7 +1799,7 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 		h.client,
 		request.NamespaceID,
 		"conf-pagination-directory",
-		&request.Actor,
+		request.ActorID,
 		request.Directory,
 	)
 	for index, name := range request.EntryNames {
@@ -1808,7 +1808,7 @@ func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 			h.client,
 			request.NamespaceID,
 			fmt.Sprintf("conf-pagination-entry-%02d", index),
-			&request.Actor,
+			request.ActorID,
 			request.Directory+"/"+name,
 		)
 	}
@@ -1949,16 +1949,16 @@ func equalStrings(left, right []string) bool {
 }
 
 type proxyCaseRequest struct {
-	NamespaceAlias        string          `json:"namespace_alias"`
-	NamespaceID           string          `json:"namespace_id"`
-	UnknownNamespaceAlias string          `json:"unknown_namespace_alias"`
-	Actor                 loonfs.ActorRef `json:"actor"`
-	Directory             string          `json:"directory"`
-	ProxiedPath           string          `json:"proxied_path"`
-	DirectPath            string          `json:"direct_path"`
-	CommitIDs             proxyCommitIDs  `json:"commit_ids"`
-	ContentUTF8           string          `json:"content_utf8"`
-	DisallowedPathSuffix  string          `json:"disallowed_path_suffix"`
+	NamespaceAlias        string         `json:"namespace_alias"`
+	NamespaceID           string         `json:"namespace_id"`
+	UnknownNamespaceAlias string         `json:"unknown_namespace_alias"`
+	ActorID               loonfs.ActorID `json:"actor_id"`
+	Directory             string         `json:"directory"`
+	ProxiedPath           string         `json:"proxied_path"`
+	DirectPath            string         `json:"direct_path"`
+	CommitIDs             proxyCommitIDs `json:"commit_ids"`
+	ContentUTF8           string         `json:"content_utf8"`
+	DisallowedPathSuffix  string         `json:"disallowed_path_suffix"`
 }
 
 type proxyCommitIDs struct {
@@ -1997,7 +1997,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	mkdir := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL, createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitIDs.Directory,
-		&request.Actor,
+		request.ActorID,
 		request.Directory,
 		nil,
 	))
@@ -2043,7 +2043,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		request.NamespaceID,
 		request.ProxiedPath,
 		request.CommitIDs.Proxied,
-		&request.Actor,
+		request.ActorID,
 		proxiedStatus.ContentRef,
 		proxiedStatus.ContentToken,
 	)
@@ -2082,7 +2082,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		request.NamespaceID,
 		request.DirectPath,
 		request.CommitIDs.Direct,
-		&request.Actor,
+		request.ActorID,
 		directStatus.ContentRef,
 		directStatus.ContentToken,
 	)
@@ -2179,7 +2179,7 @@ func proxyCommitCompletedFile(
 	namespaceID string,
 	path string,
 	commitID string,
-	actor *loonfs.ActorRef,
+	actor loonfs.ActorID,
 	contentRef *loonfs.ContentRef,
 	contentToken *loonfs.ContentToken,
 ) *loonfs.CommitResponse {
@@ -2191,7 +2191,7 @@ func proxyCommitCompletedFile(
 	}
 	return proxyCreateCommit(t, httpClient, namespaceAliasBaseURL, &loonfs.CommitRequest{
 		NamespaceID:   namespaceID,
-		Actor:         actor,
+		ActorID:       actor,
 		CommitID:      loonfs.CommitID(commitID),
 		ContentTokens: contentTokens,
 		Operations: []*loonfs.FilesystemOperation{
@@ -2307,11 +2307,11 @@ func proxyResponseStatus(t *testing.T, httpClient *http.Client, requestURL strin
 }
 
 type changesRequest struct {
-	NamespaceID string          `json:"namespace_id"`
-	Path        string          `json:"path"`
-	CommitID    string          `json:"commit_id"`
-	Actor       loonfs.ActorRef `json:"actor"`
-	AfterSeq    int64           `json:"after_seq"`
+	NamespaceID string         `json:"namespace_id"`
+	Path        string         `json:"path"`
+	CommitID    string         `json:"commit_id"`
+	ActorID     loonfs.ActorID `json:"actor_id"`
+	AfterSeq    int64          `json:"after_seq"`
 }
 
 type changesExpected struct {
@@ -2326,7 +2326,7 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 	commit := createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitID,
-		&request.Actor,
+		request.ActorID,
 		request.Path,
 		nil,
 	)
@@ -2357,10 +2357,8 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 	if string(change.CommitID) != request.CommitID {
 		t.Errorf("change commit_id = %q, want %q", change.CommitID, request.CommitID)
 	}
-	if change.CommittedBy == nil ||
-		change.CommittedBy.ID != request.Actor.ID ||
-		change.CommittedBy.Kind != request.Actor.Kind {
-		t.Errorf("change committed_by = %#v, want %#v", change.CommittedBy, request.Actor)
+	if change.CommittedBy != request.ActorID {
+		t.Errorf("change committed_by = %#v, want %#v", change.CommittedBy, request.ActorID)
 	}
 	if len(change.Events) != 1 || change.Events[0] == nil || change.Events[0].DirectoryCreated == nil {
 		t.Errorf("change events = %#v, want one directory_created event", change.Events)
@@ -2622,7 +2620,7 @@ func commitCompletedFile(
 	namespaceID string,
 	path string,
 	commitID string,
-	actor *loonfs.ActorRef,
+	actor loonfs.ActorID,
 	contentRef *loonfs.ContentRef,
 	contentToken *loonfs.ContentToken,
 ) *loonfs.CommitResponse {
@@ -2630,7 +2628,7 @@ func commitCompletedFile(
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	return applyCommit(t, sdk, &loonfs.CommitRequest{
 		NamespaceID:   namespaceID,
-		Actor:         actor,
+		ActorID:       actor,
 		CommitID:      loonfs.CommitID(commitID),
 		ContentTokens: contentTokens(contentToken),
 		Operations: []*loonfs.FilesystemOperation{
@@ -2716,13 +2714,6 @@ func listChanges(t *testing.T, sdk *server.Client, namespaceID string) *loonfs.L
 	return changes
 }
 
-func actorsEqual(left, right *loonfs.ActorRef) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return left.ID == right.ID && left.Kind == right.Kind
-}
-
 func createNamespace(t *testing.T, sdk *server.Client, namespaceID string) {
 	t.Helper()
 	_, err := sdk.Namespaces.Create(
@@ -2739,7 +2730,7 @@ func applyCreateDirectory(
 	sdk *server.Client,
 	namespaceID string,
 	commitID string,
-	actor *loonfs.ActorRef,
+	actor loonfs.ActorID,
 	path string,
 ) {
 	t.Helper()
@@ -2755,14 +2746,14 @@ func applyCreateDirectory(
 func createDirectoryCommit(
 	namespaceID string,
 	commitID string,
-	actor *loonfs.ActorRef,
+	actor loonfs.ActorID,
 	path string,
 	message *string,
 ) *loonfs.CommitRequest {
 	parents := false
 	return &loonfs.CommitRequest{
 		NamespaceID: namespaceID,
-		Actor:       actor,
+		ActorID:     actor,
 		CommitID:    loonfs.CommitID(commitID),
 		Message:     message,
 		Operations: []*loonfs.FilesystemOperation{

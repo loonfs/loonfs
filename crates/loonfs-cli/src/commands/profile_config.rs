@@ -1,18 +1,16 @@
 //! Builds provider-specific profile configurations and applies validated updates.
 
 use crate::args::{
-    ActorKindArg, ProfileCreateActorArgs, ProfileCreateAzureArgs, ProfileCreateCommand,
-    ProfileCreateGcsArgs, ProfileCreateLocalArgs, ProfileCreateR2Args, ProfileCreateRemoteArgs,
-    ProfileCreateS3Args, ProfileUpdateActorArgs, ProfileUpdateAzureArgs, ProfileUpdateCommand,
-    ProfileUpdateGcsArgs, ProfileUpdateLocalArgs, ProfileUpdateR2Args, ProfileUpdateRemoteArgs,
-    ProfileUpdateS3Args, RuntimeBehavior,
+    ProfileCreateActorArgs, ProfileCreateAzureArgs, ProfileCreateCommand, ProfileCreateGcsArgs,
+    ProfileCreateLocalArgs, ProfileCreateR2Args, ProfileCreateRemoteArgs, ProfileCreateS3Args,
+    ProfileUpdateActorArgs, ProfileUpdateAzureArgs, ProfileUpdateCommand, ProfileUpdateGcsArgs,
+    ProfileUpdateLocalArgs, ProfileUpdateR2Args, ProfileUpdateRemoteArgs, ProfileUpdateS3Args,
+    RuntimeBehavior,
 };
-use crate::config::{
-    validate_remote_client_config, ProfileActorConfig, ProfileConfig, StoreConfig,
-};
+use crate::config::{validate_remote_client_config, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
-use loonfs_api::{ActorId, ActorKind, SecretString};
+use loonfs_api::{ActorId, SecretString};
 use loonfs_objectstore::{
     AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials,
 };
@@ -165,15 +163,11 @@ fn update_remote_spec(args: ProfileUpdateRemoteArgs) -> ProfileUpdateSpec {
 }
 
 fn update_actor_spec(actor: ProfileUpdateActorArgs) -> CreateActorSpec {
-    CreateActorSpec {
-        kind: actor.actor_kind,
-        id: actor.actor_id,
-    }
+    CreateActorSpec { id: actor.actor_id }
 }
 
 pub(super) fn has_update_flags(spec: &ProfileUpdateSpec) -> bool {
-    spec.actor.kind.is_some()
-        || spec.actor.id.is_some()
+    spec.actor.id.is_some()
         || match &spec.provider {
             CreateProviderSpec::S3(args) => {
                 args.bucket.is_some()
@@ -225,16 +219,12 @@ pub(super) struct CreateProfileSpec {
 
 #[derive(Debug, Clone)]
 struct CreateActorSpec {
-    kind: Option<ActorKindArg>,
     id: Option<String>,
 }
 
 impl From<ProfileCreateActorArgs> for CreateActorSpec {
     fn from(value: ProfileCreateActorArgs) -> Self {
-        Self {
-            kind: value.actor_kind,
-            id: value.actor_id,
-        }
+        Self { id: value.actor_id }
     }
 }
 
@@ -468,10 +458,7 @@ pub(super) fn build_profile_interactive(
         name,
         CreateProfileSpec {
             provider,
-            actor: CreateActorSpec {
-                kind: None,
-                id: None,
-            },
+            actor: CreateActorSpec { id: None },
         },
         runtime,
     )
@@ -482,7 +469,7 @@ pub(super) fn build_profile_from_create_spec(
     spec: CreateProfileSpec,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
-    let actor = profile_actor_config(spec.actor.kind, spec.actor.id.as_deref())?;
+    let actor = parse_profile_actor_id(spec.actor.id.as_deref())?;
     let source = FieldSource::from_runtime(runtime);
     match spec.provider {
         CreateProviderSpec::Local(spec) => {
@@ -498,13 +485,10 @@ pub(super) fn build_profile_from_create_spec(
     }
 }
 
-fn embedded_profile(
-    store: StoreConfig,
-    actor: ProfileActorConfig,
-) -> Result<ProfileConfig, CliError> {
+fn embedded_profile(store: StoreConfig, actor: Option<ActorId>) -> Result<ProfileConfig, CliError> {
     Ok(ProfileConfig::Embedded {
         store,
-        actor,
+        actor_id: actor,
         default_namespace: None,
         writer_id: None,
     })
@@ -919,7 +903,7 @@ fn remote_profile(
     name: &str,
     current: Option<&ProfileConfig>,
     args: &ProfileCreateRemoteSpec,
-    actor: ProfileActorConfig,
+    actor: Option<ActorId>,
     source: FieldSource,
 ) -> Result<ProfileConfig, CliError> {
     let current = current
@@ -974,44 +958,31 @@ fn remote_profile(
     )?;
     Ok(ProfileConfig::Remote {
         server_url,
-        actor,
+        actor_id: actor,
         default_namespace: current.and_then(|value| value.1.as_ref()).cloned(),
         auth_token,
         ca_cert_path,
     })
 }
 
-fn profile_actor_config(
-    kind: Option<ActorKindArg>,
-    id: Option<&str>,
-) -> Result<ProfileActorConfig, CliError> {
-    match (kind, id) {
-        (None, None) => Ok(ProfileActorConfig::default()),
-        (Some(kind), Some(id)) => Ok(ProfileActorConfig {
-            actor_kind: Some(ActorKind::from(kind)),
-            actor_id: Some(ActorId::parse(id).map_err(|error| {
-                CliError::invalid_request(format!("invalid --actor-id: {error}"))
-                    .with_param("--actor-id")
-            })?),
-        }),
-        (None, Some(_)) => Err(
-            CliError::invalid_request("--actor-id requires --actor-kind").with_param("--actor-id"),
-        ),
-        (Some(_), None) => Err(
-            CliError::invalid_request("--actor-kind requires --actor-id")
-                .with_param("--actor-kind"),
-        ),
-    }
+fn parse_profile_actor_id(id: Option<&str>) -> Result<Option<ActorId>, CliError> {
+    id.map(|id| {
+        ActorId::parse(id).map_err(|error| {
+            CliError::invalid_request(format!("invalid --actor-id: {error}"))
+                .with_param("--actor-id")
+        })
+    })
+    .transpose()
 }
 
 fn updated_actor(
-    current: ProfileActorConfig,
+    current: Option<ActorId>,
     args: &CreateActorSpec,
-) -> Result<ProfileActorConfig, CliError> {
-    if args.kind.is_none() && args.id.is_none() {
+) -> Result<Option<ActorId>, CliError> {
+    if args.id.is_none() {
         Ok(current)
     } else {
-        profile_actor_config(args.kind, args.id.as_deref())
+        parse_profile_actor_id(args.id.as_deref())
     }
 }
 
@@ -1063,7 +1034,7 @@ pub(super) fn apply_update_flags(
         (
             ProfileConfig::Embedded {
                 store,
-                actor,
+                actor_id: actor,
                 default_namespace,
                 writer_id,
             },
@@ -1089,7 +1060,7 @@ pub(super) fn apply_update_flags(
             };
             Ok(ProfileConfig::Embedded {
                 store,
-                actor: updated_actor(actor, &spec.actor)?,
+                actor_id: updated_actor(actor, &spec.actor)?,
                 default_namespace,
                 writer_id,
             })
@@ -1097,7 +1068,7 @@ pub(super) fn apply_update_flags(
         (
             ProfileConfig::Remote {
                 server_url,
-                actor,
+                actor_id: actor,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
@@ -1107,7 +1078,7 @@ pub(super) fn apply_update_flags(
             let updated_actor = updated_actor(actor.clone(), &spec.actor)?;
             let current = ProfileConfig::Remote {
                 server_url,
-                actor,
+                actor_id: actor,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
@@ -1214,7 +1185,7 @@ pub(super) fn apply_update_interactive(
     match existing {
         ProfileConfig::Embedded {
             store,
-            actor,
+            actor_id: actor,
             default_namespace,
             writer_id,
         } => {
@@ -1247,12 +1218,15 @@ pub(super) fn apply_update_interactive(
             };
             Ok(ProfileConfig::Embedded {
                 store,
-                actor,
+                actor_id: actor,
                 default_namespace,
                 writer_id,
             })
         }
-        ref current @ ProfileConfig::Remote { ref actor, .. } => remote_profile(
+        ref current @ ProfileConfig::Remote {
+            actor_id: ref actor,
+            ..
+        } => remote_profile(
             name,
             Some(current),
             &ProfileCreateRemoteSpec::default(),
@@ -1473,7 +1447,7 @@ mod tests {
                 root: "/tmp/store".to_owned(),
                 key_prefix: None,
             },
-            actor: crate::config::ProfileActorConfig::default(),
+            actor_id: None,
             default_namespace: None,
             writer_id: None,
         };
@@ -1491,7 +1465,7 @@ mod tests {
     fn update_applies_flags_to_matching_provider() {
         let remote = ProfileConfig::Remote {
             server_url: "http://127.0.0.1:9400".to_owned(),
-            actor: crate::config::ProfileActorConfig::default(),
+            actor_id: None,
             default_namespace: None,
             auth_token: None,
             ca_cert_path: None,
@@ -1519,7 +1493,7 @@ mod tests {
                 root: "/tmp/store".to_owned(),
                 key_prefix: None,
             },
-            actor: crate::config::ProfileActorConfig::default(),
+            actor_id: None,
             default_namespace: None,
             writer_id: None,
         };
@@ -1543,7 +1517,7 @@ mod tests {
     fn remote_update_rejects_a_token_over_non_loopback_plaintext_http() {
         let remote = ProfileConfig::Remote {
             server_url: "https://example.internal".to_owned(),
-            actor: crate::config::ProfileActorConfig::default(),
+            actor_id: None,
             default_namespace: None,
             auth_token: None,
             ca_cert_path: None,
@@ -1578,7 +1552,7 @@ mod tests {
                 key_prefix: None,
                 force_path_style: false,
             },
-            actor: crate::config::ProfileActorConfig::default(),
+            actor_id: None,
             default_namespace: None,
             writer_id: None,
         };
@@ -1622,10 +1596,7 @@ mod tests {
     }
 
     fn empty_actor() -> CreateActorSpec {
-        CreateActorSpec {
-            kind: None,
-            id: None,
-        }
+        CreateActorSpec { id: None }
     }
 
     fn update_spec(provider: CreateProviderSpec) -> ProfileUpdateSpec {

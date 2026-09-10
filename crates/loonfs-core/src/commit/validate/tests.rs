@@ -69,7 +69,7 @@ fn planned(ops: Vec<CommitOp>) -> Vec<CommitOp> {
 }
 
 fn test_fingerprint() -> CommitFingerprint {
-    serde_json::from_str(r#""v2:sha256:test""#).expect("fingerprint")
+    serde_json::from_str(r#""v3:sha256:test""#).expect("fingerprint")
 }
 
 fn wal_create_directory(
@@ -265,7 +265,7 @@ async fn build_commit_plan(
     Ok(ValidatedCommitPlan {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id,
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         writer_epoch: context.head.writer_epoch,
         message: None,
         semantic_identity: test_fingerprint(),

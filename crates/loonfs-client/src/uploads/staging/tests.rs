@@ -1021,7 +1021,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         .clone()
         .expect("request saved before submission");
     assert_eq!(Some(&saved.commit_id), options.commit.commit_id.as_ref());
-    assert_eq!(saved.actor, options.commit.actor);
+    assert_eq!(saved.actor_id, options.commit.actor_id);
     assert_eq!(saved.message, options.commit.message);
     assert_eq!(
         saved.operations,

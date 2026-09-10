@@ -1,8 +1,7 @@
 //! Small validated-value constructors used throughout tests.
 
 use loonfs_api::{
-    ActorId, ActorRef, AttributeKey, AttributeValue, ContentId, ContentRef, EffectiveLimit,
-    NamespaceId,
+    ActorId, AttributeKey, AttributeValue, ContentId, ContentRef, EffectiveLimit, NamespaceId,
 };
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -12,8 +11,8 @@ pub fn namespace_id(value: &str) -> NamespaceId {
 }
 
 /// Returns the actor shared by mutation tests.
-pub fn test_actor() -> ActorRef {
-    ActorRef::user(ActorId::parse("test-actor").expect("valid test actor id"))
+pub fn test_actor() -> ActorId {
+    ActorId::parse("test-actor").expect("valid test actor id")
 }
 
 /// Parses an attribute key that is expected to be valid test data.

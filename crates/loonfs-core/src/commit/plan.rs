@@ -5,7 +5,7 @@ use super::CommitFingerprint;
 
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::{
-    ActorRef, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName,
+    ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName,
     InodeId, NameKey, NamespaceId, RevisionNo, WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub struct CommitPlan {
     pub namespace_id: NamespaceId,
     pub commit_id: CommitId,
-    pub actor: ActorRef,
+    pub actor_id: ActorId,
     pub writer_epoch: WriterEpoch,
     pub message: Option<String>,
     pub semantic_identity: CommitFingerprint,
@@ -34,7 +34,7 @@ pub struct CommitPlan {
 pub(crate) struct ValidatedCommitPlan {
     pub(crate) namespace_id: NamespaceId,
     pub(crate) commit_id: CommitId,
-    pub(crate) actor: ActorRef,
+    pub(crate) actor_id: ActorId,
     pub(crate) writer_epoch: WriterEpoch,
     pub(crate) message: Option<String>,
     pub(crate) semantic_identity: CommitFingerprint,
@@ -50,7 +50,7 @@ impl ValidatedCommitPlan {
         let Self {
             namespace_id,
             commit_id,
-            actor,
+            actor_id,
             writer_epoch,
             message,
             semantic_identity,
@@ -61,7 +61,7 @@ impl ValidatedCommitPlan {
         CommitPlan {
             namespace_id,
             commit_id,
-            actor,
+            actor_id,
             writer_epoch,
             message,
             semantic_identity,

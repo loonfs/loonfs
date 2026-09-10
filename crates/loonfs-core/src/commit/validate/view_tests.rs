@@ -29,7 +29,7 @@ fn assert_overlay_matches_replay(committed_seq: ChangeSeq, ops: &[ValidatedOp]) 
     replayed.apply_committed_wal_deltas_mut(
         committed_seq,
         &commit_id(committed_seq),
-        &loonfs_api::ActorRef::loonfs_system(),
+        &loonfs_api::ActorId::loonfs(),
         4_200,
         &materialized_wal_deltas(ops),
     );
@@ -52,7 +52,7 @@ fn overlay_rows(committed_seq: ChangeSeq, ops: &[ValidatedOp]) -> MetadataState 
     for op in ops {
         view.apply_validated_op_mut(
             &commit_id(committed_seq),
-            &loonfs_api::ActorRef::loonfs_system(),
+            &loonfs_api::ActorId::loonfs(),
             4_200,
             op,
         );
@@ -456,14 +456,14 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
     replayed.apply_committed_wal_deltas_mut(
         first_seq,
         &commit_id(first_seq),
-        &loonfs_api::ActorRef::loonfs_system(),
+        &loonfs_api::ActorId::loonfs(),
         4_200,
         &materialized_wal_deltas(&first_ops),
     );
     replayed.apply_committed_wal_deltas_mut(
         second_seq,
         &commit_id(second_seq),
-        &loonfs_api::ActorRef::loonfs_system(),
+        &loonfs_api::ActorId::loonfs(),
         4_200,
         &materialized_wal_deltas(&second_ops),
     );

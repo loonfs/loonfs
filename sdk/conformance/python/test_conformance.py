@@ -21,7 +21,7 @@ import pydantic
 import pytest
 import uvicorn
 from loonfs.server import (
-    ActorRef,
+    ActorId,
     BadRequestError,
     BeginUploadRequest_DirectMultipart,
     BeginUploadRequest_DirectPut,
@@ -116,7 +116,7 @@ class CommitReplayRequest:
     assertions: list[CommitAssertion]
     namespace_id: str
     commit_id: str
-    actor: ActorRef
+    actor_id: ActorId
     message: str
     path: str
 
@@ -131,7 +131,7 @@ class DirectPutRequest:
     namespace_id: str
     path: str
     commit_id: str
-    actor: ActorRef
+    actor_id: ActorId
     content_utf8: str
 
 
@@ -154,7 +154,7 @@ class MultipartRequest:
     namespace_id: str
     path: str
     commit_id: str
-    actor: ActorRef
+    actor_id: ActorId
     part_size_bytes: int
     content_pattern: BytePattern
 
@@ -184,7 +184,7 @@ class DownloadRequest:
     namespace_id: str
     path: str
     commit_id: str
-    actor: ActorRef
+    actor_id: ActorId
     content_utf8: str
 
 
@@ -209,7 +209,7 @@ class EndToEndRequest:
     directory: str
     upload_path: str
     moved_path: str
-    actor: ActorRef
+    actor_id: ActorId
     content_utf8: str
     commit_ids: EndToEndCommitIds
 
@@ -229,7 +229,7 @@ class EndToEndExpected:
 class PaginationRequest:
     namespace_id: str
     directory: str
-    actor: ActorRef
+    actor_id: ActorId
     entry_names: list[str]
     page_size: int
     resume_after_page: int
@@ -248,7 +248,7 @@ class ChildrenByInodeRequest:
     directory: str
     renamed_directory: str
     rename_commit_id: str
-    actor: ActorRef
+    actor_id: ActorId
     entry_names: list[str]
     page_size: int
     rename_after_page: int
@@ -267,7 +267,7 @@ class ChildrenByInodeExpected:
 class InodeMutationsRequest:
     namespace_id: str
     directory: str
-    actor: ActorRef
+    actor_id: ActorId
     path_directory_name: str
     path_file_name: str
     inode_directory_name: str
@@ -293,7 +293,7 @@ class InodeMutationsExpected:
 class SnapshotsRequest:
     namespace_id: str
     directory: str
-    actor: ActorRef
+    actor_id: ActorId
     snapshot_name: str
     replaced_file_name: str
     deleted_file_name: str
@@ -332,7 +332,7 @@ class ProxyRequest:
     namespace_alias: str
     namespace_id: str
     unknown_namespace_alias: str
-    actor: ActorRef
+    actor_id: ActorId
     directory: str
     proxied_path: str
     direct_path: str
@@ -356,7 +356,7 @@ class ChangesRequest:
     namespace_id: str
     path: str
     commit_id: str
-    actor: ActorRef
+    actor_id: ActorId
     after_seq: int
 
 
@@ -509,7 +509,7 @@ def _apply(
     client: LoonFS,
     namespace_id: str,
     commit_id: str,
-    actor: ActorRef,
+    actor_id: ActorId,
     operation: Any,
     *,
     message: str | None = None,
@@ -525,7 +525,7 @@ def _apply(
         extra["assertions"] = assertions
     return client.commits.create(
         namespace_id,
-        actor=actor,
+        actor_id=actor_id,
         commit_id=commit_id,
         operations=[operation],
         **extra,
@@ -629,7 +629,7 @@ def _proxy_create_commit(
     content_token: JsonObject | None = None,
 ) -> CommitResponse:
     body: JsonObject = {
-        "actor": {"id": request.actor.id, "kind": request.actor.kind},
+        "actor_id": request.actor_id,
         "commit_id": commit_id,
         "operations": [operation],
     }
@@ -720,7 +720,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
         harness.client,
         request.namespace_id,
         request.commit_id,
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.path, parents=False),
         message=request.message,
         assertions=request.assertions,
@@ -729,7 +729,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
         harness.client,
         request.namespace_id,
         request.commit_id,
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.path, parents=False),
         message=request.message,
         assertions=request.assertions,
@@ -746,7 +746,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
             harness.client,
             request.namespace_id,
             request.commit_id + "-stale",
-            request.actor,
+            request.actor_id,
             FilesystemOperation_CreateDirectory(path=request.path, parents=False),
             message=request.message,
             assertions=request.assertions,
@@ -760,7 +760,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
             harness.client,
             request.namespace_id,
             request.commit_id,
-            request.actor,
+            request.actor_id,
             FilesystemOperation_CreateDirectory(path=request.path, parents=False),
             message=request.message,
         )
@@ -776,7 +776,7 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
         harness.client,
         request.namespace_id,
         "conf-pagination-directory",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
     for index, name in enumerate(request.entry_names):
@@ -784,7 +784,7 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
             harness.client,
             request.namespace_id,
             f"conf-pagination-entry-{index:02d}",
-            request.actor,
+            request.actor_id,
             FilesystemOperation_CreateDirectory(
                 path=f"{request.directory}/{name}", parents=False
             ),
@@ -841,7 +841,7 @@ def test_children_by_inode(
         harness.client,
         request.namespace_id,
         "conf-children-by-inode-directory",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
     for index, name in reversed(list(enumerate(request.entry_names))):
@@ -849,7 +849,7 @@ def test_children_by_inode(
             harness.client,
             request.namespace_id,
             f"conf-children-by-inode-entry-{index:02d}",
-            request.actor,
+            request.actor_id,
             FilesystemOperation_CreateDirectory(
                 path=f"{request.directory}/{name}", parents=False
             ),
@@ -886,7 +886,7 @@ def test_children_by_inode(
                 harness.client,
                 request.namespace_id,
                 request.rename_commit_id,
-                request.actor,
+                request.actor_id,
                 FilesystemOperation_MovePath(
                     from_path=request.directory,
                     to_path=request.renamed_directory,
@@ -942,14 +942,14 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         client,
         namespace_id,
         "conf-inode-mutations-directory",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
     _apply(
         client,
         namespace_id,
         "conf-inode-mutations-path-directory",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(
             path=child_path(request.path_directory_name), parents=False
         ),
@@ -958,7 +958,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         namespace_id,
         path=child_path(request.path_file_name),
         content=request.content_utf8.encode(),
-        actor=request.actor,
+        actor_id=request.actor_id,
         commit_id="conf-inode-mutations-path-file",
     )
 
@@ -969,7 +969,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         client,
         namespace_id,
         "conf-inode-mutations-inode-directory",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectoryByInode(
             parent_inode_id=parent_inode_id,
             display_name=request.inode_directory_name,
@@ -980,7 +980,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         client,
         namespace_id,
         "conf-inode-mutations-inode-file",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_PutFileByInode(
             parent_inode_id=parent_inode_id,
             display_name=request.inode_file_name,
@@ -1015,7 +1015,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         client,
         namespace_id,
         "conf-inode-mutations-revision",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_PutFileRevisionByInode(
             inode_id=inode_file.inode_id,
             content_ref=staged.content_ref,
@@ -1038,7 +1038,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         client,
         namespace_id,
         "conf-inode-mutations-rename",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_MovePath(
             from_path=child_path(request.inode_file_name),
             to_path=child_path(request.renamed_file_name),
@@ -1050,7 +1050,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
             client,
             namespace_id,
             commit_id,
-            request.actor,
+            request.actor_id,
             FilesystemOperation_MoveByInode(
                 inode_id=inode_file.inode_id,
                 expected_binding_generation=generation,
@@ -1097,7 +1097,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         client,
         namespace_id,
         "conf-inode-mutations-delete",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_DeleteByInode(
             inode_id=inode_file.inode_id,
             expected_binding_generation=moved_entry.binding_generation,
@@ -1121,21 +1121,21 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         client,
         namespace_id,
         "conf-snapshots-create-directory",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
     client.files.upload(
         namespace_id,
         path=child_path(request.replaced_file_name),
         content=request.captured_content_utf8.encode(),
-        actor=request.actor,
+        actor_id=request.actor_id,
         commit_id="conf-snapshots-create-replaced",
     )
     client.files.upload(
         namespace_id,
         path=child_path(request.deleted_file_name),
         content=request.deleted_content_utf8.encode(),
-        actor=request.actor,
+        actor_id=request.actor_id,
         commit_id="conf-snapshots-create-deleted",
     )
 
@@ -1153,7 +1153,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         namespace_id,
         path=child_path(request.replaced_file_name),
         content=request.current_content_utf8.encode(),
-        actor=request.actor,
+        actor_id=request.actor_id,
         commit_id="conf-snapshots-replace-file",
         behavior="replace",
     )
@@ -1161,14 +1161,14 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         namespace_id,
         path=child_path(request.added_file_name),
         content=request.added_content_utf8.encode(),
-        actor=request.actor,
+        actor_id=request.actor_id,
         commit_id="conf-snapshots-add-file",
     )
     _apply(
         client,
         namespace_id,
         "conf-snapshots-delete-file",
-        request.actor,
+        request.actor_id,
         FilesystemOperation_DeletePath(path=child_path(request.deleted_file_name)),
     )
 
@@ -1474,7 +1474,7 @@ def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         harness.client,
         request.namespace_id,
         request.commit_id,
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.path, parents=False),
     )
     assert committed.committed_seq == expected.committed_seq
@@ -1487,8 +1487,7 @@ def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert feed.changes, "change feed is empty"
     change = feed.changes[0]
     assert change.commit_id == request.commit_id
-    assert change.committed_by.id == request.actor.id
-    assert change.committed_by.kind == request.actor.kind
+    assert change.committed_by == request.actor_id
     assert len(change.events) == 1
     assert change.events[0].kind == "directory_created"
 
@@ -1529,7 +1528,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
         harness.client,
         request.namespace_id,
         request.commit_id,
-        request.actor,
+        request.actor_id,
         FilesystemOperation_PutFile(path=request.path, content_ref=content_ref),
         content_tokens=[content_token] if content_token is not None else None,
     )
@@ -1634,7 +1633,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         harness.client,
         request.namespace_id,
         request.commit_id,
-        request.actor,
+        request.actor_id,
         FilesystemOperation_PutFile(
             path=request.path, content_ref=first_content_ref
         ),
@@ -1650,7 +1649,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         request.namespace_id,
         path=helper_path,
         content=payload,
-        actor=request.actor,
+        actor_id=request.actor_id,
         commit_id=request.commit_id + "-helper",
     )
     assert helper_commit.committed_seq > 0
@@ -1694,7 +1693,7 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         request.namespace_id,
         path=request.path,
         content=payload,
-        actor=request.actor,
+        actor_id=request.actor_id,
         commit_id=request.commit_id,
     )
     assert committed.committed_seq == expected.committed_seq
@@ -1726,11 +1725,11 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
     prepared = client.files.prepare_file_stream(namespace_id, content=io.BytesIO(b"original bytes"))
     assert isinstance(prepared, PreparedFileContent)
     inputs = dict(path="/original", prepared=prepared,
-                  actor=ActorRef(kind="user", id="prepared-user"), commit_id="prepared-put")
+                  actor_id="prepared-user", commit_id="prepared-put")
     with pytest.raises(NotFoundError):
         client.files.retrieve(namespace_id, path="/original")
     first = client.files.put_file_prepared(namespace_id, **inputs)
-    _apply(client, namespace_id, "prepared-rename", inputs["actor"],
+    _apply(client, namespace_id, "prepared-rename", inputs["actor_id"],
            FilesystemOperation_MovePath(from_path="/original", to_path="/renamed"))
     assert client.files.put_file_prepared(namespace_id, **inputs) == first
     for changed in [dict(message="changed"), dict(path="/renamed"), dict(behavior="replace")]:
@@ -1756,7 +1755,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         harness.client,
         request.namespace_id,
         request.commit_ids.mkdir,
-        request.actor,
+        request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
     )
     assert mkdir.committed_seq == expected.mkdir_committed_seq
@@ -1766,7 +1765,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         request.namespace_id,
         path=request.upload_path,
         content=payload,
-        actor=request.actor,
+        actor_id=request.actor_id,
         commit_id=request.commit_ids.upload,
     )
     assert upload.committed_seq == expected.upload_committed_seq
@@ -1792,7 +1791,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         harness.client,
         request.namespace_id,
         request.commit_ids.move,
-        request.actor,
+        request.actor_id,
         FilesystemOperation_MovePath(
             from_path=request.upload_path,
             to_path=request.moved_path,
@@ -1822,7 +1821,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         harness.client,
         request.namespace_id,
         request.commit_ids.remove,
-        request.actor,
+        request.actor_id,
         FilesystemOperation_DeletePath(path=request.moved_path),
     )
     assert removed.committed_seq == expected.remove_committed_seq
@@ -1839,8 +1838,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         request.commit_ids.remove,
     ]
     assert all(
-        change.committed_by.id == request.actor.id
-        and change.committed_by.kind == request.actor.kind
+        change.committed_by == request.actor_id
         for change in changes.changes
     )
 

@@ -24,7 +24,7 @@ type StreamUploadInput struct {
 	Path               loonfs.AbsolutePath
 	Content            io.Reader
 	SizeBytes          *int64
-	Actor              *loonfs.ActorRef
+	ActorID            loonfs.ActorID
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
@@ -33,8 +33,8 @@ type StreamUploadInput struct {
 }
 
 func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput) (*UploadResult, error) {
-	if in.Actor == nil || in.CommitID == "" {
-		return nil, fmt.Errorf("transfers: actor and commit id are required")
+	if in.ActorID == "" || in.CommitID == "" {
+		return nil, fmt.Errorf("transfers: actor_id and commit_id are required")
 	}
 	ctx, cancel := transferContext(ctx)
 	defer cancel()
@@ -44,7 +44,7 @@ func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput) (*Uploa
 	}
 	return c.PutFilePrepared(ctx, PreparedUploadInput{
 		NamespaceID: in.NamespaceID, Path: in.Path, Prepared: prepared,
-		Actor: in.Actor, CommitID: in.CommitID, Message: in.Message, Behavior: in.Behavior,
+		ActorID: in.ActorID, CommitID: in.CommitID, Message: in.Message, Behavior: in.Behavior,
 		ExpectedInodeID: in.ExpectedInodeID, ExpectedRevisionNo: in.ExpectedRevisionNo,
 	})
 }

@@ -34,10 +34,10 @@ use loonfs_api::wire::wal::{
     WalCommitPayload, WalDelta, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue,
-    Attributes, ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId,
-    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, MetadataSegmentId,
-    NameKey, NamespaceId, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
+    sha256_digest, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
+    ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
+    ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
+    NamespaceId, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -55,8 +55,8 @@ fn golden_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn actor() -> ActorRef {
-    ActorRef::service(ActorId::parse("loonfs-golden").expect("valid actor id"))
+fn actor() -> ActorId {
+    ActorId::parse("loonfs-golden").expect("valid actor id")
 }
 
 // Regenerate with `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1`:
@@ -293,7 +293,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             commit_id: commit_id(),
             committed_by: actor(),
             semantic_commit_fingerprint: serde_json::from_str(
-                r#""v2:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
+                r#""v3:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
             )
             .expect("fingerprint"),
             committed_at_ms: 4_000,
@@ -1448,21 +1448,6 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
 }
 
 #[test]
-fn wal_decode_rejects_an_additive_field_inside_the_commit_attribution() {
-    let document = wal_document_with_payload_edit(&sample_wal_payload(), |payload| {
-        with_future_field(cbor_entry(payload_commit(payload), "committed_by"));
-    });
-
-    let error = decode_wal_segment_envelope_zstd(&document)
-        .expect_err("the actor rejects a field it does not define");
-    assert!(
-        matches!(&error, EnvelopeCodecError::PayloadDecode(message)
-            if message.contains("unknown field") && message.contains("field_from_the_future")),
-        "unexpected corruption error: {error}"
-    );
-}
-
-#[test]
 fn wal_decode_rejects_a_version_one_commit_without_committed_by() {
     let document = wal_document_with_payload_edit(&sample_wal_payload(), |payload| {
         cbor_map_of(payload_commit(payload))
@@ -2305,7 +2290,7 @@ fn provenance_rows_reject_every_missing_required_field() {
             MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
                 commit_id: commit_id(),
                 committed_by: actor(),
-                semantic_commit_fingerprint: serde_json::from_str(r#""v2:sha256:receipt""#)
+                semantic_commit_fingerprint: serde_json::from_str(r#""v3:sha256:receipt""#)
                     .expect("fingerprint"),
                 committed_seq: ChangeSeq(9),
                 committed_at_ms: 9_000,

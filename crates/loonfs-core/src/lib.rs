@@ -11,7 +11,7 @@
 //! this crate with caching and batching.
 //!
 //! ```no_run
-//! use loonfs_api::{AbsolutePath, ActorId, ActorRef, CommitId, NamespaceId};
+//! use loonfs_api::{AbsolutePath, ActorId, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
 //!     FilesystemOperation, CommitRequest, NamespaceCommitEngine, CommitCandidate,
 //!     PublishTailOptions,
@@ -39,9 +39,7 @@
 //!     &publish_store,
 //!     vec![CommitCandidate::new(CommitRequest::single(
 //!         CommitId::generate(),
-//!         ActorRef::service(
-//!             ActorId::parse("example-service").expect("a static actor ID should parse"),
-//!         ),
+//!         ActorId::parse("example-service").expect("a static actor ID should parse"),
 //!         None,
 //!         FilesystemOperation::CreateDirectory {
 //!             path: AbsolutePath::parse("/plans").expect("a static absolute path should parse"),

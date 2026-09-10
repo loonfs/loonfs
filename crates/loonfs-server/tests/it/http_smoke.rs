@@ -290,7 +290,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     assertions: Vec::new(),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("smoke-write-1").expect("valid commit id")),
                     message: None,
                 },

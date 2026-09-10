@@ -5,10 +5,7 @@
     "namespace_id": "conf-download",
     "path": "/download.txt",
     "commit_id": "conf-download-001",
-    "actor": {
-      "kind": "service",
-      "id": "conformance-download"
-    },
+    "actor_id": "conformance-download",
     "content_utf8": "download grant corpus payload\n"
   },
   "expected": {

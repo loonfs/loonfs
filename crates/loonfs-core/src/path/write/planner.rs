@@ -35,7 +35,7 @@ pub(crate) fn commit_fingerprint(
 ) -> Result<CommitFingerprint> {
     loonfs_api::semantic_commit_fingerprint(
         namespace_id,
-        &request.actor,
+        &request.actor_id,
         request.message.as_deref(),
         &request.operations,
         &request.assertions,
@@ -94,7 +94,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             &mut resolved,
             &mut numbering,
             &request.commit_id,
-            &request.actor,
+            &request.actor_id,
             committed_at_ms,
         )
         .await
@@ -105,7 +105,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     Ok(ValidatedCommitPlan {
         namespace_id: head.namespace_id.clone(),
         commit_id: request.commit_id.clone(),
-        actor: request.actor.clone(),
+        actor_id: request.actor_id.clone(),
         writer_epoch: head.writer_epoch,
         message: request.message.clone(),
         semantic_identity,
@@ -367,7 +367,7 @@ mod tests {
         let batch = CommitRequest {
             assertions: Vec::new(),
             commit_id,
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/docs")],
         };
@@ -407,7 +407,7 @@ mod tests {
         let mut allocation = allocator.begin_candidate();
         let validated = prepare_commit_against_publish_view(
             request,
-            serde_json::from_str(r#""v2:sha256:test""#).expect("fingerprint"),
+            serde_json::from_str(r#""v3:sha256:test""#).expect("fingerprint"),
             view.head(),
             view.projected_metadata_view(),
             &empty_overlay,
@@ -554,7 +554,7 @@ mod tests {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: CommitId::parse("batch-create-then-put").expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     create_dir("/reports"),
@@ -618,7 +618,7 @@ mod tests {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: CommitId::parse("batch-delete-then-create").expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     FilesystemOperation::DeletePath {
@@ -656,7 +656,7 @@ mod tests {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: CommitId::parse("batch-with-a-bad-op").expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     create_dir("/first"),

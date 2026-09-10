@@ -28,9 +28,12 @@ fn profile_create_list_show_delete_work() {
         "http://127.0.0.1:9400",
         "--auth-token",
         "test-token",
+        "--actor-id",
+        "remote-user",
     ]);
     assert_success(&add_remote);
     assert_eq!(json_data(&add_remote)["mode"], "remote");
+    assert_eq!(json_data(&add_remote)["actor_id"], "remote-user");
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_success(&list);
@@ -44,6 +47,7 @@ fn profile_create_list_show_delete_work() {
     assert_success(&show);
     let stdout = stdout_string(&show);
     assert!(stdout.contains("mode = \"remote\""));
+    assert!(stdout.contains("actor_id = \"remote-user\""));
     assert!(stdout.contains("<redacted>"));
     assert!(!stdout.contains("test-token"));
 
@@ -76,11 +80,12 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
         "update",
         "local",
         "default",
-        "--actor-kind",
-        "user",
         "--actor-id",
         "profile-user",
     ]));
+    let profile = harness.run(&["--json", "profile", "show", "default"]);
+    assert_success(&profile);
+    assert_eq!(json_data(&profile)["actor_id"], "profile-user");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
     let payload = harness.temp_dir.path().join("actor.txt");
@@ -89,26 +94,37 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
 
     assert_success(&harness.run(&["put", payload, "/profile.txt"]));
     assert_success(&harness.run_with_env(
-        &[
-            ("LOONFS_ACTOR_KIND", "service"),
-            ("LOONFS_ACTOR_ID", "environment-service"),
-        ],
+        &[("LOONFS_ACTOR_ID", "environment-service")],
         &["put", payload, "/environment.txt"],
     ));
     assert_success(&harness.run_with_env(
-        &[
-            ("LOONFS_ACTOR_KIND", "service"),
-            ("LOONFS_ACTOR_ID", "environment-service"),
-        ],
-        &[
-            "put",
-            payload,
-            "/flag.txt",
-            "--actor-kind",
-            "system",
+        &[("LOONFS_ACTOR_ID", "environment-service")],
+        &["put", payload, "/flag.txt", "--actor-id", "flag-system"],
+    ));
+
+    for (environment, flag, param, source) in [
+        (
+            "environment-service",
+            Some(" bad"),
+            Some("--actor-id"),
             "--actor-id",
-            "flag-system",
-        ],
+        ),
+        (" bad", None, None, "LOONFS_ACTOR_ID"),
+    ] {
+        let mut args = vec!["--json", "put", payload, "/invalid.txt"];
+        if let Some(flag) = flag {
+            args.extend(["--actor-id", flag]);
+        }
+        let output = harness.run_with_env(&[("LOONFS_ACTOR_ID", environment)], &args);
+        assert_failure(&output);
+        let error = json_error(&output);
+        assert_eq!(error["code"], "invalid_request");
+        assert_eq!(error["param"].as_str(), param);
+        assert!(error["message"].as_str().expect("message").contains(source));
+    }
+    assert_success(&harness.run_with_env(
+        &[("LOONFS_ACTOR_ID", "")],
+        &["put", payload, "/empty-environment.txt"],
     ));
 
     let changes = harness.run(&["--json", "changes"]);
@@ -122,9 +138,10 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
     assert_eq!(
         actors,
         [
-            serde_json::json!({"kind":"user","id":"profile-user"}),
-            serde_json::json!({"kind":"service","id":"environment-service"}),
-            serde_json::json!({"kind":"system","id":"flag-system"}),
+            serde_json::json!("profile-user"),
+            serde_json::json!("environment-service"),
+            serde_json::json!("flag-system"),
+            serde_json::json!("profile-user"),
         ]
     );
 }

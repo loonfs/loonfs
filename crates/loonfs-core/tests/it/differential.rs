@@ -3,8 +3,8 @@
 use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    ActorId, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
-    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, CommitId,
+    ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, TombstoneRowAction as CoreTombstoneAction,
@@ -13,9 +13,9 @@ use loonfs_model::metadata::{
     MetadataState as ModelMetadataState, SubtreeTombstoneAction as ModelTombstoneAction,
 };
 
-type NormalizedInodes = Vec<(u64, &'static str, u64, CommitId, ActorRef, u64)>;
+type NormalizedInodes = Vec<(u64, &'static str, u64, CommitId, ActorId, u64)>;
 type NormalizedDirentryBinds = Vec<(u64, String, u64, u64, u32)>;
-type NormalizedRevisions = Vec<(u64, u64, u64, CommitId, u64, ActorRef, u32, ContentId)>;
+type NormalizedRevisions = Vec<(u64, u64, u64, CommitId, u64, ActorId, u32, ContentId)>;
 type NormalizedTombstones = Vec<NormalizedTombstone>;
 type NormalizedAttributes = Vec<NormalizedAttributeRevision>;
 type NormalizedMetadata = (
@@ -37,7 +37,7 @@ struct NormalizedAttributeRevision {
     committed_seq: u64,
     commit_id: CommitId,
     delta_index: u32,
-    updated_by: ActorRef,
+    updated_by: ActorId,
     updated_at_ms: u64,
     entries: Vec<(String, String)>,
 }
@@ -54,7 +54,7 @@ struct NormalizedTombstone {
     tombstone_delta_index: u32,
     commit_id: CommitId,
     deleted_at_ms: u64,
-    deleted_by: ActorRef,
+    deleted_by: ActorId,
     action: NormalizedTombstoneAction,
 }
 
@@ -457,7 +457,7 @@ fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(0),
         &loonfs_api::wire::control::genesis_commit_id(),
-        &ActorRef::loonfs_system(),
+        &ActorId::loonfs(),
         4_000,
         &[WalDelta::CreateInode {
             delta_index: 0,
@@ -477,9 +477,7 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
 
     for (index, deltas) in sequences.iter().enumerate() {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
-        let actor = ActorRef::user(
-            ActorId::parse(format!("scenario-actor-{index}")).expect("valid actor id"),
-        );
+        let actor = ActorId::parse(format!("scenario-actor-{index}")).expect("valid actor id");
         let committed_at_ms = 4_200 + u64::try_from(index).expect("timestamp offset");
         let commit_id =
             CommitId::parse(format!("c_differential_{index}")).expect("valid commit id");
@@ -709,9 +707,9 @@ fn normalize_inode(
     inode_kind: InodeKind,
     created_seq: u64,
     commit_id: CommitId,
-    created_by: ActorRef,
+    created_by: ActorId,
     created_at_ms: u64,
-) -> (u64, &'static str, u64, CommitId, ActorRef, u64) {
+) -> (u64, &'static str, u64, CommitId, ActorId, u64) {
     (
         inode_id,
         match inode_kind {

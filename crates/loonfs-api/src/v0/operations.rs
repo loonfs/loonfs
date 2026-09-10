@@ -632,7 +632,7 @@ pub struct CommitRequest {
     /// Caller-supplied idempotency key for the whole request.
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
-    pub actor: crate::ActorRef,
+    pub actor_id: crate::ActorId,
     /// The caller annotation that forms part of the commit identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -656,13 +656,13 @@ impl CommitRequest {
     /// A request carrying exactly one operation.
     pub fn single(
         commit_id: CommitId,
-        actor: crate::ActorRef,
+        actor: crate::ActorId,
         message: Option<String>,
         operation: FilesystemOperation,
     ) -> Self {
         Self {
             commit_id,
-            actor,
+            actor_id: actor,
             message,
             content_tokens: Vec::new(),
             assertions: Vec::new(),
@@ -687,7 +687,7 @@ pub struct FileRevision {
     /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
     pub committed_at_ms: u64,
     /// Actor responsible for this revision, as supplied by the application.
-    pub committed_by: crate::ActorRef,
+    pub committed_by: crate::ActorId,
     /// Content stored for this revision.
     pub content_ref: ContentRef,
 }
@@ -1354,6 +1354,31 @@ mod tests {
     use crate::ContentId;
 
     #[test]
+    fn commit_actor_requires_a_string() {
+        let request = serde_json::json!({
+            "commit_id": "actor-shape",
+            "actor_id": "usr_8f3c",
+            "operations": [{ "kind": "create_directory", "path": "/docs" }],
+        });
+        serde_json::from_value::<CommitRequest>(request.clone()).expect("string actor");
+        for actor in [
+            serde_json::json!({ "kind": "user", "id": "usr_8f3c" }),
+            serde_json::Value::Null,
+            serde_json::json!(42),
+        ] {
+            let mut invalid = request.clone();
+            invalid["actor_id"] = actor;
+            assert!(serde_json::from_value::<CommitRequest>(invalid).is_err());
+        }
+        let mut missing = request;
+        missing
+            .as_object_mut()
+            .expect("request object")
+            .remove("actor_id");
+        assert!(serde_json::from_value::<CommitRequest>(missing).is_err());
+    }
+
+    #[test]
     fn file_revision_provenance_fields_are_pinned_on_the_wire() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
@@ -1366,7 +1391,7 @@ mod tests {
             committed_seq: ChangeSeq(7),
             commit_id: CommitId::parse("c_revision_owner").expect("commit id"),
             committed_at_ms: 1_752_624_000_000,
-            committed_by: crate::ActorRef::loonfs_system(),
+            committed_by: crate::ActorId::loonfs(),
             content_ref: content_ref.clone(),
         };
 
@@ -1378,7 +1403,7 @@ mod tests {
                 "committed_seq": 7,
                 "commit_id": "c_revision_owner",
                 "committed_at_ms": 1_752_624_000_000_u64,
-                "committed_by": { "kind": "system", "id": "loonfs" },
+                "committed_by": "loonfs",
                 "content_ref": content_ref,
             })
         );
@@ -1887,7 +1912,7 @@ mod tests {
             operation[guard] = serde_json::json!(3);
             serde_json::json!({
                 "commit_id": "guarded-put",
-                "actor": crate::ActorRef::loonfs_system(),
+                "actor_id": crate::ActorId::loonfs(),
                 "operations": [operation]
             })
         };
@@ -1915,7 +1940,7 @@ mod tests {
         let body = |expected_revision_no: u64| {
             serde_json::json!({
                 "commit_id": "bounded-revision-guard",
-                "actor": crate::ActorRef::loonfs_system(),
+                "actor_id": crate::ActorId::loonfs(),
                 "operations": [{
                     "kind": "put_file",
                     "path": "/docs/a.txt",
@@ -1952,7 +1977,7 @@ mod tests {
         let valid = || {
             serde_json::json!({
                 "commit_id": "strict-commit",
-                "actor": crate::ActorRef::loonfs_system(),
+                "actor_id": crate::ActorId::loonfs(),
                 "content_tokens": [{
                     "content_ref": sample_content_ref(),
                     "token": "opaque-proof"

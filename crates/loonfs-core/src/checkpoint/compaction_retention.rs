@@ -352,7 +352,7 @@ mod tests {
             commit_id: loonfs_api::CommitId::parse(format!("c_attribute_{committed_seq}"))
                 .expect("commit id"),
             delta_index: 0,
-            updated_by: loonfs_api::ActorRef::loonfs_system(),
+            updated_by: loonfs_api::ActorId::loonfs(),
             updated_at_ms: 1_000 + committed_seq,
             attributes: Default::default(),
         })
@@ -451,7 +451,7 @@ mod tests {
             deletion_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Listed {
                 deleted_at_ms: 1_000,
-                deleted_by: loonfs_api::ActorRef::loonfs_system(),
+                deleted_by: loonfs_api::ActorId::loonfs(),
                 deleted_direntry: loonfs_api::wire::manifest::DeletedDirentry {
                     parent_inode_id: InodeId(1),
                     name_key: loonfs_api::NameKey::parse("deleted").expect("valid name key"),

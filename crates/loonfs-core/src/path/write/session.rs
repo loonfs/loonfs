@@ -182,7 +182,7 @@ mod tests {
         CommitCandidate::new(CommitRequest {
             assertions: Vec::new(),
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 FilesystemOperation::CreateDirectory {
@@ -213,7 +213,7 @@ mod tests {
     }
 
     fn test_fingerprint() -> CommitFingerprint {
-        serde_json::from_str(r#""v2:sha256:test""#).expect("fingerprint")
+        serde_json::from_str(r#""v3:sha256:test""#).expect("fingerprint")
     }
 
     #[tokio::test]

@@ -621,7 +621,7 @@ fn push_trace_event(
 ) {
     trace.push(SimTraceEvent {
         step: op.step,
-        actor: None,
+        actor_id: None,
         operation: operation.into(),
         object_op: Some(op),
         injected_fault: fault,

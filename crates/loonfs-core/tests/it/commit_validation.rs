@@ -552,7 +552,7 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
             CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("discard-allocation"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![create_dir("/discarded"), delete_path("/missing")],
             },
@@ -802,7 +802,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("reports-batch"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: Some("import reports".to_owned()),
             operations: vec![
                 create_dir("/reports"),
@@ -859,7 +859,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 create_dir("/first"),
@@ -892,7 +892,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/first"), create_dir("/third")],
         },
@@ -916,7 +916,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
     let batch = |commit: &str| CommitRequest {
         assertions: Vec::new(),
         commit_id: commit_id(commit),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         operations: vec![create_dir("/a"), create_dir("/b")],
     };
@@ -935,7 +935,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("replayed-batch"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/a"), create_dir("/c")],
         },
@@ -962,7 +962,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("one-operation"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/docs")],
         },
@@ -989,7 +989,7 @@ async fn operation_order_decides_the_outcome() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("create-then-delete"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/x"), delete_path("/x")],
         },
@@ -1007,7 +1007,7 @@ async fn operation_order_decides_the_outcome() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("seed-y"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![create_dir("/y")],
         },
@@ -1021,7 +1021,7 @@ async fn operation_order_decides_the_outcome() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("delete-then-create"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![delete_path("/y"), create_dir("/y")],
         },
@@ -1080,7 +1080,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("guarded-chain"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 replace(second.content_ref().clone(), 1),
@@ -1100,7 +1100,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
         CommitRequest {
             assertions: Vec::new(),
             commit_id: commit_id("stale-guarded-chain"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
                 replace(second.into_content_ref(), 3),

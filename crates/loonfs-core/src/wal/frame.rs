@@ -68,7 +68,7 @@ pub(crate) struct DecodedWalRecord<'a> {
     pub(crate) seq: ChangeSeq,
     pub(crate) writer_epoch: WriterEpoch,
     pub(crate) commit_id: &'a CommitId,
-    pub(crate) committed_by: &'a loonfs_api::ActorRef,
+    pub(crate) committed_by: &'a loonfs_api::ActorId,
     pub(crate) committed_at_ms: u64,
     pub(crate) semantic_commit_fingerprint: &'a loonfs_api::CommitFingerprint,
     pub(crate) message: Option<&'a str>,

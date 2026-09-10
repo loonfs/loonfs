@@ -821,10 +821,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .as_str()
             .expect("json string")
             .starts_with("c_"));
-        assert_eq!(
-            listed[0]["committed_by"],
-            serde_json::json!({"kind":"service","id":"loonfs-cli"})
-        );
+        assert_eq!(listed[0]["committed_by"], serde_json::json!("loonfs-cli"));
         assert!(!listed[1]["events"]
             .as_array()
             .expect("json array")

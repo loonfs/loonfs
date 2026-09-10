@@ -794,7 +794,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
             CommitRequest {
                 assertions: Vec::new(),
                 commit_id: CommitId::parse("prepared-many-puts").expect("valid commit id"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 operations: vec![
                     put("/first.txt", first.clone()),
@@ -835,7 +835,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     assertions: Vec::new(),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },

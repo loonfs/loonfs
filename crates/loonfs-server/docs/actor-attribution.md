@@ -1,20 +1,15 @@
 # Actor attribution
 
-Every mutation includes an actor, such as
-`{ "kind": "user", "id": "usr_8f3c" }`.
+Every mutation includes an `actor_id`, such as `"usr_8f3c"`.
 
 Your backend authenticates and authorizes the request. LoonFS records the
-actor exactly as sent; it does not verify or manage identities. Use
+`actor_id` exactly as sent; it does not verify or manage identities. Use
 a stable internal ID, not an email address or display name.
+LoonFS does not parse the id. An application that used to rely on the kind
+to tell two identities apart must give them different ids.
 
-- `user`: a known person caused the change. Use this even when a backend or
-  worker carries out the change for that person.
-- `service`: your application, integration, or background job caused the
-  change without acting for a specific user.
-- `system`: platform-level work changed filesystem data.
-
-Use the actor and event fields for attribution. Do not infer the actor from a
-commit message or error message.
+Use `committed_by` to identify the actor for each commit. Do not infer the actor
+from a commit message or error message.
 
 ## Security
 

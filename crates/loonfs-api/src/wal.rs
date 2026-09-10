@@ -157,7 +157,7 @@ pub struct WalCommitPayload {
     /// Caller idempotency key whose reuse must retain the same semantic fingerprint.
     pub commit_id: CommitId,
     /// Actor that committed the change, as supplied by the application.
-    pub committed_by: crate::ActorRef,
+    pub committed_by: crate::ActorId,
     /// Digest of semantic request content used to reject conflicting `commit_id` reuse.
     pub semantic_commit_fingerprint: CommitFingerprint,
     /// Wall-clock stamp from the publishing writer's request context, in

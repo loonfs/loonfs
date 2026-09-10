@@ -270,8 +270,6 @@ fn recursive_transfers_roundtrip_a_tree() {
         "-r",
         tree.to_str().expect("utf-8 path"),
         "/up",
-        "--actor-kind",
-        "user",
         "--actor-id",
         "tree-actor",
     ]);
@@ -287,10 +285,7 @@ fn recursive_transfers_roundtrip_a_tree() {
         .as_array()
         .expect("recursive put changes")
     {
-        assert_eq!(
-            change["committed_by"],
-            serde_json::json!({"kind":"user","id":"tree-actor"})
-        );
+        assert_eq!(change["committed_by"], serde_json::json!("tree-actor"));
     }
     for path in ["/up/top.txt", "/up/docs/nested/b.txt", "/up/empty/inner"] {
         assert_success(&harness.run(&["--json", "stat", path]));
@@ -677,7 +672,7 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
             "namespace_id": "demo",
             "path": "/docs",
             "inode_id": "ino_2",
-            "created_by": { "kind": "system", "id": "loonfs" },
+            "created_by": "loonfs",
             "created_at_ms": 1_752_624_000_000_u64,
             "inode_kind": "dir",
             "head_seq": 20,
@@ -692,7 +687,7 @@ fn recursive_get_surfaces_drift_across_directory_listings() {
                 "namespace_id": "demo",
                 "path": "/docs/sub",
                 "inode_id": "ino_3",
-                "created_by": { "kind": "system", "id": "loonfs" },
+                "created_by": "loonfs",
                 "created_at_ms": 1_752_624_000_000_u64,
                 "inode_kind": "dir",
                 "head_seq": 20,

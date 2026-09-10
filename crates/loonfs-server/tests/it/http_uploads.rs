@@ -304,7 +304,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     let put_request = CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: Some("upload over http".to_owned()),
         content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
@@ -464,7 +464,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         &CommitRequest {
             assertions: Vec::new(),
             commit_id: CommitId::parse("re-minted-receipt-put").expect("valid commit id"),
-            actor: loonfs_test_support::test_actor(),
+            actor_id: loonfs_test_support::test_actor(),
             message: None,
             content_tokens: vec![re_minted],
             operations: vec![FilesystemOperation::PutFile {

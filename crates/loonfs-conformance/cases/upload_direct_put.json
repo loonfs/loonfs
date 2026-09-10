@@ -5,10 +5,7 @@
     "namespace_id": "conf-upload-direct-put",
     "path": "/direct-put.txt",
     "commit_id": "conf-upload-direct-put-001",
-    "actor": {
-      "kind": "service",
-      "id": "conformance-upload"
-    },
+    "actor_id": "conformance-upload",
     "content_utf8": "direct PUT corpus payload\n"
   },
   "expected": {

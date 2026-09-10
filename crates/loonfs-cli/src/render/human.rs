@@ -540,8 +540,8 @@ pub(crate) fn human_path_entry(entry: &loonfs_api::PathEntry) -> String {
     )
 }
 
-fn render_actor(actor: &loonfs_api::ActorRef) -> String {
-    format!("{}:{}", actor.kind.as_str(), actor.id)
+fn render_actor(actor: &loonfs_api::ActorId) -> String {
+    actor.to_string()
 }
 
 /// One attribute value on one line.

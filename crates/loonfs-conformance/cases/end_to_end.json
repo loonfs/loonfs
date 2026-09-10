@@ -6,10 +6,7 @@
     "directory": "/documents",
     "upload_path": "/documents/draft.txt",
     "moved_path": "/documents/final.txt",
-    "actor": {
-      "kind": "user",
-      "id": "conformance-user"
-    },
+    "actor_id": "conformance-user",
     "content_utf8": "end-to-end corpus payload\n",
     "commit_ids": {
       "mkdir": "conf-e2e-mkdir-001",

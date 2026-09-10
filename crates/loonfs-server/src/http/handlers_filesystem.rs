@@ -453,7 +453,7 @@ pub(super) async fn list_file_revisions(
     Ok(Json(response))
 }
 
-/// The server stores the actor from the request; the shared token does not verify it.
+/// The server stores the `actor_id` from the request; the shared token does not verify it.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -486,7 +486,7 @@ pub(super) async fn create_commit(
     let ApiCommitRequest {
         assertions,
         commit_id,
-        actor,
+        actor_id,
         message,
         content_tokens,
         operations,
@@ -525,7 +525,7 @@ pub(super) async fn create_commit(
     let request = CommitRequest {
         assertions,
         commit_id,
-        actor,
+        actor_id,
         message,
         operations,
     };

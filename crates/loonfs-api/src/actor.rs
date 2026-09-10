@@ -4,86 +4,9 @@
 //! name. Profile changes should not change the actor recorded in file history.
 
 use crate::ids::{string_id, validation_error};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MAX_ACTOR_ID_BYTES: usize = 256;
-
-/// Identifies the user, service, or system responsible for a commit.
-///
-/// LoonFS stores this value as provided. It does not authenticate the actor or
-/// look up profile information.
-// This type also appears in request bodies, so it rejects unknown fields in
-// every context. Add new actor kinds instead of new fields. This is not
-// rustdoc because it describes storage behavior, not the public API.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct ActorRef {
-    /// The type of actor.
-    pub kind: ActorKind,
-    /// A stable identifier supplied by the application.
-    pub id: ActorId,
-}
-
-impl ActorRef {
-    /// Creates a user actor.
-    pub fn user(id: ActorId) -> Self {
-        Self {
-            kind: ActorKind::User,
-            id,
-        }
-    }
-
-    /// Creates a service actor.
-    pub fn service(id: ActorId) -> Self {
-        Self {
-            kind: ActorKind::Service,
-            id,
-        }
-    }
-
-    /// Creates a system actor.
-    pub fn system(id: ActorId) -> Self {
-        Self {
-            kind: ActorKind::System,
-            id,
-        }
-    }
-
-    /// Returns the actor used when LoonFS creates a namespace root.
-    pub fn loonfs_system() -> Self {
-        Self::system(ActorId::parse("loonfs").expect("`loonfs` should be a valid actor id"))
-    }
-}
-
-/// The type of actor responsible for a commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum ActorKind {
-    /// A user of the application.
-    User,
-    /// An application, integration, or background worker.
-    ///
-    /// Use [`ActorKind::User`] when a service acts on behalf of a known user.
-    Service,
-    /// System activity that changes filesystem data.
-    ///
-    /// Maintenance that does not create a commit has no actor.
-    System,
-}
-
-impl ActorKind {
-    /// Returns the value used in serialized actor references.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Service => "service",
-            Self::System => "system",
-        }
-    }
-}
 
 validation_error!(
     ActorIdValidationError,
@@ -103,6 +26,13 @@ string_id! {
         description = "Opaque hosting-platform actor id: non-empty, at most 256 UTF-8 bytes, without leading or trailing whitespace or control characters.",
         example = "usr_8f3c"
     )
+}
+
+impl ActorId {
+    /// Returns the id recorded when LoonFS creates a namespace root.
+    pub fn loonfs() -> Self {
+        Self::parse("loonfs").expect("`loonfs` should be a valid actor id")
+    }
 }
 
 fn validate_actor_id(value: &str) -> Result<(), ActorIdValidationError> {
@@ -136,37 +66,7 @@ fn actor_id_error(value: &str, reason: &str) -> ActorIdValidationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActorId, ActorKind, ActorRef};
-
-    #[test]
-    fn actor_kind_serializes_as_snake_case_strings() {
-        for (kind, json) in [
-            (ActorKind::User, r#""user""#),
-            (ActorKind::Service, r#""service""#),
-            (ActorKind::System, r#""system""#),
-        ] {
-            assert_eq!(serde_json::to_string(&kind).expect("serialize kind"), json);
-            assert_eq!(
-                serde_json::from_str::<ActorKind>(json).expect("deserialize kind"),
-                kind
-            );
-        }
-    }
-
-    #[test]
-    fn actor_ref_has_the_exact_wire_shape() {
-        let json = r#"{"kind":"user","id":"usr_8f3c"}"#;
-        let actor = ActorRef::user(ActorId::parse("usr_8f3c").expect("valid actor id"));
-
-        assert_eq!(
-            serde_json::to_string(&actor).expect("serialize actor"),
-            json
-        );
-        assert_eq!(
-            serde_json::from_str::<ActorRef>(json).expect("deserialize actor"),
-            actor
-        );
-    }
+    use super::ActorId;
 
     #[test]
     fn actor_id_rejects_invalid_values_with_stable_reasons() {
@@ -230,14 +130,6 @@ mod tests {
                 .expect_err("257-byte unicode actor id")
                 .reason(),
             "must be 256 bytes or fewer"
-        );
-    }
-
-    #[test]
-    fn actor_ref_rejects_unknown_kind_and_fields() {
-        assert!(serde_json::from_str::<ActorRef>(r#"{"kind":"robot","id":"x"}"#).is_err());
-        assert!(
-            serde_json::from_str::<ActorRef>(r#"{"kind":"user","id":"x","name":"Ada"}"#).is_err()
         );
     }
 }

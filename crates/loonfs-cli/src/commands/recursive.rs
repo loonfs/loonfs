@@ -233,7 +233,7 @@ async fn create_remote_directory(
             &CreateDirectoryOptions {
                 commit: CommitOptions {
                     assertions: Vec::new(),
-                    actor: context.actor().clone(),
+                    actor_id: context.actor().clone(),
                     commit_id: None,
                     message,
                 },
@@ -320,7 +320,7 @@ pub(crate) async fn run_put_tree(
                     behavior,
                     commit: CommitOptions {
                         assertions: Vec::new(),
-                        actor: context.actor().clone(),
+                        actor_id: context.actor().clone(),
                         commit_id: None,
                         message,
                     },
@@ -507,7 +507,7 @@ pub(crate) async fn run_copy_tree(
                         behavior,
                         commit: CommitOptions {
                             assertions: Vec::new(),
-                            actor: context.actor().clone(),
+                            actor_id: context.actor().clone(),
                             commit_id: None,
                             message: message.clone(),
                         },
@@ -616,7 +616,7 @@ mod tests {
             profile_name: "default".to_owned(),
             mode: "embedded".to_owned(),
             namespace: Some(namespace.clone()),
-            actor: Some(loonfs_test_support::test_actor()),
+            actor_id: Some(loonfs_test_support::test_actor()),
             target: ResolvedTarget::Embedded(Box::new(target)),
         };
         context

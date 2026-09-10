@@ -83,7 +83,7 @@ pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
 pub(crate) struct AttributesProjection {
     pub(crate) revision_no: AttributeRevisionNo,
     pub(crate) attributes: Attributes,
-    pub(crate) updated_by: Option<loonfs_api::ActorRef>,
+    pub(crate) updated_by: Option<loonfs_api::ActorId>,
     pub(crate) updated_at_ms: Option<u64>,
 }
 

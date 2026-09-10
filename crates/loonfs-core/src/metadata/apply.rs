@@ -8,14 +8,14 @@ use super::{
 };
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_api::{ActorRef, ChangeSeq, CommitId};
+use loonfs_api::{ActorId, ChangeSeq, CommitId};
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
         commit_id: &CommitId,
-        actor: &ActorRef,
+        actor: &ActorId,
         committed_at_ms: u64,
         deltas: &[WalDelta],
     ) -> MetadataState {
@@ -34,7 +34,7 @@ impl MetadataState {
         &mut self,
         committed_seq: ChangeSeq,
         commit_id: &CommitId,
-        actor: &ActorRef,
+        actor: &ActorId,
         committed_at_ms: u64,
         deltas: &[WalDelta],
     ) {
@@ -60,7 +60,7 @@ impl MetadataState {
         &mut self,
         committed_seq: ChangeSeq,
         commit_id: &CommitId,
-        actor: &ActorRef,
+        actor: &ActorId,
         committed_at_ms: u64,
         delta: &WalDelta,
     ) {

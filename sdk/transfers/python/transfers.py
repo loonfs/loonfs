@@ -13,7 +13,7 @@ from .client import LoonFS as _GeneratedLoonFS
 from .files.client import FilesClient as _GeneratedFilesClient
 from .core.request_options import RequestOptions
 from .types import (
-    ActorRef,
+    ActorId,
     BeginUploadRequest_DirectMultipart,
     BeginUploadRequest_DirectPut,
     BeginUploadRequest_ServiceProxied,
@@ -214,7 +214,7 @@ class FilesClient(_GeneratedFilesClient):
         *,
         path: str,
         content: bytes,
-        actor: ActorRef,
+        actor_id: ActorId,
         commit_id: str,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -229,7 +229,7 @@ class FilesClient(_GeneratedFilesClient):
             path=path,
             content=io.BytesIO(content),
             size_bytes=len(content),
-            actor=actor,
+            actor_id=actor_id,
             commit_id=commit_id,
             message=message,
             behavior=behavior,
@@ -246,7 +246,7 @@ class FilesClient(_GeneratedFilesClient):
         path: str,
         content: typing.BinaryIO,
         size_bytes: int | None = None,
-        actor: ActorRef,
+        actor_id: ActorId,
         commit_id: str,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -267,7 +267,7 @@ class FilesClient(_GeneratedFilesClient):
             namespace_id,
             path=path,
             prepared=prepared,
-            actor=actor,
+            actor_id=actor_id,
             commit_id=commit_id,
             message=message,
             behavior=behavior,
@@ -369,7 +369,7 @@ class FilesClient(_GeneratedFilesClient):
         *,
         path: str,
         prepared: PreparedFileContent,
-        actor: ActorRef,
+        actor_id: ActorId,
         commit_id: str,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -387,7 +387,7 @@ class FilesClient(_GeneratedFilesClient):
             operation_arguments["expected_revision_no"] = expected_revision_no
         operation = FilesystemOperation_PutFile(**operation_arguments)
         commit_arguments = {
-            "actor": actor,
+            "actor_id": actor_id,
             "commit_id": commit_id,
             "operations": [operation],
             "content_tokens": [prepared.content_token]

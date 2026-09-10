@@ -43,12 +43,6 @@ const EXPECTED_CASES = [
 ] as const;
 const CRC64_NVME_TABLE = makeCrc64NvmeTable();
 type JsonObject = Record<string, unknown>;
-type ActorKind = "user" | "service" | "system";
-
-interface ActorValue {
-    id: string;
-    kind: ActorKind;
-}
 
 interface ConformanceCase {
     name: string;
@@ -73,7 +67,7 @@ interface CommitReplayRequest {
     assertions: LoonFS.CommitAssertion[];
     namespace_id: string;
     commit_id: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     message: string;
     path: string;
 }
@@ -85,7 +79,7 @@ interface CommitReplayExpected {
 interface PaginationRequest {
     namespace_id: string;
     directory: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     entry_names: string[];
     page_size: number;
     resume_after_page: number;
@@ -102,7 +96,7 @@ interface ChildrenByInodeRequest {
     directory: string;
     renamed_directory: string;
     rename_commit_id: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     entry_names: string[];
     page_size: number;
     rename_after_page: number;
@@ -119,7 +113,7 @@ interface ChildrenByInodeExpected {
 interface InodeMutationsRequest {
     namespace_id: string;
     directory: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     path_directory_name: string;
     path_file_name: string;
     inode_directory_name: string;
@@ -143,7 +137,7 @@ interface InodeMutationsExpected {
 interface SnapshotsRequest {
     namespace_id: string;
     directory: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     snapshot_name: string;
     replaced_file_name: string;
     deleted_file_name: string;
@@ -173,7 +167,7 @@ interface ChangesRequest {
     namespace_id: string;
     path: string;
     commit_id: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     after_seq: number;
 }
 
@@ -186,7 +180,7 @@ interface DirectPutRequest {
     namespace_id: string;
     path: string;
     commit_id: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     content_utf8: string;
 }
 
@@ -206,7 +200,7 @@ interface MultipartRequest {
     namespace_id: string;
     path: string;
     commit_id: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     part_size_bytes: number;
     content_pattern: BytePattern;
 }
@@ -232,7 +226,7 @@ interface DownloadRequest {
     namespace_id: string;
     path: string;
     commit_id: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     content_utf8: string;
 }
 
@@ -254,7 +248,7 @@ interface EndToEndRequest {
     directory: string;
     upload_path: string;
     moved_path: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     content_utf8: string;
     commit_ids: EndToEndCommitIds;
 }
@@ -279,7 +273,7 @@ interface ProxyRequest {
     namespace_alias: string;
     namespace_id: string;
     unknown_namespace_alias: string;
-    actor: ActorValue;
+    actor_id: LoonFS.ActorId;
     directory: string;
     proxied_path: string;
     direct_path: string;
@@ -345,7 +339,7 @@ const COMMIT_REPLAY_REQUEST_FIELDS = [
     "assertions",
     "namespace_id",
     "commit_id",
-    "actor",
+    "actor_id",
     "message",
     "path",
 ] as const;
@@ -353,7 +347,7 @@ const COMMIT_REPLAY_EXPECTED_FIELDS = ["committed_seq"] as const;
 const PAGINATION_REQUEST_FIELDS = [
     "namespace_id",
     "directory",
-    "actor",
+    "actor_id",
     "entry_names",
     "page_size",
     "resume_after_page",
@@ -364,7 +358,7 @@ const CHILDREN_BY_INODE_REQUEST_FIELDS = [
     "directory",
     "renamed_directory",
     "rename_commit_id",
-    "actor",
+    "actor_id",
     "entry_names",
     "page_size",
     "rename_after_page",
@@ -379,7 +373,7 @@ const CHILDREN_BY_INODE_EXPECTED_FIELDS = [
 const INODE_MUTATIONS_REQUEST_FIELDS = [
     "namespace_id",
     "directory",
-    "actor",
+    "actor_id",
     "path_directory_name",
     "path_file_name",
     "inode_directory_name",
@@ -401,7 +395,7 @@ const INODE_MUTATIONS_EXPECTED_FIELDS = [
 const SNAPSHOTS_REQUEST_FIELDS = [
     "namespace_id",
     "directory",
-    "actor",
+    "actor_id",
     "snapshot_name",
     "replaced_file_name",
     "deleted_file_name",
@@ -429,7 +423,7 @@ const CHANGES_REQUEST_FIELDS = [
     "namespace_id",
     "path",
     "commit_id",
-    "actor",
+    "actor_id",
     "after_seq",
 ] as const;
 const CHANGES_EXPECTED_FIELDS = ["committed_seq", "change_count"] as const;
@@ -437,7 +431,7 @@ const DIRECT_PUT_REQUEST_FIELDS = [
     "namespace_id",
     "path",
     "commit_id",
-    "actor",
+    "actor_id",
     "content_utf8",
 ] as const;
 const DIRECT_PUT_EXPECTED_FIELDS = [
@@ -450,7 +444,7 @@ const MULTIPART_REQUEST_FIELDS = [
     "namespace_id",
     "path",
     "commit_id",
-    "actor",
+    "actor_id",
     "part_size_bytes",
     "content_pattern",
 ] as const;
@@ -467,7 +461,7 @@ const DOWNLOAD_REQUEST_FIELDS = [
     "namespace_id",
     "path",
     "commit_id",
-    "actor",
+    "actor_id",
     "content_utf8",
 ] as const;
 const DOWNLOAD_EXPECTED_FIELDS = ["size_bytes", "checksum_algorithm", "committed_seq"] as const;
@@ -476,7 +470,7 @@ const END_TO_END_REQUEST_FIELDS = [
     "directory",
     "upload_path",
     "moved_path",
-    "actor",
+    "actor_id",
     "content_utf8",
     "commit_ids",
 ] as const;
@@ -493,7 +487,7 @@ const PROXY_REQUEST_FIELDS = [
     "namespace_alias",
     "namespace_id",
     "unknown_namespace_alias",
-    "actor",
+    "actor_id",
     "directory",
     "proxied_path",
     "direct_path",
@@ -702,13 +696,13 @@ function caseNamed(cases: Map<string, ConformanceCase>, name: string): Conforman
 function directoryCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actorId: LoonFS.ActorId,
     path: string,
     message?: string,
 ): LoonFS.CommitRequest {
     const request: LoonFS.CommitRequest = {
         namespace_id: namespaceId,
-        actor,
+        actor_id: actorId,
         commit_id: commitId,
         operations: [{ kind: "create_directory", parents: false, path }],
     };
@@ -721,14 +715,14 @@ function directoryCommit(
 function fileCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actorId: LoonFS.ActorId,
     path: string,
     contentRef: LoonFS.ContentRef,
     contentToken?: LoonFS.ContentToken,
 ): LoonFS.CommitRequest {
     const request: LoonFS.CommitRequest = {
         namespace_id: namespaceId,
-        actor,
+        actor_id: actorId,
         commit_id: commitId,
         operations: [
             {
@@ -747,11 +741,11 @@ function fileCommit(
 
 function namespaceAliasDirectoryCommit(
     commitId: string,
-    actor: ActorValue,
+    actorId: LoonFS.ActorId,
     path: string,
 ): Omit<LoonFS.CommitRequest, "namespace_id"> {
     return {
-        actor,
+        actor_id: actorId,
         commit_id: commitId,
         operations: [{ kind: "create_directory", parents: false, path }],
     };
@@ -759,12 +753,12 @@ function namespaceAliasDirectoryCommit(
 
 function namespaceAliasFileCommit(
     commitId: string,
-    actor: ActorValue,
+    actorId: LoonFS.ActorId,
     path: string,
     completed: CompletedUpload,
 ): Omit<LoonFS.CommitRequest, "namespace_id"> {
     const request: Omit<LoonFS.CommitRequest, "namespace_id"> = {
-        actor,
+        actor_id: actorId,
         commit_id: commitId,
         operations: [
             {
@@ -784,13 +778,13 @@ function namespaceAliasFileCommit(
 function moveCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actorId: LoonFS.ActorId,
     fromPath: string,
     toPath: string,
 ): LoonFS.CommitRequest {
     return {
         namespace_id: namespaceId,
-        actor,
+        actor_id: actorId,
         commit_id: commitId,
         operations: [
             {
@@ -806,12 +800,12 @@ function moveCommit(
 function deleteCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actorId: LoonFS.ActorId,
     path: string,
 ): LoonFS.CommitRequest {
     return {
         namespace_id: namespaceId,
-        actor,
+        actor_id: actorId,
         commit_id: commitId,
         operations: [{ kind: "delete_path", path, behavior: "non_recursive" }],
     };
@@ -868,7 +862,7 @@ async function assertBrowserTransfer(
     namespaceAlias: string,
     path: string,
     bytes: Uint8Array,
-    actor: ActorValue,
+    actorId: LoonFS.ActorId,
     commitId: string,
     label: string,
 ): Promise<void> {
@@ -876,7 +870,7 @@ async function assertBrowserTransfer(
         namespace_alias: namespaceAlias,
         path,
         content: bytes,
-        actor,
+        actor_id: actorId,
         commit_id: commitId,
     });
     assert.ok(committed.committed_seq > 0, `${label} commit sequence is not positive`);
@@ -915,13 +909,13 @@ async function stageContent(
 function stagedCommit(
     namespaceId: string,
     commitId: string,
-    actor: ActorValue,
+    actorId: LoonFS.ActorId,
     operation: LoonFS.FilesystemOperation,
     staged: CompletedUpload,
 ): LoonFS.CommitRequest {
     const request: LoonFS.CommitRequest = {
         namespace_id: namespaceId,
-        actor,
+        actor_id: actorId,
         commit_id: commitId,
         operations: [operation],
     };
@@ -1186,7 +1180,7 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
     const commit = directoryCommit(
         request.namespace_id,
         request.commit_id,
-        request.actor,
+        request.actor_id,
         request.path,
         request.message,
     );
@@ -1216,10 +1210,10 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         namespace_id: request.namespace_id, content: new Blob(["original bytes"]),
     });
     const input = { namespace_id: request.namespace_id, path: "/prepared", prepared,
-        actor: request.actor, commit_id: "prepared-put" };
+        actor_id: request.actor_id, commit_id: "prepared-put" };
     const published = await activeHarness.client.files.putFilePrepared(input);
     await activeHarness.client.commits.create({namespace_id: request.namespace_id,
-        actor: request.actor, commit_id: "prepared-rename",
+        actor_id: request.actor_id, commit_id: "prepared-rename",
         operations: [{kind: "move_path", from_path: input.path, to_path: "/renamed"}],
     });
     assert.deepEqual(await activeHarness.client.files.putFilePrepared(input), published);
@@ -1247,7 +1241,7 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
         directoryCommit(
             request.namespace_id,
             "conf-pagination-directory",
-            request.actor,
+            request.actor_id,
             request.directory,
         ),
     );
@@ -1256,7 +1250,7 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
             directoryCommit(
                 request.namespace_id,
                 `conf-pagination-entry-${index.toString().padStart(2, "0")}`,
-                request.actor,
+                request.actor_id,
                 `${request.directory}/${name}`,
             ),
         );
@@ -1322,7 +1316,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
         directoryCommit(
             request.namespace_id,
             "conf-children-by-inode-directory",
-            request.actor,
+            request.actor_id,
             request.directory,
         ),
     );
@@ -1331,7 +1325,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
             directoryCommit(
                 request.namespace_id,
                 `conf-children-by-inode-entry-${index.toString().padStart(2, "0")}`,
-                request.actor,
+                request.actor_id,
                 `${request.directory}/${name}`,
             ),
         );
@@ -1372,7 +1366,7 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
                 moveCommit(
                     request.namespace_id,
                     request.rename_commit_id,
-                    request.actor,
+                    request.actor_id,
                     request.directory,
                     request.renamed_directory,
                 ),
@@ -1434,7 +1428,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         directoryCommit(
             namespaceId,
             "conf-inode-mutations-directory",
-            request.actor,
+            request.actor_id,
             request.directory,
         ),
     );
@@ -1442,7 +1436,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         directoryCommit(
             namespaceId,
             "conf-inode-mutations-path-directory",
-            request.actor,
+            request.actor_id,
             childPath(request.path_directory_name),
         ),
     );
@@ -1450,7 +1444,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         namespace_id: namespaceId,
         path: childPath(request.path_file_name),
         content: new TextEncoder().encode(request.content_utf8),
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: "conf-inode-mutations-path-file",
     });
 
@@ -1460,7 +1454,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     });
     await client.commits.create({
         namespace_id: namespaceId,
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: "conf-inode-mutations-inode-directory",
         operations: [
             {
@@ -1479,7 +1473,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         stagedCommit(
             namespaceId,
             "conf-inode-mutations-inode-file",
-            request.actor,
+            request.actor_id,
             {
                 kind: "put_file_by_inode",
                 parent_inode_id: parent.inode_id,
@@ -1525,7 +1519,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         stagedCommit(
             namespaceId,
             "conf-inode-mutations-revision",
-            request.actor,
+            request.actor_id,
             {
                 kind: "put_file_revision_by_inode",
                 inode_id: inodeFile.inode_id,
@@ -1551,14 +1545,14 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         moveCommit(
             namespaceId,
             "conf-inode-mutations-rename",
-            request.actor,
+            request.actor_id,
             childPath(request.inode_file_name),
             childPath(request.renamed_file_name),
         ),
     );
     const moveByInode = (commitId: string, generation: string): LoonFS.CommitRequest => ({
         namespace_id: namespaceId,
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: commitId,
         operations: [
             {
@@ -1630,7 +1624,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
 
     const deleted = await client.commits.create({
         namespace_id: namespaceId,
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: "conf-inode-mutations-delete",
         operations: [
             {
@@ -1657,7 +1651,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         directoryCommit(
             namespaceId,
             "conf-snapshots-create-directory",
-            request.actor,
+            request.actor_id,
             request.directory,
         ),
     );
@@ -1665,14 +1659,14 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         namespace_id: namespaceId,
         path: childPath(request.replaced_file_name),
         content: capturedBytes,
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: "conf-snapshots-create-replaced",
     });
     await client.files.upload({
         namespace_id: namespaceId,
         path: childPath(request.deleted_file_name),
         content: new TextEncoder().encode(request.deleted_content_utf8),
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: "conf-snapshots-create-deleted",
     });
 
@@ -1690,7 +1684,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         namespace_id: namespaceId,
         path: childPath(request.replaced_file_name),
         content: currentBytes,
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: "conf-snapshots-replace-file",
         behavior: "replace",
     });
@@ -1698,14 +1692,14 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         namespace_id: namespaceId,
         path: childPath(request.added_file_name),
         content: new TextEncoder().encode(request.added_content_utf8),
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: "conf-snapshots-add-file",
     });
     await client.commits.create(
         deleteCommit(
             namespaceId,
             "conf-snapshots-delete-file",
-            request.actor,
+            request.actor_id,
             childPath(request.deleted_file_name),
         ),
     );
@@ -1905,7 +1899,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             body: JSON.stringify(
                 namespaceAliasDirectoryCommit(
                     request.commit_ids.directory,
-                    request.actor,
+                    request.actor_id,
                     request.directory,
                 ),
             ),
@@ -1956,7 +1950,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             body: JSON.stringify(
                 namespaceAliasFileCommit(
                     request.commit_ids.proxied,
-                    request.actor,
+                    request.actor_id,
                     request.proxied_path,
                     proxiedCompleted,
                 ),
@@ -2001,7 +1995,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             body: JSON.stringify(
                 namespaceAliasFileCommit(
                     request.commit_ids.direct,
-                    request.actor,
+                    request.actor_id,
                     request.direct_path,
                     directCompleted,
                 ),
@@ -2049,7 +2043,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         request.namespace_alias,
         browserPath,
         payload,
-        request.actor,
+        request.actor_id,
         `${request.commit_ids.proxied}-browser`,
         "browser service-proxied transfer",
     );
@@ -2067,7 +2061,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         request.namespace_alias,
         `${request.direct_path}-browser`,
         directPutBytes,
-        request.actor,
+        request.actor_id,
         `${request.commit_ids.direct}-browser`,
         "browser direct-PUT transfer",
     );
@@ -2082,7 +2076,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         request.namespace_alias,
         `${request.direct_path}-browser-multipart`,
         multipartBytes,
-        request.actor,
+        request.actor_id,
         `${request.commit_ids.direct}-browser-multipart`,
         "browser multipart transfer",
     );
@@ -2090,7 +2084,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
 
     const prepared = await browserClient.files.prepareFileStream({namespace_alias: request.namespace_alias, content: new Blob([arrayBuffer(payload)])});
     const input = {namespace_alias: request.namespace_alias, path: "/browser-prepared", prepared,
-        actor: request.actor, commit_id: "browser-prepared-put"};
+        actor_id: request.actor_id, commit_id: "browser-prepared-put"};
     const published = await browserClient.files.putFilePrepared(input);
     assert.deepEqual(await browserClient.files.putFilePrepared(input), published);
     await assert.rejects(browserClient.files.putFilePrepared({...input, message: "changed"}),
@@ -2108,7 +2102,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             namespace_alias: request.unknown_namespace_alias,
             path: `${request.proxied_path}-browser-failure`,
             content: payload,
-            actor: request.actor,
+            actor_id: request.actor_id,
             commit_id: `${request.commit_ids.proxied}-browser-failure`,
         }),
         (error: unknown) => {
@@ -2123,7 +2117,7 @@ conformanceTest("changes", async (activeHarness, testCase) => {
     const [request, expected] = decodeChanges(testCase);
     await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
     const committed = await activeHarness.client.commits.create(
-        directoryCommit(request.namespace_id, request.commit_id, request.actor, request.path),
+        directoryCommit(request.namespace_id, request.commit_id, request.actor_id, request.path),
     );
     assert.equal(committed.committed_seq, expected.committed_seq);
 
@@ -2135,7 +2129,7 @@ conformanceTest("changes", async (activeHarness, testCase) => {
     assert.ok(feed.changes.length > 0, "change feed is empty");
     const change = feed.changes[0];
     assert.equal(change.commit_id, request.commit_id);
-    assert.deepEqual(change.committed_by, request.actor);
+    assert.deepEqual(change.committed_by, request.actor_id);
     assert.equal(change.events.length, 1);
     assert.equal(change.events[0]?.kind, "directory_created");
 });
@@ -2176,7 +2170,7 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
         fileCommit(
             request.namespace_id,
             request.commit_id,
-            request.actor,
+            request.actor_id,
             request.path,
             completed.content_ref,
             completed.content_token,
@@ -2282,7 +2276,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         fileCommit(
             request.namespace_id,
             request.commit_id,
-            request.actor,
+            request.actor_id,
             request.path,
             first.content_ref,
             replayed.content_token,
@@ -2301,7 +2295,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         namespace_id: request.namespace_id,
         path: helperPath,
         content: payload,
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: `${request.commit_id}-helper`,
     });
     assert.ok(helperCommit.committed_seq > 0, "helper multipart put reported no committed_seq");
@@ -2348,7 +2342,7 @@ conformanceTest("download", async (activeHarness, testCase) => {
         namespace_id: request.namespace_id,
         path: request.path,
         content: payload,
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: request.commit_id,
     });
     assert.equal(committed.committed_seq, expected.committed_seq);
@@ -2380,7 +2374,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         directoryCommit(
             request.namespace_id,
             request.commit_ids.mkdir,
-            request.actor,
+            request.actor_id,
             request.directory,
         ),
     );
@@ -2391,7 +2385,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         namespace_id: request.namespace_id,
         path: request.upload_path,
         content: payload,
-        actor: request.actor,
+        actor_id: request.actor_id,
         commit_id: request.commit_ids.upload,
     });
     assert.equal(upload.committed_seq, expected.upload_committed_seq);
@@ -2420,7 +2414,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         moveCommit(
             request.namespace_id,
             request.commit_ids.move,
-            request.actor,
+            request.actor_id,
             request.upload_path,
             request.moved_path,
         ),
@@ -2448,7 +2442,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         deleteCommit(
             request.namespace_id,
             request.commit_ids.remove,
-            request.actor,
+            request.actor_id,
             request.moved_path,
         ),
     );
@@ -2469,7 +2463,7 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         ],
     );
     for (const change of changes.changes) {
-        assert.deepEqual(change.committed_by, request.actor);
+        assert.deepEqual(change.committed_by, request.actor_id);
     }
 
     const trash = await activeHarness.client.trash.list({

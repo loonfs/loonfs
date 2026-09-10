@@ -114,7 +114,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("batch-one"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: Some("import the reports".to_owned()),
                 content_tokens: vec![content_token(&first), content_token(&second)],
                 operations: batch(&first.content_ref, &second.content_ref),
@@ -178,7 +178,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
             CoreCommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("batch-one"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: Some("import the reports".to_owned()),
                 operations: batch(first_prepared.content_ref(), second_prepared.content_ref()),
             },
@@ -236,7 +236,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     let request = || CommitRequest {
         assertions: Vec::new(),
         commit_id: commit_id("returns-its-change"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: Some("the first report".to_owned()),
         content_tokens: vec![content_token(&staged)],
         operations: vec![FilesystemOperation::PutFile {
@@ -345,7 +345,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
     let request = || CommitRequest {
         assertions: Vec::new(),
         commit_id: commit_id("outlives-its-history"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: Some("retired later".to_owned()),
         content_tokens: vec![content_token(&staged)],
         operations: vec![FilesystemOperation::PutFile {
@@ -441,7 +441,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("batch-stops-at-two"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: vec![content_token(&staged)],
                 operations: vec![
@@ -539,7 +539,7 @@ async fn an_empty_operation_list_is_rejected() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("empty-batch"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: Vec::new(),
                 operations: Vec::new(),
@@ -591,7 +591,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("root-alone"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: Vec::new(),
                 operations: vec![FilesystemOperation::CreateDirectory {
@@ -632,7 +632,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("root-in-batch"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: Vec::new(),
                 operations: vec![
@@ -696,7 +696,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("root-unknown-namespace"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: Vec::new(),
                 operations: vec![FilesystemOperation::CreateDirectory {
@@ -738,7 +738,7 @@ async fn a_batch_replays_under_its_commit_id() {
     let batch = |ops: Vec<FilesystemOperation>| CommitRequest {
         assertions: Vec::new(),
         commit_id: commit_id("replayed-batch"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: Some("two directories".to_owned()),
         content_tokens: Vec::new(),
         operations: ops,
@@ -842,7 +842,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
                 CoreCommitRequest {
                     assertions: Vec::new(),
                     commit_id: commit_id("crosses-transports"),
-                    actor: loonfs_test_support::test_actor(),
+                    actor_id: loonfs_test_support::test_actor(),
                     message: Some("shaped once".to_owned()),
                     operations: operations(),
                 },
@@ -890,7 +890,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: Some("shaped once".to_owned()),
                 content_tokens: Vec::new(),
                 operations: wire_operations.clone(),
@@ -919,7 +919,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: Some("shaped once".to_owned()),
                 content_tokens: Vec::new(),
                 operations: wire_operations[..2].to_vec(),
@@ -963,7 +963,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("guarded-create"),
-                actor: loonfs_test_support::test_actor(),
+                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: vec![content_token(&first)],
                 operations: vec![FilesystemOperation::PutFile {
@@ -999,7 +999,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
         put[guard] = serde_json::json!(1);
         serde_json::json!({
             "commit_id": commit,
-            "actor": loonfs_test_support::test_actor(),
+            "actor_id": loonfs_test_support::test_actor(),
             "content_tokens": [content_token(&second)],
             "operations": [put]
         })

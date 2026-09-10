@@ -322,7 +322,7 @@ mod tests {
     };
     use crate::metadata::{InodeRecord, MetadataState};
     use loonfs_api::wire::sst_blocks::DecodedDataBlock;
-    use loonfs_api::{ActorId, ActorRef, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
+    use loonfs_api::{ActorId, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use std::sync::Arc;
 
     fn block(decoded_bytes: usize) -> DecodedMetadataSegmentBlock {
@@ -361,9 +361,9 @@ mod tests {
             head_etag: "stable-head-etag".to_owned(),
         };
         let actors = [
-            ActorRef::user(ActorId::parse("auth0|x").expect("actor id")),
-            ActorRef::service(ActorId::parse("x".repeat(256)).expect("256-byte actor id")),
-            ActorRef::system(ActorId::parse("雪-actor").expect("unicode actor id")),
+            ActorId::parse("auth0|x").expect("actor id"),
+            ActorId::parse("x".repeat(256)).expect("256-byte actor id"),
+            ActorId::parse("雪-actor").expect("unicode actor id"),
         ];
 
         for (offset, actor) in actors.into_iter().enumerate() {

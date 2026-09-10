@@ -181,7 +181,7 @@ impl Client {
         let request = CommitRequest {
             assertions: options.commit.assertions.clone(),
             commit_id: commit_id.clone(),
-            actor: options.commit.actor.clone(),
+            actor_id: options.commit.actor_id.clone(),
             message: options.commit.message.clone(),
             content_tokens: staged.content_token.into_iter().collect(),
             operations: vec![FilesystemOperation::PutFile {
@@ -212,7 +212,7 @@ impl Client {
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor.clone(),
+                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::CreateDirectory {
                     path: spec.absolute_path().clone(),
@@ -234,7 +234,7 @@ impl Client {
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor.clone(),
+                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::DeletePath {
                     path: spec.absolute_path().clone(),
@@ -258,7 +258,7 @@ impl Client {
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor.clone(),
+                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::UpdateAttributes {
                     path: spec.absolute_path().clone(),
@@ -291,7 +291,7 @@ impl Client {
             from.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor.clone(),
+                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::MovePath {
                     from_path: from.absolute_path().clone(),
@@ -326,7 +326,7 @@ impl Client {
             from.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor.clone(),
+                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::CopyPath {
                     from_path: from.absolute_path().clone(),
@@ -358,7 +358,7 @@ impl Client {
             namespace_id,
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor.clone(),
+                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::Undelete {
                     inode_id,
@@ -382,7 +382,7 @@ impl Client {
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor.clone(),
+                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::RestoreRevision {
                     path: spec.absolute_path().clone(),

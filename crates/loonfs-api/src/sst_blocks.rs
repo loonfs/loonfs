@@ -751,7 +751,7 @@ mod tests {
             created_seq: ChangeSeq(inode_id),
             commit_id: crate::CommitId::parse(format!("c_row_{inode_id}"))
                 .expect("valid commit id"),
-            created_by: crate::ActorRef::loonfs_system(),
+            created_by: crate::ActorId::loonfs(),
             created_at_ms: inode_id,
         });
         let key = row.row_key();

@@ -249,7 +249,7 @@ pub struct InodeRecord {
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Actor that created the inode, as supplied by the application.
-    pub created_by: crate::ActorRef,
+    pub created_by: crate::ActorId,
     /// Time the inode was created, in Unix milliseconds.
     pub created_at_ms: u64,
 }
@@ -309,7 +309,7 @@ pub struct RevisionRecord {
     /// The owning commit's observational wall-clock stamp.
     pub committed_at_ms: u64,
     /// Actor that committed this revision, as supplied by the application.
-    pub committed_by: crate::ActorRef,
+    pub committed_by: crate::ActorId,
     /// Delta position that disambiguates the revision within `committed_seq`.
     pub delta_index: u32,
     /// Immutable bytes published by the revision.
@@ -331,7 +331,7 @@ pub struct SubtreeTombstoneRecord {
     /// Wall-clock stamp of the recording commit.
     pub deleted_at_ms: u64,
     /// Actor that recorded this tombstone event.
-    pub deleted_by: crate::ActorRef,
+    pub deleted_by: crate::ActorId,
 }
 
 /// One current-state row for a recoverable deletion.
@@ -376,7 +376,7 @@ pub struct CommitReceiptRecord {
     /// Caller idempotency key whose later reuse is checked against this row.
     pub commit_id: CommitId,
     /// Actor that committed the change, as supplied by the application.
-    pub committed_by: crate::ActorRef,
+    pub committed_by: crate::ActorId,
     /// Digest used to distinguish a safe retry from conflicting ID reuse.
     pub semantic_commit_fingerprint: crate::CommitFingerprint,
     /// Namespace sequence assigned to the accepted commit.
@@ -403,7 +403,7 @@ pub struct AttributesRevisionRecord {
     /// Delta position that disambiguates the revision within `committed_seq`.
     pub delta_index: u32,
     /// Actor that updated the attributes.
-    pub updated_by: crate::ActorRef,
+    pub updated_by: crate::ActorId,
     /// Time of the attribute update, in Unix milliseconds.
     pub updated_at_ms: u64,
     /// The inode's complete attribute map at this revision.
@@ -474,7 +474,7 @@ pub enum ActiveDeletionRowAction {
         /// `committed_at_ms`.
         deleted_at_ms: u64,
         /// Actor responsible for the deletion.
-        deleted_by: crate::ActorRef,
+        deleted_by: crate::ActorId,
         /// The binding the deletion removed, copied from the tombstone event
         /// this row derives from.
         deleted_direntry: DeletedDirentry,
@@ -1400,7 +1400,7 @@ mod tests {
             committed_seq: ChangeSeq(12),
             commit_id: row_commit_id(),
             committed_at_ms: 12_000,
-            committed_by: crate::ActorRef::loonfs_system(),
+            committed_by: crate::ActorId::loonfs(),
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::NamespaceId::parse("demo").expect("namespace id"),
@@ -1425,7 +1425,7 @@ mod tests {
                 committed_seq: ChangeSeq(seq),
                 commit_id: row_commit_id(),
                 delta_index,
-                updated_by: crate::ActorRef::loonfs_system(),
+                updated_by: crate::ActorId::loonfs(),
                 updated_at_ms: 12_000 + seq,
                 attributes: crate::Attributes::default(),
             })
@@ -1478,7 +1478,7 @@ mod tests {
             committed_seq: ChangeSeq(12),
             commit_id: row_commit_id(),
             committed_at_ms: 12_000,
-            committed_by: crate::ActorRef::loonfs_system(),
+            committed_by: crate::ActorId::loonfs(),
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::NamespaceId::parse("demo").expect("namespace id"),
@@ -1495,7 +1495,7 @@ mod tests {
                     inode_kind: crate::InodeKind::File,
                     created_seq: ChangeSeq(3),
                     commit_id: row_commit_id(),
-                    created_by: crate::ActorRef::loonfs_system(),
+                    created_by: crate::ActorId::loonfs(),
                     created_at_ms: 3_000,
                 }),
             ),
@@ -1537,7 +1537,7 @@ mod tests {
                         deleted_direntry: deleted_direntry(),
                     },
                     deleted_at_ms: 12_000,
-                    deleted_by: crate::ActorRef::loonfs_system(),
+                    deleted_by: crate::ActorId::loonfs(),
                 }),
             ),
             (
@@ -1555,7 +1555,7 @@ mod tests {
                 super::MetadataRow::CommitReceipt(super::CommitReceiptRecord {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
-                    committed_by: crate::ActorRef::loonfs_system(),
+                    committed_by: crate::ActorId::loonfs(),
                     semantic_commit_fingerprint: serde_json::from_str(r#""sha256:unused""#)
                         .expect("fingerprint"),
                     committed_seq: ChangeSeq(12),
@@ -1571,7 +1571,7 @@ mod tests {
                     committed_seq: ChangeSeq(12),
                     commit_id: row_commit_id(),
                     delta_index: 0,
-                    updated_by: crate::ActorRef::loonfs_system(),
+                    updated_by: crate::ActorId::loonfs(),
                     updated_at_ms: 12_000,
                     attributes: crate::Attributes::default(),
                 }),
@@ -1594,7 +1594,7 @@ mod tests {
 
     #[test]
     fn attribution_values_never_change_row_or_index_keys() {
-        fn rows(actor: crate::ActorRef) -> Vec<(MetadataRowFamily, super::MetadataRow)> {
+        fn rows(actor: crate::ActorId) -> Vec<(MetadataRowFamily, super::MetadataRow)> {
             vec![
                 (
                     MetadataRowFamily::Inodes,
@@ -1670,11 +1670,9 @@ mod tests {
         }
 
         let actors = [
-            crate::ActorRef::user(crate::ActorId::parse("auth0|x").expect("actor id")),
-            crate::ActorRef::service(
-                crate::ActorId::parse("x".repeat(256)).expect("256-byte actor id"),
-            ),
-            crate::ActorRef::system(crate::ActorId::parse("雪-actor").expect("unicode actor id")),
+            crate::ActorId::parse("auth0|x").expect("actor id"),
+            crate::ActorId::parse("x".repeat(256)).expect("256-byte actor id"),
+            crate::ActorId::parse("雪-actor").expect("unicode actor id"),
         ];
         let baseline = rows(actors[0].clone());
         for actor in actors.into_iter().skip(1) {

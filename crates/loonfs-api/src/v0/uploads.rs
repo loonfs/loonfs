@@ -714,7 +714,7 @@ mod tests {
 
         let request: crate::v0::CommitRequest = serde_json::from_value(serde_json::json!({
             "commit_id": "same-token-shape",
-            "actor": crate::ActorRef::loonfs_system(),
+            "actor_id": crate::ActorId::loonfs(),
             "content_tokens": [completion_token],
             "operations": [{
                 "kind": "create_directory",

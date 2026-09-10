@@ -46,7 +46,7 @@ type UploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
 	Content            []byte
-	Actor              *loonfs.ActorRef
+	ActorID            loonfs.ActorID
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
@@ -67,7 +67,7 @@ type PreparedUploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
 	Prepared           *PreparedFileContent
-	Actor              *loonfs.ActorRef
+	ActorID            loonfs.ActorID
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
@@ -105,7 +105,7 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, err
 	return c.UploadStream(ctx, StreamUploadInput{
 		NamespaceID: in.NamespaceID, Path: in.Path,
 		Content: bytes.NewReader(in.Content), SizeBytes: &size,
-		Actor: in.Actor, CommitID: in.CommitID, Message: in.Message, Behavior: in.Behavior,
+		ActorID: in.ActorID, CommitID: in.CommitID, Message: in.Message, Behavior: in.Behavior,
 		ExpectedInodeID: in.ExpectedInodeID, ExpectedRevisionNo: in.ExpectedRevisionNo,
 	})
 }
@@ -124,8 +124,8 @@ func (c *Client) PutFilePrepared(ctx context.Context, in PreparedUploadInput) (*
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
-	if in.Actor == nil {
-		return nil, fmt.Errorf("transfers: actor is required")
+	if in.ActorID == "" {
+		return nil, fmt.Errorf("transfers: actor_id is required")
 	}
 	if in.CommitID == "" {
 		return nil, fmt.Errorf("transfers: commit id is required")
@@ -144,7 +144,7 @@ func (c *Client) PutFilePrepared(ctx context.Context, in PreparedUploadInput) (*
 	}
 	committed, err := commitsClient.Create(ctx, &loonfs.CommitRequest{
 		NamespaceID:   string(in.NamespaceID),
-		Actor:         in.Actor,
+		ActorID:       in.ActorID,
 		CommitID:      in.CommitID,
 		ContentTokens: contentTokens,
 		Message:       in.Message,

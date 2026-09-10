@@ -16,7 +16,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
-use loonfs_api::{AbsolutePath, ActorId, ActorRef, ChangeSeq, DestinationBehavior};
+use loonfs_api::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_segment_prefix};
@@ -1594,12 +1594,12 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     };
     store.wait_until_blocked().await;
 
-    let actor_a = ActorRef::user(ActorId::parse("user-a").expect("actor id"));
-    let actor_b = ActorRef::service(ActorId::parse("service-b").expect("actor id"));
+    let actor_a = ActorId::parse("user-a").expect("actor id");
+    let actor_b = ActorId::parse("service-b").expect("actor id");
     let mut request_a = create_directory_request("req-a", "alpha");
-    request_a.actor = actor_a.clone();
+    request_a.actor_id = actor_a.clone();
     let mut request_b = create_directory_request("req-b", "beta");
-    request_b.actor = actor_b.clone();
+    request_b.actor_id = actor_b.clone();
     let response_a = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();

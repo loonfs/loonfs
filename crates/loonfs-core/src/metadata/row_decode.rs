@@ -109,7 +109,7 @@ mod tests {
             inode_kind: loonfs_api::InodeKind::File,
             created_seq: ChangeSeq(3),
             commit_id: CommitId::parse("c_foreign_inode").expect("commit id"),
-            created_by: loonfs_api::ActorRef::loonfs_system(),
+            created_by: loonfs_api::ActorId::loonfs(),
             created_at_ms: 4_000,
         })
     }
@@ -147,7 +147,7 @@ mod tests {
                 },
             },
             deleted_at_ms: 4_000,
-            deleted_by: loonfs_api::ActorRef::loonfs_system(),
+            deleted_by: loonfs_api::ActorId::loonfs(),
         });
         assert!(inode_from_manifest_row(tombstone).is_err());
     }

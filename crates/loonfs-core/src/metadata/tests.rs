@@ -6,11 +6,11 @@ use loonfs_api::wire::manifest::DeletedDirentry;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::ContentId;
 use loonfs_api::{
-    AbsolutePath, ActorRef, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
+    AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
     ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
 };
 
-fn actor() -> ActorRef {
+fn actor() -> ActorId {
     loonfs_test_support::test_actor()
 }
 
@@ -76,7 +76,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         seq: ChangeSeq(9),
         commit_id: owning_commit_id.clone(),
         committed_by: actor(),
-        semantic_commit_fingerprint: fingerprint("v2:sha256:test"),
+        semantic_commit_fingerprint: fingerprint("v3:sha256:test"),
         committed_at_ms: 4_200,
         message: None,
         deltas,

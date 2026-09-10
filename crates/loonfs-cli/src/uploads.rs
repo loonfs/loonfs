@@ -304,7 +304,7 @@ impl PutFileJournal for UploadJournal {
 
 fn request_matches_options(request: &CommitRequest, options: &PutFileOptions) -> bool {
     options.commit.commit_id.as_ref() == Some(&request.commit_id)
-        && options.commit.actor == request.actor
+        && options.commit.actor_id == request.actor_id
         && options.commit.message == request.message
         && options.commit.assertions == request.assertions
         && matches!(request.operations.as_slice(), [FilesystemOperation::PutFile {
@@ -388,7 +388,7 @@ mod tests {
         let options = journal.options();
         CommitRequest::single(
             options.commit.commit_id.expect("chosen ID"),
-            options.commit.actor,
+            options.commit.actor_id,
             options.commit.message,
             FilesystemOperation::PutFile {
                 path: loonfs_api::AbsolutePath::parse("/file").expect("path"),

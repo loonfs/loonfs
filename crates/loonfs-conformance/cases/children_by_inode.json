@@ -6,10 +6,7 @@
     "directory": "/entries",
     "renamed_directory": "/renamed-entries",
     "rename_commit_id": "conformance-children-by-inode-rename",
-    "actor": {
-      "kind": "service",
-      "id": "conformance-children-by-inode"
-    },
+    "actor_id": "conformance-children-by-inode",
     "entry_names": [
       "entry-00",
       "entry-01",

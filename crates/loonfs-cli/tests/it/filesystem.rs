@@ -127,7 +127,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     assert_eq!(revision_items.len(), 2);
     assert_eq!(
         revision_items[0]["committed_by"],
-        serde_json::json!({"kind":"service","id":"loonfs-cli"})
+        serde_json::json!("loonfs-cli")
     );
 
     let old_cat = harness.run(&["cat", "--revision", "1", "/docs/hello.txt"]);
@@ -863,10 +863,7 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
         .find(|entry| entry["deleted_binding"]["display_name"] == "Quarterly Report.PDF")
         .expect("report entry");
     assert!(report["deleted_at_ms"].as_u64().expect("ms") > 0);
-    assert_eq!(
-        report["deleted_by"],
-        serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
-    );
+    assert_eq!(report["deleted_by"], serde_json::json!("loonfs-cli"));
 
     // The human table prints the exact undelete invocation.
     let human = harness.run(&["trash"]);
@@ -1782,7 +1779,7 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         );
         assert_eq!(
             json_data(&with_list_json)["attributes_updated_by"],
-            serde_json::json!({ "kind": "service", "id": "loonfs-cli" })
+            serde_json::json!("loonfs-cli")
         );
         assert!(
             json_data(&with_list_json)["attributes_updated_at_ms"]

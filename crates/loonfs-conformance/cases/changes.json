@@ -5,10 +5,7 @@
     "namespace_id": "conf-changes",
     "path": "/changed",
     "commit_id": "conf-changes-001",
-    "actor": {
-      "kind": "service",
-      "id": "conformance-changes"
-    },
+    "actor_id": "conformance-changes",
     "after_seq": 0
   },
   "expected": {

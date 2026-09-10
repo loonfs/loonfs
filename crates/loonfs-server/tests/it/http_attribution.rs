@@ -4,7 +4,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::{ActorId, ActorRef, ChangeSeq, DestinationBehavior, RevisionNo};
+use loonfs_api::{ActorId, ChangeSeq, DestinationBehavior, RevisionNo};
 use loonfs_client::{
     CopyOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions, RestoreRevisionOptions,
     UndeleteOptions, UpdateAttributesOptions,
@@ -13,8 +13,8 @@ use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
-fn actor(id: &str) -> ActorRef {
-    ActorRef::user(ActorId::parse(id).expect("actor id"))
+fn actor(id: &str) -> ActorId {
+    ActorId::parse(id).expect("actor id")
 }
 
 fn path(absolute_path: &str) -> NamespacePath {
@@ -59,7 +59,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .get_path_entry(&path("/"), &Default::default())
         .await
         .expect("stat root");
-    assert_eq!(root.created_by, ActorRef::loonfs_system());
+    assert_eq!(root.created_by, ActorId::loonfs());
     assert!(root.created_at_ms > 0);
     let root_attributes = root.attributes.expect("root attributes");
     assert_eq!(root_attributes.attributes_updated_by, None);

@@ -8,7 +8,7 @@ use loonfs_api::wire::manifest::{
     ContentPublicationRecord, DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord,
     InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
-use loonfs_api::{ActorRef, ChangeSeq, CommitId, InodeId};
+use loonfs_api::{ActorId, ChangeSeq, CommitId, InodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataState {
@@ -120,7 +120,7 @@ pub(crate) struct RecoverableDeletion {
     pub(crate) root_inode_id: InodeId,
     pub(crate) deletion_seq: ChangeSeq,
     pub(crate) deleted_at_ms: u64,
-    pub(crate) deleted_by: ActorRef,
+    pub(crate) deleted_by: ActorId,
     /// The binding the delete removed and an in-place undelete restores.
     pub(crate) deleted_direntry: DeletedDirentry,
 }

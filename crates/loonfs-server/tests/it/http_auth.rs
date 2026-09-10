@@ -93,7 +93,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
     let request = CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("bad-token-put").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: vec![ContentToken {
             content_ref: completed.content_ref.clone(),
@@ -138,7 +138,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
     let request = CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("missing-token-put").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: Vec::new(),
         operations: vec![FilesystemOperation::PutFile {
@@ -180,7 +180,7 @@ async fn path_put_with_valid_content_token_succeeds() {
     let request = CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("valid-token-put").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
@@ -230,7 +230,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
     let mut request = CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("token-replay-put").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
@@ -301,7 +301,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
     let request = CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("irrelevant-token-put").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: vec![content_token(&irrelevant)],
         operations: vec![FilesystemOperation::PutFile {
@@ -344,7 +344,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     let request = CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("put-all-proofs").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: vec![
             content_token(&first),
@@ -376,7 +376,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     let repeat_ref = CommitRequest {
         assertions: Vec::new(),
         commit_id: CommitId::parse("put-repeated-ref").expect("valid commit id"),
-        actor: loonfs_test_support::test_actor(),
+        actor_id: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: vec![content_token(&first)],
         operations: vec![FilesystemOperation::PutFile {
@@ -424,7 +424,7 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
         .expect("create namespace");
     let body = json!({
         "commit_id": "bare-commit-mkdir",
-        "actor": {"kind": "service", "id": "bare-test"},
+        "actor_id": "bare-test",
         "operations": [{
             "kind": "create_directory",
             "path": "/docs"

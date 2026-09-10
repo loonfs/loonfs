@@ -1181,7 +1181,7 @@ mod tests {
             namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             path: loonfs_api::AbsolutePath::parse("/file.bin").expect("absolute path"),
             inode_id: loonfs_api::InodeId(1),
-            created_by: loonfs_api::ActorRef::loonfs_system(),
+            created_by: loonfs_api::ActorId::loonfs(),
             created_at_ms: 1,
             kind: loonfs_api::PathEntryKind::File {
                 revision_no: loonfs_api::RevisionNo(1),
@@ -1191,7 +1191,7 @@ mod tests {
                     loonfs_api::ContentId::generate(),
                     b"",
                 ),
-                revision_committed_by: loonfs_api::ActorRef::loonfs_system(),
+                revision_committed_by: loonfs_api::ActorId::loonfs(),
                 revision_committed_at_ms: 1,
             },
             head_seq: loonfs_api::ChangeSeq(1),

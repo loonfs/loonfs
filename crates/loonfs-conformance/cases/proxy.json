@@ -5,10 +5,7 @@
     "namespace_alias": "team-files",
     "namespace_id": "conf-proxy-namespace",
     "unknown_namespace_alias": "no-such-namespace-alias",
-    "actor": {
-      "kind": "user",
-      "id": "conformance-proxy"
-    },
+    "actor_id": "conformance-proxy",
     "directory": "/proxy-cases",
     "proxied_path": "/proxy-cases/service-proxied.bin",
     "direct_path": "/proxy-cases/direct-put.bin",

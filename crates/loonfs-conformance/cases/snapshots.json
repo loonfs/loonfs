@@ -4,10 +4,7 @@
   "request": {
     "namespace_id": "conf-snapshots",
     "directory": "/tree",
-    "actor": {
-      "kind": "service",
-      "id": "conformance-snapshots"
-    },
+    "actor_id": "conformance-snapshots",
     "snapshot_name": "captured-tree",
     "replaced_file_name": "kept.txt",
     "deleted_file_name": "removed.txt",

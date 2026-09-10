@@ -11,9 +11,9 @@ use loonfs_api::v0::{
     UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
-    ActorRef, ApiError, BindingGeneration, ChangeSeq, Checksum, CommitId, CommitRequest,
-    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation,
-    NamespaceId, PathEntry,
+    ActorId, ApiError, BindingGeneration, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
+    PathEntry,
 };
 use loonfs_client::{
     Client, ClientConfig, ClientError, CommitOptions, CreateDirectoryOptions, DeleteOptions,
@@ -116,13 +116,13 @@ fn display_name(value: &str) -> DisplayName {
     DisplayName::parse(value).expect("valid fixture display name")
 }
 
-fn commit_options(actor: &ActorRef, id: &str) -> CommitOptions {
+fn commit_options(actor: &ActorId, id: &str) -> CommitOptions {
     let mut options = CommitOptions::new(actor.clone());
     options.commit_id = Some(commit_id(id));
     options
 }
 
-fn put_options(actor: &ActorRef, id: &str) -> PutFileOptions {
+fn put_options(actor: &ActorId, id: &str) -> PutFileOptions {
     let mut options = PutFileOptions::new(actor.clone());
     options.commit = commit_options(actor, id);
     options
@@ -185,10 +185,7 @@ async fn run_error_contract(harness: &Harness, case: &Case) {
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
             "commit_id": "conf-error-malformed-body",
-            "actor": {
-                "kind": "service",
-                "id": "conformance-error",
-            },
+            "actor_id": "conformance-error",
             "operations": [{
                 "kind": "create_directory",
                 "path": "relative",
@@ -242,7 +239,7 @@ struct CommitReplayRequest {
     assertions: Vec<loonfs_api::CommitAssertion>,
     namespace_id: String,
     commit_id: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     message: String,
     path: String,
 }
@@ -263,7 +260,7 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
         .expect("create replay namespace");
     let commit = CommitRequest::single(
         commit_id(&request.commit_id),
-        request.actor,
+        request.actor_id,
         Some(request.message),
         FilesystemOperation::CreateDirectory {
             path: loonfs_api::AbsolutePath::parse(&request.path).expect("fixture path"),
@@ -294,7 +291,7 @@ struct DirectPutRequest {
     namespace_id: String,
     path: String,
     commit_id: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     content_utf8: String,
 }
 
@@ -371,7 +368,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
             &spec,
             content_ref.clone(),
             content_token,
-            &put_options(&request.actor, &request.commit_id),
+            &put_options(&request.actor_id, &request.commit_id),
             None,
         )
         .await
@@ -397,7 +394,7 @@ struct MultipartRequest {
     namespace_id: String,
     path: String,
     commit_id: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     part_size_bytes: u64,
     content_pattern: BytePattern,
 }
@@ -526,7 +523,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
             &spec,
             first_content_ref,
             replayed.content_token().cloned(),
-            &put_options(&request.actor, &request.commit_id),
+            &put_options(&request.actor_id, &request.commit_id),
             None,
         )
         .await
@@ -621,7 +618,7 @@ struct DownloadRequest {
     namespace_id: String,
     path: String,
     commit_id: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     content_utf8: String,
 }
 
@@ -647,7 +644,7 @@ async fn run_download(harness: &Harness, case: &Case) {
         .put_file_bytes(
             &spec,
             request.content_utf8.as_bytes(),
-            &put_options(&request.actor, &request.commit_id),
+            &put_options(&request.actor_id, &request.commit_id),
         )
         .await
         .expect("put download file");
@@ -692,7 +689,7 @@ async fn stream_grant(client: &Client, grant: &loonfs_api::v0::BeginDownloadResp
 struct PaginationRequest {
     namespace_id: String,
     directory: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     entry_names: Vec<String>,
     page_size: u32,
     resume_after_page: usize,
@@ -713,7 +710,7 @@ struct ChildrenByInodeRequest {
     directory: String,
     renamed_directory: String,
     rename_commit_id: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     entry_names: Vec<String>,
     page_size: u32,
     rename_after_page: usize,
@@ -742,7 +739,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
         .client
         .create_directory(
             &directory,
-            &CreateDirectoryOptions::new(request.actor.clone()),
+            &CreateDirectoryOptions::new(request.actor_id.clone()),
         )
         .await
         .expect("create children-by-inode directory");
@@ -753,7 +750,10 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
         );
         harness
             .client
-            .create_directory(&path, &CreateDirectoryOptions::new(request.actor.clone()))
+            .create_directory(
+                &path,
+                &CreateDirectoryOptions::new(request.actor_id.clone()),
+            )
             .await
             .expect("create child entry");
     }
@@ -805,8 +805,8 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
         if page_count == request.rename_after_page {
             let renamed_directory =
                 namespace_path(&request.namespace_id, &request.renamed_directory);
-            let mut options = MoveOptions::new(request.actor.clone());
-            options.commit = commit_options(&request.actor, &request.rename_commit_id);
+            let mut options = MoveOptions::new(request.actor_id.clone());
+            options.commit = commit_options(&request.actor_id, &request.rename_commit_id);
             let renamed = harness
                 .client
                 .move_path(&directory, &renamed_directory, &options)
@@ -860,7 +860,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
 struct InodeMutationsRequest {
     namespace_id: String,
     directory: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     path_directory_name: String,
     path_file_name: String,
     inode_directory_name: String,
@@ -902,7 +902,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .client
         .create_directory(
             &directory,
-            &CreateDirectoryOptions::new(request.actor.clone()),
+            &CreateDirectoryOptions::new(request.actor_id.clone()),
         )
         .await
         .expect("create inode-mutations directory");
@@ -910,7 +910,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .client
         .create_directory(
             &child_path(&request.path_directory_name),
-            &CreateDirectoryOptions::new(request.actor.clone()),
+            &CreateDirectoryOptions::new(request.actor_id.clone()),
         )
         .await
         .expect("create path-addressed directory");
@@ -919,7 +919,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .put_file_bytes(
             &child_path(&request.path_file_name),
             request.content_utf8.as_bytes(),
-            &put_options(&request.actor, "conf-inode-mutations-path-file"),
+            &put_options(&request.actor_id, "conf-inode-mutations-path-file"),
         )
         .await
         .expect("put path-addressed file");
@@ -936,7 +936,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &namespace,
             &CommitRequest::single(
                 commit_id("conf-inode-mutations-inode-directory"),
-                request.actor.clone(),
+                request.actor_id.clone(),
                 None,
                 FilesystemOperation::CreateDirectoryByInode {
                     parent_inode_id,
@@ -955,7 +955,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-inode-file"),
-                actor: request.actor.clone(),
+                actor_id: request.actor_id.clone(),
                 message: None,
                 content_tokens,
                 operations: vec![FilesystemOperation::PutFileByInode {
@@ -1031,7 +1031,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &CommitRequest {
                 assertions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-revision"),
-                actor: request.actor.clone(),
+                actor_id: request.actor_id.clone(),
                 message: None,
                 content_tokens,
                 operations: vec![FilesystemOperation::PutFileRevisionByInode {
@@ -1066,8 +1066,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .expect("revised binding generation");
 
     let renamed_file = child_path(&request.renamed_file_name);
-    let mut rename_options = MoveOptions::new(request.actor.clone());
-    rename_options.commit = commit_options(&request.actor, "conf-inode-mutations-rename");
+    let mut rename_options = MoveOptions::new(request.actor_id.clone());
+    rename_options.commit = commit_options(&request.actor_id, "conf-inode-mutations-rename");
     harness
         .client
         .move_path(&file_path, &renamed_file, &rename_options)
@@ -1077,7 +1077,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
     let move_by_inode = |id: &str, expected_binding_generation: BindingGeneration| {
         CommitRequest::single(
             commit_id(id),
-            request.actor.clone(),
+            request.actor_id.clone(),
             None,
             FilesystemOperation::MoveByInode {
                 inode_id: file_inode_id,
@@ -1110,7 +1110,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
             "commit_id": "conf-inode-mutations-malformed-move",
-            "actor": request.actor,
+            "actor_id": request.actor_id,
             "operations": [{
                 "kind": "move_by_inode",
                 "inode_id": file_inode_id,
@@ -1192,7 +1192,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &namespace,
             &CommitRequest::single(
                 commit_id("conf-inode-mutations-delete"),
-                request.actor.clone(),
+                request.actor_id.clone(),
                 None,
                 FilesystemOperation::DeleteByInode {
                     inode_id: file_inode_id,
@@ -1211,7 +1211,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
 struct SnapshotsRequest {
     namespace_id: String,
     directory: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     snapshot_name: String,
     replaced_file_name: String,
     deleted_file_name: String,
@@ -1255,8 +1255,8 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .expect("create snapshots namespace");
 
     let directory = namespace_path(&request.namespace_id, &request.directory);
-    let mut directory_options = CreateDirectoryOptions::new(request.actor.clone());
-    directory_options.commit = commit_options(&request.actor, "conf-snapshots-create-directory");
+    let mut directory_options = CreateDirectoryOptions::new(request.actor_id.clone());
+    directory_options.commit = commit_options(&request.actor_id, "conf-snapshots-create-directory");
     harness
         .client
         .create_directory(&directory, &directory_options)
@@ -1269,7 +1269,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .put_file_bytes(
             &replaced_path,
             request.captured_content_utf8.as_bytes(),
-            &put_options(&request.actor, "conf-snapshots-create-replaced"),
+            &put_options(&request.actor_id, "conf-snapshots-create-replaced"),
         )
         .await
         .expect("create replaced snapshot file");
@@ -1279,7 +1279,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .put_file_bytes(
             &deleted_path,
             request.deleted_content_utf8.as_bytes(),
-            &put_options(&request.actor, "conf-snapshots-create-deleted"),
+            &put_options(&request.actor_id, "conf-snapshots-create-deleted"),
         )
         .await
         .expect("create deleted snapshot file");
@@ -1305,7 +1305,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     assert_eq!(snapshot.head_seq.0, expected.snapshot_head_seq);
     assert!(snapshot.expires_at_ms > snapshot.created_at_ms);
 
-    let mut replace_options = put_options(&request.actor, "conf-snapshots-replace-file");
+    let mut replace_options = put_options(&request.actor_id, "conf-snapshots-replace-file");
     replace_options.behavior = DestinationBehavior::Replace;
     harness
         .client
@@ -1322,12 +1322,12 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .put_file_bytes(
             &added_path,
             request.added_content_utf8.as_bytes(),
-            &put_options(&request.actor, "conf-snapshots-add-file"),
+            &put_options(&request.actor_id, "conf-snapshots-add-file"),
         )
         .await
         .expect("add file after snapshot");
-    let mut delete_options = DeleteOptions::new(request.actor.clone());
-    delete_options.commit = commit_options(&request.actor, "conf-snapshots-delete-file");
+    let mut delete_options = DeleteOptions::new(request.actor_id.clone());
+    delete_options.commit = commit_options(&request.actor_id, "conf-snapshots-delete-file");
     harness
         .client
         .delete_path(&deleted_path, &delete_options)
@@ -1696,7 +1696,7 @@ async fn run_pagination(harness: &Harness, case: &Case) {
         .client
         .create_directory(
             &directory,
-            &CreateDirectoryOptions::new(request.actor.clone()),
+            &CreateDirectoryOptions::new(request.actor_id.clone()),
         )
         .await
         .expect("create pagination directory");
@@ -1707,7 +1707,10 @@ async fn run_pagination(harness: &Harness, case: &Case) {
         );
         harness
             .client
-            .create_directory(&path, &CreateDirectoryOptions::new(request.actor.clone()))
+            .create_directory(
+                &path,
+                &CreateDirectoryOptions::new(request.actor_id.clone()),
+            )
             .await
             .expect("create pagination entry");
     }
@@ -1787,7 +1790,7 @@ struct ChangesRequest {
     namespace_id: String,
     path: String,
     commit_id: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     after_seq: u64,
 }
 
@@ -1808,7 +1811,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
         .expect("create changes namespace");
     let commit = CommitRequest::single(
         commit_id(&request.commit_id),
-        request.actor.clone(),
+        request.actor_id.clone(),
         None,
         FilesystemOperation::CreateDirectory {
             path: loonfs_api::AbsolutePath::parse(&request.path).expect("fixture path"),
@@ -1833,7 +1836,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     assert_eq!(feed.changes.len(), expected.change_count);
     let change = feed.changes.first().expect("one change");
     assert_eq!(change.commit_id.as_str(), request.commit_id);
-    assert_eq!(change.committed_by, request.actor);
+    assert_eq!(change.committed_by, request.actor_id);
     assert!(matches!(
         change.events.as_slice(),
         [FilesystemChange::DirectoryCreated { .. }]
@@ -1847,7 +1850,7 @@ struct EndToEndRequest {
     directory: String,
     upload_path: String,
     moved_path: String,
-    actor: ActorRef,
+    actor_id: ActorId,
     content_utf8: String,
     commit_ids: EndToEndCommitIds,
 }
@@ -1882,8 +1885,8 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .await
         .expect("create end-to-end namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
-    let mut mkdir_options = CreateDirectoryOptions::new(request.actor.clone());
-    mkdir_options.commit = commit_options(&request.actor, &request.commit_ids.mkdir);
+    let mut mkdir_options = CreateDirectoryOptions::new(request.actor_id.clone());
+    mkdir_options.commit = commit_options(&request.actor_id, &request.commit_ids.mkdir);
     let mkdir = harness
         .client
         .create_directory(&directory, &mkdir_options)
@@ -1897,7 +1900,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .put_file_bytes(
             &upload_path,
             request.content_utf8.as_bytes(),
-            &put_options(&request.actor, &request.commit_ids.upload),
+            &put_options(&request.actor_id, &request.commit_ids.upload),
         )
         .await
         .expect("upload end-to-end file");
@@ -1929,8 +1932,8 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     assert_eq!(streamed, request.content_utf8.as_bytes());
 
     let moved_path = namespace_path(&request.namespace_id, &request.moved_path);
-    let mut move_options = MoveOptions::new(request.actor.clone());
-    move_options.commit = commit_options(&request.actor, &request.commit_ids.r#move);
+    let mut move_options = MoveOptions::new(request.actor_id.clone());
+    move_options.commit = commit_options(&request.actor_id, &request.commit_ids.r#move);
     let moved = harness
         .client
         .move_path(&upload_path, &moved_path, &move_options)
@@ -1964,8 +1967,8 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .await
         .expect("list end-to-end changes before remove");
     assert_eq!(changes.changes.len(), expected.change_count - 1);
-    let mut delete_options = DeleteOptions::new(request.actor.clone());
-    delete_options.commit = commit_options(&request.actor, &request.commit_ids.remove);
+    let mut delete_options = DeleteOptions::new(request.actor_id.clone());
+    delete_options.commit = commit_options(&request.actor_id, &request.commit_ids.remove);
     let removed = harness
         .client
         .delete_path(&moved_path, &delete_options)
@@ -1996,7 +1999,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     assert!(changes
         .changes
         .iter()
-        .all(|change| change.committed_by == request.actor));
+        .all(|change| change.committed_by == request.actor_id));
 
     let trash = harness
         .client

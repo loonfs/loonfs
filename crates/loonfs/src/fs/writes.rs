@@ -17,7 +17,7 @@ use std::sync::Arc;
 fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> CommitRequest {
     CommitRequest::single(
         commit.commit_id.clone().unwrap_or_else(CommitId::generate),
-        commit.actor.clone(),
+        commit.actor_id.clone(),
         commit.message.clone(),
         operation,
     )
