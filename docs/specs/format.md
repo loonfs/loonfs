@@ -1478,7 +1478,7 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Default manifest revalidation interval | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
 
-A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_len` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. A reader refuses a WAL segment whose decompressed size exceeds `MAX_WAL_SEGMENT_DECODED_BYTES`, 256 MiB. That is a reader limit, not a format constraint: a valid segment holds one publish batch, which admission keeps far below it. Request admission limits are specified in the [API specification][api-spec].
+A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_len` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. Request admission limits are specified in the [API specification][api-spec].
 
 ## Appendix D. Grep extension format
 

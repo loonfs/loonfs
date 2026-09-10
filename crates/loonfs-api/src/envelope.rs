@@ -49,12 +49,6 @@ pub enum EnvelopeCodecError {
     /// Reports stored bytes that the configured transport codec could not decompress.
     #[error("failed to decompress envelope: {0}")]
     Decompress(String),
-    /// Reports an object whose decompressed size exceeds a reader limit.
-    #[error("decompressed envelope exceeds the reader limit of {limit_bytes} bytes")]
-    DecompressedSizeExceeded {
-        /// Reader limit in bytes that the object exceeded.
-        limit_bytes: u64,
-    },
     /// Reports an unrecognized durable-family discriminator found during the envelope probe.
     #[error("unknown envelope kind `{found}`")]
     UnknownKind {
