@@ -82,6 +82,11 @@ pub enum CoreError {
          this deployment buffers for one read"
     )]
     ContentTooLarge { size_bytes: u64, max_bytes: u64 },
+    #[error("commit is too large for one WAL segment: estimated {estimated_bytes} bytes exceeds `MAX_WAL_SEGMENT_BYTES` ({max_bytes} bytes)")]
+    CommitTooLarge {
+        estimated_bytes: usize,
+        max_bytes: usize,
+    },
     /// The request contains more items than one batch may read. No items were
     /// read; split the request into smaller batches.
     #[error("asked for {requested} items, over the {max} one batch answers")]
@@ -419,7 +424,9 @@ impl CoreError {
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::InodeNotFound(_) => ErrorCode::InodeNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
-            CoreError::ContentTooLarge { .. } => ErrorCode::ContentTooLarge,
+            CoreError::ContentTooLarge { .. } | CoreError::CommitTooLarge { .. } => {
+                ErrorCode::ContentTooLarge
+            }
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
@@ -504,6 +511,7 @@ impl CoreError {
             | CoreError::InodeNotFound(_)
             | CoreError::RevisionNotFound { .. }
             | CoreError::ContentTooLarge { .. }
+            | CoreError::CommitTooLarge { .. }
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }

@@ -55,6 +55,7 @@ mod binding_generation;
 mod block_cache;
 mod checkpoint;
 mod commit_engine;
+mod commit_wal_size;
 mod context;
 mod control_object;
 mod control_update;

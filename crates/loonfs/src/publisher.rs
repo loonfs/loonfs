@@ -21,6 +21,7 @@ use crate::{
 use admission::{AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
+use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::cache::Recency;
 use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
@@ -384,14 +385,14 @@ impl PublisherRegistry {
         namespace_id: NamespaceId,
         candidate: CommitCandidate,
     ) -> CommitResult {
-        let estimated_bytes = candidate.estimated_retained_bytes()?;
+        let candidate = PreparedCandidate::new(candidate)?;
         let permit = {
             let mut state = self.shared.lock_state();
             let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
             publisher.check_admission(&publisher.lock_state())?;
             self.shared
                 .admission
-                .acquire(&namespace_id, estimated_bytes)?
+                .acquire_candidate(&namespace_id, &candidate)?
         };
         submit_with_admission(
             &namespace_id,
@@ -876,6 +877,23 @@ enum WorkItem {
 
 struct OpenBatch {
     candidates: Vec<BatchCandidate>,
+    wal_record_bytes_upper_bound: usize,
+}
+
+struct PreparedCandidate {
+    candidate: CommitCandidate,
+    estimated_retained_bytes: usize,
+    wal_record_bytes_upper_bound: usize,
+}
+
+impl PreparedCandidate {
+    fn new(candidate: CommitCandidate) -> Result<Self, CoreError> {
+        Ok(Self {
+            estimated_retained_bytes: candidate.estimated_retained_bytes()?,
+            wal_record_bytes_upper_bound: candidate.wal_record_bytes_upper_bound(),
+            candidate,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -899,7 +917,7 @@ enum SubmissionAdmission {
     /// conflict; if it fails, this submission gets another turn at admission.
     Contended {
         primary_identity: CommitFingerprint,
-        candidate: Box<CommitCandidate>,
+        candidate: Box<PreparedCandidate>,
         semantic_identity: CommitFingerprint,
     },
 }
@@ -1028,10 +1046,11 @@ impl NamespacePublisher {
     /// still owns and publishes the request.
     #[cfg(test)]
     async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
+        let candidate = PreparedCandidate::new(candidate)?;
         self.check_admission(&self.lock_state())?;
         let permit = self
             .admission
-            .acquire(&self.namespace_id, candidate.estimated_retained_bytes()?)?;
+            .acquire_candidate(&self.namespace_id, &candidate)?;
         submit_with_admission(
             &self.namespace_id,
             candidate,
@@ -1052,7 +1071,7 @@ impl NamespacePublisher {
     fn admit(
         &self,
         commit_id: CommitId,
-        candidate: CommitCandidate,
+        candidate: PreparedCandidate,
         semantic_identity: CommitFingerprint,
         waiter: AdmittedWaiter<CommitResult>,
         enqueued_at: u64,
@@ -1076,18 +1095,30 @@ impl NamespacePublisher {
         }
 
         let queued = queued_candidates(&state);
+        let wal_record_bytes_upper_bound = candidate.wal_record_bytes_upper_bound;
         let candidate = BatchCandidate {
             commit_id: commit_id.clone(),
-            candidate,
+            candidate: candidate.candidate,
             enqueued_at,
         };
         match state.queue.back_mut() {
-            // Coalesce with the tail batch, unless a delete sits at the tail:
-            // work admitted after a delete opens a batch behind it and
-            // publishes only if that delete fails.
-            Some(WorkItem::Batch(batch)) => batch.candidates.push(candidate),
+            // Coalesce with the tail batch while its bound stays under the
+            // segment limit. A delete at the tail, or a full batch, opens a
+            // batch behind it; work behind a delete publishes only if that
+            // delete fails.
+            Some(WorkItem::Batch(batch))
+                if batch
+                    .wal_record_bytes_upper_bound
+                    .saturating_add(wal_record_bytes_upper_bound)
+                    .saturating_add(WAL_SEGMENT_OVERHEAD_BYTES)
+                    <= MAX_WAL_SEGMENT_BYTES =>
+            {
+                batch.wal_record_bytes_upper_bound += wal_record_bytes_upper_bound;
+                batch.candidates.push(candidate);
+            }
             _ => state.queue.push_back(WorkItem::Batch(OpenBatch {
                 candidates: vec![candidate],
+                wal_record_bytes_upper_bound,
             })),
         }
         self.trace_enqueue(queued + 1, "new");
@@ -1748,23 +1779,23 @@ impl NamespacePublisher {
 
 async fn submit_with_admission<F>(
     namespace_id: &NamespaceId,
-    candidate: CommitCandidate,
+    candidate: PreparedCandidate,
     timer: &dyn MonotonicTimer,
     mut admit: F,
 ) -> CommitResult
 where
     F: FnMut(
         CommitId,
-        CommitCandidate,
+        PreparedCandidate,
         CommitFingerprint,
         oneshot::Sender<CommitResult>,
         u64,
     ) -> Result<SubmissionAdmission, CoreError>,
 {
-    let commit_id = candidate.commit_id().clone();
+    let commit_id = candidate.candidate.commit_id().clone();
     let enqueued_at = timer.monotonic_now_ms();
     let mut candidate = candidate;
-    let mut semantic_identity = candidate.semantic_identity(namespace_id)?;
+    let mut semantic_identity = candidate.candidate.semantic_identity(namespace_id)?;
     for _ in 0..CONTENTION_RETRY_LIMIT {
         let (sender, receiver) = oneshot::channel();
         let admission = admit(

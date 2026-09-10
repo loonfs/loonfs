@@ -9,6 +9,13 @@ pub(crate) async fn publish_wal<S: ObjectStore + ?Sized>(
     store: &S,
     wal: &PreparedWalSegment,
 ) -> crate::error::Result<()> {
+    if wal.document_len() > loonfs_api::wire::wal::MAX_WAL_SEGMENT_BYTES {
+        return Err(crate::error::CoreError::Internal(format!(
+            "WAL document is {} bytes, over `MAX_WAL_SEGMENT_BYTES` ({})",
+            wal.document_len(),
+            loonfs_api::wire::wal::MAX_WAL_SEGMENT_BYTES,
+        )));
+    }
     let payload = wal.envelope().payload();
     let object_key = loonfs_objectstore::keys::wal_segment(&payload.namespace_id, &payload.wal_no);
     store.put_if_absent(&object_key, Bytes::copy_from_slice(wal.as_bytes())).await

@@ -23,6 +23,94 @@ fn owner_update() -> UpdateAttributesOptions {
 }
 
 #[test]
+fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
+    use loonfs_api::{Attributes, MAX_ATTRIBUTES_TOTAL_BYTES};
+    use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use std::sync::Arc;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("large-attributes");
+    let counted = Arc::new(RecordingStore::new(
+        store(temp_dir.path()),
+        KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(&namespace_id)),
+    ));
+    let fs = open_runtime(counted.clone(), "large-attributes-writer");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/file",
+        b"content",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("file");
+    let mut set = BTreeMap::from([(attribute_key("x"), attribute_text("a"))]);
+    let mut remaining = MAX_ATTRIBUTES_TOTAL_BYTES - 2 - 16 * 3;
+    for index in 0..16 {
+        let length = remaining.min(loonfs_api::MAX_ATTRIBUTE_VALUE_BYTES);
+        remaining -= length;
+        set.insert(
+            attribute_key(&format!("k{index:02}")),
+            attribute_text(&"v".repeat(length)),
+        );
+    }
+    let initial = Attributes::new(set.clone()).expect("full map");
+    assert_eq!(initial.logical_bytes(), MAX_ATTRIBUTES_TOTAL_BYTES);
+    let mut options = UpdateAttributesOptions::new(loonfs_test_support::test_actor());
+    options.set = set;
+    block_on(fs.writer.update_attributes(&namespace_id, "/file", options))
+        .expect("fill attributes");
+    counted.reset();
+    let response = fs
+        .mutate_blocking(
+            &namespace_id,
+            CommitRequest {
+                commit_id: CommitId::parse("maximum-attribute-updates").expect("commit"),
+                actor_id: loonfs_test_support::test_actor(),
+                message: None,
+                assertions: Vec::new(),
+                operations: (0..loonfs::publish::MAX_COMMIT_OPERATIONS)
+                    .map(|index| FilesystemOperation::UpdateAttributes {
+                        path: parse_mutation_path("/file").expect("path"),
+                        set: BTreeMap::from([(
+                            attribute_key("x"),
+                            attribute_text(if index % 2 == 0 { "b" } else { "c" }),
+                        )]),
+                        remove: Vec::new(),
+                        expected_inode_id: None,
+                        expected_attributes_revision_no: None,
+                    })
+                    .collect(),
+            },
+        )
+        .expect("maximum updates fit one segment");
+    assert_eq!(counted.count(OperationClass::PutCreateIfAbsent), 1);
+    block_on(fs.writer.shutdown()).expect("shutdown");
+    drop(fs);
+    counted.reset();
+    let reopened = open_runtime(counted.clone(), "fresh-reader-runtime");
+    let entry = reopened
+        .stat_path_blocking(&namespace_id, "/file")
+        .expect("reopen committed state");
+    let projection = entry.attributes.expect("attributes");
+    assert_eq!(
+        projection.attributes_revision_no,
+        AttributeRevisionNo(1 + loonfs::publish::MAX_COMMIT_OPERATIONS as u64)
+    );
+    assert_eq!(
+        projection.attributes.get(&attribute_key("x")),
+        Some(&attribute_text("c"))
+    );
+    assert_eq!(
+        projection.attributes.logical_bytes(),
+        MAX_ATTRIBUTES_TOTAL_BYTES
+    );
+    assert!(response.committed_seq.0 > 0);
+    assert!(counted.count(OperationClass::Read) > 0);
+    assert_eq!(counted.count(OperationClass::Put), 0);
+}
+
+#[test]
 fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-parity");

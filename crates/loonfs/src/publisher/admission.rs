@@ -1,7 +1,8 @@
 //! One budget for every caller whose publication has been admitted.
 
-use super::{CoreError, NamespaceId};
+use super::{CoreError, NamespaceId, PreparedCandidate};
 use crate::PublicationLimits;
+use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Semaphore};
@@ -42,6 +43,23 @@ impl PublicationAdmission {
     #[cfg(test)]
     pub(super) fn used_requests(&self) -> usize {
         self.lock_usage().total.requests
+    }
+
+    pub(super) fn acquire_candidate(
+        self: &Arc<Self>,
+        namespace_id: &NamespaceId,
+        candidate: &PreparedCandidate,
+    ) -> Result<Arc<AdmissionPermit>, CoreError> {
+        let document_bytes = candidate
+            .wal_record_bytes_upper_bound
+            .saturating_add(WAL_SEGMENT_OVERHEAD_BYTES);
+        if document_bytes > MAX_WAL_SEGMENT_BYTES {
+            return Err(CoreError::CommitTooLarge {
+                estimated_bytes: document_bytes,
+                max_bytes: MAX_WAL_SEGMENT_BYTES,
+            });
+        }
+        self.acquire(namespace_id, candidate.estimated_retained_bytes)
     }
 
     pub(super) fn acquire(
@@ -138,6 +156,31 @@ mod tests {
 
     fn limit(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("nonzero test limit")
+    }
+
+    #[test]
+    fn an_oversized_commit_is_rejected_before_queue_capacity() {
+        let budget = Arc::new(PublicationAdmission::new(PublicationLimits {
+            max_requests: limit(1),
+            ..PublicationLimits::default()
+        }));
+        let namespace_id = NamespaceId::parse("large").expect("namespace");
+        let permit = budget.acquire(&namespace_id, 0).expect("fill queue");
+        let mut candidate = PreparedCandidate::new(CommitCandidate::new(
+            super::super::tests::create_directory_request("large", "large"),
+        ))
+        .expect("prepare");
+        candidate.wal_record_bytes_upper_bound =
+            MAX_WAL_SEGMENT_BYTES - WAL_SEGMENT_OVERHEAD_BYTES + 1;
+        let error = budget
+            .acquire_candidate(&namespace_id, &candidate)
+            .err()
+            .expect("oversized commit");
+        assert_eq!(error.code(), loonfs_api::ErrorCode::ContentTooLarge);
+        assert!(error.to_string().contains("too large for one WAL segment"));
+        assert!(error.to_string().contains("MAX_WAL_SEGMENT_BYTES"));
+        drop(permit);
+        assert_eq!(budget.used_requests(), 0);
     }
 
     #[test]

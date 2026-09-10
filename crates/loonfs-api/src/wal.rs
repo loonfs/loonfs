@@ -10,12 +10,48 @@ use crate::{
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 
 /// Version 1: a zstd-compressed CBOR envelope document carrying the payload
 /// as an opaque CBOR byte string. `payload_checksum` covers exactly those
 /// bytes, and delta/precondition tags use the snake_case names the format
 /// spec fixes ("Standard mutation operations" and "Preconditions").
 pub const WAL_FORMAT_VERSION: u32 = 1;
+
+/// Largest decompressed WAL document allowed by [Appendix A.5](../../../docs/specs/format.md#a5-wal-records).
+pub const MAX_WAL_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
+
+/// Upper bound for the document and payload fields outside commit records.
+pub const WAL_SEGMENT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
+    ("kind", cbor_string_bytes("namespace_wal_segment".len())),
+    ("format_version", 5),
+    ("payload_checksum", cbor_string_bytes(64)),
+    ("payload", 9),
+]) + cbor_map_bytes(&[
+    ("namespace_id", cbor_string_bytes(crate::ids::MAX_ID_BYTES)),
+    ("wal_no", 9),
+    ("next_inode_id", 9),
+    ("writer_epoch", 9),
+    ("base_head_seq", 9),
+    ("start_seq", 9),
+    ("end_seq", 9),
+    ("records", 9),
+]);
+
+// CBOR strings, collections, and u64 values need at most nine header bytes.
+const fn cbor_string_bytes(length: usize) -> usize {
+    9 + length
+}
+
+const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
+    let mut bytes = 9;
+    let mut index = 0;
+    while index < fields.len() {
+        bytes += cbor_string_bytes(fields[index].0.len()) + fields[index].1;
+        index += 1;
+    }
+    bytes
+}
 
 /// Identifies the durable payload family carried by a WAL envelope.
 ///
@@ -246,6 +282,7 @@ pub fn encode_wal_segment_envelope_zstd(
             payload,
         },
         bytes,
+        document_len: encoded.len(),
     })
 }
 
@@ -257,8 +294,23 @@ pub fn encode_wal_segment_envelope_zstd(
 pub fn decode_wal_segment_envelope_zstd(
     bytes: &[u8],
 ) -> Result<WalSegmentEnvelope, EnvelopeCodecError> {
-    let decompressed = zstd::stream::decode_all(bytes)
+    decode_wal_segment_envelope_zstd_with_limit(bytes, MAX_WAL_SEGMENT_BYTES)
+}
+
+fn decode_wal_segment_envelope_zstd_with_limit(
+    bytes: &[u8],
+    limit: usize,
+) -> Result<WalSegmentEnvelope, EnvelopeCodecError> {
+    let decoder = zstd::stream::read::Decoder::new(bytes)
         .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
+    let mut decompressed = Vec::new();
+    decoder
+        .take(limit as u64 + 1)
+        .read_to_end(&mut decompressed)
+        .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
+    if decompressed.len() > limit {
+        return Err(EnvelopeCodecError::WalSegmentTooLarge { max_bytes: limit });
+    }
     let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     let expected_kind = WalEnvelopeKind::NamespaceWalSegment;
@@ -275,4 +327,45 @@ pub fn decode_wal_segment_envelope_zstd(
         payload_checksum: document.payload_checksum,
         payload,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoder_accepts_the_limit_and_rejects_the_next_byte_before_decoding() {
+        let encoded = encode_wal_segment_envelope_zstd(WalSegmentPayload {
+            namespace_id: NamespaceId::parse("bounded").expect("namespace"),
+            wal_no: WalNo(1),
+            next_inode_id: InodeId(2),
+            writer_epoch: WriterEpoch(1),
+            base_head_seq: ChangeSeq(0),
+            start_seq: ChangeSeq(0),
+            end_seq: ChangeSeq(0),
+            records: Vec::new(),
+        })
+        .expect("encode");
+        let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");
+        assert_eq!(document.len(), encoded.document_len());
+        assert!(document.len() <= WAL_SEGMENT_OVERHEAD_BYTES);
+        assert_eq!(
+            &decode_wal_segment_envelope_zstd_with_limit(encoded.as_bytes(), document.len())
+                .expect("at limit"),
+            encoded.envelope(),
+        );
+        assert!(matches!(
+            decode_wal_segment_envelope_zstd_with_limit(encoded.as_bytes(), document.len() - 1),
+            Err(EnvelopeCodecError::WalSegmentTooLarge { max_bytes }) if max_bytes == document.len() - 1
+        ));
+        let invalid = zstd::stream::encode_all(&[0xff; 64][..], 0).expect("compress");
+        assert!(matches!(
+            decode_wal_segment_envelope_zstd_with_limit(&invalid, 8),
+            Err(EnvelopeCodecError::WalSegmentTooLarge { max_bytes: 8 })
+        ));
+        assert!(matches!(
+            decode_wal_segment_envelope_zstd_with_limit(&invalid, 64),
+            Err(EnvelopeCodecError::EnvelopeDecode(_))
+        ));
+    }
 }

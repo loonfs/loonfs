@@ -458,6 +458,7 @@ one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same commit and fingerprint alike.
 A `message` is at most 4096 bytes; a longer one is rejected with
 `invalid_request` before planning, on every transport.
+A commit whose estimated encoded log would exceed one WAL segment is rejected with `content_too_large` before publication; the message names the [WAL document limit](format.md#a5-wal-records).
 The semantic fingerprint includes assertions in request order. Changing an
 assertion or its position changes identity. The fingerprint input always
 includes the assertion list, including an empty list.
