@@ -20,7 +20,6 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     let (head, retention_floor_seq) = load_head_and_retention_floor(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let head = head.state;
     crate::namespace::control::ensure_namespace_live(&head)?;
 
     if after_seq < retention_floor_seq {

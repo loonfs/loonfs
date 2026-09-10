@@ -394,7 +394,7 @@ mod tests {
         let head = load_namespace_head_control(&store, &namespace_id)
             .await
             .expect("load head");
-        assert_eq!(head.state.next_inode_id, InodeId(5));
+        assert_eq!(head.next_inode_id, InodeId(5));
     }
 
     #[tokio::test]
@@ -421,7 +421,7 @@ mod tests {
         let head = load_namespace_head_control(&store, &namespace_id)
             .await
             .expect("load head");
-        assert_eq!(head.state.next_inode_id, InodeId(3));
+        assert_eq!(head.next_inode_id, InodeId(3));
     }
 
     #[tokio::test]
@@ -448,7 +448,7 @@ mod tests {
         let head = load_namespace_head_control(&store, &namespace_id)
             .await
             .expect("load head");
-        assert_eq!(head.state.next_inode_id, InodeId(3));
+        assert_eq!(head.next_inode_id, InodeId(3));
     }
 
     #[tokio::test]

@@ -57,7 +57,7 @@ pub(super) async fn gc_namespace_with_timer<S: ObjectStore + ?Sized>(
                 continue;
             }
             verify_retired_owner(store, namespace_id, &live, context.now_ms).await?;
-            if let Some(basis) = &snapshot.head.state.fork_basis {
+            if let Some(basis) = &snapshot.head.fork_basis {
                 if release_source_checkpoint(store, basis).await? {
                     report.released_checkpoints.fork += 1;
                     report.deleted.checkpoint_records += 1;
@@ -120,10 +120,9 @@ async fn verify_retired_owner<S: ObjectStore + ?Sized>(
     let head = load_head_object(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    if !head.state.status.is_deleted()
-        || head.state.content_store_id != live.content_store_id
+    if !head.status.is_deleted()
+        || head.content_store_id != live.content_store_id
         || head
-            .state
             .status
             .reclaim_after_ms()
             .is_none_or(|deadline| now_ms < deadline)
@@ -144,7 +143,7 @@ async fn retirement_report<S: ObjectStore + ?Sized>(
     let head = load_head_object(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    report.reclaim_after_ms = head.state.status.reclaim_after_ms();
+    report.reclaim_after_ms = head.status.reclaim_after_ms();
     if let Some(deadline) = report
         .reclaim_after_ms
         .filter(|deadline| *deadline > now_ms)

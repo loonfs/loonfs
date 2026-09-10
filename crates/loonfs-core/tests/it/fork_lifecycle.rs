@@ -302,7 +302,6 @@ async fn head_state<S: ObjectStore + ?Sized>(
     load_namespace_head_control(store, namespace_id)
         .await
         .expect("load head")
-        .state
 }
 
 async fn namespace_keys<S: ObjectStore + ?Sized>(
@@ -344,7 +343,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
             .list_prefix("content-stores/")
             .await
             .expect("list content stores"),
-        vec![content_store(&head.state.content_store_id)],
+        vec![content_store(&head.content_store_id)],
     );
 
     let root_entry = resolve_path(&store, &namespace_id, "/")
@@ -1382,7 +1381,7 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     let head = load_namespace_head_control(&store, &source)
         .await
         .expect("head");
-    let descriptor_key = content_store(&head.state.content_store_id);
+    let descriptor_key = content_store(&head.content_store_id);
     let puts: Vec<_> = store
         .take()
         .into_iter()
@@ -1414,8 +1413,8 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     assert_eq!(
         descriptor,
         ContentStoreState {
-            content_store_id: head.state.content_store_id.clone(),
-            created_at_ms: head.state.created_at_ms,
+            content_store_id: head.content_store_id.clone(),
+            created_at_ms: head.created_at_ms,
         }
     );
     store.reset();
@@ -1448,10 +1447,7 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     let fork_head = load_namespace_head_control(&store, &target)
         .await
         .expect("fork head");
-    assert_eq!(
-        fork_head.state.content_store_id,
-        descriptor.content_store_id
-    );
+    assert_eq!(fork_head.content_store_id, descriptor.content_store_id);
     for allow_existing in [false, true] {
         store.reset();
         let result = bootstrap_namespace(&store, &source, &context, allow_existing).await;

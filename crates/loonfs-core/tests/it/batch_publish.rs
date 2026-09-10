@@ -373,7 +373,7 @@ async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
         .expect("load head");
-    assert_eq!(head.state.seq, ChangeSeq(1));
+    assert_eq!(head.seq, ChangeSeq(1));
 }
 
 #[tokio::test]
@@ -480,7 +480,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
         .expect("load head");
-    assert_eq!(head.state.seq, ChangeSeq(0));
+    assert_eq!(head.seq, ChangeSeq(0));
 
     let retried =
         publish_namespace_commits_batch(&store, &namespace_id, batch().await, &context).await;
@@ -1196,7 +1196,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
         .expect("load head");
-    assert_eq!(head.state.seq, ChangeSeq(8));
+    assert_eq!(head.seq, ChangeSeq(8));
 }
 
 #[tokio::test]
@@ -1419,7 +1419,7 @@ async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
         let head = load_namespace_head_control(&store, &namespace_id)
             .await
             .expect("head");
-        assert_eq!(head.state.next_inode_id, InodeId(next_seq + 2));
+        assert_eq!(head.next_inode_id, InodeId(next_seq + 2));
         let replay = submit_commit(&store, &namespace_id, first.clone(), &context)
             .await
             .expect("receipt resolves despite stale assertion");
@@ -1548,7 +1548,7 @@ async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_a
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
         .expect("head");
-    assert_eq!(head.state.next_inode_id, InodeId(6));
+    assert_eq!(head.next_inode_id, InodeId(6));
 }
 
 #[tokio::test]

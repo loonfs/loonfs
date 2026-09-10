@@ -22,7 +22,6 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         manifest_no: context.basis.manifest_no(),
         manifest_head_seq: context.basis.manifest().manifest_head_seq,
         head_seq: state.seq,
-        head_etag: context.head_etag.clone(),
     };
     let mut rows = None;
     let mut last_record = None;

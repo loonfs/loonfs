@@ -2279,7 +2279,7 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_fu
             .await
             .expect("head");
         assert_eq!(
-            head.state.status.reclaim_after_ms(),
+            head.status.reclaim_after_ms(),
             landed.then_some(GRACE_MS * 2)
         );
         if !landed {

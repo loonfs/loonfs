@@ -98,8 +98,7 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
 ) {
     let current = loonfs_core::control::load_namespace_head_control(store, namespace_id)
         .await
-        .expect("tail state")
-        .state;
+        .expect("tail state");
     append_wal_segments(
         store,
         namespace_id,
@@ -221,8 +220,7 @@ fn standalone_reader_builds_without_writer_identity() {
         let store = LocalFsStore::new(temp_dir.path()).expect("open store for inspection");
         let head = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
             .await
-            .expect("load head")
-            .state;
+            .expect("load head");
         let writer_block = head.writer.expect("head records the writer that published");
         assert_eq!(writer_block.writer_id.as_str(), "handle-test-writer");
         assert_ne!(

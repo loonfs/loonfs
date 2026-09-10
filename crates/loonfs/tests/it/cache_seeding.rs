@@ -76,6 +76,70 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     );
 }
 
+#[tokio::test]
+async fn reader_reuses_published_projection_after_control_cache_eviction() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    let other_namespace_id = NamespaceId::parse("other").expect("namespace id");
+    let object_store = store(temp_dir.path());
+    let fs = open_runtime_with_async(object_store.clone(), "shared-projection", |builder| {
+        builder.runtime_cache(RuntimeCacheConfig {
+            max_cached_namespaces: 1,
+            ..Default::default()
+        })
+    })
+    .await;
+    for namespace_id in [&namespace_id, &other_namespace_id] {
+        fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+    }
+    fs.writer
+        .create_directory(
+            &namespace_id,
+            "/docs",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("publish directory");
+    fs.writer.publisher().drain().await.expect("finish hints");
+    let head = loonfs_core::control::load_namespace_head_control(&object_store, &namespace_id)
+        .await
+        .expect("published head");
+    loonfs_core::control::raise_namespace_hint(&object_store, &namespace_id, head.wal_no, None)
+        .await
+        .expect("raise hint without changing visible state");
+
+    // Content preparation evicts the control entry without inserting a projection.
+    fs.writer
+        .prepare_file_bytes(&other_namespace_id, b"pending")
+        .await
+        .expect("evict published control entry");
+    let before_read = fs.runtime_cache_stats();
+    assert_eq!(before_read.wal_tail_projection_cache_inserts, 1);
+    assert_eq!(before_read.wal_tail_projection_cache_evictions, 0);
+
+    let entry = fs
+        .reader
+        .get_path_entry(&namespace_id, "/docs", Default::default())
+        .await
+        .expect("read published directory");
+    assert_eq!(entry.head_seq, ChangeSeq(1));
+    let after_read = fs.runtime_cache_stats();
+    assert_eq!(
+        after_read.wal_tail_projection_cache_hits,
+        before_read.wal_tail_projection_cache_hits + 1
+    );
+    assert_eq!(
+        after_read.wal_tail_projection_cache_misses,
+        before_read.wal_tail_projection_cache_misses
+    );
+    assert_eq!(
+        after_read.wal_tail_projection_cache_inserts,
+        before_read.wal_tail_projection_cache_inserts
+    );
+}
+
 #[test]
 fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
     let temp_dir = tempdir().expect("tempdir");

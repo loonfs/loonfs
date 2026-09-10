@@ -88,8 +88,6 @@ impl FsMaintenance {
         engine
     }
 
-    /// Drops this runtime's read caches; publisher projections reload because
-    /// their keys include the head etag and basis identity.
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
         self.core.invalidate_namespace_read_cache(namespace_id);
     }

@@ -24,7 +24,6 @@ async fn writer_epoch(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
     loonfs::control::load_namespace_head_control(store, namespace_id)
         .await
         .expect("load namespace head")
-        .state
         .writer_epoch
         .0
 }

@@ -38,7 +38,6 @@ use tracing::Instrument;
 #[derive(Clone, Copy)]
 pub(crate) struct ReadLoadContext<'anchor, 'cache> {
     head: &'anchor NamespaceReadState,
-    head_etag: &'anchor str,
     /// Basis pinned together with the head when the snapshot was taken. The
     /// live root may have moved past a pinned head; the pinned pair stays
     /// consistent (any manifest at or below the pinned seq serves it, with
@@ -51,14 +50,12 @@ pub(crate) struct ReadLoadContext<'anchor, 'cache> {
 impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
     pub(crate) fn pinned_head(
         head: &'anchor NamespaceReadState,
-        head_etag: &'anchor str,
         basis: &'anchor MetadataBasis,
         segment_cache: Option<&'cache MetadataSegmentCache>,
         tail_cache: Option<&'cache WalTailProjectionCache>,
     ) -> Self {
         Self {
             head,
-            head_etag,
             basis,
             segment_cache,
             tail_cache,
@@ -101,13 +98,7 @@ pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
     let loaded = load_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(MetadataProjectionLoadError::LoadHead)?;
-    let context = ReadLoadContext::pinned_head(
-        &loaded.head.state,
-        &loaded.head.etag,
-        &loaded.basis,
-        None,
-        None,
-    );
+    let context = ReadLoadContext::pinned_head(&loaded.head, &loaded.basis, None, None);
     load_metadata_view(store, namespace_id, context).await
 }
 
@@ -197,7 +188,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             manifest_no,
             manifest_head_seq: manifest_head.seq,
             head_seq: head.seq,
-            head_etag: load_context.head_etag.to_owned(),
         };
         if let Some(cache) = load_context.tail_cache {
             if let Some(wal_tail_rows) = cache.get(&cache_key) {
@@ -1005,8 +995,7 @@ mod tests {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
         let head = load_head_object(&store, &namespace_id)
             .await
-            .expect("state")
-            .state;
+            .expect("state");
         let key = loonfs_objectstore::keys::wal_segment(&namespace_id, &head.wal_no);
         let bytes = store.get(&key, None).await.expect("WAL").expect("exists");
         let mut payload = loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(&bytes)
