@@ -2,6 +2,7 @@
 
 use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::error::{CoreError, Result};
+use crate::limits::RETIREMENT_PUBLICATION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::control_snapshot::load_control_snapshot;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -69,13 +70,13 @@ pub(crate) async fn retire_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     grace_window_ms: u64,
-    fresh_now_ms: u64,
+    call_now_ms: u64,
+    timer: &dyn MonotonicTimer,
+    started_ms: u64,
 ) -> Result<u64> {
-    let deadline = fresh_now_ms
+    let deadline = call_now_ms
         .checked_add(grace_window_ms.max(crate::limits::NAMESPACE_RETIREMENT_GRACE_MS))
         .ok_or_else(|| CoreError::Internal("namespace retirement deadline overflow".to_owned()))?;
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
     loop {
         let current = load_current_manifest(store, namespace_id).await?;
         let mut payload = current.envelope.payload().clone();
@@ -95,13 +96,20 @@ pub(crate) async fn retire_namespace<S: ObjectStore + ?Sized>(
             reclaim_after_ms: Some(deadline),
         };
         let manifest = encode_manifest(payload)?;
+        let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
+        if elapsed_ms > RETIREMENT_PUBLICATION_BUDGET_MS {
+            return Err(CoreError::MetadataPublicationBudgetExceeded {
+                elapsed_ms,
+                budget_ms: RETIREMENT_PUBLICATION_BUDGET_MS,
+            });
+        }
         if matches!(
             publish_manifest(
                 store,
                 namespace_id,
                 &manifest,
                 Some(current.state.manifest.manifest_no),
-                &timer,
+                timer,
                 started_ms
             )
             .await?,

@@ -48,6 +48,7 @@ use loonfs_test_support::stores::{
 use tempfile::tempdir;
 
 mod many_pins;
+mod retirement;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
 

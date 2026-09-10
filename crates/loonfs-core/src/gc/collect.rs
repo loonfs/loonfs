@@ -11,6 +11,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_head_object;
 use crate::namespace::control_snapshot::load_control_snapshot;
+use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use futures::StreamExt;
 use loonfs_api::{GcResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -21,6 +22,18 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     config: &GcConfig,
     context: &MutationContext,
 ) -> Result<GcResponse> {
+    let timer = StdMonotonicTimer::default();
+    gc_namespace_with_timer(store, namespace_id, config, context, &timer).await
+}
+
+pub(super) async fn gc_namespace_with_timer<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    config: &GcConfig,
+    context: &MutationContext,
+    timer: &dyn MonotonicTimer,
+) -> Result<GcResponse> {
+    let started_ms = timer.monotonic_now_ms();
     config.validate()?;
     let mut report = GcResponse::empty(namespace_id.clone());
     let snapshot = match load_control_snapshot(store, namespace_id).await {
@@ -89,6 +102,8 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
                 namespace_id,
                 config.grace_window_ms,
                 context.now_ms,
+                timer,
+                started_ms,
             )
             .await?;
         }

@@ -102,6 +102,64 @@ fn directory_request(commit_id: &str, name: &str) -> CommitRequest {
 }
 
 #[tokio::test]
+async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
+    use crate::content::{mint_content_token, verify_content_token};
+    use crate::namespace::catalog::load_namespace_catalog_entry;
+    use loonfs_test_support::clock::ManualClock;
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("deleted-token").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let clock = Arc::new(ManualClock::new(1_000));
+    let setup = context(clock.now_ms());
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let (completed, _) = completed_upload(&store, &namespace_id, &setup).await;
+    let catalog = load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("catalog");
+    let token = mint_content_token(
+        "secret",
+        completed.receipt.as_ref().expect("completed receipt"),
+        clock.now_ms(),
+    )
+    .expect("mint token");
+    clock.advance_ms(1);
+    delete_namespace(
+        &store,
+        &namespace_id,
+        Default::default(),
+        &context(clock.now_ms()),
+    )
+    .await
+    .expect("delete");
+    let prepared = verify_content_token("secret", &catalog, &token, clock.now_ms())
+        .expect("token remains valid");
+    let candidate =
+        CommitCandidate::prepared(put_candidate(&completed).request().clone(), vec![prepared]);
+    let mut engine = NamespaceCommitEngine::new(namespace_id).monotonic_timer(clock.clone());
+    store.reset();
+    let result = engine
+        .publish_batch(
+            &store,
+            vec![candidate],
+            &context(clock.now_ms()),
+            &PublishTailOptions::default(),
+        )
+        .await;
+    assert!(matches!(
+        &result.results[..],
+        [Err(CoreError::NamespaceDeleted { .. })]
+    ));
+    assert_eq!(store.counts().puts, 0);
+}
+
+#[tokio::test]
 async fn content_reclaimed_during_view_load_cannot_be_published() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
