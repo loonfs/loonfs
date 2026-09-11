@@ -92,6 +92,7 @@ either way.
     "commit.max_external_content_refs": 4096,
     "commit.max_message_bytes": 4096,
     "commit.max_operations": 4096,
+    "commit.max_preconditions": 1024,
     "maintenance.gc.min_grace_window_ms": 1230000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
@@ -135,6 +136,7 @@ Registered limit keys:
 | `upload.max_concurrent` | How many service-proxied upload streams the deployment accepts at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content streams the deployment serves at once; requests past the cap answer `server_busy`. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
+| `commit.max_preconditions` | Most precondition entries one commit may carry, counting entries rather than resources. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_content_tokens` | Most content tokens one commit may carry. Over-limit requests answer `invalid_request` before planning. |
 | `commit.max_external_content_refs` | Most distinct external content refs one commit's operations may name. Over-limit requests answer `invalid_request` before planning. |
 | `commit.max_message_bytes` | Largest accepted commit `message`, in bytes; a longer one answers `invalid_request` before planning. |
@@ -239,13 +241,13 @@ The codes that populate it:
 | --- | --- |
 | `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the current manifest records a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `writer_capacity_exceeded` | `max_writer_sessions` |
-| `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `assertion_index` for a failed request assertion |
-| `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `assertion_index` for a failed request assertion |
-| `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `assertion_index` for a failed request assertion |
-| `binding_generation_mismatch` | `inode_id` and `assertion_index` for a failed request assertion |
+| `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `precondition_index` for a failed request precondition |
+| `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `precondition_index` for a failed request precondition |
+| `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
+| `binding_generation_mismatch` | `inode_id` and `precondition_index` for a failed request precondition |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
-| `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `assertion_index` identifies a failed request assertion. |
+| `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `precondition_index` identifies a failed request precondition. |
 | `not_deleted` | `inode_id`, plus `expected_deletion_seq` and `actual_deletion_seq` when a live deletion exists at a different generation |
 | any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
 | any commit carrying more than one operation | `operation_index` — the position of the operation that stopped the request (section 5.1) |
@@ -281,7 +283,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
 | `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` no longer matches the head; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
-| `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision guard every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
+| `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision precondition every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
 | `binding_generation_mismatch` | 409 | The binding generation supplied for an inode move or delete is no longer current. Re-read the entry before retrying. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
@@ -448,20 +450,20 @@ The explicit `prepare_content_ref` import is the safe handoff when only a ref
 is available; the returned prepared value names the fresh target-owned ref,
 not the input ref.
 
-### 5.1 Commit identity and race guards
+### 5.1 Commit identity and preconditions
 
 A commit is one request: a `commit_id` — a client-generated stable
 idempotency key that must be reused verbatim for safe retries — a required
 application-supplied opaque `actor_id` identifier, an optional `message` (a human-readable annotation that is part of the commit's
-identity), an optional ordered `assertions` array, and an ordered, non-empty list of path operations. A request with
+identity), an optional ordered `preconditions` array, and an ordered, non-empty list of path operations. A request with
 one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same commit and fingerprint alike.
 A `message` is at most 4096 bytes; a longer one is rejected with
 `invalid_request` before planning, on every transport.
 A commit whose estimated encoded log would exceed one WAL segment is rejected with `content_too_large` before publication; the message names the [WAL document limit](format.md#a5-wal-records).
-The semantic fingerprint includes assertions in request order. Changing an
-assertion or its position changes identity. The fingerprint input always
-includes the assertion list, including an empty list.
+The semantic fingerprint includes preconditions in request order. Changing a
+precondition or its position changes identity. The fingerprint input always
+includes the precondition list, including an empty list.
 
 The operations of one request commit together, in order, as one logical
 commit. Operation `k` is planned against authoritative namespace state plus
@@ -479,18 +481,18 @@ implies (revision identity, binding identity, name absence, directory
 emptiness, ancestor visibility) so races fail explicitly rather than
 silently merge. Those checks are evaluated where their operation runs, which
 is what lets a later operation depend on an earlier one. Callers add their
-own cross-request guards on operations where staleness matters. Puts can
+own cross-request preconditions on operations where staleness matters. Puts can
 check the current inode and revision. Moves and copies can check the
 destination inode and revision. Deletes, undeletes, inode-addressed writes,
-and namespace deletion have guards for their corresponding state. Each guard
+and namespace deletion have preconditions for their corresponding state. Each precondition
 checks the state visible to its operation, including changes made by earlier
 operations in the same request.
 
-Commit bodies reject unknown fields so a misspelled guard cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying an unguarded write.
+Commit bodies reject unknown fields so a misspelled precondition cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying a write without that precondition.
 
 Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens.
 
-Inode-addressed moves and deletes require the token as `expected_binding_generation`. A valid token that no longer matches returns `binding_generation_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The guard is part of the commit's identity and is evaluated after any earlier operations in the same request.
+Inode-addressed moves and deletes require the token as `expected_binding_generation`. A valid token that no longer matches returns `binding_generation_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -517,9 +519,9 @@ the requested cursor is older than the retention floor, the caller must
 re-bootstrap instead of expecting older incremental history to remain
 available.
 
-### Request-level assertions
+### Request-level preconditions
 
-`assertions` is optional and defaults to an empty list, with at most 1024 entries.
+`preconditions` is optional and defaults to an empty list, with at most 1024 entries as advertised by `commit.max_preconditions`.
 More entries return `invalid_request` before planning.
 The pre-state includes earlier admitted candidates in the batch and none of this candidate's operations.
 Its head sequence is the last admitted commit's sequence, or the batch's base head sequence for the first admission.
@@ -532,23 +534,29 @@ Failure returns `stale_head` with `expected_head_seq` and `actual_head_seq`.
 Any new revision of that inode, including restore, invalidates it, as does deletion.
 Failure returns `stale_revision`; `actual_revision_no` is absent when the inode is not visible or has no current revision.
 
-`binding` requires an absolute `path` to contain `expected_inode_id`, or to be unbound when that field is absent.
-The root is a valid target. A bind, unbind, or rebind at the path can invalidate the expectation.
-Without a generation, returning to the same inode satisfies it again.
-Optional `expected_binding_generation` requires `expected_inode_id` and detects any move of the inode, including moving away and back.
-An inode mismatch returns `path_conflict` with `expected_inode_id` and `actual_inode_id`, each absent for an unbound expectation or actual path.
-A generation mismatch returns `binding_generation_mismatch`; the root has no binding generation.
+`path_binding` requires an absolute `path` and `expected_inode_id`.
+A missing or null `expected_inode_id` is a decode error.
+The path must resolve to that inode. A different inode or an unbound path returns `path_conflict` with `expected_inode_id` and `actual_inode_id`; the latter is absent when unbound.
+Without a generation, returning to the same inode satisfies the precondition again.
+Optional `expected_binding_generation` also detects moves away and back.
+A generation mismatch returns `binding_generation_mismatch`.
+Binding the root to `ino_1` passes without a generation. The root has no binding generation, so supplying one returns `binding_generation_mismatch`.
 
-`attributes` requires a visible `inode_id` whose attribute revision equals `expected_attributes_revision_no`.
+`path_absence` requires only an absolute `path` and rejects inode or generation fields.
+It passes when no visible entry resolves at the full path, including when an ancestor is missing or an intermediate component is not a directory.
+A bound path returns `path_conflict` with `actual_inode_id` set and `expected_inode_id` absent.
+Absence of `/` fails with actual inode `ino_1`.
+
+`attributes_revision` requires a visible `inode_id` whose attribute revision equals `expected_attributes_revision_no`.
 Any attribute update invalidates it, as does deletion. Content-only rewrites do not.
 Failure returns `stale_attributes`; `actual_attributes_revision_no` is absent when the inode is not visible.
 
-Receipt resolution comes first: an identical landed request returns its receipt even when its assertion is now stale.
-Reusing that commit ID with different assertions returns `commit_id_reuse_conflict`.
-Assertions run in order before operations; the first failure returns its kind's error with zero-based `assertion_index`.
-A failed assertion reserves no sequence or inode and leaves the planning view unchanged.
-A retry after a lost numbered WAL put evaluates assertions again against the new basis.
-Assertions are admission conditions, stored only through the fingerprint in WAL records and receipts, and never evaluated during replay.
+Receipt resolution comes first: an identical landed request returns its receipt even when its precondition is now stale.
+Reusing that commit ID with different preconditions returns `commit_id_reuse_conflict`.
+Preconditions run in order before operations; the first failure returns its kind's error with zero-based `precondition_index`.
+A failed precondition reserves no sequence or inode and leaves the planning view unchanged.
+A retry after a lost numbered WAL put evaluates preconditions again against the new basis.
+Preconditions are admission conditions, stored only through the fingerprint in WAL records and receipts, and never evaluated during replay.
 
 ### Actor attribution
 
@@ -612,8 +620,8 @@ responsible for its own reconciliation. LoonFS chooses this documented
 horizon over an unbounded receipt index deliberately: detecting a dropped
 id would require remembering every id forever.
 
-Write guards are part of the commit's identity. Reusing a `commit_id` after
-changing a guard fails with `commit_id_reuse_conflict`.
+Write preconditions are part of the commit's identity. Reusing a `commit_id` after
+changing a precondition fails with `commit_id_reuse_conflict`.
 
 A put's content is part of that identity too, and identity means *which
 content object*, not what bytes it holds. So:
@@ -724,7 +732,7 @@ with those two operations overriding it.
 Request bodies reject unknown fields, at every level of nesting, with 400
 `invalid_request`. Most request fields are optional and several of those are
 preconditions, so a field the server does not recognize cannot be ignored: a
-misspelled guard would decode to its default and the server would carry out
+misspelled precondition would decode to its default and the server would carry out
 a different request than the caller asked for. Response bodies are the other
 way round, because a client must keep working against a server newer than
 itself and so must tolerate fields it does not know (section 7.2).
@@ -736,7 +744,7 @@ Unknown content kinds fail to decode, just like unknown checksum algorithms.
 The encoding conventions in `format.md` state the same rules and extend them to
 durable shapes.
 
-Query strings reject unknown parameters. For example, `DELETE /v0/namespaces/{ns}?expected_head_sq=418` returns 400 `invalid_request` rather than deleting the namespace without the intended guard. Routes that declare no query parameters reject all query parameters. `GET /health`, `GET /readiness`, and `GET /metrics` are exceptions because probes and scrapers may append their own parameters.
+Query strings reject unknown parameters. For example, `DELETE /v0/namespaces/{ns}?expected_head_sq=418` returns 400 `invalid_request` rather than deleting the namespace without the intended precondition. Routes that declare no query parameters reject all query parameters. `GET /health`, `GET /readiness`, and `GET /metrics` are exceptions because probes and scrapers may append their own parameters.
 
 The token is a bearer credential and so is everything the upload routes hand
 back: a presigned direct-upload URL is a capability to write to the
@@ -1782,7 +1790,7 @@ retained. A directory returns `path_conflict`, an unknown inode returns
 ### 6.8 `POST /commits`
 
 This is the binding for the commit model in section 5.1: one `commit_id`, one
-required `actor_id`, an optional `message`, optional `assertions`, and `operations` — an ordered,
+required `actor_id`, an optional `message`, optional `preconditions`, and `operations` — an ordered,
 non-empty array of path operations. An empty array is `invalid_request`.
 
 The root path `/` is readable but never a mutation target. An operation that
@@ -1799,7 +1807,7 @@ Representative request:
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "actor_id": "usr_8f3c",
-  "assertions": [
+  "preconditions": [
     { "kind": "namespace_head", "expected_head_seq": 42 },
     { "kind": "file_revision", "inode_id": "ino_7", "expected_revision_no": 3 }
   ],
@@ -1880,16 +1888,16 @@ destination can be replaced, and a path never replaces itself.
 Replacing puts can include `expected_inode_id` alone or pair it with
 `expected_revision_no`. Replacing moves and copies use
 `expected_destination_inode_id` alone or pair it with
-`expected_destination_revision_no`. A destination or path revision guard
-requires its matching inode guard because a revision identifies a version
-within one inode, not the inode occupying a path. A revision-only guard
+`expected_destination_revision_no`. A destination or path revision precondition
+requires its matching inode precondition because a revision identifies a version
+within one inode, not the inode occupying a path. A revision-only precondition
 returns `invalid_request`.
 
-Guards require `replace` behavior. An inode mismatch returns `path_conflict`,
+Preconditions require `replace` behavior. An inode mismatch returns `path_conflict`,
 a revision mismatch returns `stale_revision`, and a missing destination
 returns `path_not_found`.
 
-These guards assert content revisions only. A guarded put or replacing copy
+These preconditions check content revisions only. A put with preconditions or replacing copy
 proceeds after an attribute-only update when the inode and content revision
 still match. A replacing move deletes the destination inode, including its
 attributes. Attribute-level concurrency uses
@@ -1897,7 +1905,7 @@ attributes. Attribute-level concurrency uses
 
 Five operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
 
-`create_directory_by_inode` and `put_file_by_inode` create an entry under an existing parent directory. Both are create-only and return `path_conflict` when the name is already in use.
+`create_directory_by_inode` and `create_file_by_inode` create an entry under an existing parent directory. Both are create-only and return `path_conflict` when the name is already in use.
 
 `put_file_revision_by_inode` appends a revision to a file wherever it is currently located. It requires `expected_revision_no` and returns `stale_revision` when the file has changed.
 
@@ -2076,15 +2084,15 @@ its own event in the change feed. A copy over an existing file changes that
 file's content and nothing else.
 
 `expected_inode_id` and `expected_attributes_revision_no` are both optional
-guards, and both are part of the commit's semantic identity for commit-id
-reuse. An attribute revision guard requires its matching inode guard because
-a revision identifies a version of one inode; a revision-only guard returns
-`invalid_request` before resolving the path. A wrong `expected_inode_id`
-answers `path_conflict`, like the delete guard it mirrors, so a raced
+preconditions, and both are part of the commit's semantic identity for commit-id
+reuse. An attribute revision precondition requires its matching inode precondition
+because a revision identifies a version of one inode; a revision-only precondition
+returns `invalid_request` before resolving the path. A wrong `expected_inode_id`
+answers `path_conflict`, like the delete precondition it mirrors, so a raced
 rebinding cannot land attributes on the wrong inode. A stale
 `expected_attributes_revision_no` answers `stale_attributes`. Omitting the
-revision guard does not make the write a merge: every update carries the
-revision it read as its own guard, so a concurrent update still answers
+revision precondition does not make the write a merge: every update carries the
+revision it read as its own precondition, so a concurrent update still answers
 `stale_attributes` with the expected and actual revisions in the details.
 
 ### 6.9 Upload transport

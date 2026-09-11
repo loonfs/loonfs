@@ -34,7 +34,7 @@ fn assert_content_not_prepared_response(
     match result {
         Err(error) if matches!(error.as_ref(), ureq::Error::Status(_, _)) => {
             let ureq::Error::Status(status, response) = *error else {
-                panic!("guard requires an HTTP status error");
+                panic!("check requires an HTTP status error");
             };
             assert_eq!(status, 409);
             let error: ApiError =
@@ -91,7 +91,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token rejected").await;
 
     let request = CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: CommitId::parse("bad-token-put").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         message: None,
@@ -136,7 +136,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
         .expect("create namespace");
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token missing").await;
     let request = CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: CommitId::parse("missing-token-put").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         message: None,
@@ -178,7 +178,7 @@ async fn path_put_with_valid_content_token_succeeds() {
     let bytes = b"valid token";
     let completed = stage_uploaded_content(&harness.client, &namespace, bytes).await;
     let request = CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: CommitId::parse("valid-token-put").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         message: None,
@@ -228,7 +228,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token replay").await;
     let content_ref = completed.content_ref.clone();
     let mut request = CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: CommitId::parse("token-replay-put").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         message: None,
@@ -299,7 +299,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
     let irrelevant =
         stage_uploaded_content(&harness.client, &namespace, b"irrelevant content").await;
     let request = CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: CommitId::parse("irrelevant-token-put").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         message: None,
@@ -342,7 +342,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     // An irrelevant garbage token rides along with the valid proof; only
     // the token covering the operation's ref decides admission.
     let request = CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: CommitId::parse("put-all-proofs").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         message: None,
@@ -374,7 +374,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     // The same staged ref and token admit a second put: preparation
     // belongs to the content, not to one operation.
     let repeat_ref = CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: CommitId::parse("put-repeated-ref").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         message: None,

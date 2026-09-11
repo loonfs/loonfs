@@ -792,7 +792,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
         .commit_prepared(
             &harness.namespace_id,
             CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: CommitId::parse("prepared-many-puts").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -834,7 +834,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
-                    assertions: Vec::new(),
+                    preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,

@@ -71,7 +71,7 @@ async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/renamed.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -98,7 +98,7 @@ async fn creates_entries_under_a_parent_inode() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: test_commit_id(Some("create-by-inode")),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -107,7 +107,7 @@ async fn creates_entries_under_a_parent_inode() {
                     parent_inode_id: docs_inode_id,
                     display_name: display_name("archive"),
                 },
-                FilesystemOperation::PutFileByInode {
+                FilesystemOperation::CreateFileByInode {
                     parent_inode_id: docs_inode_id,
                     display_name: display_name("january.txt"),
                     content_ref,
@@ -158,7 +158,7 @@ async fn creating_by_inode_rejects_a_bound_name() {
         &store,
         &namespace_id,
         test_commit_id(Some("put-over-taken")),
-        FilesystemOperation::PutFileByInode {
+        FilesystemOperation::CreateFileByInode {
             parent_inode_id: docs_inode_id,
             display_name: display_name("taken.txt"),
             content_ref,
@@ -221,7 +221,7 @@ async fn revision_write_requires_the_current_revision_and_survives_a_move() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
             to_path: AbsolutePath::parse("/report.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -273,7 +273,7 @@ async fn move_requires_the_current_binding_generation() {
             expected_binding_generation: stale_generation,
             to_parent_inode_id: ROOT_INODE_ID,
             to_display_name: display_name("moved.txt"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -294,7 +294,7 @@ async fn move_requires_the_current_binding_generation() {
             expected_binding_generation: fresh_generation,
             to_parent_inode_id: ROOT_INODE_ID,
             to_display_name: display_name("moved.txt"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -354,7 +354,7 @@ async fn delete_requires_the_current_binding_generation() {
 }
 
 #[tokio::test]
-async fn earlier_move_makes_a_later_guard_stale_and_rolls_back_the_commit() {
+async fn earlier_move_makes_a_later_precondition_stale_and_rolls_back_the_commit() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     write_file_bytes(
         &store,
@@ -373,7 +373,7 @@ async fn earlier_move_makes_a_later_guard_stale_and_rolls_back_the_commit() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: test_commit_id(Some("move-then-delete-with-old-generation")),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -383,7 +383,7 @@ async fn earlier_move_makes_a_later_guard_stale_and_rolls_back_the_commit() {
                     expected_binding_generation: binding_generation.clone(),
                     to_parent_inode_id: ROOT_INODE_ID,
                     to_display_name: display_name("moved.txt"),
-                    guard: loonfs_api::DestinationGuard {
+                    precondition: loonfs_api::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -418,7 +418,7 @@ async fn earlier_move_makes_a_later_guard_stale_and_rolls_back_the_commit() {
 }
 
 #[tokio::test]
-async fn content_write_preserves_the_guard_for_a_later_move() {
+async fn content_write_preserves_the_precondition_for_a_later_move() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     write_file_bytes(
         &store,
@@ -437,7 +437,7 @@ async fn content_write_preserves_the_guard_for_a_later_move() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: test_commit_id(Some("write-then-move-with-same-generation")),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -455,7 +455,7 @@ async fn content_write_preserves_the_guard_for_a_later_move() {
                     expected_binding_generation: binding_generation.clone(),
                     to_parent_inode_id: ROOT_INODE_ID,
                     to_display_name: display_name("moved.txt"),
-                    guard: loonfs_api::DestinationGuard {
+                    precondition: loonfs_api::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -466,7 +466,7 @@ async fn content_write_preserves_the_guard_for_a_later_move() {
         &context,
     )
     .await
-    .expect("content-only writes must preserve the binding guard");
+    .expect("content-only writes must preserve the binding precondition");
 
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/moved.txt")
@@ -481,7 +481,7 @@ async fn content_write_preserves_the_guard_for_a_later_move() {
 }
 
 #[tokio::test]
-async fn foreign_and_root_binding_guards_are_invalid() {
+async fn foreign_and_root_binding_preconditions_are_invalid() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     let (docs_inode_id, local_generation) = read_entry(&store, &namespace_id, "/docs").await;
 
@@ -512,7 +512,7 @@ async fn foreign_and_root_binding_guards_are_invalid() {
         &context,
     )
     .await
-    .expect_err("foreign guard must fail");
+    .expect_err("foreign precondition must fail");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
     let root_error = submit_operation(
@@ -550,7 +550,7 @@ async fn inode_operation_observes_an_earlier_delete_in_the_same_commit() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: test_commit_id(Some("delete-then-write")),
             actor_id: loonfs_test_support::test_actor(),
             message: None,

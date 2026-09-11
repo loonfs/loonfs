@@ -76,7 +76,7 @@ fn filesystem_operations_match_core_semantics() {
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
@@ -147,7 +147,7 @@ fn forked_namespace_shares_content_then_diverges() {
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,

@@ -99,7 +99,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
         FilesystemOperation::CopyPath {
             from_path: path("/report.txt"),
             to_path: path("/copy.txt"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

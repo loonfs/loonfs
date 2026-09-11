@@ -6,15 +6,15 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::{
     MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_MESSAGE_BYTES,
-    MAX_COMMIT_OPERATIONS,
+    MAX_COMMIT_OPERATIONS, MAX_COMMIT_PRECONDITIONS,
 };
 use loonfs_api::{
     ChangeSeq, CommitId, DestinationBehavior, InodeKind, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
     LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
-    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_DOWNLOAD_MAX_CONCURRENT,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
-    LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
+    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
+    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT,
+    LIMIT_PAGINATION_MAX, LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
     LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
     LIMIT_UPLOAD_MAX_CONTENT_BYTES,
@@ -219,6 +219,10 @@ async fn capabilities_endpoint_advertises_capabilities() {
         ),
         (LIMIT_COMMIT_MAX_OPERATIONS, MAX_COMMIT_OPERATIONS as u64),
         (
+            LIMIT_COMMIT_MAX_PRECONDITIONS,
+            MAX_COMMIT_PRECONDITIONS as u64,
+        ),
+        (
             LIMIT_COMMIT_MAX_CONTENT_TOKENS,
             MAX_COMMIT_CONTENT_TOKENS as u64,
         ),
@@ -289,7 +293,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
-                    assertions: Vec::new(),
+                    preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("smoke-write-1").expect("valid commit id")),
                     message: None,

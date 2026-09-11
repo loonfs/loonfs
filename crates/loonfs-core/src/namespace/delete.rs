@@ -28,7 +28,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         if let Some(expected) = options.expected_head_seq {
             if head.seq != expected {
                 return Err(CoreError::StaleHeadPrecondition {
-                    assertion_index: None,
+                    precondition_index: None,
                     expected,
                     actual: head.seq,
                 });

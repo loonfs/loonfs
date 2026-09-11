@@ -16,7 +16,7 @@ Embedded CLI uploads and standard-input streams do not use these records. Repeat
 
 ## What the record contains
 
-Before opening an upload session, the CLI records the chosen commit ID, actor, message, overwrite guards, source length, and full-precision source modification time.
+Before opening an upload session, the CLI records the chosen commit ID, actor, message, overwrite preconditions, source length, and full-precision source modification time.
 
 The record has two states:
 

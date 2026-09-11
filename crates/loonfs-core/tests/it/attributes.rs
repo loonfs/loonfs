@@ -1,5 +1,5 @@
 //! Inode attributes end to end: what the planner accepts, what the commit
-//! guards reject, and what survives a flush, a fork, and every operation that
+//! preconditions reject, and what survives a flush, a fork, and every operation that
 //! moves an inode around.
 
 #![allow(clippy::panic)]
@@ -418,7 +418,7 @@ async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
     store.reset();
     let replay = publish_request(&mut engine, &store, request, &context)
         .await
-        .expect("the original receipt replays despite the stale guard");
+        .expect("the original receipt replays despite the stale precondition");
     assert_eq!(replay, receipt);
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
@@ -488,7 +488,7 @@ async fn an_update_is_rejected_when_the_resulting_map_breaks_a_limit() {
 }
 
 // ---------------------------------------------------------------------------
-// Race guards
+// Race preconditions
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -545,7 +545,7 @@ async fn an_already_satisfied_patch_reports_a_stale_expectation() {
 }
 
 #[tokio::test]
-async fn an_attribute_revision_guard_requires_an_inode_before_resolving_the_path() {
+async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_the_path() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     put_file_bytes(
         &store,
@@ -600,7 +600,7 @@ async fn an_attribute_revision_guard_requires_an_inode_before_resolving_the_path
         );
         let error = publish_request(&mut engine, &store, request, &context)
             .await
-            .expect_err("the revision guard requires an inode guard");
+            .expect_err("the revision precondition requires an inode precondition");
         assert_invalid_commit_request(&error, label);
         let message = error.to_string();
         assert!(
@@ -626,7 +626,7 @@ async fn an_attribute_revision_guard_requires_an_inode_before_resolving_the_path
 }
 
 #[tokio::test]
-async fn an_attribute_guard_rejects_a_recreated_path_before_checking_its_revision() {
+async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_revision() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     put_file_bytes(
         &store,
@@ -760,7 +760,7 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("put-then-set"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -807,7 +807,7 @@ async fn an_unchanged_update_and_a_second_update_commit_together() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("twice"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -857,7 +857,7 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("stops"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -1101,7 +1101,7 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
         FilesystemOperation::MovePath {
             from_path: path("/docs/a.txt"),
             to_path: path("/moved.txt"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1261,7 +1261,7 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
         FilesystemOperation::CopyPath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1323,7 +1323,7 @@ async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
         FilesystemOperation::CopyPath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1386,7 +1386,7 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
         FilesystemOperation::CopyPath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,

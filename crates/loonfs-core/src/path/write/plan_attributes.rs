@@ -21,7 +21,10 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     validate_request_shape(set, remove)?;
-    loonfs_api::v0::validate_attributes_guard(expected_inode_id, expected_attributes_revision_no)?;
+    loonfs_api::v0::validate_attributes_precondition(
+        expected_inode_id,
+        expected_attributes_revision_no,
+    )?;
 
     // Attributes belong to the resource, so a directory is as valid a target
     // as a file; nothing here looks at the inode kind.
@@ -30,7 +33,7 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
 
     let (current_revision_no, current) =
         view.view.attributes_at_visible_seq(target.inode_id).await?;
-    // A caller-supplied guard replaces the freshly-read revision in the op,
+    // A caller-supplied precondition replaces the freshly-read revision in the op,
     // so commit validation rejects a raced update with the stale-attributes
     // error and its expected/actual details.
     let base_attributes_revision_no =

@@ -206,7 +206,7 @@ impl ErrorCode {
             | ErrorCode::StaleRevision
             // An attribute update was decided against a different attribute
             // revision than the one it wrote from, whether the caller stated
-            // that revision or the update's own guard observed it.
+            // that revision or the update's own precondition observed it.
             | ErrorCode::StaleAttributes
             | ErrorCode::BindingGenerationMismatch
             // Undelete's target is not the root of a live deletion: a

@@ -452,7 +452,7 @@ binding_is(parent_inode_id, name_key, child_inode_id, bind_seq, bind_delta_index
 
 Checking the inode ID alone is not equivalent. An item may have been moved away and rebound under the same name since the caller observed it.
 
-Caller-supplied `expected_*` guards add specific checks. Omitting an optional guard disables that check; it does not disable the operation's normal structural validation. Where a revision guard accompanies an optional inode guard, the revision guard requires the matching inode guard. Inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves and deletes require `expected_binding_generation`.
+Caller-supplied `expected_*` preconditions add specific checks. Omitting an optional precondition disables that check; it does not disable the operation's normal structural validation. Where a revision precondition accompanies an optional inode precondition, the revision precondition requires the matching inode precondition. Inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves and deletes require `expected_binding_generation`.
 
 A rejected request receives no sequence number and creates no WAL record. Passing validation is tentative acceptance, not success.
 
@@ -499,7 +499,7 @@ Suppose request A creates `/reports` and request B also tries to create `/report
 
 ### 6.5 Commit identity and retries
 
-Every WAL commit and commit receipt stores a `semantic_commit_fingerprint`. It represents the logical request: `namespace_id`, `actor_id`, ordered operations, caller guards, assertions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
+Every WAL commit and commit receipt stores a `semantic_commit_fingerprint`. It represents the logical request: `namespace_id`, `actor_id`, ordered operations with their inline preconditions, request-level preconditions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
 
 While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
 
@@ -513,7 +513,7 @@ File revision history and commit idempotency have different retention rules. Kee
 
 Standard requests operate on paths or inode IDs. They create directories, write files, move or copy items, delete and undelete items, restore file revisions, and update attributes. Their exact parameters are listed in Appendix B because those parameters also determine retry identity.
 
-The default destination behavior for puts, moves, and copies is `no_replace`. Deletes default to `non_recursive`, directory creation defaults to `parents: false`, and attribute `set` and `remove` collections default to empty. Optional race guards have no implied value.
+The default destination behavior for puts, moves, and copies is `no_replace`. Deletes default to `non_recursive`, directory creation defaults to `parents: false`, and attribute `set` and `remove` collections default to empty. Optional preconditions have no implied value.
 
 A replacing move deletes the destination file and rebinds the source within the same logical commit. Only a file destination can be replaced; moving a path onto itself is not a replacement. An undelete can use the deleted binding's original parent and name or the caller's replacement path, subject to normal validation.
 
@@ -946,7 +946,7 @@ Authoritative durable envelopes and their nested payloads reject unknown fields.
 
 `ContentRef` and `Checksum` are closed shapes wherever they appear. They evolve through supported `kind` or `algorithm` values, not additional fields on an existing closed shape. Unknown content kinds and checksum algorithms are rejected. A new content kind requires a supported version change for every durable family containing that reference.
 
-API request bodies also reject unknown fields, including nested fields, so a misspelled guard cannot silently become an unguarded request. Response bodies generally tolerate additions, except for shared closed shapes. The companion API specification defines those transport rules.
+API request bodies also reject unknown fields, including nested fields, so a misspelled precondition cannot silently become a request without that precondition. Response bodies generally tolerate additions, except for shared closed shapes. The companion API specification defines those transport rules.
 
 The owning envelope's `format_version` governs its entire payload, including nested objects and collection semantics. A payload does not add an independent format-version field. Block segments are interpreted under the version of the manifest that references them. A name such as `blob_v1` identifies a closed content strategy; it is not permission to ignore the owning family's version.
 
@@ -1297,24 +1297,24 @@ These patterns define the core object families. Segment owners can differ from t
 
 ## Appendix B. Semantic commit fingerprints
 
-A commit fingerprint is stored as `v3:sha256:<64 lowercase hex>`. The scheme identifies the canonicalization rules below, not the API's general-purpose JSON serialization.
+A commit fingerprint is stored as `v4:sha256:<64 lowercase hex>`. The scheme identifies the canonicalization rules below, not the API's general-purpose JSON serialization.
 
 The fingerprint is the SHA-256 of compact UTF-8 JSON with the following top-level fields in this exact order:
 
 ```text
 {
-  "domain": "loonfs.commit.semantic.v3",
+  "domain": "loonfs.commit.semantic.v4",
   "namespace_id": <namespace string>,
   "actor_id": <actor ID string>,
   "operations": <ordered canonical operations>,
   "message": <string or null>,
-  "assertions": <ordered canonical assertions>
+  "preconditions": <ordered canonical preconditions>
 }
 ```
 
-The layout above is a schema illustration. Actual preimage bytes contain no formatting whitespace. The `assertions` member is always present and is `[]` for an empty list; `message` is always present and is `null` when absent.
+The layout above is a schema illustration. Actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present and is `[]` for an empty list; `message` is always present and is `null` when absent.
 
-The `namespace_id`, `actor_id`, message, operation order, and caller race guards are significant. A changed `actor_id` is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The commit ID itself, writer epoch, and committed timestamp are excluded.
+The `namespace_id`, `actor_id`, message, operation order, and caller preconditions are significant. A changed `actor_id` is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The commit ID itself, writer epoch, and committed timestamp are excluded.
 
 ### B.1 Operation fields
 
@@ -1325,7 +1325,7 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `create_directory` | `path`, `parents` |
 | `create_directory_by_inode` | `parent_inode_id`, `display_name` |
 | `put_file` | `path`, `behavior`, `content_ref`, `expected_inode_id`, `expected_revision_no` |
-| `put_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref` |
+| `create_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref` |
 | `put_file_revision_by_inode` | `inode_id`, `content_ref`, `expected_revision_no` |
 | `move_by_inode` | `inode_id`, `expected_binding_generation`, `to_parent_inode_id`, `to_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
 | `delete_by_inode` | `inode_id`, `expected_binding_generation`, `behavior` |
@@ -1348,24 +1348,25 @@ A content reference is represented by exactly these fields, in this order:
 {"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":15}
 ```
 
-The owner namespace and checksum are excluded by the current v3 scheme. Every reference a commit can admit is owned by the committing namespace: an upload records its session's namespace as the owner, and admission requires the reference to match the prepared content exactly, so the owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
+The owner namespace and checksum are excluded by the current v4 scheme. Every reference a commit can admit is owned by the committing namespace: an upload records its session's namespace as the owner, and admission requires the reference to match the prepared content exactly, so the owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
 
 Two uploads of identical bytes have different IDs and different fingerprints. A retry reuses the original reference rather than repeating the upload and substituting a new one.
 
-### B.3 Assertions
+### B.3 Preconditions
 
-The assertion list appears after `message` and retains caller order without sorting or deduplication. Each assertion starts with `kind`, followed by:
+The precondition list appears after `message` and retains caller order without sorting or deduplication. Each precondition starts with `kind`, followed by:
 
 | Kind | Fields after `kind`, in order |
 | --- | --- |
 | `namespace_head` | `expected_head_seq` |
 | `file_revision` | `inode_id`, `expected_revision_no` |
-| `binding` | `path`, `expected_inode_id`, `expected_binding_generation` |
-| `attributes` | `inode_id`, `expected_attributes_revision_no` |
+| `attributes_revision` | `inode_id`, `expected_attributes_revision_no` |
+| `path_binding` | `path`, `expected_inode_id`, `expected_binding_generation` |
+| `path_absence` | `path` |
 
-Assertion inode IDs use their numeric storage representation, not public `ino_` strings. Every listed field is written. Optional fields are `null` when absent.
+Precondition inode IDs use their numeric storage representation, not public `ino_` strings. Every listed field is written. Optional fields are `null` when absent.
 
-Assertion sequence and revision values are JSON integers. Paths use validated absolute spelling, and binding generations remain opaque strings. Assertions affect request identity and validation; they add no separate WAL field or replay delta.
+Precondition sequence and revision values are JSON integers. Paths use validated absolute spelling, and binding generations remain opaque strings. Preconditions affect request identity and validation; they add no separate WAL field or replay delta.
 
 ### B.4 Strings, integers, and example bytes
 
@@ -1374,18 +1375,18 @@ Non-ASCII characters are encoded directly as UTF-8. JSON quotes, backslashes, an
 For example, the following is the complete canonical preimage for one directory-creation request. There is no trailing newline in the bytes being hashed:
 
 ```json
-{"domain":"loonfs.commit.semantic.v3","namespace_id":"demo","actor_id":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"assertions":[]}
+{"domain":"loonfs.commit.semantic.v4","namespace_id":"demo","actor_id":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
 ```
 
 Its fingerprint is:
 
 ```text
-v3:sha256:729b9bd9613b3f59488da7bff97168419dd6e346df44b649815ef814ef87ee42
+v4:sha256:59e3509a557059396e314b35f05c564b47597fac2ba652f162598afdf91a691a
 ```
 
 A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can omit defaults that the canonical operation writes explicitly; its raw request JSON is not the fingerprint preimage.
 
-The complete shared vectors are in [commit_fingerprints_v3.json][fingerprint-vectors]. They cover every operation, every assertion variant, absent and present binding expectations, an empty assertion list, and absent and present race guards. Encoders must preserve those exact bytes and digests within scheme v3.
+The complete shared vectors are in [commit_fingerprints_v4.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without generations, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders must preserve those exact bytes and digests within scheme v4.
 
 ## Appendix C. Timing and size reference
 
@@ -1591,5 +1592,5 @@ For an absent or deleted core namespace, an explicit grep collection call can re
 [api-spec]: api.md
 [provider-spec]: object-storage-providers.md
 [limits-source]: ../../crates/loonfs-core/src/limits.rs
-[fingerprint-vectors]: ../../crates/loonfs-api/tests/golden/commit_fingerprints_v3.json
+[fingerprint-vectors]: ../../crates/loonfs-api/tests/golden/commit_fingerprints_v4.json
 [name-vectors]: ../../crates/loonfs-api/tests/golden/name_folding.v1.json

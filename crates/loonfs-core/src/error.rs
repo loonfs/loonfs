@@ -122,7 +122,7 @@ pub enum CoreError {
     #[error("inode `{inode_id}` is no longer bound at the generation the request named")]
     BindingGenerationMismatch {
         inode_id: InodeId,
-        assertion_index: Option<u32>,
+        precondition_index: Option<u32>,
     },
     #[error("commit id conflict for `{commit_id}`")]
     CommitIdReuseConflict {
@@ -239,7 +239,7 @@ pub enum CoreError {
     StaleHeadPrecondition {
         expected: ChangeSeq,
         actual: ChangeSeq,
-        assertion_index: Option<u32>,
+        precondition_index: Option<u32>,
     },
     /// Identifies the operation that caused a multi-operation request to fail.
     /// The request remains atomic, and the error code is taken from the underlying
@@ -597,19 +597,19 @@ impl CoreError {
             CoreError::StaleHeadPrecondition {
                 expected,
                 actual,
-                assertion_index,
+                precondition_index,
             } => Some(ErrorDetails {
-                assertion_index: *assertion_index,
+                precondition_index: *precondition_index,
                 expected_head_seq: Some(*expected),
                 actual_head_seq: Some(*actual),
                 ..ErrorDetails::default()
             }),
             CoreError::BindingGenerationMismatch {
                 inode_id,
-                assertion_index: Some(assertion_index),
+                precondition_index: Some(precondition_index),
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
-                assertion_index: Some(*assertion_index),
+                precondition_index: Some(*precondition_index),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitValidation(error) => error.details(),
@@ -869,7 +869,7 @@ mod tests {
         let reuse = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),
             committed_seq: Some(ChangeSeq(9)),
-            committed_fingerprint: Some("v3:sha256:abc".to_owned()),
+            committed_fingerprint: Some("v4:sha256:abc".to_owned()),
         };
         let details = reuse.details().expect("reuse details");
         assert_eq!(
@@ -879,7 +879,7 @@ mod tests {
         assert_eq!(details.committed_seq, Some(ChangeSeq(9)));
         assert_eq!(
             details.committed_fingerprint.as_deref(),
-            Some("v3:sha256:abc")
+            Some("v4:sha256:abc")
         );
 
         // A conflict between two live claims has no landed commit to name,
@@ -897,7 +897,7 @@ mod tests {
             inode_id: InodeId(7),
             expected: RevisionNo(2),
             actual: Some(RevisionNo(5)),
-            assertion_index: None,
+            precondition_index: None,
         });
         let details = stale.details().expect("stale-revision details");
         assert_eq!(details.inode_id, Some(InodeId(7)));
@@ -915,7 +915,7 @@ mod tests {
                 inode_id: InodeId(7),
                 expected: RevisionNo(2),
                 actual: None,
-                assertion_index: None,
+                precondition_index: None,
             });
         let message = unversioned.to_string();
         assert!(message.contains("revision 2"), "{message}");
@@ -931,7 +931,7 @@ mod tests {
         // A refused `expected_head_seq` carries both sequences, so a caller
         // that still means to delete knows what to retry against.
         let precondition = CoreError::StaleHeadPrecondition {
-            assertion_index: None,
+            precondition_index: None,
             expected: ChangeSeq(41),
             actual: ChangeSeq(45),
         };

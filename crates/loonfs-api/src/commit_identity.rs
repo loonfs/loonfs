@@ -11,7 +11,7 @@
 //! receipt.
 
 use crate::{
-    AbsolutePath, ActorId, AttributeRevisionNo, ChangeSeq, CommitAssertion, ContentRef,
+    AbsolutePath, ActorId, AttributeRevisionNo, ChangeSeq, CommitPrecondition, ContentRef,
     DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
     RevisionNo,
 };
@@ -21,13 +21,13 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Domain separator included in every mutation fingerprint input.
-const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v3";
+const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v4";
 
 /// Format version and hash algorithm stored with each fingerprint.
 ///
 /// Storing both values lets a later format use different encoding rules or a
 /// different hash without changing existing fingerprints.
-const FINGERPRINT_SCHEME: &str = "v3:sha256";
+const FINGERPRINT_SCHEME: &str = "v4:sha256";
 
 /// The semantic identity of one mutation request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
@@ -86,7 +86,7 @@ enum OperationFingerprintInput<'a> {
         parent_inode_id: InodeId,
         display_name: &'a str,
     },
-    PutFileByInode {
+    CreateFileByInode {
         parent_inode_id: InodeId,
         display_name: &'a str,
         content_ref: ContentRefFingerprintInput<'a>,
@@ -111,8 +111,8 @@ enum OperationFingerprintInput<'a> {
         behavior: DeleteDirectoryBehavior,
     },
     // Identity covers the complete caller-visible logical request. A changed
-    // delete guard must conflict instead of replaying the old receipt
-    // without checking the new guard.
+    // delete precondition must conflict instead of replaying the old receipt
+    // without checking the new precondition.
     DeletePath {
         path: &'a str,
         behavior: DeleteDirectoryBehavior,
@@ -141,7 +141,7 @@ enum OperationFingerprintInput<'a> {
         deletion_seq: ChangeSeq,
         path: Option<&'a str>,
     },
-    // Both guards join the preimage for the same reason the delete guard
+    // Both preconditions join the preimage for the same reason the delete precondition
     // does: a changed expectation is a different logical request. `set` is a
     // map, so it serializes key-ordered whatever order the caller sent; the
     // translation below sorts and deduplicates `remove` so two spellings of
@@ -157,7 +157,7 @@ enum OperationFingerprintInput<'a> {
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum AssertionFingerprintInput<'a> {
+enum PreconditionFingerprintInput<'a> {
     NamespaceHead {
         expected_head_seq: ChangeSeq,
     },
@@ -165,46 +165,54 @@ enum AssertionFingerprintInput<'a> {
         inode_id: InodeId,
         expected_revision_no: RevisionNo,
     },
-    Binding {
+    PathBinding {
         path: &'a str,
-        expected_inode_id: Option<InodeId>,
+        expected_inode_id: InodeId,
         expected_binding_generation: Option<&'a str>,
     },
-    Attributes {
+    PathAbsence {
+        path: &'a str,
+    },
+    AttributesRevision {
         inode_id: InodeId,
         expected_attributes_revision_no: AttributeRevisionNo,
     },
 }
 
-fn assertion_fingerprint_input(assertion: &CommitAssertion) -> AssertionFingerprintInput<'_> {
-    match assertion {
-        CommitAssertion::NamespaceHead { expected_head_seq } => {
-            AssertionFingerprintInput::NamespaceHead {
+fn precondition_fingerprint_input(
+    precondition: &CommitPrecondition,
+) -> PreconditionFingerprintInput<'_> {
+    match precondition {
+        CommitPrecondition::NamespaceHead { expected_head_seq } => {
+            PreconditionFingerprintInput::NamespaceHead {
                 expected_head_seq: *expected_head_seq,
             }
         }
-        CommitAssertion::FileRevision {
+        CommitPrecondition::FileRevision {
             inode_id,
             expected_revision_no,
-        } => AssertionFingerprintInput::FileRevision {
+        } => PreconditionFingerprintInput::FileRevision {
             inode_id: *inode_id,
             expected_revision_no: *expected_revision_no,
         },
-        CommitAssertion::Binding {
+        CommitPrecondition::PathBinding {
             path,
             expected_inode_id,
             expected_binding_generation,
-        } => AssertionFingerprintInput::Binding {
+        } => PreconditionFingerprintInput::PathBinding {
             path: path.as_str(),
             expected_inode_id: *expected_inode_id,
             expected_binding_generation: expected_binding_generation
                 .as_ref()
                 .map(|value| value.as_str()),
         },
-        CommitAssertion::Attributes {
+        CommitPrecondition::PathAbsence { path } => PreconditionFingerprintInput::PathAbsence {
+            path: path.as_str(),
+        },
+        CommitPrecondition::AttributesRevision {
             inode_id,
             expected_attributes_revision_no,
-        } => AssertionFingerprintInput::Attributes {
+        } => PreconditionFingerprintInput::AttributesRevision {
             inode_id: *inode_id,
             expected_attributes_revision_no: *expected_attributes_revision_no,
         },
@@ -270,11 +278,11 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             parent_inode_id: *parent_inode_id,
             display_name: display_name.as_str(),
         },
-        FilesystemOperation::PutFileByInode {
+        FilesystemOperation::CreateFileByInode {
             parent_inode_id,
             display_name,
             content_ref,
-        } => OperationFingerprintInput::PutFileByInode {
+        } => OperationFingerprintInput::CreateFileByInode {
             parent_inode_id: *parent_inode_id,
             display_name: display_name.as_str(),
             content_ref: content_ref_fingerprint_input(content_ref),
@@ -293,15 +301,15 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             expected_binding_generation,
             to_parent_inode_id,
             to_display_name,
-            guard,
+            precondition,
         } => OperationFingerprintInput::MoveByInode {
             inode_id: *inode_id,
             expected_binding_generation: expected_binding_generation.as_str(),
             to_parent_inode_id: *to_parent_inode_id,
             to_display_name: to_display_name.as_str(),
-            behavior: guard.behavior,
-            expected_destination_inode_id: guard.expected_inode_id,
-            expected_destination_revision_no: guard.expected_revision_no,
+            behavior: precondition.behavior,
+            expected_destination_inode_id: precondition.expected_inode_id,
+            expected_destination_revision_no: precondition.expected_revision_no,
         },
         FilesystemOperation::DeleteByInode {
             inode_id,
@@ -324,24 +332,24 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         FilesystemOperation::MovePath {
             from_path,
             to_path,
-            guard,
+            precondition,
         } => OperationFingerprintInput::MovePath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
-            behavior: guard.behavior,
-            expected_destination_inode_id: guard.expected_inode_id,
-            expected_destination_revision_no: guard.expected_revision_no,
+            behavior: precondition.behavior,
+            expected_destination_inode_id: precondition.expected_inode_id,
+            expected_destination_revision_no: precondition.expected_revision_no,
         },
         FilesystemOperation::CopyPath {
             from_path,
             to_path,
-            guard,
+            precondition,
         } => OperationFingerprintInput::CopyPath {
             from_path: from_path.as_str(),
             to_path: to_path.as_str(),
-            behavior: guard.behavior,
-            expected_destination_inode_id: guard.expected_inode_id,
-            expected_destination_revision_no: guard.expected_revision_no,
+            behavior: precondition.behavior,
+            expected_destination_inode_id: precondition.expected_inode_id,
+            expected_destination_revision_no: precondition.expected_revision_no,
         },
         FilesystemOperation::RestoreRevision {
             path,
@@ -396,14 +404,14 @@ pub fn semantic_commit_fingerprint(
     actor: &ActorId,
     message: Option<&str>,
     operations: &[FilesystemOperation],
-    assertions: &[CommitAssertion],
+    preconditions: &[CommitPrecondition],
 ) -> Result<CommitFingerprint, SemanticFingerprintError> {
     Ok(fingerprint_bytes(&canonical_commit_bytes(
         namespace_id,
         actor,
         message,
         operations,
-        assertions,
+        preconditions,
     )?))
 }
 
@@ -412,7 +420,7 @@ fn canonical_commit_bytes(
     actor: &ActorId,
     message: Option<&str>,
     operations: &[FilesystemOperation],
-    assertions: &[CommitAssertion],
+    preconditions: &[CommitPrecondition],
 ) -> Result<Vec<u8>, SemanticFingerprintError> {
     #[derive(Serialize)]
     struct CanonicalCommit<'a> {
@@ -421,7 +429,7 @@ fn canonical_commit_bytes(
         actor_id: &'a str,
         operations: Vec<OperationFingerprintInput<'a>>,
         message: Option<&'a str>,
-        assertions: Vec<AssertionFingerprintInput<'a>>,
+        preconditions: Vec<PreconditionFingerprintInput<'a>>,
     }
 
     Ok(serde_json::to_vec(&CanonicalCommit {
@@ -430,7 +438,10 @@ fn canonical_commit_bytes(
         actor_id: actor.as_str(),
         operations: operations.iter().map(operation_fingerprint_input).collect(),
         message,
-        assertions: assertions.iter().map(assertion_fingerprint_input).collect(),
+        preconditions: preconditions
+            .iter()
+            .map(precondition_fingerprint_input)
+            .collect(),
     })?)
 }
 
@@ -449,12 +460,12 @@ mod tests {
             name: String,
             operation: FilesystemOperation,
             #[serde(default)]
-            assertions: Vec<crate::CommitAssertion>,
+            preconditions: Vec<crate::CommitPrecondition>,
             canonical_json: String,
             fingerprint: String,
         }
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/golden/commit_fingerprints_v3.json");
+            .join("tests/golden/commit_fingerprints_v4.json");
         let mut vectors: Vec<Vector> = serde_json::from_str(
             &std::fs::read_to_string(&fixture_path).expect("read fingerprint vectors"),
         )
@@ -468,7 +479,7 @@ mod tests {
                 &test_actor(),
                 None,
                 &operations,
-                &vector.assertions,
+                &vector.preconditions,
             )
             .expect("canonical bytes");
             if update {
@@ -486,7 +497,7 @@ mod tests {
                 &test_actor(),
                 None,
                 &operations,
-                &vector.assertions,
+                &vector.preconditions,
             )
             .expect("fingerprint");
             assert_eq!(
@@ -655,7 +666,7 @@ mod tests {
             .expect("binding generation"),
             to_parent_inode_id: InodeId(7),
             to_display_name: DisplayName::parse("report.txt").expect("display name"),
-            guard: crate::DestinationGuard {
+            precondition: crate::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -697,11 +708,11 @@ mod tests {
     }
 
     #[test]
-    fn put_file_guards_change_the_fingerprint_deterministically() {
+    fn put_file_preconditions_change_the_fingerprint_deterministically() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
-            b"guarded put bytes",
+            b"put bytes",
         );
         let operation = |expected_inode_id, expected_revision_no| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/report.txt").expect("path"),
@@ -711,12 +722,12 @@ mod tests {
             expected_revision_no,
         };
 
-        let unguarded = fingerprint(operation(None, None));
+        let without_preconditions = fingerprint(operation(None, None));
         let inode_only = fingerprint(operation(Some(InodeId(7)), None));
         let first_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(3))));
         let next_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(4))));
 
-        assert_ne!(unguarded, inode_only);
+        assert_ne!(without_preconditions, inode_only);
         assert_ne!(inode_only, first_revision);
         assert_ne!(first_revision, next_revision);
         assert_eq!(
@@ -725,16 +736,16 @@ mod tests {
         );
     }
 
-    fn assert_destination_guards_change_fingerprint(
+    fn assert_destination_preconditions_change_fingerprint(
         operation: impl Fn(Option<InodeId>, Option<RevisionNo>) -> FilesystemOperation,
     ) {
-        let unguarded = fingerprint(operation(None, None));
+        let without_preconditions = fingerprint(operation(None, None));
         let first_inode = fingerprint(operation(Some(InodeId(7)), None));
         let other_inode = fingerprint(operation(Some(InodeId(8)), None));
         let first_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(3))));
         let other_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(4))));
 
-        assert_ne!(unguarded, first_inode);
+        assert_ne!(without_preconditions, first_inode);
         assert_ne!(first_inode, other_inode);
         assert_ne!(first_inode, first_revision);
         assert_ne!(first_revision, other_revision);
@@ -745,23 +756,23 @@ mod tests {
     }
 
     #[test]
-    fn move_and_copy_destination_guards_change_the_fingerprint_deterministically() {
-        assert_destination_guards_change_fingerprint(|inode_id, revision_no| {
+    fn move_and_copy_destination_preconditions_change_the_fingerprint_deterministically() {
+        assert_destination_preconditions_change_fingerprint(|inode_id, revision_no| {
             FilesystemOperation::MovePath {
                 from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-                guard: crate::DestinationGuard {
+                precondition: crate::DestinationPrecondition {
                     behavior: DestinationBehavior::Replace,
                     expected_inode_id: inode_id,
                     expected_revision_no: revision_no,
                 },
             }
         });
-        assert_destination_guards_change_fingerprint(|inode_id, revision_no| {
+        assert_destination_preconditions_change_fingerprint(|inode_id, revision_no| {
             FilesystemOperation::CopyPath {
                 from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-                guard: crate::DestinationGuard {
+                precondition: crate::DestinationPrecondition {
                     behavior: DestinationBehavior::Replace,
                     expected_inode_id: inode_id,
                     expected_revision_no: revision_no,
@@ -808,7 +819,7 @@ mod tests {
                 )
                 .expect("retry fingerprint")
                 .as_str(),
-                "v3:sha256:ea77a1d7bf958e6905e42e31da42be2318327f168f8920f50a9b8eb9cc1e5402"
+                "v4:sha256:c2f8d5286a35207d627fb4c213ffc4431be7eab19336491187da82473f8e5155"
             );
         }
     }

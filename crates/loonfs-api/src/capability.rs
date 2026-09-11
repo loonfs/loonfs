@@ -104,6 +104,9 @@ limit_keys! {
     /// Advisory limit: the most path operations one commit may carry; a longer
     /// list answers `invalid_request` before planning.
     LIMIT_COMMIT_MAX_OPERATIONS = "commit.max_operations";
+    /// Counts precondition entries, not resources; a longer list answers
+    /// `invalid_request` before planning.
+    LIMIT_COMMIT_MAX_PRECONDITIONS = "commit.max_preconditions";
     /// Advisory limit: the most content tokens one commit may carry.
     LIMIT_COMMIT_MAX_CONTENT_TOKENS = "commit.max_content_tokens";
     /// Advisory limit: the most distinct external content refs one commit's

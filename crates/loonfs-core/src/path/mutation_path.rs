@@ -12,14 +12,14 @@ pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<Absolu
 /// absolute, normalized, and not the root.
 ///
 /// Every surface that accepts a raw mutation path parses it here. Planning
-/// checks only the root guard and does not parse it again.
+/// checks only the root precondition and does not parse it again.
 pub fn parse_mutation_path(absolute_path: &str) -> Result<AbsolutePath> {
     let path = parse_absolute_path_for_core(absolute_path)?;
     ensure_mutation_path(&path)?;
     Ok(path)
 }
 
-/// The root-mutation guard on an already-parsed path.
+/// Rejects mutation of the root on an already-parsed path.
 ///
 /// The absolute-path grammar is carried by the type; this rejects the root,
 /// which is readable but cannot be mutated. Intents can be built from parsed

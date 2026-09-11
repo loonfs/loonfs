@@ -31,7 +31,7 @@ fn named_entry(entry: &PathEntry) -> &str {
 }
 
 #[derive(Clone, Copy)]
-struct WriteGuards {
+struct WritePreconditions {
     inode_id: Option<InodeId>,
     revision_no: Option<RevisionNo>,
 }
@@ -93,7 +93,7 @@ async fn move_path<S: ObjectStore + ?Sized>(
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -119,7 +119,7 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -130,12 +130,12 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
     .await
 }
 
-async fn put_file_with_guards<S: ObjectStore + ?Sized>(
+async fn put_file_with_preconditions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     bytes: &[u8],
-    guards: WriteGuards,
+    preconditions: WritePreconditions,
     context: &MutationContext,
     commit_id: &str,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
@@ -148,8 +148,8 @@ async fn put_file_with_guards<S: ObjectStore + ?Sized>(
             path: AbsolutePath::parse(absolute_path).expect("path"),
             content_ref: content.into_content_ref(),
             behavior: DestinationBehavior::Replace,
-            expected_inode_id: guards.inode_id,
-            expected_revision_no: guards.revision_no,
+            expected_inode_id: preconditions.inode_id,
+            expected_revision_no: preconditions.revision_no,
         },
         context,
     )
@@ -228,7 +228,7 @@ async fn list_path_page<S: ObjectStore + ?Sized>(
 }
 
 /// Drains the paged revision listing — the only revision-listing operation
-/// the stack exposes — so guards can assert over a file's full history.
+/// the stack exposes — so tests can check a file's full history.
 async fn list_file_revisions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1143,7 +1143,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                 FilesystemOperation::MovePath {
                     from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                    guard: loonfs_api::DestinationGuard {
+                    precondition: loonfs_api::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -1417,7 +1417,7 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
 
     // The unbind is what makes the old binding dead: an operation aimed at
     // the source path finds nothing, while the same inode is still reachable
-    // — and still deletable under a guard naming it — at the destination.
+    // — and still deletable under a precondition naming it — at the destination.
     let stale_binding = submit_operation(
         &store,
         &namespace_id("demo"),
@@ -1505,7 +1505,7 @@ async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
 }
 
 #[tokio::test]
-async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
+async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1553,17 +1553,17 @@ async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
     assert_eq!(old.revision_no(), Some(RevisionNo(1)));
     assert_eq!(recreated.revision_no(), Some(RevisionNo(1)));
 
-    let error = put_file_with_guards(
+    let error = put_file_with_preconditions(
         &store,
         &namespace_id,
         "/docs/aba.txt",
         b"must not land",
-        WriteGuards {
+        WritePreconditions {
             inode_id: Some(old.inode_id),
             revision_no: Some(RevisionNo(1)),
         },
         &context,
-        "guarded-put-aba",
+        "with_preconditions-put-aba",
     )
     .await
     .expect_err("the old identity must reject the recreated file");
@@ -1578,12 +1578,12 @@ async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
         }
         other => panic!("expected binding mismatch, got {other:?}"),
     }
-    let error = put_file_with_guards(
+    let error = put_file_with_preconditions(
         &store,
         &namespace_id,
         "/docs/aba.txt",
         b"revision-only must not land",
-        WriteGuards {
+        WritePreconditions {
             inode_id: None,
             revision_no: Some(RevisionNo(1)),
         },
@@ -1601,12 +1601,12 @@ async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
         b"new inode"
     );
 
-    put_file_with_guards(
+    put_file_with_preconditions(
         &store,
         &namespace_id,
         "/docs/aba.txt",
         b"inode only",
-        WriteGuards {
+        WritePreconditions {
             inode_id: Some(recreated.inode_id),
             revision_no: None,
         },
@@ -1614,13 +1614,13 @@ async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
         "inode-only-put",
     )
     .await
-    .expect("an inode-only guard allows replacement");
-    put_file_with_guards(
+    .expect("an inode-only precondition allows replacement");
+    put_file_with_preconditions(
         &store,
         &namespace_id,
         "/docs/aba.txt",
         b"inode and revision",
-        WriteGuards {
+        WritePreconditions {
             inode_id: Some(recreated.inode_id),
             revision_no: Some(RevisionNo(2)),
         },
@@ -1628,7 +1628,7 @@ async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
         "inode-revision-put",
     )
     .await
-    .expect("matching inode and revision guards allow replacement");
+    .expect("matching inode and revision preconditions allow replacement");
 
     let rejected_content = store_bytes_as_content(&store, &namespace_id, b"must not land")
         .await
@@ -1636,7 +1636,7 @@ async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("no-replace-guarded-put")),
+        test_commit_id(Some("no-replace-with_preconditions-put")),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/aba.txt").expect("path"),
             content_ref: rejected_content.into_content_ref(),
@@ -1647,12 +1647,12 @@ async fn put_guard_matrix_covers_identity_aba_and_valid_combinations() {
         &context,
     )
     .await
-    .expect_err("no-replace rejects every put guard");
+    .expect_err("no-replace rejects every put precondition");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/docs/aba.txt")
             .await
-            .expect("guarded file remains visible")
+            .expect("file with preconditions remains visible")
             .bytes,
         b"inode and revision"
     );
@@ -1935,7 +1935,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1956,7 +1956,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -2009,7 +2009,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/dir").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -2029,7 +2029,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -2085,7 +2085,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -2114,7 +2114,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
 }
 
 #[tokio::test]
-async fn move_path_guard_matrix_checks_the_destination_state() {
+async fn move_path_precondition_matrix_checks_the_destination_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -2161,11 +2161,11 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-inode-only-destination-guard")),
+        test_commit_id(Some("move-inode-only-destination-precondition")),
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/inode-source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/inode-destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(inode_destination.inode_id),
                 expected_revision_no: None,
@@ -2174,16 +2174,16 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         &context,
     )
     .await
-    .expect("an inode-only destination guard allows a move");
+    .expect("an inode-only destination precondition allows a move");
 
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-revision-only-destination-guard")),
+        test_commit_id(Some("move-revision-only-destination-precondition")),
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: Some(RevisionNo(1)),
@@ -2198,11 +2198,11 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-no-replace-destination-guard")),
+        test_commit_id(Some("move-no-replace-destination-precondition")),
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: Some(destination.inode_id),
                 expected_revision_no: None,
@@ -2211,7 +2211,7 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         &context,
     )
     .await
-    .expect_err("no-replace rejects every destination guard");
+    .expect_err("no-replace rejects every destination precondition");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/docs/source.txt")
@@ -2235,7 +2235,7 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(destination.inode_id),
                 expected_revision_no: Some(RevisionNo(2)),
@@ -2250,11 +2250,11 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("move-correct-destination-guards")),
+        test_commit_id(Some("move-correct-destination-preconditions")),
         FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(destination.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
@@ -2263,7 +2263,7 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
         &context,
     )
     .await
-    .expect("the observed destination guards must allow the move");
+    .expect("the observed destination preconditions must allow the move");
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/docs/destination.txt")
             .await
@@ -2274,7 +2274,7 @@ async fn move_path_guard_matrix_checks_the_destination_state() {
 }
 
 #[tokio::test]
-async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
+async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -2332,11 +2332,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("guarded-copy-aba")),
+        test_commit_id(Some("with_preconditions-copy-aba")),
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(old.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
@@ -2359,11 +2359,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("copy-revision-only-destination-guard")),
+        test_commit_id(Some("copy-revision-only-destination-precondition")),
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: Some(RevisionNo(1)),
@@ -2378,11 +2378,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("copy-no-replace-destination-guard")),
+        test_commit_id(Some("copy-no-replace-destination-precondition")),
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: Some(recreated.inode_id),
                 expected_revision_no: None,
@@ -2391,7 +2391,7 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
         &context,
     )
     .await
-    .expect_err("no-replace rejects every destination guard");
+    .expect_err("no-replace rejects every destination precondition");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/docs/aba-destination.txt")
@@ -2404,11 +2404,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("copy-inode-only-destination-guard")),
+        test_commit_id(Some("copy-inode-only-destination-precondition")),
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(recreated.inode_id),
                 expected_revision_no: None,
@@ -2417,15 +2417,15 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
         &context,
     )
     .await
-    .expect("an inode-only destination guard allows a copy");
+    .expect("an inode-only destination precondition allows a copy");
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("copy-inode-revision-destination-guard")),
+        test_commit_id(Some("copy-inode-revision-destination-precondition")),
         FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(recreated.inode_id),
                 expected_revision_no: Some(RevisionNo(2)),
@@ -2434,11 +2434,11 @@ async fn copy_path_guard_matrix_covers_identity_aba_and_valid_combinations() {
         &context,
     )
     .await
-    .expect("matching inode and revision guards allow a copy");
+    .expect("matching inode and revision preconditions allow a copy");
 }
 
 #[tokio::test]
-async fn move_by_inode_guard_matrix_checks_the_destination_state() {
+async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -2520,7 +2520,7 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(source.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
@@ -2529,7 +2529,7 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
         &context,
     )
     .await
-    .expect_err("a wrong inode guard must fail an inode-addressed move");
+    .expect_err("a wrong inode precondition must fail an inode-addressed move");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 
     let error = submit_operation(
@@ -2542,7 +2542,7 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: Some(RevisionNo(1)),
@@ -2557,14 +2557,14 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
     let error = submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("inode-move-no-replace-destination-guard")),
+        test_commit_id(Some("inode-move-no-replace-destination-precondition")),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_generation: binding_generation.clone(),
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: Some(destination.inode_id),
                 expected_revision_no: None,
@@ -2573,7 +2573,7 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
         &context,
     )
     .await
-    .expect_err("no-replace rejects every destination guard");
+    .expect_err("no-replace rejects every destination precondition");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/docs/source.txt")
@@ -2593,14 +2593,14 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("inode-move-inode-only-destination-guard")),
+        test_commit_id(Some("inode-move-inode-only-destination-precondition")),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_generation: binding_generation,
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(destination.inode_id),
                 expected_revision_no: None,
@@ -2609,18 +2609,18 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
         &context,
     )
     .await
-    .expect("an inode-only destination guard allows an inode move");
+    .expect("an inode-only destination precondition allows an inode move");
     submit_operation(
         &store,
         &namespace_id,
-        test_commit_id(Some("inode-move-inode-revision-destination-guard")),
+        test_commit_id(Some("inode-move-inode-revision-destination-precondition")),
         FilesystemOperation::MoveByInode {
             inode_id: source_two.inode_id,
             expected_binding_generation: binding_generation_two,
             to_parent_inode_id: docs.inode_id,
             to_display_name: loonfs_api::DisplayName::parse("destination-two.txt")
                 .expect("display name"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(destination_two.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
@@ -2629,5 +2629,5 @@ async fn move_by_inode_guard_matrix_checks_the_destination_state() {
         &context,
     )
     .await
-    .expect("matching inode and revision guards allow an inode move");
+    .expect("matching inode and revision preconditions allow an inode move");
 }

@@ -179,7 +179,7 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         let commit_id = commit_id_or_generated(&options.commit);
         let request = CommitRequest {
-            assertions: options.commit.assertions.clone(),
+            preconditions: options.commit.preconditions.clone(),
             commit_id: commit_id.clone(),
             actor_id: options.commit.actor_id.clone(),
             message: options.commit.message.clone(),
@@ -219,7 +219,7 @@ impl Client {
                     parents: options.parents,
                 },
             )
-            .assertions(options.commit.assertions.clone()),
+            .preconditions(options.commit.preconditions.clone()),
         )
         .await
     }
@@ -242,7 +242,7 @@ impl Client {
                     expected_inode_id: options.expected_inode_id,
                 },
             )
-            .assertions(options.commit.assertions.clone()),
+            .preconditions(options.commit.preconditions.clone()),
         )
         .await
     }
@@ -268,7 +268,7 @@ impl Client {
                     expected_attributes_revision_no: options.expected_attributes_revision_no,
                 },
             )
-            .assertions(options.commit.assertions.clone()),
+            .preconditions(options.commit.preconditions.clone()),
         )
         .await
     }
@@ -296,14 +296,14 @@ impl Client {
                 FilesystemOperation::MovePath {
                     from_path: from.absolute_path().clone(),
                     to_path: to.absolute_path().clone(),
-                    guard: loonfs_api::DestinationGuard {
+                    precondition: loonfs_api::DestinationPrecondition {
                         behavior: options.behavior,
                         expected_inode_id: options.expected_destination_inode_id,
                         expected_revision_no: options.expected_destination_revision_no,
                     },
                 },
             )
-            .assertions(options.commit.assertions.clone()),
+            .preconditions(options.commit.preconditions.clone()),
         )
         .await
     }
@@ -331,14 +331,14 @@ impl Client {
                 FilesystemOperation::CopyPath {
                     from_path: from.absolute_path().clone(),
                     to_path: to.absolute_path().clone(),
-                    guard: loonfs_api::DestinationGuard {
+                    precondition: loonfs_api::DestinationPrecondition {
                         behavior: options.behavior,
                         expected_inode_id: options.expected_destination_inode_id,
                         expected_revision_no: options.expected_destination_revision_no,
                     },
                 },
             )
-            .assertions(options.commit.assertions.clone()),
+            .preconditions(options.commit.preconditions.clone()),
         )
         .await
     }
@@ -366,7 +366,7 @@ impl Client {
                     path: path.cloned(),
                 },
             )
-            .assertions(options.commit.assertions.clone()),
+            .preconditions(options.commit.preconditions.clone()),
         )
         .await
     }
@@ -389,7 +389,7 @@ impl Client {
                     source_revision_no,
                 },
             )
-            .assertions(options.commit.assertions.clone()),
+            .preconditions(options.commit.preconditions.clone()),
         )
         .await
     }

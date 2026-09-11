@@ -21,7 +21,7 @@ fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> C
         commit.message.clone(),
         operation,
     )
-    .assertions(commit.assertions.clone())
+    .preconditions(commit.preconditions.clone())
 }
 
 impl FsWriter {
@@ -515,7 +515,7 @@ impl FsWriter {
             FilesystemOperation::MovePath {
                 from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                 to_path: loonfs_core::path::parse_mutation_path(to_path)?,
-                guard: loonfs_api::DestinationGuard {
+                precondition: loonfs_api::DestinationPrecondition {
                     behavior: options.behavior,
                     expected_inode_id: options.expected_destination_inode_id,
                     expected_revision_no: options.expected_destination_revision_no,
@@ -554,7 +554,7 @@ impl FsWriter {
             FilesystemOperation::CopyPath {
                 from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                 to_path: loonfs_core::path::parse_mutation_path(to_path)?,
-                guard: loonfs_api::DestinationGuard {
+                precondition: loonfs_api::DestinationPrecondition {
                     behavior: options.behavior,
                     expected_inode_id: options.expected_destination_inode_id,
                     expected_revision_no: options.expected_destination_revision_no,

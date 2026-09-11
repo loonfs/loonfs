@@ -1,4 +1,4 @@
-//! Publish-path validation: content admission, race guards evaluated against
+//! Publish-path validation: content admission, race preconditions evaluated against
 //! what a request's earlier operations did, and the all-or-nothing rule that
 //! makes a multi-operation request one commit.
 
@@ -442,7 +442,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
                 FilesystemOperation::MovePath {
                     from_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
                     to_path: AbsolutePath::parse("/docs/moved.txt").expect("path"),
-                    guard: loonfs_api::DestinationGuard {
+                    precondition: loonfs_api::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -548,7 +548,7 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
                 create_dir("/first"),
             ),
             CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("discard-allocation"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -689,7 +689,8 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
 }
 
 #[tokio::test]
-async fn a_guarded_put_reports_missing_content_before_the_stale_revision_without_content_reads() {
+async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revision_without_content_reads(
+) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -733,7 +734,7 @@ async fn a_guarded_put_reports_missing_content_before_the_stale_revision_without
     .into_iter()
     .next()
     .expect("one result")
-    .expect_err("unprepared content should be reported before the stale revision guard");
+    .expect_err("unprepared content should be reported before the stale revision precondition");
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert!(matches!(
         error,
@@ -798,7 +799,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("reports-batch"),
             actor_id: loonfs_test_support::test_actor(),
             message: Some("import reports".to_owned()),
@@ -855,7 +856,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -888,7 +889,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -912,7 +913,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         .expect("bootstrap namespace");
 
     let batch = |commit: &str| CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: commit_id(commit),
         actor_id: loonfs_test_support::test_actor(),
         message: None,
@@ -931,7 +932,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("replayed-batch"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -958,7 +959,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("one-operation"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -985,7 +986,7 @@ async fn operation_order_decides_the_outcome() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("create-then-delete"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -1003,7 +1004,7 @@ async fn operation_order_decides_the_outcome() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("seed-y"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -1017,7 +1018,7 @@ async fn operation_order_decides_the_outcome() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: commit_id("delete-then-create"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -1033,7 +1034,7 @@ async fn operation_order_decides_the_outcome() {
 }
 
 #[tokio::test]
-async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
+async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_request() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
@@ -1044,16 +1045,16 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
     write_file_bytes(
         &store,
         &namespace_id,
-        "/docs/guarded.txt",
+        "/docs/with_preconditions.txt",
         b"first",
         &context,
-        Some("seed-guarded"),
+        Some("seed-with_preconditions"),
     )
     .await
-    .expect("seed guarded file");
-    let observed = resolve_path(&store, &namespace_id, "/docs/guarded.txt")
+    .expect("seed file with preconditions");
+    let observed = resolve_path(&store, &namespace_id, "/docs/with_preconditions.txt")
         .await
-        .expect("resolve guarded file");
+        .expect("resolve file with preconditions");
     let second = store_bytes_as_content(&store, &namespace_id, b"second")
         .await
         .expect("stage second");
@@ -1063,21 +1064,21 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
 
     let replace =
         |content_ref: loonfs_api::ContentRef, expected: u64| FilesystemOperation::PutFile {
-            path: AbsolutePath::parse("/docs/guarded.txt").expect("path"),
+            path: AbsolutePath::parse("/docs/with_preconditions.txt").expect("path"),
             content_ref,
             behavior: DestinationBehavior::Replace,
             expected_inode_id: Some(observed.inode_id),
             expected_revision_no: Some(RevisionNo(expected)),
         };
 
-    // The second put guards on revision 2, which only exists because the
+    // The second put preconditions on revision 2, which only exists because the
     // first put of this same request created it.
     submit_commit(
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
-            commit_id: commit_id("guarded-chain"),
+            preconditions: Vec::new(),
+            commit_id: commit_id("with_preconditions-chain"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
@@ -1088,16 +1089,16 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
         &context,
     )
     .await
-    .expect("the second guard sees the first write");
+    .expect("the second precondition sees the first write");
 
-    // Guarding on the revision the request started from is stale by the time
+    // Requiring the revision the request started from is stale by the time
     // the second operation runs, so the whole request stops there.
     let error = submit_commit(
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
-            commit_id: commit_id("stale-guarded-chain"),
+            preconditions: Vec::new(),
+            commit_id: commit_id("stale-with_preconditions-chain"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
@@ -1108,7 +1109,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
         &context,
     )
     .await
-    .expect_err("the second guard is stale once the first write lands");
+    .expect_err("the second precondition is stale once the first write lands");
     assert_eq!(error.code(), ErrorCode::StaleRevision);
     assert_eq!(
         error

@@ -229,8 +229,8 @@ Writing
     Upload a local file, standard input when the local path is `-`, or with
     -r the directory tree rooted at the local path. --force replaces an
     existing destination. The expected value flags replace only if the file
-    still has the inode and optional revision that you read. A revision guard
-    requires the inode guard, and neither can be used with -r
+    still has the inode and optional revision that you read. A revision precondition
+    requires the inode precondition, and neither can be used with -r
 
   loonfs mkdir <path> [-p] [--actor-id <id>]
     Create a directory; -p creates missing parents as well and succeeds when

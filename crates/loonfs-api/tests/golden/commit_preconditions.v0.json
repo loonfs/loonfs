@@ -1,6 +1,6 @@
 [
   {
-    "commit_id": "guarded",
+    "commit_id": "preconditions",
     "actor_id": "loonfs-golden",
     "operations": [
       {
@@ -10,9 +10,9 @@
     ]
   },
   {
-    "commit_id": "guarded",
+    "commit_id": "preconditions",
     "actor_id": "loonfs-golden",
-    "assertions": [
+    "preconditions": [
       {
         "kind": "namespace_head",
         "expected_head_seq": 42
@@ -23,13 +23,17 @@
         "expected_revision_no": 3
       },
       {
-        "kind": "binding",
+        "kind": "path_binding",
         "path": "/docs/input",
         "expected_inode_id": "ino_42",
         "expected_binding_generation": "aaaa"
       },
       {
-        "kind": "attributes",
+        "kind": "path_absence",
+        "path": "/docs/missing"
+      },
+      {
+        "kind": "attributes_revision",
         "inode_id": "ino_42",
         "expected_attributes_revision_no": 2
       }
@@ -42,7 +46,7 @@
     ]
   },
   {
-    "assertion_index": 0,
+    "precondition_index": 0,
     "expected_head_seq": 42,
     "actual_head_seq": 43
   }

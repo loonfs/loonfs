@@ -30,7 +30,7 @@ fn options(commit_id: &CommitId) -> PutFileOptions {
     PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: None,
@@ -320,7 +320,7 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
     let first = runtime
         .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
         .await
-        .expect("first unguarded put");
+        .expect("first put without preconditions");
     let observed = runtime
         .get_path_entry(&namespace_id, PATH)
         .await
@@ -337,7 +337,7 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
             },
         )
         .await
-        .expect_err("a guard the original never carried is a different commit");
+        .expect_err("a precondition the original never carried is a different commit");
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     let entry = runtime
@@ -368,7 +368,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
         .commit_prepared(
             &namespace_id,
             CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id.clone(),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -542,7 +542,7 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
     let commit_id = CommitId::parse("pinned-mkdir").expect("valid commit id");
     let options = |message: &str| CreateDirectoryOptions {
         commit: loonfs_api::options::CommitOptions {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),

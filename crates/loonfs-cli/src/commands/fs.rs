@@ -71,7 +71,7 @@ fn parse_snapshot_id_arg(snapshot_id: Option<&str>) -> Result<Option<CheckpointI
 
 fn commit_options(actor: &ActorId, args: &CommitArgs) -> Result<CommitOptions, CliError> {
     Ok(CommitOptions {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         actor_id: actor.clone(),
         commit_id: parse_commit_id_arg(args.commit_id.as_deref())?,
         message: args.message.clone(),

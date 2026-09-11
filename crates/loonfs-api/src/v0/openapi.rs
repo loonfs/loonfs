@@ -19,7 +19,7 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<BeginUploadRequest>("mode");
     named.tagged::<BeginUploadResponse>("mode");
     named.tagged::<CheckpointOwnerSummary>("kind");
-    named.tagged::<CommitAssertion>("kind");
+    named.tagged::<CommitPrecondition>("kind");
     named.tagged::<FilesystemChange>("kind");
     named.tagged::<FilesystemOperation>("kind");
     named.tagged::<MetadataCompactionOutcome>("outcome");

@@ -1,4 +1,4 @@
-//! Batch publication, replay, acknowledgement loss, limits, and fencing guards.
+//! Batch publication, replay, acknowledgement loss, limits, and fencing preconditions.
 
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
@@ -715,7 +715,7 @@ async fn empty_request_is_rejected_before_commit_id_reuse() {
         &store,
         &namespace_id,
         CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: CommitId::parse("empty-reuse").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -789,7 +789,7 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
         .await
         .expect("bootstrap");
     let candidate = CommitCandidate::new(CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         message: None,
@@ -939,7 +939,7 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
             committed_fingerprint: Some(fingerprint),
         } if commit_id == "attributed-receipt"
             && committed_seq == first.committed_seq
-            && fingerprint.starts_with("v3:sha256:")
+            && fingerprint.starts_with("v4:sha256:")
     ));
 }
 
@@ -1067,7 +1067,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             committed_fingerprint: Some(fingerprint),
         } if commit_id == "same-path-request"
             && committed_seq == Some(first.committed_seq)
-            && fingerprint.starts_with("v3:sha256:")
+            && fingerprint.starts_with("v4:sha256:")
     ));
 
     let wal_keys = data_wal_keys(&store).await;
@@ -1085,10 +1085,10 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         .expect("bootstrap");
 
     let seeded_paths = [
-        ("/same-guard.txt", "seed-same-guard"),
-        ("/changed-guard.txt", "seed-changed-guard"),
-        ("/removed-guard.txt", "seed-removed-guard"),
-        ("/added-guard.txt", "seed-added-guard"),
+        ("/same-precondition.txt", "seed-same-precondition"),
+        ("/changed-precondition.txt", "seed-changed-precondition"),
+        ("/removed-precondition.txt", "seed-removed-precondition"),
+        ("/added-precondition.txt", "seed-added-precondition"),
     ];
     for (path, commit_id) in seeded_paths {
         write_file_bytes(
@@ -1100,73 +1100,73 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
             Some(commit_id),
         )
         .await
-        .expect("seed guarded delete target");
+        .expect("seed delete target");
     }
 
-    let same_inode = resolve_path(&store, &namespace_id, "/same-guard.txt")
+    let same_inode = resolve_path(&store, &namespace_id, "/same-precondition.txt")
         .await
-        .expect("resolve same-guard target")
+        .expect("resolve same-precondition target")
         .inode_id;
     let first = delete_path_non_recursive_expecting(
         &store,
         &namespace_id,
-        "/same-guard.txt",
+        "/same-precondition.txt",
         Some(same_inode),
         &context,
-        "delete-same-guard",
+        "delete-same-precondition",
     )
     .await
-    .expect("first guarded delete");
+    .expect("first delete with preconditions");
     let retry = delete_path_non_recursive_expecting(
         &store,
         &namespace_id,
-        "/same-guard.txt",
+        "/same-precondition.txt",
         Some(same_inode),
         &context,
-        "delete-same-guard",
+        "delete-same-precondition",
     )
     .await
-    .expect("identical guarded delete retry");
+    .expect("identical delete retry with preconditions");
     assert_eq!(retry, first);
 
-    let changed_inode = resolve_path(&store, &namespace_id, "/changed-guard.txt")
+    let changed_inode = resolve_path(&store, &namespace_id, "/changed-precondition.txt")
         .await
-        .expect("resolve changed-guard target")
+        .expect("resolve changed-precondition target")
         .inode_id;
-    let removed_inode = resolve_path(&store, &namespace_id, "/removed-guard.txt")
+    let removed_inode = resolve_path(&store, &namespace_id, "/removed-precondition.txt")
         .await
-        .expect("resolve removed-guard target")
+        .expect("resolve removed-precondition target")
         .inode_id;
-    let added_inode = resolve_path(&store, &namespace_id, "/added-guard.txt")
+    let added_inode = resolve_path(&store, &namespace_id, "/added-precondition.txt")
         .await
-        .expect("resolve added-guard target")
+        .expect("resolve added-precondition target")
         .inode_id;
     let conflicts = [
         (
-            "delete-changed-guard",
-            "/changed-guard.txt",
+            "delete-changed-precondition",
+            "/changed-precondition.txt",
             Some(changed_inode),
             Some(InodeId(1)),
         ),
         (
-            "delete-removed-guard",
-            "/removed-guard.txt",
+            "delete-removed-precondition",
+            "/removed-precondition.txt",
             Some(removed_inode),
             None,
         ),
         (
-            "delete-added-guard",
-            "/added-guard.txt",
+            "delete-added-precondition",
+            "/added-precondition.txt",
             None,
             Some(added_inode),
         ),
     ];
-    for (commit_id, path, first_guard, retry_guard) in conflicts {
+    for (commit_id, path, first_precondition, retry_precondition) in conflicts {
         delete_path_non_recursive_expecting(
             &store,
             &namespace_id,
             path,
-            first_guard,
+            first_precondition,
             &context,
             commit_id,
         )
@@ -1177,12 +1177,12 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
             &store,
             &namespace_id,
             path,
-            retry_guard,
+            retry_precondition,
             &context,
             commit_id,
         )
         .await
-        .expect_err("changed guard must conflict");
+        .expect_err("changed precondition must conflict");
         assert!(matches!(
             error,
             CoreError::CommitIdReuseConflict {
@@ -1200,7 +1200,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
 }
 
 #[tokio::test]
-async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
+async fn fresh_delete_path_expected_inode_precondition_still_matches_or_rejects() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1211,28 +1211,28 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
     write_file_bytes(
         &store,
         &namespace_id,
-        "/matching-guard.txt",
+        "/matching-precondition.txt",
         b"matching",
         &context,
-        Some("seed-matching-guard"),
+        Some("seed-matching-precondition"),
     )
     .await
     .expect("seed matching target");
     write_file_bytes(
         &store,
         &namespace_id,
-        "/mismatching-guard.txt",
+        "/mismatching-precondition.txt",
         b"mismatching",
         &context,
-        Some("seed-mismatching-guard"),
+        Some("seed-mismatching-precondition"),
     )
     .await
     .expect("seed mismatching target");
-    let matching_inode = resolve_path(&store, &namespace_id, "/matching-guard.txt")
+    let matching_inode = resolve_path(&store, &namespace_id, "/matching-precondition.txt")
         .await
         .expect("resolve matching target")
         .inode_id;
-    let mismatching_inode = resolve_path(&store, &namespace_id, "/mismatching-guard.txt")
+    let mismatching_inode = resolve_path(&store, &namespace_id, "/mismatching-precondition.txt")
         .await
         .expect("resolve mismatching target")
         .inode_id;
@@ -1240,14 +1240,14 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
     delete_path_non_recursive_expecting(
         &store,
         &namespace_id,
-        "/matching-guard.txt",
+        "/matching-precondition.txt",
         Some(matching_inode),
         &context,
-        "delete-matching-guard",
+        "delete-matching-precondition",
     )
     .await
-    .expect("matching guard deletes");
-    let missing = resolve_path(&store, &namespace_id, "/matching-guard.txt")
+    .expect("matching precondition deletes");
+    let missing = resolve_path(&store, &namespace_id, "/matching-precondition.txt")
         .await
         .expect_err("matching target is deleted");
     assert_eq!(missing.code(), ErrorCode::PathNotFound);
@@ -1255,13 +1255,13 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
     let error = delete_path_non_recursive_expecting(
         &store,
         &namespace_id,
-        "/mismatching-guard.txt",
+        "/mismatching-precondition.txt",
         Some(InodeId(1)),
         &context,
-        "delete-mismatching-guard",
+        "delete-mismatching-precondition",
     )
     .await
-    .expect_err("mismatching guard must fail planning");
+    .expect_err("mismatching precondition must fail planning");
     assert!(matches!(
         error,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
@@ -1271,7 +1271,7 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
         }) if actual == mismatching_inode
     ));
     assert_eq!(
-        resolve_path(&store, &namespace_id, "/mismatching-guard.txt")
+        resolve_path(&store, &namespace_id, "/mismatching-precondition.txt")
             .await
             .expect("mismatching target remains")
             .inode_id,
@@ -1355,7 +1355,11 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     assert_eq!(retry.committed_seq, first.committed_seq);
 }
 
-fn guarded_directory(commit_id: &str, path: &str, expected_head_seq: ChangeSeq) -> CommitRequest {
+fn directory_with_preconditions(
+    commit_id: &str,
+    path: &str,
+    expected_head_seq: ChangeSeq,
+) -> CommitRequest {
     commit_request(
         commit_id,
         FilesystemOperation::CreateDirectory {
@@ -1363,13 +1367,13 @@ fn guarded_directory(commit_id: &str, path: &str, expected_head_seq: ChangeSeq) 
             parents: false,
         },
     )
-    .assertions(vec![loonfs_api::CommitAssertion::NamespaceHead {
+    .preconditions(vec![loonfs_api::CommitPrecondition::NamespaceHead {
         expected_head_seq,
     }])
 }
 
 #[tokio::test]
-async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
+async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() {
     for second_expected in [ChangeSeq(0), ChangeSeq(1)] {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1378,8 +1382,8 @@ async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
         bootstrap_namespace(&store, &namespace_id, &context, false)
             .await
             .expect("bootstrap");
-        let first = guarded_directory("first", "/first", ChangeSeq(0));
-        let second = guarded_directory("second", "/second", second_expected);
+        let first = directory_with_preconditions("first", "/first", ChangeSeq(0));
+        let second = directory_with_preconditions("second", "/second", second_expected);
         let next_seq = if second_expected == ChangeSeq(0) {
             2
         } else {
@@ -1391,7 +1395,11 @@ async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
             vec![
                 CommitCandidate::new(first.clone()),
                 CommitCandidate::new(second),
-                CommitCandidate::new(guarded_directory("next", "/next", ChangeSeq(next_seq - 1))),
+                CommitCandidate::new(directory_with_preconditions(
+                    "next",
+                    "/next",
+                    ChangeSeq(next_seq - 1),
+                )),
             ],
             &context,
         )
@@ -1399,12 +1407,14 @@ async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
         let landed = results[0].as_ref().expect("first commit");
         assert_eq!(landed.committed_seq, ChangeSeq(1));
         if second_expected == ChangeSeq(0) {
-            let error = results[1].as_ref().expect_err("second assertion is stale");
+            let error = results[1]
+                .as_ref()
+                .expect_err("second precondition is stale");
             assert_eq!(error.code(), ErrorCode::StaleHead);
-            let details = error.details().expect("assertion details");
+            let details = error.details().expect("precondition details");
             assert_eq!(details.expected_head_seq, Some(ChangeSeq(0)));
             assert_eq!(details.actual_head_seq, Some(ChangeSeq(1)));
-            assert_eq!(details.assertion_index, Some(0));
+            assert_eq!(details.precondition_index, Some(0));
             assert_eq!(details.operation_index, None);
         } else {
             assert_eq!(
@@ -1422,21 +1432,21 @@ async fn head_assertions_use_admitted_pre_state_and_receipts_resolve_first() {
         assert_eq!(head.next_inode_id, InodeId(next_seq + 2));
         let replay = submit_commit(&store, &namespace_id, first.clone(), &context)
             .await
-            .expect("receipt resolves despite stale assertion");
+            .expect("receipt resolves despite stale precondition");
         assert_eq!(&replay, landed);
-        let changed = first.assertions(vec![loonfs_api::CommitAssertion::NamespaceHead {
+        let changed = first.preconditions(vec![loonfs_api::CommitPrecondition::NamespaceHead {
             expected_head_seq: ChangeSeq(next_seq),
         }]);
         let conflict = submit_commit(&store, &namespace_id, changed, &context)
             .await
-            .expect_err("changed assertion changes identity");
+            .expect_err("changed precondition changes identity");
         assert_eq!(conflict.code(), ErrorCode::CommitIdReuseConflict);
     }
 }
 
 fn scoped_directory(
     commit_id: &str,
-    assertions: Vec<loonfs_api::CommitAssertion>,
+    preconditions: Vec<loonfs_api::CommitPrecondition>,
 ) -> CommitRequest {
     commit_request(
         commit_id,
@@ -1445,25 +1455,25 @@ fn scoped_directory(
             parents: false,
         },
     )
-    .assertions(assertions)
+    .preconditions(preconditions)
 }
 
-fn assertion_details(
+fn precondition_details(
     result: &Result<loonfs_api::CommitResponse, CoreError>,
     code: ErrorCode,
     index: u32,
 ) -> loonfs_api::ErrorDetails {
-    let error = result.as_ref().expect_err("assertion fails");
+    let error = result.as_ref().expect_err("precondition fails");
     assert_eq!(error.code(), code);
-    let details = error.details().expect("assertion details");
-    assert_eq!(details.assertion_index, Some(index));
+    let details = error.details().expect("precondition details");
+    assert_eq!(details.precondition_index, Some(index));
     assert_eq!(details.operation_index, None);
     details
 }
 
 #[tokio::test]
-async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_and_deletion() {
-    use loonfs_api::{CommitAssertion, RevisionNo};
+async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrites_and_deletion() {
+    use loonfs_api::{CommitPrecondition, RevisionNo};
 
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1490,7 +1500,7 @@ async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_a
     let content = store_bytes_as_content(&store, &namespace_id, b"rewrite")
         .await
         .expect("content");
-    let assertion = CommitAssertion::FileRevision {
+    let precondition = CommitPrecondition::FileRevision {
         inode_id,
         expected_revision_no: RevisionNo(1),
     };
@@ -1506,9 +1516,9 @@ async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_a
         &namespace_id,
         vec![
             commit_request("unrelated", put("/other")),
-            scoped_directory("holds", vec![assertion.clone()]),
+            scoped_directory("holds", vec![precondition.clone()]),
             commit_request("rewrite", put("/input")),
-            scoped_directory("stale", vec![assertion.clone()]),
+            scoped_directory("stale", vec![precondition.clone()]),
             commit_request(
                 "delete",
                 FilesystemOperation::DeletePath {
@@ -1517,13 +1527,11 @@ async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_a
                     expected_inode_id: None,
                 },
             ),
-            scoped_directory("deleted", vec![assertion]),
+            scoped_directory("deleted", vec![precondition]),
             scoped_directory(
                 "later",
-                vec![CommitAssertion::Binding {
+                vec![CommitPrecondition::PathAbsence {
                     path: AbsolutePath::parse("/stale").expect("path"),
-                    expected_inode_id: None,
-                    expected_binding_generation: None,
                 }],
             ),
         ],
@@ -1533,11 +1541,11 @@ async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_a
     for index in [0, 1, 2, 4, 6] {
         results[index].as_ref().expect("admitted candidate");
     }
-    let stale = assertion_details(&results[3], ErrorCode::StaleRevision, 0);
+    let stale = precondition_details(&results[3], ErrorCode::StaleRevision, 0);
     assert_eq!(stale.inode_id, Some(inode_id));
     assert_eq!(stale.expected_revision_no, Some(RevisionNo(1)));
     assert_eq!(stale.actual_revision_no, Some(RevisionNo(2)));
-    let deleted = assertion_details(&results[5], ErrorCode::StaleRevision, 0);
+    let deleted = precondition_details(&results[5], ErrorCode::StaleRevision, 0);
     assert_eq!(deleted.inode_id, Some(inode_id));
     assert_eq!(deleted.expected_revision_no, Some(RevisionNo(1)));
     assert_eq!(deleted.actual_revision_no, None);
@@ -1552,8 +1560,8 @@ async fn file_revision_assertions_ignore_unrelated_commits_and_reject_rewrites_a
 }
 
 #[tokio::test]
-async fn binding_assertions_track_identity_absence_and_moves() {
-    use loonfs_api::CommitAssertion;
+async fn binding_preconditions_track_identity_absence_and_moves() {
+    use loonfs_api::CommitPrecondition;
 
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1581,26 +1589,24 @@ async fn binding_assertions_track_identity_absence_and_moves() {
     let other = resolve_path(&store, &namespace_id, "/other")
         .await
         .expect("other");
-    let binding = CommitAssertion::Binding {
+    let binding = CommitPrecondition::PathBinding {
         path: AbsolutePath::parse("/input").expect("path"),
-        expected_inode_id: Some(input.inode_id),
+        expected_inode_id: input.inode_id,
         expected_binding_generation: None,
     };
-    let generation = CommitAssertion::Binding {
+    let generation = CommitPrecondition::PathBinding {
         path: AbsolutePath::parse("/input").expect("path"),
-        expected_inode_id: Some(input.inode_id),
+        expected_inode_id: input.inode_id,
         expected_binding_generation: input.binding_generation.clone(),
     };
     assert!(input.binding_generation.is_some());
-    let absent = CommitAssertion::Binding {
+    let absent = CommitPrecondition::PathAbsence {
         path: AbsolutePath::parse("/vacant").expect("path"),
-        expected_inode_id: None,
-        expected_binding_generation: None,
     };
     let move_file = |from: &str, to: &str| FilesystemOperation::MovePath {
         from_path: AbsolutePath::parse(from).expect("source"),
         to_path: AbsolutePath::parse(to).expect("destination"),
-        guard: loonfs_api::DestinationGuard {
+        precondition: loonfs_api::DestinationPrecondition {
             behavior: DestinationBehavior::Replace,
             ..Default::default()
         },
@@ -1612,7 +1618,22 @@ async fn binding_assertions_track_identity_absence_and_moves() {
             scoped_directory("unrelated", vec![]),
             scoped_directory(
                 "holds",
-                vec![binding.clone(), generation.clone(), absent.clone()],
+                vec![
+                    binding.clone(),
+                    generation.clone(),
+                    absent.clone(),
+                    CommitPrecondition::PathAbsence {
+                        path: AbsolutePath::parse("/missing/child").expect("path"),
+                    },
+                    CommitPrecondition::PathAbsence {
+                        path: AbsolutePath::parse("/input/child").expect("path"),
+                    },
+                    CommitPrecondition::PathBinding {
+                        path: AbsolutePath::root(),
+                        expected_inode_id: InodeId(1),
+                        expected_binding_generation: None,
+                    },
+                ],
             ),
             commit_request("away", move_file("/input", "/away")),
             commit_request("back", move_file("/away", "/input")),
@@ -1622,6 +1643,12 @@ async fn binding_assertions_track_identity_absence_and_moves() {
             scoped_directory("rebound", vec![binding]),
             commit_request("bind-vacant", move_file("/input", "/vacant")),
             scoped_directory("now-bound", vec![absent]),
+            scoped_directory(
+                "root-bound",
+                vec![CommitPrecondition::PathAbsence {
+                    path: AbsolutePath::root(),
+                }],
+            ),
         ],
         &context,
     )
@@ -1629,19 +1656,22 @@ async fn binding_assertions_track_identity_absence_and_moves() {
     for index in [0, 1, 2, 3, 5, 6, 8] {
         results[index].as_ref().expect("admitted candidate");
     }
-    let moved = assertion_details(&results[4], ErrorCode::BindingGenerationMismatch, 0);
+    let moved = precondition_details(&results[4], ErrorCode::BindingGenerationMismatch, 0);
     assert_eq!(moved.inode_id, Some(input.inode_id));
-    let rebound = assertion_details(&results[7], ErrorCode::PathConflict, 0);
+    let rebound = precondition_details(&results[7], ErrorCode::PathConflict, 0);
     assert_eq!(rebound.expected_inode_id, Some(input.inode_id));
     assert_eq!(rebound.actual_inode_id, Some(other.inode_id));
-    let now_bound = assertion_details(&results[9], ErrorCode::PathConflict, 0);
+    let now_bound = precondition_details(&results[9], ErrorCode::PathConflict, 0);
     assert_eq!(now_bound.expected_inode_id, None);
     assert_eq!(now_bound.actual_inode_id, Some(other.inode_id));
+    let root = precondition_details(&results[10], ErrorCode::PathConflict, 0);
+    assert_eq!(root.expected_inode_id, None);
+    assert_eq!(root.actual_inode_id, Some(InodeId(1)));
 }
 
 #[tokio::test]
-async fn attributes_assertions_ignore_content_rewrites_and_reject_attribute_updates() {
-    use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, CommitAssertion};
+async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_updates() {
+    use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, CommitPrecondition};
     use std::collections::BTreeMap;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -1669,7 +1699,7 @@ async fn attributes_assertions_ignore_content_rewrites_and_reject_attribute_upda
     let content = store_bytes_as_content(&store, &namespace_id, b"rewrite")
         .await
         .expect("content");
-    let assertion = CommitAssertion::Attributes {
+    let precondition = CommitPrecondition::AttributesRevision {
         inode_id,
         expected_attributes_revision_no: AttributeRevisionNo(0),
     };
@@ -1685,7 +1715,7 @@ async fn attributes_assertions_ignore_content_rewrites_and_reject_attribute_upda
                     expected_revision_no: loonfs_api::RevisionNo(1),
                 },
             ),
-            scoped_directory("holds", vec![assertion.clone()]),
+            scoped_directory("holds", vec![precondition.clone()]),
             commit_request(
                 "update",
                 FilesystemOperation::UpdateAttributes {
@@ -1699,7 +1729,7 @@ async fn attributes_assertions_ignore_content_rewrites_and_reject_attribute_upda
                     expected_attributes_revision_no: None,
                 },
             ),
-            scoped_directory("stale", vec![assertion]),
+            scoped_directory("stale", vec![precondition]),
         ],
         &context,
     )
@@ -1707,7 +1737,7 @@ async fn attributes_assertions_ignore_content_rewrites_and_reject_attribute_upda
     for result in &results[..3] {
         result.as_ref().expect("admitted candidate");
     }
-    let stale = assertion_details(&results[3], ErrorCode::StaleAttributes, 0);
+    let stale = precondition_details(&results[3], ErrorCode::StaleAttributes, 0);
     assert_eq!(stale.inode_id, Some(inode_id));
     assert_eq!(
         stale.expected_attributes_revision_no,
@@ -1720,8 +1750,8 @@ async fn attributes_assertions_ignore_content_rewrites_and_reject_attribute_upda
 }
 
 #[tokio::test]
-async fn mixed_assertions_report_the_first_failure_and_write_nothing() {
-    use loonfs_api::{CommitAssertion, RevisionNo};
+async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
+    use loonfs_api::{CommitPrecondition, RevisionNo};
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 
     let temp_dir = tempdir().expect("tempdir");
@@ -1746,18 +1776,18 @@ async fn mixed_assertions_report_the_first_failure_and_write_nothing() {
         .results
         .remove(0)
         .expect("seed");
-    let head = CommitAssertion::NamespaceHead {
+    let head = CommitPrecondition::NamespaceHead {
         expected_head_seq: ChangeSeq(0),
     };
-    let scoped = CommitAssertion::FileRevision {
+    let scoped = CommitPrecondition::FileRevision {
         inode_id: InodeId(99),
         expected_revision_no: RevisionNo(1),
     };
-    let valid = CommitAssertion::NamespaceHead {
+    let valid = CommitPrecondition::NamespaceHead {
         expected_head_seq: ChangeSeq(1),
     };
     store.take();
-    for (index, (assertions, code, failed_index)) in [
+    for (index, (preconditions, code, failed_index)) in [
         (vec![head.clone(), scoped.clone()], ErrorCode::StaleHead, 0),
         (vec![scoped.clone(), head], ErrorCode::StaleRevision, 0),
         (vec![valid, scoped], ErrorCode::StaleRevision, 1),
@@ -1770,7 +1800,7 @@ async fn mixed_assertions_report_the_first_failure_and_write_nothing() {
                 &store,
                 vec![CommitCandidate::new(scoped_directory(
                     &format!("mixed-{index}"),
-                    assertions,
+                    preconditions,
                 ))],
                 &context,
                 &PublishTailOptions::default(),
@@ -1778,7 +1808,7 @@ async fn mixed_assertions_report_the_first_failure_and_write_nothing() {
             .await
             .results
             .remove(0);
-        assertion_details(&result, code, failed_index);
+        precondition_details(&result, code, failed_index);
     }
     let counts = store.counts();
     assert_eq!(counts.puts, 0);
@@ -1787,7 +1817,7 @@ async fn mixed_assertions_report_the_first_failure_and_write_nothing() {
 }
 
 #[tokio::test]
-async fn assertion_limit_rejects_before_planning_and_writes_nothing() {
+async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 
     let temp_dir = tempdir().expect("tempdir");
@@ -1804,7 +1834,7 @@ async fn assertion_limit_rejects_before_planning_and_writes_nothing() {
     engine
         .publish_batch(
             &store,
-            vec![CommitCandidate::new(guarded_directory(
+            vec![CommitCandidate::new(directory_with_preconditions(
                 "seed",
                 "/seed",
                 ChangeSeq(0),
@@ -1817,11 +1847,12 @@ async fn assertion_limit_rejects_before_planning_and_writes_nothing() {
         .remove(0)
         .expect("seed commit");
     store.take();
-    let request = guarded_directory("over-limit", "/missing/child", ChangeSeq(0)).assertions(vec![
-            loonfs_api::CommitAssertion::NamespaceHead {
+    let request = directory_with_preconditions("over-limit", "/missing/child", ChangeSeq(0))
+        .preconditions(vec![
+            loonfs_api::CommitPrecondition::NamespaceHead {
                 expected_head_seq: ChangeSeq(0),
             };
-            loonfs_core::limits::MAX_COMMIT_ASSERTIONS + 1
+            loonfs_core::limits::MAX_COMMIT_PRECONDITIONS + 1
         ]);
     let error = engine
         .publish_batch(
@@ -1833,11 +1864,11 @@ async fn assertion_limit_rejects_before_planning_and_writes_nothing() {
         .await
         .results
         .remove(0)
-        .expect_err("assertion limit");
+        .expect_err("precondition limit");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert!(error
         .to_string()
-        .contains("1025 assertions; maximum is 1024"));
+        .contains("1025 preconditions; maximum is 1024"));
     let counts = store.counts();
     assert_eq!(counts.puts, 0);
     assert_eq!(counts.compare_and_swaps, 0);

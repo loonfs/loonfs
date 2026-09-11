@@ -68,7 +68,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
                 commit_id: CommitId::parse("maximum-attribute-updates").expect("commit"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 operations: (0..loonfs::publish::MAX_COMMIT_OPERATIONS)
                     .map(|index| FilesystemOperation::UpdateAttributes {
                         path: parse_mutation_path("/file").expect("path"),

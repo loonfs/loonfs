@@ -112,7 +112,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .create_commit(
             &remote_ns,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("batch-one"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: Some("import the reports".to_owned()),
@@ -176,7 +176,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .commit_prepared(
             &embedded_ns,
             CoreCommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("batch-one"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: Some("import the reports".to_owned()),
@@ -234,7 +234,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
         .expect("create namespace");
     let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
     let request = || CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: commit_id("returns-its-change"),
         actor_id: loonfs_test_support::test_actor(),
         message: Some("the first report".to_owned()),
@@ -343,7 +343,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
     // Resubmitting the same `content_ref` is what makes the retry
     // semantically identical, so the server replays rather than conflicts.
     let request = || CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: commit_id("outlives-its-history"),
         actor_id: loonfs_test_support::test_actor(),
         message: Some("retired later".to_owned()),
@@ -439,7 +439,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("batch-stops-at-two"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -537,7 +537,7 @@ async fn an_empty_operation_list_is_rejected() {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("empty-batch"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -589,7 +589,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("root-alone"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -630,7 +630,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("root-in-batch"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -694,7 +694,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .create_commit(
             &namespace_id("missing"),
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("root-unknown-namespace"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -736,7 +736,7 @@ async fn a_batch_replays_under_its_commit_id() {
         .expect("create namespace");
 
     let batch = |ops: Vec<FilesystemOperation>| CommitRequest {
-        assertions: Vec::new(),
+        preconditions: Vec::new(),
         commit_id: commit_id("replayed-batch"),
         actor_id: loonfs_test_support::test_actor(),
         message: Some("two directories".to_owned()),
@@ -812,7 +812,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             FilesystemOperation::MovePath {
                 from_path: absolute("/reports/2026"),
                 to_path: absolute("/reports/2025"),
-                guard: loonfs_api::DestinationGuard {
+                precondition: loonfs_api::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -840,7 +840,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             .create_commit(
                 &namespace,
                 CoreCommitRequest {
-                    assertions: Vec::new(),
+                    preconditions: Vec::new(),
                     commit_id: commit_id("crosses-transports"),
                     actor_id: loonfs_test_support::test_actor(),
                     message: Some("shaped once".to_owned()),
@@ -876,7 +876,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         FilesystemOperation::MovePath {
             from_path: absolute("/reports/2026"),
             to_path: absolute("/reports/2025"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -888,7 +888,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: Some("shaped once".to_owned()),
@@ -917,7 +917,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: Some("shaped once".to_owned()),
@@ -938,7 +938,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
+async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -961,8 +961,8 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
-                commit_id: commit_id("guarded-create"),
+                preconditions: Vec::new(),
+                commit_id: commit_id("with_preconditions-create"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: vec![content_token(&first)],
@@ -984,11 +984,11 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
             &Default::default(),
         )
         .await
-        .expect("observe the guarded file");
+        .expect("observe the file with preconditions");
 
     // One replace, spelled two ways. Both name the revision that is actually
-    // current, so the spelling of the guard is the only difference.
-    let replace = |commit: &str, guard: &str| {
+    // current, so the spelling of the precondition is the only difference.
+    let replace = |commit: &str, precondition: &str| {
         let mut put = serde_json::json!({
             "kind": "put_file",
             "path": FIRST_FILE,
@@ -996,7 +996,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
             "behavior": "replace",
             "expected_inode_id": loonfs_api::public_inode_id::encode(observed.inode_id)
         });
-        put[guard] = serde_json::json!(1);
+        put[precondition] = serde_json::json!(1);
         serde_json::json!({
             "commit_id": commit,
             "actor_id": loonfs_test_support::test_actor(),
@@ -1008,9 +1008,9 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
     let ureq::Error::Status(status, response) = *send_commit_json(
         &harness.server_url,
         &namespace,
-        &replace("misspelled-guard", "expected_revsion_no"),
+        &replace("misspelled-precondition", "expected_revsion_no"),
     )
-    .expect_err("a misspelled guard is not a commit this API accepts") else {
+    .expect_err("a misspelled precondition is not a commit this API accepts") else {
         panic!("a rejected commit body returns an HTTP status");
     };
     assert_eq!(status, 400);
@@ -1018,7 +1018,7 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
         serde_json::from_reader(response.into_reader()).expect("API error envelope");
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
 
-    // The rejected body wrote nothing: the file is still the one the guarded
+    // The rejected body wrote nothing: the file is still the one the with_preconditions
     // create published.
     let unchanged = harness
         .client
@@ -1036,9 +1036,9 @@ async fn a_misspelled_commit_guard_is_rejected_rather_than_dropped() {
     send_commit_json(
         &harness.server_url,
         &namespace,
-        &replace("spelled-guard", "expected_revision_no"),
+        &replace("spelled-precondition", "expected_revision_no"),
     )
-    .expect("the guard spelled correctly commits");
+    .expect("the precondition spelled correctly commits");
     let replaced = harness
         .client
         .get_path_entry(
