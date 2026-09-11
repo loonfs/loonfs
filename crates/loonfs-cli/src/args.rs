@@ -878,7 +878,8 @@ pub(crate) struct FilesystemAnnotateArgs {
     #[arg(long, value_parser = parse_public_inode_id)]
     pub expected_inode_id: Option<InodeId>,
     /// Update only while the inode's attribute revision is still this one.
-    #[arg(long)]
+    /// Requires --expected-inode-id.
+    #[arg(long, requires = "expected_inode_id")]
     pub expected_attributes_revision: Option<u64>,
     #[command(flatten)]
     pub commit: CommitArgs,
@@ -1666,6 +1667,15 @@ mod tests {
     #[test]
     fn revision_guards_require_matching_inode_guards() {
         for arguments in [
+            vec![
+                "loonfs",
+                "annotate",
+                "/file.txt",
+                "--set",
+                "owner=ada",
+                "--expected-attributes-revision",
+                "1",
+            ],
             vec![
                 "loonfs",
                 "cp",

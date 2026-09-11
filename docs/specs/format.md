@@ -142,7 +142,7 @@ Attribute keys are compared exactly, without normalization or case folding. A ke
 
 Values are UTF-8 strings of at most 4,096 bytes. Empty strings and control characters are valid values. Removing a key is an explicit operation; an empty value does not remove it. A map contains at most 100 entries and at most 65,536 logical UTF-8 bytes, counting all keys and values without serialization overhead. Invalid durable maps are rejected, not truncated.
 
-An inode begins with an empty map at attribute revision `0`; that initial state has no persisted attribute row. Each effective update increments `attributes_revision_no` by one and stores the complete resulting map. A request that does not change the map is rejected. Clearing the map is a real update and must remain distinguishable from an inode whose attributes were never changed.
+An inode begins with an empty map at attribute revision `0`; that initial state has no persisted attribute row. Each accepted update increments `attributes_revision_no` by one and stores the complete resulting map. An accepted update advances the revision even when the resulting map equals the previous one. Clearing the map is a real update and must remain distinguishable from an inode whose attributes were never changed.
 
 Attribute revision numbers support optimistic concurrency. The API does not expose a separate history-listing interface for old attribute maps. The storage layer nevertheless retains the rows needed to reconstruct supported sequence-based views, as specified in the compaction rules.
 

@@ -289,7 +289,7 @@ pub enum DestinationGuardError {
     GuardsRequireReplace,
     /// A revision guard did not name the inode whose revision it checks.
     #[error(
-        "{revision_field} asserts a revision of a specific file; pair it with {inode_field} so the assertion names which file"
+        "`{revision_field}` names the revision of one inode; pair it with `{inode_field}` so the request names which inode"
     )]
     RevisionRequiresInode {
         /// Revision field supplied by the request.
@@ -328,6 +328,20 @@ impl DestinationGuard {
             revision_no: self.expected_revision_no,
         }))
     }
+}
+
+/// Rejects an attribute revision guard without an inode guard.
+pub fn validate_attributes_guard(
+    expected_inode_id: Option<InodeId>,
+    expected_attributes_revision_no: Option<AttributeRevisionNo>,
+) -> Result<(), DestinationGuardError> {
+    if expected_attributes_revision_no.is_some() && expected_inode_id.is_none() {
+        return Err(DestinationGuardError::RevisionRequiresInode {
+            revision_field: "expected_attributes_revision_no",
+            inode_field: "expected_inode_id",
+        });
+    }
+    Ok(())
 }
 
 /// Directory delete behavior for path-oriented deletes.
@@ -543,7 +557,7 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
-        /// The attribute revision that must still be current before the update.
+        /// With an inode guard, the attribute revision that must still be current.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributeRevisionNo>,

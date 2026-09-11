@@ -98,7 +98,7 @@ pub struct UpdateAttributesOptions {
     pub commit: CommitOptions,
     /// The inode that the path must still resolve to before the update.
     pub expected_inode_id: Option<InodeId>,
-    /// The attribute revision that must still be current before the update.
+    /// With an inode guard, the attribute revision that must still be current.
     pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
 }
 
