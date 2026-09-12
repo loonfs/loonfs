@@ -49,6 +49,20 @@ pub(super) fn ensure_expected_inode(
 
 impl From<loonfs_api::DestinationPreconditionError> for CoreError {
     fn from(error: loonfs_api::DestinationPreconditionError) -> Self {
-        Self::InvalidCommitRequest(error.to_string())
+        let field = match error {
+            loonfs_api::DestinationPreconditionError::PreconditionsRequireReplace { field } => {
+                field
+            }
+            loonfs_api::DestinationPreconditionError::RevisionRequiresInode {
+                revision_field,
+                ..
+            } => revision_field,
+            _ => return Self::InvalidCommitRequest(error.to_string()),
+        };
+        Self::InvalidCommitField {
+            field,
+            message: error.to_string(),
+            precondition_index: None,
+        }
     }
 }

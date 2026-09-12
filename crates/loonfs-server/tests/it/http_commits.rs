@@ -567,6 +567,151 @@ async fn an_empty_operation_list_is_rejected() {
     harness.server.abort();
 }
 
+#[tokio::test]
+async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "http-revision-field",
+        "http-revision-field",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let content = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
+    let error = harness
+        .client
+        .create_commit(
+            &namespace,
+            &CommitRequest {
+                preconditions: Vec::new(),
+                commit_id: commit_id("revision-without-inode"),
+                actor_id: loonfs_test_support::test_actor(),
+                message: None,
+                content_tokens: vec![content_token(&content)],
+                operations: vec![FilesystemOperation::PutFile {
+                    path: absolute(ROOT_FILE),
+                    content_ref: content.content_ref,
+                    behavior: DestinationBehavior::Replace,
+                    expected_inode_id: None,
+                    expected_revision_no: Some(RevisionNo(1)),
+                }],
+            },
+        )
+        .await
+        .expect_err("revision requires an inode");
+    match error {
+        ClientError::Api {
+            status,
+            code,
+            param,
+            details,
+            ..
+        } => {
+            assert_eq!(status, 400);
+            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(param.as_deref(), Some("/operations/0/expected_revision_no"));
+            let details = details.expect("operation details");
+            assert_eq!(details.operation_index, Some(0));
+            assert_eq!(details.precondition_index, None);
+        }
+        other => panic!("expected invalid_request, got {other:?}"),
+    }
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_foreign_binding_precondition_identifies_the_generation_field() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "http-generation-field",
+        "http-generation-field",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    let foreign_namespace = namespace_id("foreign");
+    for namespace in [&namespace, &foreign_namespace] {
+        harness
+            .client
+            .create_namespace(namespace)
+            .await
+            .expect("create namespace");
+        harness
+            .client
+            .create_directory(
+                &NamespacePath::parse(namespace.as_str(), REPORTS_DIR).expect("path"),
+                &loonfs_client::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create directory");
+    }
+    let current = harness
+        .client
+        .get_path_entry(
+            &NamespacePath::parse(namespace.as_str(), REPORTS_DIR).expect("path"),
+            &Default::default(),
+        )
+        .await
+        .expect("stat current directory");
+    let foreign = harness
+        .client
+        .get_path_entry(
+            &NamespacePath::parse(foreign_namespace.as_str(), REPORTS_DIR).expect("path"),
+            &Default::default(),
+        )
+        .await
+        .expect("stat foreign directory");
+    let error = harness
+        .client
+        .create_commit(
+            &namespace,
+            &CommitRequest::single(
+                commit_id("foreign-generation"),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::CreateDirectory {
+                    path: absolute("/unwritten"),
+                    parents: false,
+                },
+            )
+            .preconditions(vec![loonfs_api::CommitPrecondition::PathBinding {
+                path: absolute(REPORTS_DIR),
+                expected_inode_id: current.inode_id,
+                expected_binding_generation: Some(
+                    foreign.binding_generation.expect("named binding"),
+                ),
+            }]),
+        )
+        .await
+        .expect_err("generation belongs to another namespace");
+    match error {
+        ClientError::Api {
+            status,
+            code,
+            param,
+            details,
+            ..
+        } => {
+            assert_eq!(status, 400);
+            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(
+                param.as_deref(),
+                Some("/preconditions/0/expected_binding_generation")
+            );
+            let details = details.expect("precondition details");
+            assert_eq!(details.precondition_index, Some(0));
+            assert_eq!(details.operation_index, None);
+        }
+        other => panic!("expected invalid_request, got {other:?}"),
+    }
+    harness.server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_root_path_is_rejected_as_a_mutation_target() {
     let temp_dir = tempdir().expect("tempdir");
@@ -612,11 +757,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             assert_eq!(status, 400);
             assert_eq!(code, ErrorCode::InvalidRequest.as_str());
             let details = details.expect("a failed commit carries details");
-            // One operation has one place to fail, so nothing disambiguates it.
-            assert_eq!(
-                details.operation_index, None,
-                "a one-operation request names no position"
-            );
+            assert_eq!(details.operation_index, Some(0));
             assert_eq!(
                 details.commit_id.as_ref().map(CommitId::as_str),
                 Some("root-alone")

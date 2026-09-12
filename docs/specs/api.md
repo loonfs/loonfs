@@ -214,6 +214,8 @@ depends on where the input came from:
 | Path parameter | Parameter name |
 | CLI-local input | Flag or argument spelling |
 
+Commit shape errors identify the offending expectation field as `/operations/{i}/{field}` or `/preconditions/{i}/{field}`, where `i` is its zero-based position.
+
 `code` is the stable machine contract; `message` is human-readable and may
 change between releases; `feature` is present only on `not_supported` errors
 and names the capability-document key the client should reconcile against.
@@ -244,13 +246,13 @@ The codes that populate it:
 | `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `precondition_index` for a failed request precondition |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `precondition_index` for a failed request precondition |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
-| `binding_generation_mismatch` | `inode_id` and `precondition_index` for a failed request precondition |
+| `binding_generation_mismatch` | `inode_id`, `expected_binding_generation` (the request's token as supplied), `actual_binding_generation` (the current binding's token, absent for the root); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `precondition_index` identifies a failed request precondition. |
 | `not_deleted` | `inode_id`, plus `expected_deletion_seq` and `actual_deletion_seq` when a live deletion exists at a different generation |
 | any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
-| any commit carrying more than one operation | `operation_index` — the position of the operation that stopped the request (section 5.1) |
+| any failed operation | `operation_index` — the zero-based position of the operation that stopped the request, 0 for a one-operation request (section 5.1) |
 
 One code exists specifically so capability handling is uniform from day one:
 
@@ -471,7 +473,7 @@ everything operations `0..k` do, so a request can create a directory and
 write into it, or delete a path and recreate it. Either every operation
 commits or none does: the first operation that fails aborts the whole
 request, nothing it or its predecessors would have written becomes visible,
-and — when the request carried more than one operation — the error names the
+and the error names the
 position that stopped it in `details.operation_index`. The error code stays
 the failing operation's own; no code is specific to batching.
 
@@ -1869,7 +1871,7 @@ position that stopped it. Had the put above raced another writer:
 ```json
 {
   "code": "path_conflict",
-  "message": "operation 1: destination `/reports/2026/january.pdf` already exists",
+  "message": "destination `/reports/2026/january.pdf` already exists",
   "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
   "details": {
     "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",

@@ -1289,6 +1289,10 @@
             "$ref": "#/components/schemas/AttributeRevisionNo",
             "description": "Attribute revision that is actually current for the inode."
           },
+          "actual_binding_generation": {
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Current binding token; absent for the root, which has no binding."
+          },
           "actual_deletion_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Deletion generation actually active for the inode."
@@ -1324,6 +1328,10 @@
           "expected_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
             "description": "Attribute revision the request expected to be current."
+          },
+          "expected_binding_generation": {
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Opaque binding token supplied by the request."
           },
           "expected_deletion_seq": {
             "$ref": "#/components/schemas/ChangeSeq",

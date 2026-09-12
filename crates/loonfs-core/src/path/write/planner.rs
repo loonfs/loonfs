@@ -50,8 +50,7 @@ pub(crate) fn commit_fingerprint(
 /// Each semantic operation is planned against the view and its compiled
 /// operations are immediately validated, with accepted effects applied to the
 /// shared view so later operations observe earlier ones. The first failure
-/// aborts the request; multi-operation requests attach the failing
-/// operation's index, while single-operation requests return the raw error.
+/// aborts the request and attaches the failing operation's index.
 ///
 /// The commit's identity moves into the returned [`ValidatedCommitPlan`]:
 /// the head is the validated source of the namespace and writer epoch
@@ -77,7 +76,6 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
     let mut numbering = CommitNumbering::default();
     let mut validated_ops: Vec<ValidatedOp> = Vec::new();
-    let operation_count = request.operations.len();
     for (index, operation) in request.operations.iter().enumerate() {
         let unit = {
             let resolution_view = resolved.view();
@@ -87,7 +85,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             };
             plan_operation(operation, &view, allocation)
                 .await
-                .map_err(|error| attribute(error, index, operation_count))?
+                .map_err(|error| attribute(error, index))?
         };
         let unit_ops = unit.ops;
         let validated_unit = validate_ops(
@@ -99,7 +97,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             committed_at_ms,
         )
         .await
-        .map_err(|error| attribute(error, index, operation_count))?;
+        .map_err(|error| attribute(error, index))?;
         validated_ops.extend(validated_unit);
     }
 
@@ -273,14 +271,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Names the operation a batch stopped at.
-///
-/// A one-operation request has one place to fail, so its error stays exactly
-/// what the operation produced; there is nothing to disambiguate.
-fn attribute(error: CoreError, index: usize, operation_count: usize) -> CoreError {
-    if operation_count < 2 {
-        return error;
-    }
+fn attribute(error: CoreError, index: usize) -> CoreError {
     error.at_operation(index)
 }
 

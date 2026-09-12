@@ -103,8 +103,10 @@ pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
     expected_binding_generation: &BindingGenerationToken,
 ) -> Result<()> {
     let expected = BindingGeneration::decode(expected_binding_generation, view.namespace_id)
-        .map_err(|error| {
-            CoreError::InvalidCommitRequest(format!("invalid expected binding generation: {error}"))
+        .map_err(|error| CoreError::InvalidCommitField {
+            field: "expected_binding_generation",
+            message: format!("invalid expected binding generation: {error}"),
+            precondition_index: None,
         })?;
     let Some(current) = resolved.binding_generation else {
         return Err(CoreError::RootMutationForbidden);
@@ -112,6 +114,15 @@ pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
     if current != expected {
         return Err(CoreError::BindingGenerationMismatch {
             inode_id: resolved.inode_id,
+            expected_binding_generation: expected_binding_generation.clone(),
+            actual_binding_generation: Some(current.encode(view.namespace_id).map_err(
+                |error| {
+                    CoreError::Internal(format!(
+                        "failed to encode the binding generation of inode `{}`: {error}",
+                        resolved.inode_id
+                    ))
+                },
+            )?),
             precondition_index: None,
         });
     }

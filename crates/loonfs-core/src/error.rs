@@ -15,8 +15,8 @@ use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalSegmentError, WalTailLoadError};
 use loonfs_api::{
-    ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, RevisionNo, UploadId,
-    WriterEpoch, WriterId,
+    BindingGeneration, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId,
+    RevisionNo, UploadId, WriterEpoch, WriterId,
 };
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use thiserror::Error;
@@ -67,6 +67,12 @@ pub enum CoreError {
     InvalidPath(String),
     #[error("invalid commit request: {0}")]
     InvalidCommitRequest(String),
+    #[error("invalid commit request: {message}")]
+    InvalidCommitField {
+        field: &'static str,
+        message: String,
+        precondition_index: Option<u32>,
+    },
     #[error("path not found `{0}`")]
     PathNotFound(String),
     #[error("inode not found `{0}`")]
@@ -122,6 +128,8 @@ pub enum CoreError {
     #[error("inode `{inode_id}` is no longer bound at the generation the request named")]
     BindingGenerationMismatch {
         inode_id: InodeId,
+        expected_binding_generation: BindingGeneration,
+        actual_binding_generation: Option<BindingGeneration>,
         precondition_index: Option<u32>,
     },
     #[error("commit id conflict for `{commit_id}`")]
@@ -241,10 +249,7 @@ pub enum CoreError {
         actual: ChangeSeq,
         precondition_index: Option<u32>,
     },
-    /// Identifies the operation that caused a multi-operation request to fail.
-    /// The request remains atomic, and the error code is taken from the underlying
-    /// failure. Single-operation requests return the underlying error directly.
-    #[error("operation {operation_index}: {source}")]
+    #[error("{source}")]
     FailedOperation {
         operation_index: u32,
         source: Box<CoreError>,
@@ -408,6 +413,7 @@ impl CoreError {
             CoreError::InvalidPath(_)
             | CoreError::RootMutationForbidden
             | CoreError::InvalidCommitRequest(_)
+            | CoreError::InvalidCommitField { .. }
             | CoreError::InvalidCheckpointRequest(_)
             | CoreError::InvalidGcConfig(_)
             | CoreError::InvalidQuery(_)
@@ -460,8 +466,6 @@ impl CoreError {
         }
     }
 
-    /// Attributes this failure to the operation at `operation_index` of a
-    /// multi-operation request.
     pub(crate) fn at_operation(self, operation_index: usize) -> Self {
         let Ok(operation_index) = u32::try_from(operation_index) else {
             return self;
@@ -506,6 +510,7 @@ impl CoreError {
             | CoreError::WalBuild(_)
             | CoreError::InvalidPath(_)
             | CoreError::InvalidCommitRequest(_)
+            | CoreError::InvalidCommitField { .. }
             | CoreError::PathNotFound(_)
             | CoreError::InodeNotFound(_)
             | CoreError::RevisionNotFound { .. }
@@ -606,9 +611,20 @@ impl CoreError {
             }),
             CoreError::BindingGenerationMismatch {
                 inode_id,
-                precondition_index: Some(precondition_index),
+                expected_binding_generation,
+                actual_binding_generation,
+                precondition_index,
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
+                expected_binding_generation: Some(expected_binding_generation.clone()),
+                actual_binding_generation: actual_binding_generation.clone(),
+                precondition_index: *precondition_index,
+                ..ErrorDetails::default()
+            }),
+            CoreError::InvalidCommitField {
+                precondition_index: Some(precondition_index),
+                ..
+            } => Some(ErrorDetails {
                 precondition_index: Some(*precondition_index),
                 ..ErrorDetails::default()
             }),

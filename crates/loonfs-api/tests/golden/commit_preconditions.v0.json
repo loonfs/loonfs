@@ -47,6 +47,8 @@
   },
   {
     "precondition_index": 0,
+    "expected_binding_generation": "aaaa",
+    "actual_binding_generation": "bbbb",
     "expected_head_seq": 42,
     "actual_head_seq": 43
   }

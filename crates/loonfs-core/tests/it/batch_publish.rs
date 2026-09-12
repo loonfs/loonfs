@@ -1262,8 +1262,15 @@ async fn fresh_delete_path_expected_inode_precondition_still_matches_or_rejects(
     )
     .await
     .expect_err("mismatching precondition must fail planning");
+    let CoreError::FailedOperation {
+        operation_index: 0,
+        source,
+    } = error
+    else {
+        panic!("expected failed operation, got {error:?}");
+    };
     assert!(matches!(
-        error,
+        *source,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
             expected_inode_id: Some(InodeId(1)),
             actual_inode_id: Some(actual),
