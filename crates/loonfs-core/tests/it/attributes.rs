@@ -1,11 +1,6 @@
 //! Inode attributes end to end: what the planner accepts, what the commit
 //! guards reject, and what survives a flush, a fork, and every operation that
 //! moves an inode around.
-//!
-//! There is no attribute read API yet, so these read attributes back through
-//! the change feed — which is also what pins the feed's own contract — and
-//! through the revision number a later update publishes, which is only right
-//! if the write path read the current state from where it was stored.
 
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
@@ -18,11 +13,14 @@ use loonfs_api::{
     NamespaceId, RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
 };
 use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::publish::{CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{
+    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
+};
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -112,6 +110,24 @@ async fn update<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
     submit_operation(store, namespace_id, commit_id(id), operation, context).await
+}
+
+async fn publish_request<S: ObjectStore + ?Sized>(
+    engine: &mut NamespaceCommitEngine,
+    store: &S,
+    request: CommitRequest,
+    context: &MutationContext,
+) -> Result<loonfs_api::CommitResponse, CoreError> {
+    engine
+        .publish_batch(
+            store,
+            vec![CommitCandidate::new(request)],
+            context,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .results
+        .remove(0)
 }
 
 /// Every attribute event the feed still holds, oldest first.
@@ -356,7 +372,7 @@ async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
 }
 
 #[tokio::test]
-async fn an_update_that_changes_nothing_is_rejected() {
+async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     put_file_bytes(
         &store,
@@ -379,30 +395,37 @@ async fn an_update_that_changes_nothing_is_rejected() {
     .await
     .expect("first write");
 
-    for (label, operation) in [
-        (
-            "same-value",
-            set_attributes("/docs/a.txt", &[("owner", "ada")]),
-        ),
-        (
-            "remove-absent",
-            remove_attributes("/docs/a.txt", &["never-written"]),
-        ),
-    ] {
-        let error = match update(&store, &namespace_id, label, operation, &context).await {
-            Ok(_) => panic!("`{label}` must be rejected"),
-            Err(error) => error,
-        };
-        assert_invalid_commit_request(&error, label);
-    }
-
-    // A first write on an inode that has no attributes is not a no-op even
-    // though it removes nothing: the map goes from empty to populated.
     let file_inode = inode_of(&store, &namespace_id, "/docs/a.txt").await;
+    let operation = FilesystemOperation::UpdateAttributes {
+        path: path("/docs/a.txt"),
+        set: BTreeMap::from([(key("owner"), text("ada"))]),
+        remove: Vec::new(),
+        expected_inode_id: Some(file_inode),
+        expected_attributes_revision_no: Some(AttributeRevisionNo(1)),
+    };
+    let request = CommitRequest::single(
+        commit_id("same-value"),
+        loonfs_test_support::test_actor(),
+        None,
+        operation,
+    );
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let receipt = publish_request(&mut engine, &store, request.clone(), &context)
+        .await
+        .expect("an unchanged map advances the revision");
+
+    store.reset();
+    let replay = publish_request(&mut engine, &store, request, &context)
+        .await
+        .expect("the original receipt replays despite the stale guard");
+    assert_eq!(replay, receipt);
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().deletes, 0);
     assert_eq!(
         attributes_of(&store, &namespace_id, file_inode).await,
-        Some((AttributeRevisionNo(1), map(&[("owner", "ada")]))),
-        "the rejected updates published nothing"
+        Some((AttributeRevisionNo(2), map(&[("owner", "ada")]))),
+        "receipt replay does not advance the revision"
     );
 }
 
@@ -469,7 +492,7 @@ async fn an_update_is_rejected_when_the_resulting_map_breaks_a_limit() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_caller_supplied_stale_expectation_reports_expected_and_actual() {
+async fn an_already_satisfied_patch_reports_a_stale_expectation() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     put_file_bytes(
         &store,
@@ -492,15 +515,16 @@ async fn a_caller_supplied_stale_expectation_reports_expected_and_actual() {
     .await
     .expect("first write");
 
+    let file_inode = inode_of(&store, &namespace_id, "/docs/a.txt").await;
     let error = update(
         &store,
         &namespace_id,
         "stale-expectation",
         FilesystemOperation::UpdateAttributes {
             path: path("/docs/a.txt"),
-            set: BTreeMap::from([(key("owner"), text("grace"))]),
+            set: BTreeMap::from([(key("owner"), text("ada"))]),
             remove: Vec::new(),
-            expected_inode_id: None,
+            expected_inode_id: Some(file_inode),
             expected_attributes_revision_no: Some(AttributeRevisionNo(0)),
         },
         &context,
@@ -517,6 +541,174 @@ async fn a_caller_supplied_stale_expectation_reports_expected_and_actual() {
     assert_eq!(
         details.actual_attributes_revision_no,
         Some(AttributeRevisionNo(1))
+    );
+}
+
+#[tokio::test]
+async fn an_attribute_revision_guard_requires_an_inode_before_resolving_the_path() {
+    let (_temp_dir, store, namespace_id, context) = setup().await;
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"hello",
+        DestinationBehavior::NoReplace,
+        &context,
+        Some("seed"),
+    )
+    .await
+    .expect("seed file");
+
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    publish_request(
+        &mut engine,
+        &store,
+        CommitRequest::single(
+            commit_id("set-owner"),
+            loonfs_test_support::test_actor(),
+            None,
+            set_attributes("/docs/a.txt", &[("owner", "ada")]),
+        ),
+        &context,
+    )
+    .await
+    .expect("write attributes in the retained writer session");
+
+    let file_before = resolve_path(&store, &namespace_id, "/docs/a.txt")
+        .await
+        .expect("read file");
+    let directory_before = resolve_path(&store, &namespace_id, "/docs")
+        .await
+        .expect("read directory");
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    for (label, target) in [
+        ("file", "/docs/a.txt"),
+        ("directory", "/docs"),
+        ("missing", "/missing.txt"),
+    ] {
+        let request = CommitRequest::single(
+            commit_id(label),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::UpdateAttributes {
+                path: path(target),
+                set: BTreeMap::from([(key("owner"), text("ada"))]),
+                remove: Vec::new(),
+                expected_inode_id: None,
+                expected_attributes_revision_no: Some(AttributeRevisionNo(0)),
+            },
+        );
+        let error = publish_request(&mut engine, &store, request, &context)
+            .await
+            .expect_err("the revision guard requires an inode guard");
+        assert_invalid_commit_request(&error, label);
+        let message = error.to_string();
+        assert!(
+            message.contains("expected_attributes_revision_no"),
+            "{message}"
+        );
+        assert!(message.contains("expected_inode_id"), "{message}");
+    }
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().deletes, 0);
+    assert_eq!(
+        resolve_path(&store, &namespace_id, "/docs/a.txt")
+            .await
+            .expect("read file"),
+        file_before
+    );
+    assert_eq!(
+        resolve_path(&store, &namespace_id, "/docs")
+            .await
+            .expect("read directory"),
+        directory_before
+    );
+}
+
+#[tokio::test]
+async fn an_attribute_guard_rejects_a_recreated_path_before_checking_its_revision() {
+    let (_temp_dir, store, namespace_id, context) = setup().await;
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"hello",
+        DestinationBehavior::NoReplace,
+        &context,
+        Some("seed"),
+    )
+    .await
+    .expect("seed file");
+    update(
+        &store,
+        &namespace_id,
+        "set-owner",
+        set_attributes("/docs/a.txt", &[("owner", "ada")]),
+        &context,
+    )
+    .await
+    .expect("write attributes");
+    let original = resolve_path(&store, &namespace_id, "/docs/a.txt")
+        .await
+        .expect("read original inode");
+    update(
+        &store,
+        &namespace_id,
+        "delete",
+        FilesystemOperation::DeletePath {
+            path: path("/docs/a.txt"),
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id: Some(original.inode_id),
+        },
+        &context,
+    )
+    .await
+    .expect("delete original inode");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"replacement",
+        DestinationBehavior::NoReplace,
+        &context,
+        Some("recreate"),
+    )
+    .await
+    .expect("recreate file");
+    let replacement = resolve_path(&store, &namespace_id, "/docs/a.txt")
+        .await
+        .expect("read replacement inode");
+    assert_ne!(original.inode_id, replacement.inode_id);
+
+    let error = update(
+        &store,
+        &namespace_id,
+        "stale-inode",
+        FilesystemOperation::UpdateAttributes {
+            path: path("/docs/a.txt"),
+            set: BTreeMap::from([(key("owner"), text("grace"))]),
+            remove: Vec::new(),
+            expected_inode_id: Some(original.inode_id),
+            expected_attributes_revision_no: Some(
+                original
+                    .attributes
+                    .expect("original attributes")
+                    .attributes_revision_no,
+            ),
+        },
+        &context,
+    )
+    .await
+    .expect_err("the path names a new inode");
+    assert_eq!(error.code(), ErrorCode::PathConflict);
+    let details = error.details().expect("path conflict details");
+    assert_eq!(details.expected_inode_id, Some(original.inode_id));
+    assert_eq!(details.actual_inode_id, Some(replacement.inode_id));
+    assert_eq!(
+        resolve_path(&store, &namespace_id, "/docs/a.txt")
+            .await
+            .expect("read replacement after rejection"),
+        replacement
     );
 }
 
@@ -597,7 +789,7 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
 }
 
 #[tokio::test]
-async fn two_updates_in_one_request_advance_the_revision_twice() {
+async fn an_unchanged_update_and_a_second_update_commit_together() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     put_file_bytes(
         &store,
@@ -620,7 +812,7 @@ async fn two_updates_in_one_request_advance_the_revision_twice() {
             actor_id: loonfs_test_support::test_actor(),
             message: None,
             operations: vec![
-                set_attributes("/docs/a.txt", &[("owner", "ada")]),
+                remove_attributes("/docs/a.txt", &["owner"]),
                 set_attributes("/docs/a.txt", &[("owner", "grace")]),
             ],
         },
@@ -639,7 +831,7 @@ async fn two_updates_in_one_request_advance_the_revision_twice() {
     assert_eq!(
         events,
         vec![
-            (AttributeRevisionNo(1), map(&[("owner", "ada")])),
+            (AttributeRevisionNo(1), Attributes::default()),
             (AttributeRevisionNo(2), map(&[("owner", "grace")])),
         ],
         "internal-op order survives into the feed"
@@ -737,9 +929,7 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
         .await
         .expect("flush the WAL tail into metadata segments");
 
-    // A repeat of the current state is still a no-op, which it could only be
-    // if the flushed map is what the planner read.
-    let no_op = update(
+    update(
         &store,
         &namespace_id,
         "repeat-after-flush",
@@ -747,8 +937,21 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
         &context,
     )
     .await
-    .expect_err("the flushed map is unchanged by this update");
-    assert_invalid_commit_request(&no_op, "repeat-after-flush");
+    .expect("an unchanged map advances the flushed revision");
+
+    let entry = resolve_path(&store, &namespace_id, "/docs/a.txt")
+        .await
+        .expect("read the updated attributes");
+    let attributes = entry.attributes.expect("attribute projection");
+    assert_eq!(attributes.attributes_revision_no, AttributeRevisionNo(3));
+    assert_eq!(
+        attributes.attributes,
+        map(&[("owner", "ada"), ("stage", "draft")])
+    );
+    assert_eq!(
+        attributes_of(&store, &namespace_id, entry.inode_id).await,
+        Some((AttributeRevisionNo(3), attributes.attributes))
+    );
 
     update(
         &store,
@@ -764,7 +967,7 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
     assert_eq!(
         attributes_of(&store, &namespace_id, file_inode).await,
         Some((
-            AttributeRevisionNo(3),
+            AttributeRevisionNo(4),
             map(&[("owner", "grace"), ("stage", "draft")])
         )),
         "the counter continues from the flushed revision and the map is whole"
@@ -806,7 +1009,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
         .expect("fork the namespace");
 
     // Before the fork's first flush, its basis is the source's manifest.
-    let inherited = update(
+    update(
         &store,
         &target,
         "repeat-in-fork",
@@ -814,8 +1017,12 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
         &context,
     )
     .await
-    .expect_err("the fork already holds the source's map");
-    assert_invalid_commit_request(&inherited, "repeat-in-fork");
+    .expect("the unchanged inherited map advances the revision");
+    let file_inode = inode_of(&store, &target, "/docs/a.txt").await;
+    assert_eq!(
+        attributes_of(&store, &target, file_inode).await,
+        Some((AttributeRevisionNo(2), map(&[("owner", "ada")]))),
+    );
 
     update(
         &store,
@@ -841,11 +1048,10 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
     .await
     .expect("an update after the fork's flush commits");
 
-    let file_inode = inode_of(&store, &target, "/docs/a.txt").await;
     assert_eq!(
         attributes_of(&store, &target, file_inode).await,
         Some((
-            AttributeRevisionNo(3),
+            AttributeRevisionNo(4),
             map(&[("owner", "grace"), ("stage", "draft")])
         )),
         "the fork's own flush carries the inherited revision forward"
@@ -1009,8 +1215,7 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
         Some((AttributeRevisionNo(1), map(&[("owner", "ada")]))),
         "the recovered inode holds the map it had"
     );
-    // The map is the live one, so restating it is still a no-op.
-    let no_op = update(
+    update(
         &store,
         &namespace_id,
         "repeat-after-undelete",
@@ -1018,8 +1223,11 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
         &context,
     )
     .await
-    .expect_err("undelete revealed the same map");
-    assert_invalid_commit_request(&no_op, "repeat-after-undelete");
+    .expect("the unchanged map advances the recovered revision");
+    assert_eq!(
+        attributes_of(&store, &namespace_id, file_inode).await,
+        Some((AttributeRevisionNo(2), map(&[("owner", "ada")]))),
+    );
 }
 
 #[tokio::test]
@@ -1235,8 +1443,7 @@ async fn clearing_every_attribute_publishes_the_empty_map() {
         attributes_of(&store, &namespace_id, file_inode).await,
         Some((AttributeRevisionNo(2), Attributes::default()))
     );
-    // Clearing again changes nothing, so it is rejected like any other no-op.
-    let no_op = update(
+    update(
         &store,
         &namespace_id,
         "clear-again",
@@ -1244,8 +1451,11 @@ async fn clearing_every_attribute_publishes_the_empty_map() {
         &context,
     )
     .await
-    .expect_err("the map is already empty");
-    assert_invalid_commit_request(&no_op, "clear-again");
+    .expect("removing an absent key advances the revision");
+    assert_eq!(
+        attributes_of(&store, &namespace_id, file_inode).await,
+        Some((AttributeRevisionNo(3), Attributes::default()))
+    );
 
     // A cleared map is a real state that survives a flush.
     namespace_engine(&store, &namespace_id, &context)
@@ -1263,7 +1473,7 @@ async fn clearing_every_attribute_publishes_the_empty_map() {
     .expect("a write after the clear commits");
     assert_eq!(
         attributes_of(&store, &namespace_id, file_inode).await,
-        Some((AttributeRevisionNo(3), map(&[("owner", "hopper")]))),
+        Some((AttributeRevisionNo(4), map(&[("owner", "hopper")]))),
         "the cleared revision is what the write built on"
     );
 }

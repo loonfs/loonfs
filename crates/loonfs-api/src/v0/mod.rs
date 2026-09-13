@@ -18,8 +18,8 @@ pub use downloads::{
     BeginDownloadResponse,
 };
 pub use operations::{
-    AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, Checkpoint,
-    CheckpointOwnerSummary, CommitAssertion, CommitRequest, CreateCheckpointRequest,
+    validate_attributes_guard, AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError,
+    Checkpoint, CheckpointOwnerSummary, CommitAssertion, CommitRequest, CreateCheckpointRequest,
     CreateNamespaceRequest, CreateSnapshotRequest, DeleteCheckpointResponse,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, DeleteSnapshotResponse,
     DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior, DestinationGuard,

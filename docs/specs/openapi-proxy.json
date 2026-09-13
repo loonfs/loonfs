@@ -1853,7 +1853,7 @@
         "properties": {
           "expected_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
-            "description": "The attribute revision that must still be current before the update."
+            "description": "With an inode guard, the attribute revision that must still be current."
           },
           "expected_inode_id": {
             "$ref": "#/components/schemas/InodeId",

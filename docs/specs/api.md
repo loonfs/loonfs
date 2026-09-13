@@ -2026,6 +2026,7 @@ path resolves to:
         "tags": "draft,review"
       },
       "remove": ["stage"],
+      "expected_inode_id": "ino_7",
       "expected_attributes_revision_no": 3
     }
   ]
@@ -2054,11 +2055,14 @@ there is nothing to apply. So do a key that appears in both, a key repeated
 in `remove`, and any key under the reserved `loonfs.` prefix, which is
 system-owned and not a caller's to write.
 
-An update that leaves the map exactly as it was also answers
-`invalid_request`. Attributes are current state with no history, so a
-revision that restates the same map has nothing behind it — unlike a put of
-identical bytes, which appends a revision because a file's revisions *are* its
-history. The resulting map is checked against every limit in the format spec,
+An accepted update advances the attribute revision even when the resulting
+map is unchanged. The revision counts accepted updates, matching puts of
+identical content. The update writes the complete resulting map and produces
+an attributes event in the change feed. Replaying the same request with the
+same `commit_id` returns its original receipt without advancing the revision
+again; a new `commit_id` is a new update.
+
+The resulting map is checked against every limit in the format spec,
 so a small write that pushes an already-large map over a cap is rejected for
 the map it would produce.
 
@@ -2073,9 +2077,11 @@ file's content and nothing else.
 
 `expected_inode_id` and `expected_attributes_revision_no` are both optional
 guards, and both are part of the commit's semantic identity for commit-id
-reuse. A wrong `expected_inode_id` answers `path_conflict`, like the delete
-guard it mirrors, so a raced rebinding cannot land attributes on the wrong
-inode. A stale
+reuse. An attribute revision guard requires its matching inode guard because
+a revision identifies a version of one inode; a revision-only guard returns
+`invalid_request` before resolving the path. A wrong `expected_inode_id`
+answers `path_conflict`, like the delete guard it mirrors, so a raced
+rebinding cannot land attributes on the wrong inode. A stale
 `expected_attributes_revision_no` answers `stale_attributes`. Omitting the
 revision guard does not make the write a merge: every update carries the
 revision it read as its own guard, so a concurrent update still answers

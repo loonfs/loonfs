@@ -1801,7 +1801,6 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
         let entry = json_data(&removed);
         assert!(entry["attributes"]["owner"].is_null());
         assert_eq!(entry["attributes"]["note"], "has=equals");
-        // Three effective updates, three revisions.
         assert_eq!(entry["attributes_revision_no"], 3);
         assert!(entry.pointer("/attributes/attributes").is_none());
 

@@ -21,6 +21,7 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     validate_request_shape(set, remove)?;
+    loonfs_api::v0::validate_attributes_guard(expected_inode_id, expected_attributes_revision_no)?;
 
     // Attributes belong to the resource, so a directory is as valid a target
     // as a file; nothing here looks at the inode kind.
@@ -41,17 +42,6 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
     }
     for key in remove {
         updated.remove(key);
-    }
-    // An update that leaves the map exactly as it was publishes nothing. This
-    // is new: an identical-content put deliberately appends a revision,
-    // because a file's revisions are its history. Attributes are current
-    // state with no history, so a revision that states the same map is a
-    // number with nothing behind it.
-    if updated == *current.as_map() {
-        return Err(CoreError::InvalidCommitRequest(format!(
-            "the update leaves the attributes of `{}` unchanged",
-            absolute_path.as_str()
-        )));
     }
     let attributes = Attributes::new(updated).map_err(|error| {
         CoreError::InvalidCommitRequest(format!("the resulting attribute map is invalid: {error}"))
