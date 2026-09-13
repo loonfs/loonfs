@@ -270,7 +270,7 @@ async fn move_requires_the_current_binding_generation() {
         test_commit_id(Some("move-stale")),
         FilesystemOperation::MoveByInode {
             inode_id: report_inode_id,
-            expected_binding_generation: stale_generation,
+            expected_binding_generation: stale_generation.clone(),
             to_parent_inode_id: ROOT_INODE_ID,
             to_display_name: display_name("moved.txt"),
             precondition: loonfs_api::DestinationPrecondition {
@@ -284,6 +284,59 @@ async fn move_requires_the_current_binding_generation() {
     .await
     .expect_err("stale binding generation must fail");
     assert_eq!(error.code(), ErrorCode::BindingGenerationMismatch);
+    let details = error.details().expect("operation details");
+    assert_eq!(details.operation_index, Some(0));
+    assert_eq!(details.precondition_index, None);
+    assert_eq!(details.inode_id, Some(report_inode_id));
+    assert_eq!(
+        details.expected_binding_generation,
+        Some(stale_generation.clone())
+    );
+    assert_eq!(
+        details.actual_binding_generation,
+        Some(fresh_generation.clone())
+    );
+
+    for (path, inode_id, actual) in [
+        (
+            "/docs/renamed.txt",
+            report_inode_id,
+            Some(fresh_generation.clone()),
+        ),
+        ("/", ROOT_INODE_ID, None),
+    ] {
+        let error = submit_commit(
+            &store,
+            &namespace_id,
+            CommitRequest::single(
+                test_commit_id(Some("binding-precondition")),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/unwritten").expect("path"),
+                    parents: false,
+                },
+            )
+            .preconditions(vec![loonfs_api::CommitPrecondition::PathBinding {
+                path: AbsolutePath::parse(path).expect("path"),
+                expected_inode_id: inode_id,
+                expected_binding_generation: Some(stale_generation.clone()),
+            }]),
+            &context,
+        )
+        .await
+        .expect_err("binding precondition must fail");
+        assert_eq!(error.code(), ErrorCode::BindingGenerationMismatch);
+        let details = error.details().expect("precondition details");
+        assert_eq!(details.precondition_index, Some(0));
+        assert_eq!(details.operation_index, None);
+        assert_eq!(details.inode_id, Some(inode_id));
+        assert_eq!(
+            details.expected_binding_generation,
+            Some(stale_generation.clone())
+        );
+        assert_eq!(details.actual_binding_generation, actual);
+    }
 
     submit_operation(
         &store,

@@ -103,6 +103,9 @@ impl ApiResponseError {
         let message = error.public_message();
         let mut response = Self::new(code, &message);
         response.body.details = details.map(Box::new);
+        if let Some(param) = error.invalid_request_param() {
+            response = response.with_invalid_request_param(param);
+        }
         response
     }
 

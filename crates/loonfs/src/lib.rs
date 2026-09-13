@@ -250,6 +250,27 @@ impl RuntimeError {
         }
     }
 
+    /// Identifies a malformed commit field as a JSON Pointer for HTTP errors.
+    pub fn invalid_request_param(&self) -> Option<String> {
+        match self {
+            Self::Core(CoreError::FailedOperation {
+                operation_index,
+                source,
+            }) => match source.as_ref() {
+                CoreError::InvalidCommitField { field, .. } => {
+                    Some(format!("/operations/{operation_index}/{field}"))
+                }
+                _ => None,
+            },
+            Self::Core(CoreError::InvalidCommitField {
+                field,
+                precondition_index: Some(precondition_index),
+                ..
+            }) => Some(format!("/preconditions/{precondition_index}/{field}")),
+            _ => None,
+        }
+    }
+
     /// Returns an error message safe to show to users.
     pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
         let store_message = match self {

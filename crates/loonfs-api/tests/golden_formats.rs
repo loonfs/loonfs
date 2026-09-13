@@ -2539,6 +2539,12 @@ fn commit_precondition_wire_shapes_match_golden() {
         precondition_index: Some(0),
         expected_head_seq: Some(ChangeSeq(42)),
         actual_head_seq: Some(ChangeSeq(43)),
+        expected_binding_generation: Some(
+            loonfs_api::BindingGeneration::parse("aaaa").expect("generation"),
+        ),
+        actual_binding_generation: Some(
+            loonfs_api::BindingGeneration::parse("bbbb").expect("generation"),
+        ),
         ..ErrorDetails::default()
     };
     let bytes =

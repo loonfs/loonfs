@@ -1567,7 +1567,14 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     )
     .await
     .expect_err("the old identity must reject the recreated file");
-    match error {
+    let CoreError::FailedOperation {
+        operation_index: 0,
+        source,
+    } = error
+    else {
+        panic!("expected failed operation, got {error:?}");
+    };
+    match *source {
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
             expected_inode_id: Some(expected_child_inode_id),
             actual_inode_id: Some(actual_child_inode_id),
@@ -1688,9 +1695,10 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
     .expect_err("non-recursive delete should reject non-empty dir");
     assert!(matches!(
         &error,
-        CoreError::CommitValidation(CommitValidationError::DirectoryNotEmpty {
-            inode_id: InodeId(2)
-        })
+        CoreError::FailedOperation { operation_index: 0, source }
+            if matches!(source.as_ref(), CoreError::CommitValidation(
+                CommitValidationError::DirectoryNotEmpty { inode_id: InodeId(2) }
+            ))
     ));
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
@@ -1945,7 +1953,10 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     )
     .await
     .expect_err("no-replace move onto an occupied name fails");
-    assert!(matches!(error, CoreError::DestinationExists { .. }));
+    assert!(
+        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        if matches!(*source, CoreError::DestinationExists { .. }))
+    );
 
     // Replace compiles to one commit: the destination file's delete and the
     // source's rebind land atomically.
@@ -2019,7 +2030,10 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     )
     .await
     .expect_err("replace move onto a directory fails");
-    assert!(matches!(error, CoreError::ExpectedFile { .. }));
+    assert!(
+        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        if matches!(*source, CoreError::ExpectedFile { .. }))
+    );
 
     // A path never replaces itself, force or not.
     let error = submit_operation(
@@ -2039,7 +2053,10 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     )
     .await
     .expect_err("replace move onto itself fails");
-    assert!(matches!(error, CoreError::DestinationExists { .. }));
+    assert!(
+        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        if matches!(*source, CoreError::DestinationExists { .. }))
+    );
 }
 
 #[tokio::test]
@@ -2346,8 +2363,15 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     )
     .await
     .expect_err("the old copy destination identity must reject the recreated file");
+    let CoreError::FailedOperation {
+        operation_index: 0,
+        source,
+    } = error
+    else {
+        panic!("expected failed operation, got {error:?}");
+    };
     assert!(matches!(
-        error,
+        *source,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
             expected_inode_id: Some(expected_child_inode_id),
             actual_inode_id: Some(actual_child_inode_id),

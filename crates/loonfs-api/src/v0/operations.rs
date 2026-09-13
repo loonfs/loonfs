@@ -104,6 +104,14 @@ pub struct ErrorDetails {
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_inode_id: Option<InodeId>,
+    /// Opaque binding token supplied by the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub expected_binding_generation: Option<BindingGeneration>,
+    /// Current binding token; absent for the root, which has no binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub actual_binding_generation: Option<BindingGeneration>,
     /// Revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -286,7 +294,10 @@ pub struct ExpectedFileState {
 pub enum DestinationPreconditionError {
     /// A create-only operation supplied a replacement precondition.
     #[error("destination preconditions require replace behavior")]
-    PreconditionsRequireReplace,
+    PreconditionsRequireReplace {
+        /// First supplied expectation field, with inode before revision.
+        field: &'static str,
+    },
     /// A revision precondition did not name the inode whose revision it checks.
     #[error(
         "`{revision_field}` names the revision of one inode; pair it with `{inode_field}` so the precondition names which inode"
@@ -311,7 +322,14 @@ impl DestinationPrecondition {
                 (None, None)
             )
         {
-            return Err(DestinationPreconditionError::PreconditionsRequireReplace);
+            let (revision_field, inode_field) = fields.names();
+            return Err(DestinationPreconditionError::PreconditionsRequireReplace {
+                field: if self.expected_inode_id.is_some() {
+                    inode_field
+                } else {
+                    revision_field
+                },
+            });
         }
         let Some(inode_id) = self.expected_inode_id else {
             if self.expected_revision_no.is_some() {

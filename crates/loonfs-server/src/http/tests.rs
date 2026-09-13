@@ -359,6 +359,12 @@ fn error_detail_fields_match_the_api_spec_table() {
         inode_id: Some(InodeId(1)),
         expected_inode_id: Some(InodeId(2)),
         actual_inode_id: Some(InodeId(3)),
+        expected_binding_generation: Some(
+            loonfs_api::BindingGeneration::parse("aaaa").expect("generation"),
+        ),
+        actual_binding_generation: Some(
+            loonfs_api::BindingGeneration::parse("bbbb").expect("generation"),
+        ),
         expected_revision_no: Some(RevisionNo::from(1)),
         actual_revision_no: Some(RevisionNo::from(2)),
         expected_attributes_revision_no: Some(AttributeRevisionNo::from(1)),

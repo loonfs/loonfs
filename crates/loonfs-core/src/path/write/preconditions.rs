@@ -133,14 +133,26 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
     }
     if let (Some(binding), Some(expected)) = (actual, expected_binding_generation) {
         check_binding_generation(view, &binding, expected).map_err(|error| match error {
-            CoreError::BindingGenerationMismatch { inode_id, .. } => {
-                CoreError::BindingGenerationMismatch {
-                    inode_id,
-                    precondition_index,
-                }
-            }
+            CoreError::BindingGenerationMismatch {
+                inode_id,
+                expected_binding_generation,
+                actual_binding_generation,
+                ..
+            } => CoreError::BindingGenerationMismatch {
+                inode_id,
+                expected_binding_generation,
+                actual_binding_generation,
+                precondition_index,
+            },
             CoreError::RootMutationForbidden => CoreError::BindingGenerationMismatch {
                 inode_id: binding.inode_id,
+                expected_binding_generation: expected.clone(),
+                actual_binding_generation: None,
+                precondition_index,
+            },
+            CoreError::InvalidCommitField { field, message, .. } => CoreError::InvalidCommitField {
+                field,
+                message,
                 precondition_index,
             },
             error => error,

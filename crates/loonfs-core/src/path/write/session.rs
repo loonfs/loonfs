@@ -482,7 +482,10 @@ mod tests {
         results[0].as_ref().expect("first create succeeds");
         let error = results[1].as_ref().expect_err("duplicate create rejected");
         assert_eq!(error.code(), ErrorCode::PathConflict);
-        assert!(matches!(error, CoreError::DestinationExists { .. }));
+        assert!(
+            matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+            if matches!(source.as_ref(), CoreError::DestinationExists { .. }))
+        );
     }
 
     #[tokio::test]
