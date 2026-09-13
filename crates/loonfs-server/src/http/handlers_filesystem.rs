@@ -463,7 +463,7 @@ pub(super) async fn list_file_revisions(
         path = "/v0/namespaces/{namespace_id}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
-        description = "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. Request assertions check the pre-state after receipt resolution and before operations; a failed assertion names its position in `details.assertion_index`. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
+        description = "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. Request preconditions check the pre-state after receipt resolution and before operations; a failed precondition names its position in `details.precondition_index`. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = ApiCommitRequest,
         responses(
@@ -484,7 +484,7 @@ pub(super) async fn create_commit(
     AppJson(request): AppJson<ApiCommitRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     let ApiCommitRequest {
-        assertions,
+        preconditions,
         commit_id,
         actor_id,
         message,
@@ -523,7 +523,7 @@ pub(super) async fn create_commit(
         ))
     };
     let request = CommitRequest {
-        assertions,
+        preconditions,
         commit_id,
         actor_id,
         message,

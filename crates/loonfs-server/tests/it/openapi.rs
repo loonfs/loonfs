@@ -1193,7 +1193,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemOperationCreateDirectory",
                 "FilesystemOperationCreateDirectoryByInode",
                 "FilesystemOperationPutFile",
-                "FilesystemOperationPutFileByInode",
+                "FilesystemOperationCreateFileByInode",
                 "FilesystemOperationPutFileRevisionByInode",
                 "FilesystemOperationDeletePath",
                 "FilesystemOperationDeleteByInode",

@@ -56,10 +56,10 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub operation_index: Option<u32>,
-    /// Zero-based position of the failed request assertion.
+    /// Zero-based position of the failed request precondition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub assertion_index: Option<u32>,
+    pub precondition_index: Option<u32>,
     /// Epoch the failing writer session held when it was displaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -224,10 +224,10 @@ pub enum DestinationBehavior {
     Replace,
 }
 
-/// Fields that guard replacement of a move or copy destination.
+/// Requirements for replacing a move or copy destination.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DestinationGuard {
+pub struct DestinationPrecondition {
     /// Whether an existing destination file may be replaced.
     #[serde(default)]
     pub behavior: DestinationBehavior,
@@ -240,7 +240,7 @@ pub struct DestinationGuard {
     )]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_inode_id: Option<InodeId>,
-    /// With `replace` behavior and an inode guard, the required content revision.
+    /// With `replace` behavior and an inode precondition, the required content revision.
     #[serde(
         rename = "expected_destination_revision_no",
         default,
@@ -250,16 +250,16 @@ pub struct DestinationGuard {
     pub expected_revision_no: Option<RevisionNo>,
 }
 
-/// Field-name family used when validating replacement guards.
+/// Field-name family used when validating replacement preconditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardFields {
+pub enum PreconditionFields {
     /// Fields on a file put operation.
     Put,
     /// Destination fields on a move or copy operation.
     Destination,
 }
 
-impl GuardFields {
+impl PreconditionFields {
     fn names(self) -> (&'static str, &'static str) {
         match self {
             Self::Put => ("expected_revision_no", "expected_inode_id"),
@@ -280,16 +280,16 @@ pub struct ExpectedFileState {
     pub revision_no: Option<RevisionNo>,
 }
 
-/// Why a destination guard is not a valid request.
+/// Why a destination precondition is not a valid request.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum DestinationGuardError {
-    /// A create-only operation supplied a replacement guard.
-    #[error("write guards require replace behavior")]
-    GuardsRequireReplace,
-    /// A revision guard did not name the inode whose revision it checks.
+pub enum DestinationPreconditionError {
+    /// A create-only operation supplied a replacement precondition.
+    #[error("destination preconditions require replace behavior")]
+    PreconditionsRequireReplace,
+    /// A revision precondition did not name the inode whose revision it checks.
     #[error(
-        "`{revision_field}` names the revision of one inode; pair it with `{inode_field}` so the request names which inode"
+        "`{revision_field}` names the revision of one inode; pair it with `{inode_field}` so the precondition names which inode"
     )]
     RevisionRequiresInode {
         /// Revision field supplied by the request.
@@ -299,24 +299,24 @@ pub enum DestinationGuardError {
     },
 }
 
-impl DestinationGuard {
-    /// Validates the guard and returns the required destination state.
+impl DestinationPrecondition {
+    /// Validates the precondition and returns the required destination state.
     pub fn resolve(
         &self,
-        fields: GuardFields,
-    ) -> Result<Option<ExpectedFileState>, DestinationGuardError> {
+        fields: PreconditionFields,
+    ) -> Result<Option<ExpectedFileState>, DestinationPreconditionError> {
         if self.behavior == DestinationBehavior::NoReplace
             && !matches!(
                 (self.expected_inode_id, self.expected_revision_no),
                 (None, None)
             )
         {
-            return Err(DestinationGuardError::GuardsRequireReplace);
+            return Err(DestinationPreconditionError::PreconditionsRequireReplace);
         }
         let Some(inode_id) = self.expected_inode_id else {
             if self.expected_revision_no.is_some() {
                 let (revision_field, inode_field) = fields.names();
-                return Err(DestinationGuardError::RevisionRequiresInode {
+                return Err(DestinationPreconditionError::RevisionRequiresInode {
                     revision_field,
                     inode_field,
                 });
@@ -330,13 +330,13 @@ impl DestinationGuard {
     }
 }
 
-/// Rejects an attribute revision guard without an inode guard.
-pub fn validate_attributes_guard(
+/// Rejects an attribute revision precondition without an inode precondition.
+pub fn validate_attributes_precondition(
     expected_inode_id: Option<InodeId>,
     expected_attributes_revision_no: Option<AttributeRevisionNo>,
-) -> Result<(), DestinationGuardError> {
+) -> Result<(), DestinationPreconditionError> {
     if expected_attributes_revision_no.is_some() && expected_inode_id.is_none() {
-        return Err(DestinationGuardError::RevisionRequiresInode {
+        return Err(DestinationPreconditionError::RevisionRequiresInode {
             revision_field: "expected_attributes_revision_no",
             inode_field: "expected_inode_id",
         });
@@ -406,7 +406,7 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
-        /// With `replace` behavior and an inode guard, the request requires this content revision.
+        /// With `replace` behavior and an inode precondition, the request requires this content revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_revision_no: Option<RevisionNo>,
@@ -414,9 +414,9 @@ pub enum FilesystemOperation {
     /// Create a file with an unused name under an existing parent inode.
     #[cfg_attr(
         feature = "openapi",
-        schema(title = "FilesystemOperationPutFileByInode")
+        schema(title = "FilesystemOperationCreateFileByInode")
     )]
-    PutFileByInode {
+    CreateFileByInode {
         /// Parent directory.
         #[serde(with = "crate::public_inode_id")]
         parent_inode_id: InodeId,
@@ -480,7 +480,7 @@ pub enum FilesystemOperation {
         to_path: AbsolutePath,
         /// Replacement behavior and optional destination state.
         #[serde(flatten)]
-        guard: DestinationGuard,
+        precondition: DestinationPrecondition,
     },
     /// Move an inode if its current binding matches.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMoveByInode"))]
@@ -497,7 +497,7 @@ pub enum FilesystemOperation {
         to_display_name: DisplayName,
         /// Replacement behavior and optional destination state.
         #[serde(flatten)]
-        guard: DestinationGuard,
+        precondition: DestinationPrecondition,
     },
     /// Copy one file path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationCopyPath"))]
@@ -508,7 +508,7 @@ pub enum FilesystemOperation {
         to_path: AbsolutePath,
         /// Replacement behavior and optional destination state.
         #[serde(flatten)]
-        guard: DestinationGuard,
+        precondition: DestinationPrecondition,
     },
     /// Restore the deletion identified by `inode_id` and `deletion_seq`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUndelete"))]
@@ -557,7 +557,7 @@ pub enum FilesystemOperation {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_inode_id: Option<InodeId>,
-        /// With an inode guard, the attribute revision that must still be current.
+        /// With an inode precondition, the attribute revision that must still be current.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributeRevisionNo>,
@@ -569,7 +569,7 @@ impl FilesystemOperation {
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match self {
             Self::PutFile { content_ref, .. }
-            | Self::PutFileByInode { content_ref, .. }
+            | Self::CreateFileByInode { content_ref, .. }
             | Self::PutFileRevisionByInode { content_ref, .. } => Some(content_ref),
             Self::CreateDirectory { .. }
             | Self::CreateDirectoryByInode { .. }
@@ -591,15 +591,15 @@ impl FilesystemOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CommitAssertion {
+pub enum CommitPrecondition {
     /// Requires the pre-state head sequence to equal `expected_head_seq`.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitAssertionNamespaceHead"))]
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionNamespaceHead"))]
     NamespaceHead {
         /// Sequence observed when the caller read its inputs.
         expected_head_seq: ChangeSeq,
     },
     /// Requires a visible inode with the content revision the caller read.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitAssertionFileRevision"))]
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionFileRevision"))]
     FileRevision {
         /// Inode whose state the caller read.
         #[serde(with = "crate::public_inode_id")]
@@ -607,32 +607,36 @@ pub enum CommitAssertion {
         /// Content revision observed by the caller.
         expected_revision_no: RevisionNo,
     },
-    /// Requires the path to retain the binding or absence the caller read.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitAssertionBinding"))]
-    Binding {
+    /// Requires the path to retain the binding the caller read.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionPathBinding"))]
+    PathBinding {
         /// Absolute path to check, including the root.
         path: AbsolutePath,
-        /// When absent, requires the path to be unbound.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "crate::public_inode_id::option"
-        )]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        expected_inode_id: Option<InodeId>,
-        /// Requires an inode expectation and detects moves away and back.
+        /// Inode required at the path.
+        #[serde(with = "crate::public_inode_id")]
+        expected_inode_id: InodeId,
+        /// Detects moves away and back.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_binding_generation: Option<BindingGeneration>,
     },
     /// Requires a visible inode with the attribute revision the caller read.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitAssertionAttributes"))]
-    Attributes {
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitPreconditionAttributesRevision")
+    )]
+    AttributesRevision {
         /// Inode whose state the caller read.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
         /// Attribute revision observed by the caller.
         expected_attributes_revision_no: AttributeRevisionNo,
+    },
+    /// Requires no visible entry at the full path.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionPathAbsence"))]
+    PathAbsence {
+        /// Absolute path to check, including the root.
+        path: AbsolutePath,
     },
 }
 
@@ -655,15 +659,15 @@ pub struct CommitRequest {
     pub content_tokens: Vec<ContentToken>,
     /// Ordered admission conditions evaluated before any operations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assertions: Vec<CommitAssertion>,
+    pub preconditions: Vec<CommitPrecondition>,
     /// The non-empty ordered operations to commit atomically.
     pub operations: Vec<FilesystemOperation>,
 }
 
 impl CommitRequest {
     /// Sets the admission conditions in caller order.
-    pub fn assertions(mut self, assertions: Vec<CommitAssertion>) -> Self {
-        self.assertions = assertions;
+    pub fn preconditions(mut self, preconditions: Vec<CommitPrecondition>) -> Self {
+        self.preconditions = preconditions;
         self
     }
 
@@ -679,7 +683,7 @@ impl CommitRequest {
             actor_id: actor,
             message,
             content_tokens: Vec::new(),
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             operations: vec![operation],
         }
     }
@@ -1553,7 +1557,7 @@ mod tests {
         let move_path = FilesystemOperation::MovePath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            guard: crate::DestinationGuard {
+            precondition: crate::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(InodeId(7)),
                 expected_revision_no: Some(RevisionNo(3)),
@@ -1574,7 +1578,7 @@ mod tests {
         let copy_path = FilesystemOperation::CopyPath {
             from_path: path("/docs/a.txt"),
             to_path: path("/docs/b.txt"),
-            guard: crate::DestinationGuard {
+            precondition: crate::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(InodeId(7)),
                 expected_revision_no: Some(RevisionNo(3)),
@@ -1616,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn update_attributes_omits_empty_collections_and_absent_guards() {
+    fn update_attributes_omits_empty_collections_and_absent_preconditions() {
         let set_only = FilesystemOperation::UpdateAttributes {
             path: path("/docs/a.txt"),
             set: BTreeMap::from([(
@@ -1641,7 +1645,7 @@ mod tests {
             "path": "/docs/a.txt",
             "remove": ["draft"]
         }))
-        .expect("remove-only op defaults the set map and both guards");
+        .expect("remove-only op defaults the set map and both preconditions");
         assert_eq!(
             decoded,
             FilesystemOperation::UpdateAttributes {
@@ -1731,7 +1735,7 @@ mod tests {
             FilesystemOperation::MovePath {
                 from_path: path("/docs/a.txt"),
                 to_path: path("/docs/b.txt"),
-                guard: crate::DestinationGuard {
+                precondition: crate::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1750,7 +1754,7 @@ mod tests {
             FilesystemOperation::CopyPath {
                 from_path: path("/docs/a.txt"),
                 to_path: path("/docs/b.txt"),
-                guard: crate::DestinationGuard {
+                precondition: crate::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1912,8 +1916,34 @@ mod tests {
     }
 
     #[test]
-    fn a_misspelled_guard_does_not_decode() {
-        let put = |guard: &str| {
+    fn path_preconditions_reject_ambiguous_shapes() {
+        let missing = serde_json::from_value::<CommitPrecondition>(
+            serde_json::json!({"kind": "path_binding", "path": "/docs/input"}),
+        )
+        .expect_err("binding requires an inode");
+        assert!(
+            missing.to_string().contains("expected_inode_id"),
+            "{missing}"
+        );
+        serde_json::from_value::<CommitPrecondition>(serde_json::json!({
+            "kind": "path_binding", "path": "/docs/input", "expected_inode_id": null
+        }))
+        .expect_err("a null inode is not an absence check");
+        let error = serde_json::from_value::<CommitPrecondition>(serde_json::json!({
+            "kind": "path_absence", "path": "/docs/input", "expected_inode_id": "ino_42"
+        }))
+        .expect_err("absence accepts only a path");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `expected_inode_id`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_precondition_does_not_decode() {
+        let put = |precondition: &str| {
             let mut operation = serde_json::json!({
                 "kind": "put_file",
                 "path": "/docs/a.txt",
@@ -1921,16 +1951,16 @@ mod tests {
                 "behavior": "replace",
                 "expected_inode_id": "ino_7"
             });
-            operation[guard] = serde_json::json!(3);
+            operation[precondition] = serde_json::json!(3);
             serde_json::json!({
-                "commit_id": "guarded-put",
+                "commit_id": "with_preconditions-put",
                 "actor_id": crate::ActorId::loonfs(),
                 "operations": [operation]
             })
         };
 
         let spelled: CommitRequest = serde_json::from_value(put("expected_revision_no"))
-            .expect("the guard spelled correctly decodes");
+            .expect("the precondition spelled correctly decodes");
         assert!(matches!(
             spelled.operations.as_slice(),
             [FilesystemOperation::PutFile {
@@ -1951,7 +1981,7 @@ mod tests {
     fn expected_revision_no_must_fit_the_public_integer_range() {
         let body = |expected_revision_no: u64| {
             serde_json::json!({
-                "commit_id": "bounded-revision-guard",
+                "commit_id": "bounded-revision-precondition",
                 "actor_id": crate::ActorId::loonfs(),
                 "operations": [{
                     "kind": "put_file",

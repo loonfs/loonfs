@@ -415,7 +415,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             RevisionNo(1),
             &RestoreRevisionOptions {
                 commit: loonfs_api::options::CommitOptions {
-                    assertions: Vec::new(),
+                    preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(
                         CommitId::parse("req-restore-restore").expect("valid commit id"),
@@ -577,7 +577,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
-                    assertions: Vec::new(),
+                    preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
@@ -656,7 +656,7 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
             RevisionNo(99),
             &RestoreRevisionOptions {
                 commit: loonfs_api::options::CommitOptions {
-                    assertions: Vec::new(),
+                    preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(
                         CommitId::parse("req-restore-missing-source-restore")

@@ -45,7 +45,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                             commit_id: loonfs_api::CommitId::generate(),
                             actor_id: loonfs_test_support::ids::test_actor(),
                             message: None,
-                            assertions: Vec::new(),
+                            preconditions: Vec::new(),
                             operations: vec![
                                 crate::path::write::FilesystemOperation::CreateDirectory {
                                     path: loonfs_api::AbsolutePath::parse("/file").expect("path"),

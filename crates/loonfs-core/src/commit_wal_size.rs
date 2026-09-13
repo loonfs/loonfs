@@ -133,7 +133,7 @@ pub(crate) fn estimated_wal_record_bytes(request: &CommitRequest) -> usize {
         ),
         (
             "semantic_commit_fingerprint",
-            string_bytes("v3:sha256:".len() + 64),
+            string_bytes("v4:sha256:".len() + 64),
         ),
         ("committed_at_ms", INTEGER_BYTES),
         (
@@ -163,7 +163,7 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
             CREATE_INODE_BYTES + BIND_BYTES + NAMES_BYTES
         }
         FilesystemOperation::PutFile { path, .. } => create_path_bytes(path) + REVISION_BYTES,
-        FilesystemOperation::PutFileByInode { .. } => {
+        FilesystemOperation::CreateFileByInode { .. } => {
             CREATE_INODE_BYTES + BIND_BYTES + NAMES_BYTES + REVISION_BYTES
         }
         FilesystemOperation::PutFileRevisionByInode { .. }

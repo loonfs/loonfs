@@ -1,8 +1,8 @@
 //! Per-operation options shared by the embedded runtime and HTTP client.
 
 use crate::{
-    ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, CheckpointId, CommitAssertion,
-    CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
+    ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, CheckpointId, CommitId,
+    CommitPrecondition, DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
 };
 use std::collections::BTreeMap;
 
@@ -37,7 +37,7 @@ pub struct CommitOptions {
     pub message: Option<String>,
     /// Ordered admission conditions evaluated before any operations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assertions: Vec<CommitAssertion>,
+    pub preconditions: Vec<CommitPrecondition>,
 }
 
 impl CommitOptions {
@@ -47,7 +47,7 @@ impl CommitOptions {
             actor_id: actor,
             commit_id: None,
             message: None,
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
         }
     }
 }
@@ -98,7 +98,7 @@ pub struct UpdateAttributesOptions {
     pub commit: CommitOptions,
     /// The inode that the path must still resolve to before the update.
     pub expected_inode_id: Option<InodeId>,
-    /// With an inode guard, the attribute revision that must still be current.
+    /// With an inode precondition, the attribute revision that must still be current.
     pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
 }
 

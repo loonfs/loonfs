@@ -1,9 +1,9 @@
 //! [`PublishPlanningSession`]: plans a batch's candidates in admission
 //! order, each seeing the rows earlier candidates would persist.
 
-use super::assertions::evaluate_assertions;
 use super::intent::CommitRequest;
 use super::planner::prepare_commit_against_publish_view;
+use super::preconditions::evaluate_preconditions;
 use crate::commit::{
     CandidateAllocation, CommitFingerprint, CommitPlan, InodeAllocator, ValidatedCommitPlan,
 };
@@ -14,7 +14,7 @@ use loonfs_api::wire::wal::WalCommitPayload;
 #[cfg(test)]
 use loonfs_api::AbsolutePath;
 #[cfg(test)]
-use loonfs_api::CommitAssertion;
+use loonfs_api::CommitPrecondition;
 #[cfg(test)]
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
@@ -68,7 +68,7 @@ impl PublishPlanningSession {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
         let overlay = MetadataState::default();
         let pre_state = base_view.with_overlay(&overlay, &self.accepted_rows, self.head.seq);
-        evaluate_assertions(&request.assertions, &self.head, &pre_state).await?;
+        evaluate_preconditions(&request.preconditions, &self.head, &pre_state).await?;
         prepare_commit_against_publish_view(
             request,
             semantic_identity,
@@ -180,7 +180,7 @@ mod tests {
 
     fn candidate_that_allocates_then_fails(commit_id: &str) -> CommitCandidate {
         CommitCandidate::new(CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -213,11 +213,11 @@ mod tests {
     }
 
     fn test_fingerprint() -> CommitFingerprint {
-        serde_json::from_str(r#""v3:sha256:test""#).expect("fingerprint")
+        serde_json::from_str(r#""v4:sha256:test""#).expect("fingerprint")
     }
 
     #[tokio::test]
-    async fn assertions_change_only_the_fingerprint_in_the_wal_payload() {
+    async fn preconditions_change_only_the_fingerprint_in_the_wal_payload() {
         use super::super::planner::commit_fingerprint;
         use crate::commit::{materialize_commit, wal_payload_from_materialized_commit};
 
@@ -227,13 +227,13 @@ mod tests {
             .expect("view");
         let request = create_directory_candidate("wal", "/docs").request().clone();
         let mut payloads = Vec::new();
-        for assertions in [
+        for preconditions in [
             Vec::new(),
-            vec![CommitAssertion::NamespaceHead {
+            vec![CommitPrecondition::NamespaceHead {
                 expected_head_seq: view.head().seq,
             }],
         ] {
-            let request = request.clone().assertions(assertions);
+            let request = request.clone().preconditions(preconditions);
             let mut session = PublishPlanningSession::new(view.head());
             let mut allocation = session.begin_candidate();
             let plan = session

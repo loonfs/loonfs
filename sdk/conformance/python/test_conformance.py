@@ -29,18 +29,18 @@ from loonfs.server import (
     BeginUploadResponse_DirectPut,
     BeginUploadResponse_ServiceProxied,
     Checksum,
-    CommitAssertion,
+    CommitPrecondition,
     CommitResponse,
     CompletedUploadPart,
     ConflictError,
     FilesystemOperation_CreateDirectory,
     FilesystemOperation_CreateDirectoryByInode,
+    FilesystemOperation_CreateFileByInode,
     FilesystemOperation_DeleteByInode,
     FilesystemOperation_DeletePath,
     FilesystemOperation_MoveByInode,
     FilesystemOperation_MovePath,
     FilesystemOperation_PutFile,
-    FilesystemOperation_PutFileByInode,
     FilesystemOperation_PutFileRevisionByInode,
     ListPathEntriesResponse,
     LoonFS,
@@ -112,7 +112,7 @@ class ErrorContractExpected:
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class CommitReplayRequest:
-    assertions: list[CommitAssertion]
+    preconditions: list[CommitPrecondition]
     namespace_id: str
     commit_id: str
     actor_id: ActorId
@@ -513,15 +513,15 @@ def _apply(
     *,
     message: str | None = None,
     content_tokens: list[str] | None = None,
-    assertions: list[CommitAssertion] | None = None,
+    preconditions: list[CommitPrecondition] | None = None,
 ) -> Any:
     extra = {}
     if message is not None:
         extra["message"] = message
     if content_tokens is not None:
         extra["content_tokens"] = content_tokens
-    if assertions is not None:
-        extra["assertions"] = assertions
+    if preconditions is not None:
+        extra["preconditions"] = preconditions
     return client.commits.create(
         namespace_id,
         actor_id=actor_id,
@@ -715,7 +715,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
         request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.path, parents=False),
         message=request.message,
-        assertions=request.assertions,
+        preconditions=request.preconditions,
     )
     replayed = _apply(
         harness.client,
@@ -724,7 +724,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
         request.actor_id,
         FilesystemOperation_CreateDirectory(path=request.path, parents=False),
         message=request.message,
-        assertions=request.assertions,
+        preconditions=request.preconditions,
     )
 
     assert first.committed_seq == expected.committed_seq
@@ -741,10 +741,10 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
             request.actor_id,
             FilesystemOperation_CreateDirectory(path=request.path, parents=False),
             message=request.message,
-            assertions=request.assertions,
+            preconditions=request.preconditions,
         )
     assert stale.value.body.code == "stale_head"
-    assert stale.value.body.details.assertion_index == 0
+    assert stale.value.body.details.precondition_index == 0
     assert stale.value.body.details.actual_head_seq == first.committed_seq
 
     with pytest.raises(ConflictError) as reused:
@@ -973,7 +973,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         namespace_id,
         "conf-inode-mutations-inode-file",
         request.actor_id,
-        FilesystemOperation_PutFileByInode(
+        FilesystemOperation_CreateFileByInode(
             parent_inode_id=parent_inode_id,
             display_name=request.inode_file_name,
             content_ref=staged.content_ref,
@@ -1730,10 +1730,10 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
     with pytest.raises(ConflictError):
         client.files.put_file_prepared(namespace_id, **(inputs | dict(prepared=fresh)))
     entry = client.files.retrieve(namespace_id, path="/renamed")
-    guarded = inputs | dict(path="/renamed", commit_id="prepared-replace", behavior="replace",
+    with_preconditions = inputs | dict(path="/renamed", commit_id="prepared-replace", behavior="replace",
                            expected_inode_id=entry.inode_id, expected_revision_no=entry.revision_no)
-    replaced = client.files.put_file_prepared(namespace_id, **guarded)
-    assert client.files.put_file_prepared(namespace_id, **guarded) == replaced
+    replaced = client.files.put_file_prepared(namespace_id, **with_preconditions)
+    assert client.files.put_file_prepared(namespace_id, **with_preconditions) == replaced
 
 
 def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None:

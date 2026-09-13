@@ -542,7 +542,7 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
                 inode_id,
                 expected,
                 actual: Some(actual),
-                assertion_index: None,
+                precondition_index: None,
             }
             .into(),
         );
@@ -648,7 +648,7 @@ async fn validate_source_binding<S: ObjectStore + ?Sized>(
             ),
             expected_inode_id: Some(expected.child_inode_id),
             actual_inode_id: Some(existing.child_inode_id),
-            assertion_index: None,
+            precondition_index: None,
         }
         .into());
     }
@@ -672,7 +672,7 @@ async fn validate_file_base_revision_is<S: ObjectStore + ?Sized>(
             inode_id,
             expected: expected_revision_no,
             actual,
-            assertion_index: None,
+            precondition_index: None,
         }
         .into());
     }

@@ -1015,10 +1015,10 @@ pub(crate) struct FilesystemPutArgs {
     /// Replace the remote destination if it already exists.
     #[arg(long)]
     pub force: bool,
-    /// This guard replaces only if the path still points to this inode. It implies --force.
+    /// Replacement requires that the path still points to this inode. This precondition implies --force.
     #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
     pub expected_inode_id: Option<InodeId>,
-    /// This guard replaces only if the file still has this revision and inode. It implies --force.
+    /// Replacement requires that the file still has this revision and inode. This precondition implies --force.
     #[arg(long, conflicts_with = "recursive", requires = "expected_inode_id")]
     pub expected_revision: Option<u64>,
     #[command(flatten)]
@@ -1042,10 +1042,10 @@ pub(crate) struct FilesystemTransferArgs {
     /// Replace the destination if it already exists.
     #[arg(long)]
     pub force: bool,
-    /// This guard replaces only if the destination still points to this inode. It implies --force.
+    /// Replacement requires that the destination still points to this inode. This precondition implies --force.
     #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
     pub expected_destination_inode_id: Option<InodeId>,
-    /// This guard replaces only if the destination still has this revision and inode. It implies --force.
+    /// Replacement requires that the destination still has this revision and inode. This precondition implies --force.
     #[arg(
         long,
         conflicts_with = "recursive",
@@ -1665,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_guards_require_matching_inode_guards() {
+    fn revision_preconditions_require_matching_inode_preconditions() {
         for arguments in [
             vec![
                 "loonfs",
@@ -1693,7 +1693,7 @@ mod tests {
                 "1",
             ],
         ] {
-            let error = Cli::try_parse_from(arguments).expect_err("inode guard is required");
+            let error = Cli::try_parse_from(arguments).expect_err("inode precondition is required");
             assert_eq!(
                 error.kind(),
                 clap::error::ErrorKind::MissingRequiredArgument

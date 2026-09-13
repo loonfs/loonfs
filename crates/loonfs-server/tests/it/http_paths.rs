@@ -108,7 +108,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
-                    assertions: Vec::new(),
+                    preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,

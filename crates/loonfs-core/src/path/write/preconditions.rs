@@ -1,4 +1,4 @@
-//! Request assertions against the candidate pre-state.
+//! Request preconditions against the candidate pre-state.
 
 use super::publish_path_planning::{
     check_binding_generation, is_missing_visible_path, resolve_visible_inode,
@@ -8,11 +8,11 @@ use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::{AbsolutePath, BindingGeneration, CommitAssertion, InodeId};
+use loonfs_api::{AbsolutePath, BindingGeneration, CommitPrecondition, InodeId};
 use loonfs_objectstore::ObjectStore;
 
-pub(super) async fn evaluate_assertions<S: ObjectStore + ?Sized>(
-    assertions: &[CommitAssertion],
+pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
+    preconditions: &[CommitPrecondition],
     head: &NamespaceReadState,
     pre_state: &MetadataView<'_, '_, S>,
 ) -> Result<()> {
@@ -20,19 +20,19 @@ pub(super) async fn evaluate_assertions<S: ObjectStore + ?Sized>(
         namespace_id: &head.namespace_id,
         view: pre_state,
     };
-    for (index, assertion) in assertions.iter().enumerate() {
-        let assertion_index = u32::try_from(index).ok();
-        match assertion {
-            CommitAssertion::NamespaceHead { expected_head_seq } => {
+    for (index, precondition) in preconditions.iter().enumerate() {
+        let precondition_index = u32::try_from(index).ok();
+        match precondition {
+            CommitPrecondition::NamespaceHead { expected_head_seq } => {
                 if *expected_head_seq != head.seq {
                     return Err(CoreError::StaleHeadPrecondition {
                         expected: *expected_head_seq,
                         actual: head.seq,
-                        assertion_index,
+                        precondition_index,
                     });
                 }
             }
-            CommitAssertion::FileRevision {
+            CommitPrecondition::FileRevision {
                 inode_id,
                 expected_revision_no,
             } => {
@@ -49,12 +49,12 @@ pub(super) async fn evaluate_assertions<S: ObjectStore + ?Sized>(
                         inode_id: *inode_id,
                         expected: *expected_revision_no,
                         actual,
-                        assertion_index,
+                        precondition_index,
                     }
                     .into());
                 }
             }
-            CommitAssertion::Binding {
+            CommitPrecondition::PathBinding {
                 path,
                 expected_inode_id,
                 expected_binding_generation,
@@ -62,13 +62,16 @@ pub(super) async fn evaluate_assertions<S: ObjectStore + ?Sized>(
                 evaluate_binding(
                     &view,
                     path,
-                    *expected_inode_id,
+                    Some(*expected_inode_id),
                     expected_binding_generation.as_ref(),
-                    assertion_index,
+                    precondition_index,
                 )
                 .await?;
             }
-            CommitAssertion::Attributes {
+            CommitPrecondition::PathAbsence { path } => {
+                evaluate_binding(&view, path, None, None, precondition_index).await?;
+            }
+            CommitPrecondition::AttributesRevision {
                 inode_id,
                 expected_attributes_revision_no,
             } => {
@@ -83,7 +86,7 @@ pub(super) async fn evaluate_assertions<S: ObjectStore + ?Sized>(
                             inode_id: *inode_id,
                             expected: *expected_attributes_revision_no,
                             actual,
-                            assertion_index,
+                            precondition_index,
                         }
                         .into(),
                     );
@@ -110,13 +113,8 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
     path: &AbsolutePath,
     expected_inode_id: Option<InodeId>,
     expected_binding_generation: Option<&BindingGeneration>,
-    assertion_index: Option<u32>,
+    precondition_index: Option<u32>,
 ) -> Result<()> {
-    if expected_binding_generation.is_some() && expected_inode_id.is_none() {
-        return Err(CoreError::InvalidCommitRequest(
-            "expected_binding_generation requires expected_inode_id".to_owned(),
-        ));
-    }
     let actual = match view.view.resolve_visible_path(path).await {
         Ok(binding) => Some(binding),
         Err(error) if is_missing_visible_path(&error) => None,
@@ -129,7 +127,7 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
             target: format!("path `{path}`"),
             expected_inode_id,
             actual_inode_id,
-            assertion_index,
+            precondition_index,
         }
         .into());
     }
@@ -138,12 +136,12 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
             CoreError::BindingGenerationMismatch { inode_id, .. } => {
                 CoreError::BindingGenerationMismatch {
                     inode_id,
-                    assertion_index,
+                    precondition_index,
                 }
             }
             CoreError::RootMutationForbidden => CoreError::BindingGenerationMismatch {
                 inode_id: binding.inode_id,
-                assertion_index,
+                precondition_index,
             },
             error => error,
         })?;

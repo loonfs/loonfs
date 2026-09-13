@@ -236,7 +236,7 @@ async fn assert_raw_error(response: reqwest::Response, expected: &ErrorOutcome) 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommitReplayRequest {
-    assertions: Vec<loonfs_api::CommitAssertion>,
+    preconditions: Vec<loonfs_api::CommitPrecondition>,
     namespace_id: String,
     commit_id: String,
     actor_id: ActorId,
@@ -267,7 +267,7 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
             parents: false,
         },
     )
-    .assertions(request.assertions);
+    .preconditions(request.preconditions);
     let first = harness
         .client
         .create_commit(&namespace, &commit)
@@ -953,12 +953,12 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-inode-file"),
                 actor_id: request.actor_id.clone(),
                 message: None,
                 content_tokens,
-                operations: vec![FilesystemOperation::PutFileByInode {
+                operations: vec![FilesystemOperation::CreateFileByInode {
                     parent_inode_id,
                     display_name: display_name(&request.inode_file_name),
                     content_ref,
@@ -1029,7 +1029,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .create_commit(
             &namespace,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-revision"),
                 actor_id: request.actor_id.clone(),
                 message: None,
@@ -1084,7 +1084,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 expected_binding_generation,
                 to_parent_inode_id: inode_directory_id,
                 to_display_name: display_name(&request.moved_file_name),
-                guard: loonfs_api::DestinationGuard {
+                precondition: loonfs_api::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

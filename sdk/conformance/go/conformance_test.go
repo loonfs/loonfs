@@ -249,12 +249,12 @@ func runErrorContract(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type commitReplayRequest struct {
-	Assertions  []*loonfs.CommitAssertion `json:"assertions"`
-	NamespaceID string                    `json:"namespace_id"`
-	CommitID    string                    `json:"commit_id"`
-	ActorID     loonfs.ActorID            `json:"actor_id"`
-	Message     string                    `json:"message"`
-	Path        string                    `json:"path"`
+	Preconditions []*loonfs.CommitPrecondition `json:"preconditions"`
+	NamespaceID   string                       `json:"namespace_id"`
+	CommitID      string                       `json:"commit_id"`
+	ActorID       loonfs.ActorID               `json:"actor_id"`
+	Message       string                       `json:"message"`
+	Path          string                       `json:"path"`
 }
 
 type commitReplayExpected struct {
@@ -272,7 +272,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		request.Path,
 		&request.Message,
 	)
-	commit.Assertions = request.Assertions
+	commit.Preconditions = request.Preconditions
 	first, err := h.client.Commits.Create(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("first commit: %v", err)
@@ -299,22 +299,22 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	stale := *commit
 	stale.CommitID = request.CommitID + "-stale"
 	_, err = h.client.Commits.Create(context.Background(), &stale)
-	var assertionConflict *loonfs.ConflictError
-	if !errors.As(err, &assertionConflict) || assertionConflict.Body == nil || assertionConflict.Body.Code != "stale_head" {
-		t.Fatalf("stale assertion: got %v, want stale_head", err)
+	var preconditionConflict *loonfs.ConflictError
+	if !errors.As(err, &preconditionConflict) || preconditionConflict.Body == nil || preconditionConflict.Body.Code != "stale_head" {
+		t.Fatalf("stale precondition: got %v, want stale_head", err)
 	}
-	details := assertionConflict.Body.Details
-	if details == nil || details.AssertionIndex == nil || *details.AssertionIndex != 0 {
-		t.Fatalf("stale assertion details = %#v, want assertion_index 0", details)
+	details := preconditionConflict.Body.Details
+	if details == nil || details.PreconditionIndex == nil || *details.PreconditionIndex != 0 {
+		t.Fatalf("stale precondition details = %#v, want precondition_index 0", details)
 	}
 	if details.ActualHeadSeq == nil || *details.ActualHeadSeq != first.CommittedSeq {
-		t.Fatalf("stale assertion details = %#v, want actual_head_seq %d", details, first.CommittedSeq)
+		t.Fatalf("stale precondition details = %#v, want actual_head_seq %d", details, first.CommittedSeq)
 	}
-	changedAssertions := *commit
-	changedAssertions.Assertions = nil
-	_, err = h.client.Commits.Create(context.Background(), &changedAssertions)
-	if !errors.As(err, &assertionConflict) || assertionConflict.Body == nil || assertionConflict.Body.Code != "commit_id_reuse_conflict" {
-		t.Fatalf("changed assertions: got %v, want commit_id_reuse_conflict", err)
+	changedPreconditions := *commit
+	changedPreconditions.Preconditions = nil
+	_, err = h.client.Commits.Create(context.Background(), &changedPreconditions)
+	if !errors.As(err, &preconditionConflict) || preconditionConflict.Body == nil || preconditionConflict.Body.Code != "commit_id_reuse_conflict" {
+		t.Fatalf("changed preconditions: got %v, want commit_id_reuse_conflict", err)
 	}
 	prepared, err := h.client.Files.PrepareFileStream(context.Background(), loonfs.NamespaceID(request.NamespaceID), strings.NewReader("original bytes"), nil)
 	if err != nil {
@@ -371,7 +371,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	replay, err = h.client.Files.PutFilePrepared(context.Background(), input)
 	if err != nil || replay == nil || *replay != *published {
-		t.Fatalf("guarded replay: %#v, %v", replay, err)
+		t.Fatalf("replay with preconditions: %#v, %v", replay, err)
 	}
 
 }
@@ -1192,7 +1192,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		ContentTokens: contentTokens(contentToken),
 		Operations: []*loonfs.FilesystemOperation{
 			{
-				PutFileByInode: &loonfs.FilesystemOperationPutFileByInode{
+				CreateFileByInode: &loonfs.FilesystemOperationCreateFileByInode{
 					ParentInodeID: parentInodeID,
 					DisplayName:   request.InodeFileName,
 					ContentRef:    contentRef,

@@ -112,7 +112,7 @@ pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
     if current != expected {
         return Err(CoreError::BindingGenerationMismatch {
             inode_id: resolved.inode_id,
-            assertion_index: None,
+            precondition_index: None,
         });
     }
     Ok(())

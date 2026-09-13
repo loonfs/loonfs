@@ -2,7 +2,6 @@
 //! compiles it into one commit's operations, and the publish planning
 //! session.
 
-mod assertions;
 mod intent;
 mod plan_attributes;
 mod plan_by_inode;
@@ -11,6 +10,7 @@ mod plan_delete;
 mod plan_restore;
 mod plan_transfer;
 pub(crate) mod planner;
+mod preconditions;
 mod publish_path_planning;
 mod session;
 
@@ -38,7 +38,7 @@ pub(super) fn ensure_expected_inode(
                     ),
                     expected_inode_id: Some(expected),
                     actual_inode_id: Some(resolved.inode_id),
-                    assertion_index: None,
+                    precondition_index: None,
                 }
                 .into(),
             );
@@ -47,8 +47,8 @@ pub(super) fn ensure_expected_inode(
     Ok(())
 }
 
-impl From<loonfs_api::DestinationGuardError> for CoreError {
-    fn from(error: loonfs_api::DestinationGuardError) -> Self {
+impl From<loonfs_api::DestinationPreconditionError> for CoreError {
+    fn from(error: loonfs_api::DestinationPreconditionError) -> Self {
         Self::InvalidCommitRequest(error.to_string())
     }
 }

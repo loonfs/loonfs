@@ -20,7 +20,8 @@ use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{
-    next_public_ordinal, ChangeSeq, DestinationGuard, GuardFields, NamespaceId, MAX_PUBLIC_INTEGER,
+    next_public_ordinal, ChangeSeq, DestinationPrecondition, NamespaceId, PreconditionFields,
+    MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -38,7 +39,7 @@ pub(crate) fn commit_fingerprint(
         &request.actor_id,
         request.message.as_deref(),
         &request.operations,
-        &request.assertions,
+        &request.preconditions,
     )
     .map_err(|err| CoreError::Internal(format!("failed to fingerprint mutation: {err}")))
 }
@@ -53,7 +54,7 @@ pub(crate) fn commit_fingerprint(
 /// operation's index, while single-operation requests return the raw error.
 ///
 /// The commit's identity moves into the returned [`ValidatedCommitPlan`]:
-/// the head is the already-guarded source of the namespace and writer epoch
+/// the head is the validated source of the namespace and writer epoch
 /// (`load_publish_metadata_view` fences on epoch equality, and the batch
 /// rejects namespace mismatches before admission).
 pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
@@ -135,12 +136,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 path,
                 content_ref.clone(),
                 *behavior,
-                DestinationGuard {
+                DestinationPrecondition {
                     behavior: *behavior,
                     expected_inode_id: *expected_inode_id,
                     expected_revision_no: *expected_revision_no,
                 }
-                .resolve(GuardFields::Put)?,
+                .resolve(PreconditionFields::Put)?,
                 view,
                 allocation,
             )
@@ -159,7 +160,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             )
             .await
         }
-        FilesystemOperation::PutFileByInode {
+        FilesystemOperation::CreateFileByInode {
             parent_inode_id,
             display_name,
             content_ref,
@@ -201,15 +202,15 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             expected_binding_generation,
             to_parent_inode_id,
             to_display_name,
-            guard,
+            precondition,
         } => {
             plan_move_by_inode(
                 *inode_id,
                 expected_binding_generation,
                 *to_parent_inode_id,
                 to_display_name,
-                guard.behavior,
-                guard.resolve(GuardFields::Destination)?,
+                precondition.behavior,
+                precondition.resolve(PreconditionFields::Destination)?,
                 view,
             )
             .await
@@ -217,13 +218,13 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::MovePath {
             from_path,
             to_path,
-            guard,
+            precondition,
         } => {
             plan_move_path(
                 from_path,
                 to_path,
-                guard.behavior,
-                guard.resolve(GuardFields::Destination)?,
+                precondition.behavior,
+                precondition.resolve(PreconditionFields::Destination)?,
                 view,
             )
             .await
@@ -231,13 +232,13 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::CopyPath {
             from_path,
             to_path,
-            guard,
+            precondition,
         } => {
             plan_copy_file_path(
                 from_path,
                 to_path,
-                guard.behavior,
-                guard.resolve(GuardFields::Destination)?,
+                precondition.behavior,
+                precondition.resolve(PreconditionFields::Destination)?,
                 view,
                 allocation,
             )
@@ -365,7 +366,7 @@ mod tests {
             create_dir("/docs"),
         );
         let batch = CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id,
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -407,7 +408,7 @@ mod tests {
         let mut allocation = allocator.begin_candidate();
         let validated = prepare_commit_against_publish_view(
             request,
-            serde_json::from_str(r#""v3:sha256:test""#).expect("fingerprint"),
+            serde_json::from_str(r#""v4:sha256:test""#).expect("fingerprint"),
             view.head(),
             view.projected_metadata_view(),
             &empty_overlay,
@@ -552,7 +553,7 @@ mod tests {
             &store,
             &namespace_id,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-create-then-put").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -616,7 +617,7 @@ mod tests {
             &store,
             &namespace_id,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-delete-then-create").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,
@@ -654,7 +655,7 @@ mod tests {
             &store,
             &namespace_id,
             &CommitRequest {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-with-a-bad-op").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
                 message: None,

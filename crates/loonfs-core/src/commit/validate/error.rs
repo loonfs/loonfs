@@ -82,7 +82,7 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         expected: RevisionNo,
         actual: Option<RevisionNo>,
-        assertion_index: Option<u32>,
+        precondition_index: Option<u32>,
     },
     #[error(
         "binding precondition failed: name `{name_key}` is not bound under parent inode `{parent_inode_id}`"
@@ -98,7 +98,7 @@ pub enum CommitValidationError {
         target: String,
         expected_inode_id: Option<InodeId>,
         actual_inode_id: Option<InodeId>,
-        assertion_index: Option<u32>,
+        precondition_index: Option<u32>,
     },
     #[error("directory inode `{inode_id}` is not empty")]
     DirectoryNotEmpty { inode_id: InodeId },
@@ -152,7 +152,7 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         expected: AttributeRevisionNo,
         actual: Option<AttributeRevisionNo>,
-        assertion_index: Option<u32>,
+        precondition_index: Option<u32>,
     },
     #[error(
         "cannot update attributes for inode `{inode_id}` because revision `{base_attributes_revision_no}` is already at the maximum 9007199254740991"
@@ -197,21 +197,21 @@ impl CommitValidationError {
             Self::BindingPreconditionMismatch {
                 expected_inode_id,
                 actual_inode_id,
-                assertion_index,
+                precondition_index,
                 ..
             } => Some(ErrorDetails {
                 expected_inode_id: *expected_inode_id,
                 actual_inode_id: *actual_inode_id,
-                assertion_index: *assertion_index,
+                precondition_index: *precondition_index,
                 ..ErrorDetails::default()
             }),
             Self::BaseRevisionMismatch {
                 inode_id,
                 expected,
                 actual,
-                assertion_index,
+                precondition_index,
             } => Some(ErrorDetails {
-                assertion_index: *assertion_index,
+                precondition_index: *precondition_index,
                 inode_id: Some(*inode_id),
                 expected_revision_no: Some(*expected),
                 actual_revision_no: *actual,
@@ -247,9 +247,9 @@ impl CommitValidationError {
                 inode_id,
                 expected,
                 actual,
-                assertion_index,
+                precondition_index,
             } => Some(ErrorDetails {
-                assertion_index: *assertion_index,
+                precondition_index: *precondition_index,
                 inode_id: Some(*inode_id),
                 expected_attributes_revision_no: Some(*expected),
                 actual_attributes_revision_no: *actual,

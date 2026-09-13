@@ -76,7 +76,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         seq: ChangeSeq(9),
         commit_id: owning_commit_id.clone(),
         committed_by: actor(),
-        semantic_commit_fingerprint: fingerprint("v3:sha256:test"),
+        semantic_commit_fingerprint: fingerprint("v4:sha256:test"),
         committed_at_ms: 4_200,
         message: None,
         deltas,

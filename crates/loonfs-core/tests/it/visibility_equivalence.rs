@@ -151,7 +151,7 @@ impl VisibilityHarness {
         self.publish_operation(FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse(from_path).expect("valid source path"),
             to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -164,7 +164,7 @@ impl VisibilityHarness {
         self.publish_operation(FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse(from_path).expect("valid source path"),
             to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
-            guard: loonfs_api::DestinationGuard {
+            precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -206,7 +206,7 @@ impl VisibilityHarness {
         operations: Vec<FilesystemOperation>,
     ) -> Result<CommitResponse, CoreError> {
         self.publish(CommitCandidate::new(CommitRequest {
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             commit_id: CommitId::generate(),
             actor_id: loonfs_test_support::test_actor(),
             message: None,
@@ -557,7 +557,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
                 from_path: AbsolutePath::parse("/reverse/branch").expect("valid source path"),
                 to_path: AbsolutePath::parse("/safe/reverse-branch")
                     .expect("valid destination path"),
-                guard: loonfs_api::DestinationGuard {
+                precondition: loonfs_api::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -580,7 +580,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
             FilesystemOperation::MovePath {
                 from_path: AbsolutePath::parse("/source/branch").expect("valid source path"),
                 to_path: AbsolutePath::parse("/safe/branch").expect("valid destination path"),
-                guard: loonfs_api::DestinationGuard {
+                precondition: loonfs_api::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -942,7 +942,7 @@ async fn directory_move_sequences_cannot_create_parent_cycles() {
     harness
         .put_file(
             "/a/b/c/file.txt",
-            b"cycle guard",
+            b"cycle precondition",
             DestinationBehavior::NoReplace,
         )
         .await

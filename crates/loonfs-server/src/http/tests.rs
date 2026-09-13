@@ -58,6 +58,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "allow_stale",
     "already_published",
     "attributes_changed",
+    "attributes_revision",
     "attributes_revision_no",
     "attributes_updated_at_ms",
     "attributes_updated_by",
@@ -141,13 +142,15 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "operation_kind",
     "operation_part",
     "parent_inode_id",
+    "path_absence",
+    "path_binding",
     "part_size_bytes",
     "path_prefix",
     "prepare_content_ref",
     "prepare_file_bytes",
     "protocol_version",
     "put_file",
-    "put_file_by_inode",
+    "create_file_by_inode",
     "put_file_prepared",
     "put_file_revision_by_inode",
     "request_deadline_ms",
@@ -344,7 +347,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         .collect();
 
     let populated = ErrorDetails {
-        assertion_index: Some(0),
+        precondition_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
         committed_seq: Some(ChangeSeq::from(1)),
         committed_fingerprint: Some("fingerprint".to_owned()),
@@ -1576,7 +1579,7 @@ async fn runtime_created_state_is_readable_through_http() {
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit: loonfs_api::options::CommitOptions {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
                 message: None,
@@ -1677,7 +1680,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
-                        assertions: Vec::new(),
+                        preconditions: Vec::new(),
                         actor_id: loonfs_test_support::test_actor(),
                         commit_id: None,
                         message: None,
@@ -1793,7 +1796,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
-                        assertions: Vec::new(),
+                        preconditions: Vec::new(),
                         actor_id: loonfs_test_support::test_actor(),
                         commit_id: None,
                         message: None,
@@ -1812,7 +1815,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_guarded_put_rejects_a_delete_recreate_race() {
+async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
@@ -1855,14 +1858,14 @@ async fn http_guarded_put_rejects_a_delete_recreate_race() {
         .await
         .expect("observe recreated file");
 
-    let mut guarded = replace_file_options();
-    guarded.expected_inode_id = Some(observed.inode_id);
-    guarded.expected_revision_no = Some(RevisionNo(1));
+    let mut with_preconditions = replace_file_options();
+    with_preconditions.expected_inode_id = Some(observed.inode_id);
+    with_preconditions.expected_revision_no = Some(RevisionNo(1));
     match harness
         .client
-        .put_file_bytes(&target, b"must not land", &guarded)
+        .put_file_bytes(&target, b"must not land", &with_preconditions)
         .await
-        .expect_err("the recreated inode must fail the guard")
+        .expect_err("the recreated inode must fail the precondition")
     {
         ClientError::Api {
             status,
@@ -1882,7 +1885,7 @@ async fn http_guarded_put_rejects_a_delete_recreate_race() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_guarded_move_rejects_a_bumped_destination_revision() {
+async fn http_move_with_preconditions_rejects_a_bumped_destination_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
@@ -1994,7 +1997,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
-                    assertions: Vec::new(),
+                    preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
@@ -3654,7 +3657,7 @@ async fn write_file_bytes(
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                 message: None,
@@ -3679,7 +3682,7 @@ async fn delete_path_recursive(
         DeleteOptions {
             behavior: DeleteDirectoryBehavior::Recursive,
             commit: loonfs_api::options::CommitOptions {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                 message: None,
@@ -4551,12 +4554,12 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
 }
 
 #[tokio::test]
-async fn stale_commit_assertion_returns_409_with_its_index() {
+async fn stale_commit_precondition_returns_409_with_its_index() {
     use tower::ServiceExt;
 
     let temp_dir = tempdir().expect("tempdir");
     let (router, state) = app(
-        test_config(temp_dir.path(), "assertion-writer"),
+        test_config(temp_dir.path(), "precondition-writer"),
         AppOptions::default(),
     )
     .await
@@ -4578,9 +4581,9 @@ async fn stale_commit_assertion_returns_409_with_its_index() {
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(
                     serde_json::json!({
-                        "commit_id": "stale-assertion",
+                        "commit_id": "stale-precondition",
                         "actor_id": "test-actor",
-                        "assertions": [{"kind": "namespace_head", "expected_head_seq": 1}],
+                        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })
                     .to_string(),
@@ -4596,7 +4599,7 @@ async fn stale_commit_assertion_returns_409_with_its_index() {
     let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
     assert_eq!(error.code, ErrorCode::StaleHead.as_str());
     let details = error.details.expect("details");
-    assert_eq!(details.assertion_index, Some(0));
+    assert_eq!(details.precondition_index, Some(0));
     assert_eq!(details.expected_head_seq, Some(ChangeSeq(1)));
     assert_eq!(details.actual_head_seq, Some(ChangeSeq(0)));
     assert_eq!(details.operation_index, None);
@@ -4604,12 +4607,12 @@ async fn stale_commit_assertion_returns_409_with_its_index() {
 }
 
 #[tokio::test]
-async fn scoped_commit_assertion_returns_409_with_its_index() {
+async fn scoped_commit_precondition_returns_409_with_its_index() {
     use tower::ServiceExt;
 
     let temp_dir = tempdir().expect("tempdir");
     let (router, state) = app(
-        test_config(temp_dir.path(), "assertion-writer"),
+        test_config(temp_dir.path(), "precondition-writer"),
         AppOptions::default(),
     )
     .await
@@ -4631,9 +4634,9 @@ async fn scoped_commit_assertion_returns_409_with_its_index() {
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(
                     serde_json::json!({
-                        "commit_id": "stale-assertion",
+                        "commit_id": "stale-precondition",
                         "actor_id": "test-actor",
-                        "assertions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_99", "expected_revision_no": 1}],
+                        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_99", "expected_revision_no": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })
                     .to_string(),
@@ -4649,7 +4652,7 @@ async fn scoped_commit_assertion_returns_409_with_its_index() {
     let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
     assert_eq!(error.code, ErrorCode::StaleRevision.as_str());
     let details = error.details.expect("details");
-    assert_eq!(details.assertion_index, Some(1));
+    assert_eq!(details.precondition_index, Some(1));
     assert_eq!(details.inode_id, Some(loonfs_api::InodeId(99)));
     assert_eq!(
         details.expected_revision_no,

@@ -419,33 +419,43 @@
         ],
         "type": "string"
       },
-      "CommitAssertion": {
+      "CommitId": {
+        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] returns\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
+        "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+        "type": "string"
+      },
+      "CommitPrecondition": {
         "description": "Admission conditions checked against the candidate's pre-state before its operations.\nThe pre-state head sequence is the last admitted commit's sequence in the batch,\nor the batch's base head sequence when no earlier candidate was admitted.",
         "discriminator": {
           "mapping": {
-            "attributes": "#/components/schemas/CommitAssertionAttributes",
-            "binding": "#/components/schemas/CommitAssertionBinding",
-            "file_revision": "#/components/schemas/CommitAssertionFileRevision",
-            "namespace_head": "#/components/schemas/CommitAssertionNamespaceHead"
+            "attributes_revision": "#/components/schemas/CommitPreconditionAttributesRevision",
+            "file_revision": "#/components/schemas/CommitPreconditionFileRevision",
+            "namespace_head": "#/components/schemas/CommitPreconditionNamespaceHead",
+            "path_absence": "#/components/schemas/CommitPreconditionPathAbsence",
+            "path_binding": "#/components/schemas/CommitPreconditionPathBinding"
           },
           "propertyName": "kind"
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/CommitAssertionNamespaceHead"
+            "$ref": "#/components/schemas/CommitPreconditionNamespaceHead"
           },
           {
-            "$ref": "#/components/schemas/CommitAssertionFileRevision"
+            "$ref": "#/components/schemas/CommitPreconditionFileRevision"
           },
           {
-            "$ref": "#/components/schemas/CommitAssertionBinding"
+            "$ref": "#/components/schemas/CommitPreconditionPathBinding"
           },
           {
-            "$ref": "#/components/schemas/CommitAssertionAttributes"
+            "$ref": "#/components/schemas/CommitPreconditionAttributesRevision"
+          },
+          {
+            "$ref": "#/components/schemas/CommitPreconditionPathAbsence"
           }
         ]
       },
-      "CommitAssertionAttributes": {
+      "CommitPreconditionAttributesRevision": {
         "description": "Requires a visible inode with the attribute revision the caller read.",
         "properties": {
           "expected_attributes_revision_no": {
@@ -458,7 +468,7 @@
           },
           "kind": {
             "enum": [
-              "attributes"
+              "attributes_revision"
             ],
             "type": "string"
           }
@@ -470,35 +480,7 @@
         ],
         "type": "object"
       },
-      "CommitAssertionBinding": {
-        "description": "Requires the path to retain the binding or absence the caller read.",
-        "properties": {
-          "expected_binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
-            "description": "Requires an inode expectation and detects moves away and back."
-          },
-          "expected_inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "When absent, requires the path to be unbound."
-          },
-          "kind": {
-            "enum": [
-              "binding"
-            ],
-            "type": "string"
-          },
-          "path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute path to check, including the root."
-          }
-        },
-        "required": [
-          "path",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "CommitAssertionFileRevision": {
+      "CommitPreconditionFileRevision": {
         "description": "Requires a visible inode with the content revision the caller read.",
         "properties": {
           "expected_revision_no": {
@@ -523,7 +505,7 @@
         ],
         "type": "object"
       },
-      "CommitAssertionNamespaceHead": {
+      "CommitPreconditionNamespaceHead": {
         "description": "Requires the pre-state head sequence to equal `expected_head_seq`.",
         "properties": {
           "expected_head_seq": {
@@ -543,11 +525,54 @@
         ],
         "type": "object"
       },
-      "CommitId": {
-        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] returns\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
-        "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
-        "type": "string"
+      "CommitPreconditionPathAbsence": {
+        "description": "Requires no visible entry at the full path.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "path_absence"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path to check, including the root."
+          }
+        },
+        "required": [
+          "path",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "CommitPreconditionPathBinding": {
+        "description": "Requires the path to retain the binding the caller read.",
+        "properties": {
+          "expected_binding_generation": {
+            "$ref": "#/components/schemas/BindingGeneration",
+            "description": "Detects moves away and back."
+          },
+          "expected_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Inode required at the path."
+          },
+          "kind": {
+            "enum": [
+              "path_binding"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path to check, including the root."
+          }
+        },
+        "required": [
+          "path",
+          "expected_inode_id",
+          "kind"
+        ],
+        "type": "object"
       },
       "CommitRequest": {
         "additionalProperties": false,
@@ -556,13 +581,6 @@
           "actor_id": {
             "$ref": "#/components/schemas/ActorId",
             "description": "Actor responsible for the commit, as supplied by the application."
-          },
-          "assertions": {
-            "description": "Ordered admission conditions evaluated before any operations.",
-            "items": {
-              "$ref": "#/components/schemas/CommitAssertion"
-            },
-            "type": "array"
           },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
@@ -586,6 +604,13 @@
             "description": "The non-empty ordered operations to commit atomically.",
             "items": {
               "$ref": "#/components/schemas/FilesystemOperation"
+            },
+            "type": "array"
+          },
+          "preconditions": {
+            "description": "Ordered admission conditions evaluated before any operations.",
+            "items": {
+              "$ref": "#/components/schemas/CommitPrecondition"
             },
             "type": "array"
           }
@@ -966,12 +991,6 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Change-feed cursor the request asked to resume after."
           },
-          "assertion_index": {
-            "description": "Zero-based position of the failed request assertion.",
-            "format": "int32",
-            "minimum": 0,
-            "type": "integer"
-          },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Idempotency key of the commit the error concerns."
@@ -1019,6 +1038,12 @@
           },
           "operation_index": {
             "description": "The index of the failed operation in the request.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "precondition_index": {
+            "description": "Zero-based position of the failed request precondition.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -1415,12 +1440,12 @@
             "copy_path": "#/components/schemas/FilesystemOperationCopyPath",
             "create_directory": "#/components/schemas/FilesystemOperationCreateDirectory",
             "create_directory_by_inode": "#/components/schemas/FilesystemOperationCreateDirectoryByInode",
+            "create_file_by_inode": "#/components/schemas/FilesystemOperationCreateFileByInode",
             "delete_by_inode": "#/components/schemas/FilesystemOperationDeleteByInode",
             "delete_path": "#/components/schemas/FilesystemOperationDeletePath",
             "move_by_inode": "#/components/schemas/FilesystemOperationMoveByInode",
             "move_path": "#/components/schemas/FilesystemOperationMovePath",
             "put_file": "#/components/schemas/FilesystemOperationPutFile",
-            "put_file_by_inode": "#/components/schemas/FilesystemOperationPutFileByInode",
             "put_file_revision_by_inode": "#/components/schemas/FilesystemOperationPutFileRevisionByInode",
             "restore_revision": "#/components/schemas/FilesystemOperationRestoreRevision",
             "undelete": "#/components/schemas/FilesystemOperationUndelete",
@@ -1439,7 +1464,7 @@
             "$ref": "#/components/schemas/FilesystemOperationPutFile"
           },
           {
-            "$ref": "#/components/schemas/FilesystemOperationPutFileByInode"
+            "$ref": "#/components/schemas/FilesystemOperationCreateFileByInode"
           },
           {
             "$ref": "#/components/schemas/FilesystemOperationPutFileRevisionByInode"
@@ -1483,7 +1508,7 @@
           },
           "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior and an inode guard, the required content revision."
+            "description": "With `replace` behavior and an inode precondition, the required content revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -1552,6 +1577,36 @@
         "required": [
           "parent_inode_id",
           "display_name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "FilesystemOperationCreateFileByInode": {
+        "description": "Create a file with an unused name under an existing parent inode.",
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Immutable bytes that must be covered by a valid preparation proof."
+          },
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "New file name."
+          },
+          "kind": {
+            "enum": [
+              "create_file_by_inode"
+            ],
+            "type": "string"
+          },
+          "parent_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Parent directory."
+          }
+        },
+        "required": [
+          "parent_inode_id",
+          "display_name",
+          "content_ref",
           "kind"
         ],
         "type": "object"
@@ -1630,7 +1685,7 @@
           },
           "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior and an inode guard, the required content revision."
+            "description": "With `replace` behavior and an inode precondition, the required content revision."
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -1673,7 +1728,7 @@
           },
           "expected_destination_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior and an inode guard, the required content revision."
+            "description": "With `replace` behavior and an inode precondition, the required content revision."
           },
           "from_path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -1714,7 +1769,7 @@
           },
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "With `replace` behavior and an inode guard, the request requires this content revision."
+            "description": "With `replace` behavior and an inode precondition, the request requires this content revision."
           },
           "kind": {
             "enum": [
@@ -1729,36 +1784,6 @@
         },
         "required": [
           "path",
-          "content_ref",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "FilesystemOperationPutFileByInode": {
-        "description": "Create a file with an unused name under an existing parent inode.",
-        "properties": {
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Immutable bytes that must be covered by a valid preparation proof."
-          },
-          "display_name": {
-            "$ref": "#/components/schemas/DisplayName",
-            "description": "New file name."
-          },
-          "kind": {
-            "enum": [
-              "put_file_by_inode"
-            ],
-            "type": "string"
-          },
-          "parent_inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "Parent directory."
-          }
-        },
-        "required": [
-          "parent_inode_id",
-          "display_name",
           "content_ref",
           "kind"
         ],
@@ -1853,7 +1878,7 @@
         "properties": {
           "expected_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
-            "description": "With an inode guard, the attribute revision that must still be current."
+            "description": "With an inode precondition, the attribute revision that must still be current."
           },
           "expected_inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -3006,7 +3031,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/commits": {
       "post": {
-        "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. Request assertions check the pre-state after receipt resolution and before operations; a failed assertion names its position in `details.assertion_index`. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
+        "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. Request preconditions check the pre-state after receipt resolution and before operations; a failed precondition names its position in `details.precondition_index`. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
         "operationId": "create_commit",
         "parameters": [
           {

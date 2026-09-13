@@ -318,7 +318,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         let commit_id = CommitId::parse("equivalent-put").expect("valid commit id");
         let options = PutFileOptions {
             commit: loonfs_api::options::CommitOptions {
-                assertions: Vec::new(),
+                preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(commit_id.clone()),
                 message: None,

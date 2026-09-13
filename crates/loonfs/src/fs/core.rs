@@ -15,8 +15,8 @@ use loonfs_api::{
     FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
     LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
-    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    PROTOCOL_VERSION,
+    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
+    LIMIT_GC_MIN_GRACE_WINDOW_MS, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataSegmentCache, StoredMetadataBlockCache, WalTailProjectionCache,
@@ -258,6 +258,10 @@ impl ReadCore {
                     (
                         LIMIT_COMMIT_MAX_OPERATIONS,
                         loonfs_core::limits::MAX_COMMIT_OPERATIONS,
+                    ),
+                    (
+                        LIMIT_COMMIT_MAX_PRECONDITIONS,
+                        loonfs_core::limits::MAX_COMMIT_PRECONDITIONS,
                     ),
                     (
                         LIMIT_COMMIT_MAX_CONTENT_TOKENS,

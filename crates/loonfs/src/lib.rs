@@ -56,7 +56,7 @@ pub use loonfs_api::v0::{
 pub use loonfs_api::{
     ActorId, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo, AttributeValue,
     Attributes, AttributesProjection, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId,
-    CheckpointOwnerSummary, ChecksumAlgorithm, CommitAssertion, CommitId, ContentId, ContentRef,
+    CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, CommitPrecondition, ContentId, ContentRef,
     ContentRefKind, DeleteCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
     DirectoryPageCursor, EffectiveLimit, FileBytes, FileRevision, FileRevisionsPageCursor,
@@ -112,8 +112,8 @@ pub mod wire {
 /// Most embedded applications do not need this module.
 pub mod publish {
     pub use loonfs_core::limits::{
-        MAX_COMMIT_ASSERTIONS, MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS,
-        MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS,
+        MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_MESSAGE_BYTES,
+        MAX_COMMIT_OPERATIONS, MAX_COMMIT_PRECONDITIONS,
     };
     pub use loonfs_core::path::parse_mutation_path;
     pub use loonfs_core::publish::{

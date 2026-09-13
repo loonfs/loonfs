@@ -293,7 +293,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             commit_id: commit_id(),
             committed_by: actor(),
             semantic_commit_fingerprint: serde_json::from_str(
-                r#""v3:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
+                r#""v4:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
             )
             .expect("fingerprint"),
             committed_at_ms: 4_000,
@@ -2287,7 +2287,7 @@ fn provenance_rows_reject_every_missing_required_field() {
             MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
                 commit_id: commit_id(),
                 committed_by: actor(),
-                semantic_commit_fingerprint: serde_json::from_str(r#""v3:sha256:receipt""#)
+                semantic_commit_fingerprint: serde_json::from_str(r#""v4:sha256:receipt""#)
                     .expect("fingerprint"),
                 committed_seq: ChangeSeq(9),
                 committed_at_ms: 9_000,
@@ -2498,13 +2498,13 @@ fn content_publication_rows_match_golden_bytes_and_lookup_grammar() {
 }
 
 #[test]
-fn commit_assertion_wire_shapes_match_golden() {
+fn commit_precondition_wire_shapes_match_golden() {
     use loonfs_api::{
-        AbsolutePath, CommitAssertion, CommitRequest, ErrorDetails, FilesystemOperation,
+        AbsolutePath, CommitPrecondition, CommitRequest, ErrorDetails, FilesystemOperation,
     };
 
     let request = CommitRequest::single(
-        CommitId::parse("guarded").expect("commit id"),
+        CommitId::parse("preconditions").expect("commit id"),
         actor(),
         None,
         FilesystemOperation::CreateDirectory {
@@ -2512,37 +2512,41 @@ fn commit_assertion_wire_shapes_match_golden() {
             parents: false,
         },
     );
-    let guarded = request.clone().assertions(vec![
-        CommitAssertion::NamespaceHead {
+    let with_preconditions = request.clone().preconditions(vec![
+        CommitPrecondition::NamespaceHead {
             expected_head_seq: ChangeSeq(42),
         },
-        CommitAssertion::FileRevision {
+        CommitPrecondition::FileRevision {
             inode_id: InodeId(42),
             expected_revision_no: RevisionNo(3),
         },
-        CommitAssertion::Binding {
+        CommitPrecondition::PathBinding {
             path: AbsolutePath::parse("/docs/input").expect("path"),
-            expected_inode_id: Some(InodeId(42)),
+            expected_inode_id: InodeId(42),
             expected_binding_generation: Some(
                 loonfs_api::BindingGeneration::parse("aaaa").expect("generation"),
             ),
         },
-        CommitAssertion::Attributes {
+        CommitPrecondition::PathAbsence {
+            path: AbsolutePath::parse("/docs/missing").expect("path"),
+        },
+        CommitPrecondition::AttributesRevision {
             inode_id: InodeId(42),
             expected_attributes_revision_no: loonfs_api::AttributeRevisionNo(2),
         },
     ]);
     let details = ErrorDetails {
-        assertion_index: Some(0),
+        precondition_index: Some(0),
         expected_head_seq: Some(ChangeSeq(42)),
         actual_head_seq: Some(ChangeSeq(43)),
         ..ErrorDetails::default()
     };
-    let bytes = serde_json::to_vec_pretty(&(request, &guarded, details)).expect("wire shapes");
-    assert_matches_golden("commit_assertions.v0.json", &bytes);
+    let bytes =
+        serde_json::to_vec_pretty(&(request, &with_preconditions, details)).expect("wire shapes");
+    assert_matches_golden("commit_preconditions.v0.json", &bytes);
     let (_, decoded, _): (CommitRequest, CommitRequest, ErrorDetails) =
         serde_json::from_slice(&bytes).expect("decode wire shapes");
-    assert_eq!(decoded, guarded);
+    assert_eq!(decoded, with_preconditions);
 }
 
 #[test]

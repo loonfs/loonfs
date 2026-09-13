@@ -69,7 +69,7 @@ fn planned(ops: Vec<CommitOp>) -> Vec<CommitOp> {
 }
 
 fn test_fingerprint() -> CommitFingerprint {
-    serde_json::from_str(r#""v3:sha256:test""#).expect("fingerprint")
+    serde_json::from_str(r#""v4:sha256:test""#).expect("fingerprint")
 }
 
 fn wal_create_directory(
@@ -277,7 +277,7 @@ async fn build_commit_plan(
 }
 
 #[tokio::test]
-async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() {
+async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondition() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_append_attributes(0, InodeId(2), 1, &[("owner", "ada")]),
@@ -300,7 +300,7 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() 
                 inode_id: InodeId(2),
                 expected: AttributeRevisionNo(1),
                 actual: Some(AttributeRevisionNo(2)),
-                assertion_index: None,
+                precondition_index: None,
             }
         ),
         "{error:?}"
@@ -308,7 +308,7 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_guard() 
     assert_eq!(
         CoreError::from(error).code(),
         ErrorCode::StaleAttributes,
-        "the guard reports the attribute-conflict code"
+        "the precondition reports the attribute-conflict code"
     );
 }
 
@@ -402,7 +402,7 @@ async fn stale_revision_precondition_is_rejected() {
             inode_id: InodeId(3),
             expected: RevisionNo(1),
             actual: Some(RevisionNo(2)),
-            assertion_index: None,
+            precondition_index: None,
         }
     ));
 }
@@ -666,7 +666,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             inode_id: InodeId(3),
             expected: RevisionNo(1),
             actual: Some(RevisionNo(2)),
-            assertion_index: None,
+            precondition_index: None,
         }
     ));
     assert_eq!(

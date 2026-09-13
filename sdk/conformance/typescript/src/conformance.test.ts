@@ -63,7 +63,7 @@ interface ErrorContractExpected {
 }
 
 interface CommitReplayRequest {
-    assertions: LoonFS.CommitAssertion[];
+    preconditions: LoonFS.CommitPrecondition[];
     namespace_id: string;
     commit_id: string;
     actor_id: LoonFS.ActorId;
@@ -335,7 +335,7 @@ function strictObject(value: unknown, fields: readonly string[], label: string):
 const ERROR_CONTRACT_REQUEST_FIELDS = ["namespace_id"] as const;
 const ERROR_CONTRACT_EXPECTED_FIELDS = ["unauthenticated"] as const;
 const COMMIT_REPLAY_REQUEST_FIELDS = [
-    "assertions",
+    "preconditions",
     "namespace_id",
     "commit_id",
     "actor_id",
@@ -1183,7 +1183,7 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         request.path,
         request.message,
     );
-    commit.assertions = request.assertions;
+    commit.preconditions = request.preconditions;
     const first = await activeHarness.client.commits.create(commit);
     const replayed = await activeHarness.client.commits.create(commit);
 
@@ -1196,13 +1196,13 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         (error: unknown) => {
             assert.ok(error instanceof LoonFS.ConflictError);
             assert.equal(error.body.code, "stale_head");
-            assert.equal(error.body.details?.assertion_index, 0);
+            assert.equal(error.body.details?.precondition_index, 0);
             assert.equal(error.body.details?.actual_head_seq, first.committed_seq);
             return true;
         },
     );
     await assert.rejects(
-        activeHarness.client.commits.create({...commit, assertions: []}),
+        activeHarness.client.commits.create({...commit, preconditions: []}),
         (error: unknown) => error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict",
     );
     const prepared: PreparedFileContent = await activeHarness.client.files.prepareFileStream({
@@ -1226,10 +1226,10 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         (error: unknown) => error instanceof LoonFS.ConflictError);
     const entry = await activeHarness.client.files.retrieve({namespace_id: request.namespace_id, path: "/renamed"});
     if (entry.inode_kind !== "file") throw new Error("expected file");
-    const guarded = {...input, path: "/renamed", commit_id: "prepared-replace", behavior: "replace" as const,
+    const withPreconditions = {...input, path: "/renamed", commit_id: "prepared-replace", behavior: "replace" as const,
         expected_inode_id: entry.inode_id, expected_revision_no: entry.revision_no};
-    const replaced = await activeHarness.client.files.putFilePrepared(guarded);
-    assert.deepEqual(await activeHarness.client.files.putFilePrepared(guarded), replaced);
+    const replaced = await activeHarness.client.files.putFilePrepared(withPreconditions);
+    assert.deepEqual(await activeHarness.client.files.putFilePrepared(withPreconditions), replaced);
 
 });
 
@@ -1474,7 +1474,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
             "conf-inode-mutations-inode-file",
             request.actor_id,
             {
-                kind: "put_file_by_inode",
+                kind: "create_file_by_inode",
                 parent_inode_id: parent.inode_id,
                 display_name: request.inode_file_name,
                 content_ref: staged.content_ref,
@@ -2088,10 +2088,10 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         (error: unknown) => error instanceof BrowserLoonFS.ConflictError);
     const entry = await browserClient.files.retrieve({namespace_alias: request.namespace_alias, path: input.path});
     if (entry.inode_kind !== "file") throw new Error("expected file");
-    const guarded = {...input, commit_id: "browser-prepared-replace", behavior: "replace" as const,
+    const withPreconditions = {...input, commit_id: "browser-prepared-replace", behavior: "replace" as const,
         expected_inode_id: entry.inode_id, expected_revision_no: entry.revision_no};
-    const replaced = await browserClient.files.putFilePrepared(guarded);
-    assert.deepEqual(await browserClient.files.putFilePrepared(guarded), replaced);
+    const replaced = await browserClient.files.putFilePrepared(withPreconditions);
+    assert.deepEqual(await browserClient.files.putFilePrepared(withPreconditions), replaced);
 
     // The rig fails only at begin. No session exists then, so mid-flow cleanup is not covered.
     await assert.rejects(

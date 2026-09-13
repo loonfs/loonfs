@@ -139,7 +139,7 @@ mod tests {
     fn embedded_runtime_errors_carry_their_structured_details() {
         let error = map_runtime_error(RuntimeError::Core(
             loonfs::CoreError::StaleHeadPrecondition {
-                assertion_index: None,
+                precondition_index: None,
                 expected: ChangeSeq(41),
                 actual: ChangeSeq(45),
             },

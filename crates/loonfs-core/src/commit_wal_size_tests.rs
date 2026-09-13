@@ -13,9 +13,9 @@ use loonfs_api::wire::wal::{
 };
 use loonfs_api::{
     ActorId, AttributeKey, AttributeRevisionNo, Attributes, ChangeSeq, Checksum, CommitId,
-    ContentId, ContentRef, ContentRefKind, ContentStoreId, DestinationBehavior, DestinationGuard,
-    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo, WriterEpoch,
-    MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
+    ContentId, ContentRef, ContentRefKind, ContentStoreId, DestinationBehavior,
+    DestinationPrecondition, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
+    WalNo, WriterEpoch, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
 };
 use loonfs_test_support::ids::{attribute_key, attribute_text};
 use std::collections::BTreeMap;
@@ -103,7 +103,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             commit_id: CommitId::parse("c".repeat(MAX_ID_BYTES)).expect("commit"),
             actor_id: actor.clone(),
             message: Some("m".repeat(MAX_COMMIT_MESSAGE_BYTES)),
-            assertions: Vec::new(),
+            preconditions: Vec::new(),
             operations: (0..operation_count)
                 .map(|index| match kind {
                     "attributes" => FilesystemOperation::UpdateAttributes {
@@ -119,7 +119,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                     "copy" => FilesystemOperation::CopyPath {
                         from_path: AbsolutePath::parse("/source").expect("path"),
                         to_path: AbsolutePath::parse(format!("/{index:0255}")).expect("path"),
-                        guard: DestinationGuard::default(),
+                        precondition: DestinationPrecondition::default(),
                     },
                     _ => FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!(
