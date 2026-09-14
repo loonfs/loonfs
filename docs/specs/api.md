@@ -322,7 +322,8 @@ storage credentials or bucket policy. `commit_outcome_unknown` and
 `deadline_exceeded` require the caller to determine whether a mutation
 completed before retrying it.
 Responses carrying one of the three immediately retryable codes include
-`Retry-After: 1`.
+`Retry-After: 1`. Generated SDKs retry a response that carries `Retry-After` and do
+not retry on status alone.
 
 Precondition failures surface as `409` resource-state conflicts
 (`stale_revision`, `stale_head`, `commit_id_reuse_conflict`) rather than

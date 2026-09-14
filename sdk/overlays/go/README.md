@@ -65,9 +65,9 @@ keeping the LoonFS credential on the server.
 
 ## Retries
 
-The Go SDK makes one HTTP attempt by default. You can opt into retries with
-`option.WithMaxAttempts`, but only do so for operations your application can
-safely repeat.
+The SDK retries responses that carry `Retry-After` and does not retry on
+status alone. It never retries operations that LoonFS marks `not_idempotent`.
+Use `option.WithMaxAttempts` to tune the attempt count.
 
 For publication retries, call `client.Files.PrepareFileBytes(ctx, namespaceID,
 payload)` once and retain the returned `*files.PreparedFileContent`. Publish it

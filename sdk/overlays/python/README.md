@@ -71,10 +71,10 @@ See the [generated API reference](https://github.com/loonfs/loonfs-sdk-python/bl
 
 ## Retries
 
-The SDK retries transient failures on operations that are safe to repeat.
-Operations that LoonFS classifies as non-idempotent are never retried
-automatically. Use the `max_retries` client or request option to tune retries for
-safe operations.
+The SDK retries connection failures and responses that carry `Retry-After`,
+and does not retry on status alone. It never retries operations that LoonFS
+marks `not_idempotent`. Use the `max_retries` client or request option to
+tune the retry count.
 
 For publication retries, call `client.files.prepare_file_bytes(namespace_id,
 content=payload)` once and retain its `PreparedFileContent`. Pass it to
