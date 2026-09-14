@@ -7,7 +7,7 @@ use crate::args::{
 };
 use crate::error::CliError;
 use crate::resolve::parse_namespace_id;
-use loonfs_api::{CheckpointId, ErrorCode};
+use loonfs_api::{ErrorCode, SnapshotId};
 use std::path::Path;
 
 async fn resolve_snapshot_context(
@@ -26,8 +26,8 @@ async fn resolve_snapshot_context(
     Ok(context)
 }
 
-pub(super) fn parse_snapshot_id(value: &str) -> Result<CheckpointId, CliError> {
-    CheckpointId::parse(value).map_err(|error| {
+pub(super) fn parse_snapshot_id(value: &str) -> Result<SnapshotId, CliError> {
+    SnapshotId::parse(value).map_err(|error| {
         CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
             .with_param("snapshot_id")
     })

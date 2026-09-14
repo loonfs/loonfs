@@ -334,7 +334,7 @@ conditional-request failures.
 One SDK serves both backends; deployment mode never forks the client
 codebase.
 
-Generated SDKs use schema names as public type names. A resource body uses the resource name, such as `Checkpoint` or `UploadSession`. A response envelope uses `<Verb><Noun>Response`, such as `ListCheckpointsResponse`. Namespace-owned resources include `namespace_id`.
+Generated SDKs use schema names as public type names. A resource body uses the resource name, such as `Checkpoint` or `UploadSession`. A response envelope uses `<Verb><Noun>Response`, such as `ListCheckpointsResponse`. The request and response schemas of an operation share its verb, as in `CreateDownloadRequest` for `create_download`. Namespace-owned resources include `namespace_id`.
 
 Revision numbers, change sequences, attribute revisions, manifest numbers,
 writer epochs, and grep run numbers are JSON integers from 0 through
@@ -597,7 +597,7 @@ Responses expose attribution through these fields:
 
 ### 5.2 Commit responses and safe retry
 
-Every commit returns the same response envelope: the `namespace_id` that changed, the
+Every commit returns a `Commit`: the `namespace_id` that changed, the
 `commit_id` it committed under, and the `committed_seq` where it
 became visible. When the caller did not supply a commit id, the surface that
 accepted the request generates one and returns it, so every caller holds the
@@ -788,8 +788,8 @@ The table below lists the retry class for every v0 operation.
 | List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
 | Read prior file content by inode | `get_file_revision_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
-| Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads?snapshot_id=...` (`snapshot_id` is optional and cannot be combined with the body's `revision_no`) |
-| Start a download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with body `{}` |
+| Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` with body `path`, optional `revision_no`, and optional `snapshot_id` (`snapshot_id` cannot be combined with `revision_no`) |
+| Start a download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits` |
 | Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads` |
@@ -969,7 +969,7 @@ collection deletes them. Snapshot deletion removes the pin. A second delete retu
 
 These operations manage the snapshot lifetime. Path stat, directory listing,
 file content, download, and change-feed requests accept an optional
-`snapshot_id`. File content and download requests cannot combine `snapshot_id`
+`snapshot_id`; the download request carries it in its body. File content and download requests cannot combine `snapshot_id`
 with `revision_no`; the snapshot selects the revision. A snapshot change feed
 ends at the captured sequence, and `after_seq` cannot exceed that sequence.
 
@@ -1947,7 +1947,7 @@ Five operations use inode IDs instead of paths. They let clients act on an entry
 
 A successful response is returned only after the underlying change is actually
 committed: the numbered WAL put succeeded. Every
-commit returns the same envelope (section 5.2).
+commit returns the same `Commit` object (section 5.2).
 
 Representative response:
 
@@ -2337,11 +2337,13 @@ any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a path and, optionally,
-the revision to read — the same two things the proxied read takes:
+the revision to read in its JSON body:
 
 ```json
 { "path": "/docs/report.txt", "revision_no": 3 }
 ```
+
+The body may instead include `snapshot_id` to read a snapshot; it cannot be combined with `revision_no`.
 
 The response is a short-lived read capability plus everything the reader
 checks the arriving bytes against:
@@ -2369,7 +2371,7 @@ checks the arriving bytes against:
 
 The inode form is
 `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`.
-Its body is `{}` and its response does not include a path:
+The request has no body and its response does not include a path:
 
 ```json
 {
@@ -2429,7 +2431,7 @@ presign writes either, no file it holds can be larger than it will proxy.
 Each change is one commit carrying its identity (`committed_seq`, `commit_id`,
 `committed_by`, observational `committed_at_ms`, optional `message`) and `events`:
 the semantic filesystem operations the commit
-applied, in the order it applied them. One request operation may apply
+applied, in the order it applied them. Each change is a `Commit`, the same object `POST /commits` returns. One request operation may apply
 several — a put creates each missing parent directory, a replacing move
 deletes the file it moves over, a copy carries the source's attributes onto
 the inode it just created — so a request with three operations may report
@@ -2442,6 +2444,7 @@ more than three events. The events stay in request order.
   "through_seq": 419,
   "changes": [
     {
+      "namespace_id": "demo",
       "committed_seq": 419,
       "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
       "committed_by": "usr_8f3c",

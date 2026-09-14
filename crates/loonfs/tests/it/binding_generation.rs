@@ -85,7 +85,9 @@ fn binding_generation_changes_on_move_but_not_content_update() {
         .changes
         .first()
         .expect("the move is a committed change")
-        .events;
+        .events
+        .as_ref()
+        .expect("change feed events");
     match events.as_slice() {
         [FilesystemChange::Moved {
             binding_generation, ..

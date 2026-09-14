@@ -266,23 +266,6 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         ErrorCode::NamespaceDeleted,
     );
 
-    let strict_body = raw_agent()
-        .post(&format!(
-            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/downloads",
-            harness.server_url,
-            loonfs_api::public_inode_id::encode(file_id)
-        ))
-        .set("authorization", "Bearer test-token")
-        .send_json(serde_json::json!({ "path": "/file.txt" }))
-        .expect_err("inode download body rejects fields");
-    let ureq::Error::Status(status, response) = strict_body else {
-        panic!("expected status response")
-    };
-    assert_eq!(status, 400);
-    let error: ApiError =
-        serde_json::from_reader(response.into_reader()).expect("decode strict-body error");
-    assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
-
     assert_api_code(
         harness
             .client
@@ -600,11 +583,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
             let request = raw_agent()
                 .request(method, &url)
                 .set("authorization", "Bearer test-token");
-            let result = if method == "POST" {
-                request.send_json(serde_json::json!({}))
-            } else {
-                request.call()
-            };
+            let result = request.call();
             let ureq::Error::Status(status, response) =
                 result.expect_err("malformed inode route should fail")
             else {

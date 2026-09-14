@@ -9,7 +9,7 @@ use loonfs_api::{
         BeginUploadRequest, CompleteUploadRequest, FilesystemChange, UploadMode, UploadSession,
         UploadSessionStatus,
     },
-    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
+    AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
     LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
 };
@@ -318,7 +318,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     let send_put = |request: &CommitRequest| {
         let response =
             send_commit(&harness.server_url, &namespace, request).expect("commit uploaded file");
-        serde_json::from_reader::<_, CommitResponse>(response.into_reader())
+        serde_json::from_reader::<_, Commit>(response.into_reader())
             .expect("decode operation response")
     };
     let commit = send_put(&put_request);
@@ -360,9 +360,9 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     assert_eq!(change.commit_id, put_request.commit_id);
     assert_eq!(change.message.as_deref(), Some("upload over http"));
     // The commit emits one file-created event with its initial revision.
-    assert_eq!(change.events.len(), 1);
+    assert_eq!(change.events.as_ref().expect("change feed events").len(), 1);
     assert!(matches!(
-        &change.events[0],
+        &change.events.as_ref().expect("change feed events")[0],
         FilesystemChange::FileCreated {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
@@ -477,7 +477,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         },
     )
     .expect("a re-minted receipt admits its content");
-    let commit: CommitResponse =
+    let commit: Commit =
         serde_json::from_reader(commit.into_reader()).expect("decode commit response");
     assert_eq!(commit.committed_seq, ChangeSeq(1));
 

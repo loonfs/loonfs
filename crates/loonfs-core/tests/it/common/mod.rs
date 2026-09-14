@@ -100,7 +100,7 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         request: CommitRequest,
         context: &MutationContext,
-    ) -> Result<loonfs_api::v0::CommitResponse, CoreError> {
+    ) -> Result<loonfs_api::v0::Commit, CoreError> {
         let candidate = prepared_candidate(store, namespace_id, request).await;
         publish_namespace_commits_batch(store, namespace_id, vec![candidate], context)
             .await
@@ -116,7 +116,7 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
         context: &MutationContext,
-    ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
+    ) -> Vec<Result<loonfs_api::v0::Commit, CoreError>> {
         let mut candidates = Vec::with_capacity(requests.len());
         for request in requests {
             candidates.push(prepared_candidate(store, namespace_id, request).await);
@@ -172,7 +172,7 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         candidates: Vec<CommitCandidate>,
         context: &MutationContext,
-    ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
+    ) -> Vec<Result<loonfs_api::v0::Commit, CoreError>> {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
         engine
             .publish_batch(store, candidates, context, &PublishTailOptions::default())
@@ -214,7 +214,7 @@ pub(crate) mod commit_split_support {
         commit_id: CommitId,
         operation: FilesystemOperation,
         context: &MutationContext,
-    ) -> Result<loonfs_api::CommitResponse, CoreError> {
+    ) -> Result<loonfs_api::Commit, CoreError> {
         submit_commit(
             store,
             namespace_id,
@@ -237,7 +237,7 @@ pub(crate) mod commit_split_support {
         behavior: DestinationBehavior,
         context: &MutationContext,
         commit_id: Option<&str>,
-    ) -> Result<loonfs_api::CommitResponse, CoreError> {
+    ) -> Result<loonfs_api::Commit, CoreError> {
         let content = store_bytes_as_content(store, namespace_id, bytes).await?;
         submit_operation(
             store,
@@ -262,7 +262,7 @@ pub(crate) mod commit_split_support {
         bytes: &[u8],
         context: &MutationContext,
         commit_id: Option<&str>,
-    ) -> Result<loonfs_api::CommitResponse, CoreError> {
+    ) -> Result<loonfs_api::Commit, CoreError> {
         put_file_bytes(
             store,
             namespace_id,
@@ -281,7 +281,7 @@ pub(crate) mod commit_split_support {
         absolute_path: &str,
         context: &MutationContext,
         commit_id: Option<&str>,
-    ) -> Result<loonfs_api::CommitResponse, CoreError> {
+    ) -> Result<loonfs_api::Commit, CoreError> {
         submit_operation(
             store,
             namespace_id,

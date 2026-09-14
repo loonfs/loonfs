@@ -5,7 +5,7 @@ use crate::binding_generation::BindingGeneration;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::read_anchor::load_head_and_retention_floor;
 use crate::wal::{load_wal_tail, WalTailLoadRequest};
-use loonfs_api::v0::{CommittedChange, FilesystemChange, ListChangesResponse};
+use loonfs_api::v0::{Commit, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -94,7 +94,7 @@ pub(super) async fn find_committed_change_at<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     committed_seq: ChangeSeq,
-) -> Result<Option<CommittedChange>> {
+) -> Result<Option<Commit>> {
     let page = list_changes_after(
         store,
         namespace_id,
@@ -112,14 +112,19 @@ pub(super) async fn find_committed_change_at<S: ObjectStore + ?Sized>(
 pub(super) fn committed_change_from_wal_record(
     namespace_id: &NamespaceId,
     record: &WalCommitPayload,
-) -> Result<CommittedChange> {
-    Ok(CommittedChange {
+) -> Result<Commit> {
+    Ok(Commit {
+        namespace_id: namespace_id.clone(),
         committed_seq: record.seq,
         commit_id: record.commit_id.clone(),
         committed_by: record.committed_by.clone(),
         committed_at_ms: record.committed_at_ms,
         message: record.message.clone(),
-        events: events_from_wal_deltas(namespace_id, record.seq, &record.deltas)?,
+        events: Some(events_from_wal_deltas(
+            namespace_id,
+            record.seq,
+            &record.deltas,
+        )?),
     })
 }
 

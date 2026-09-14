@@ -26,7 +26,7 @@ use loonfs_api::options::{
     DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, StatPathOptions,
 };
 use loonfs_api::v0::{
-    BeginUploadResponse, CommitResponse, ListChangesResponse, UploadContentResponse, UploadMode,
+    BeginUploadResponse, Commit, ListChangesResponse, UploadContentResponse, UploadMode,
     UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_api::wire::control::CheckpointOwner;
@@ -542,7 +542,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn publish_namespace_commits_batch(
         &self,
         candidates: Vec<CommitCandidate>,
-    ) -> Result<Vec<Result<CommitResponse>>> {
+    ) -> Result<Vec<Result<Commit>>> {
         let context = self.mutation_context()?;
         Ok(crate::commit_engine::publish_namespace_commits_batch(
             &self.store,

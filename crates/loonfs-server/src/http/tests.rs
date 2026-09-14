@@ -3745,6 +3745,54 @@ mod direct_download {
     use std::sync::Arc;
     use std::time::SystemTime;
 
+    #[tokio::test]
+    async fn download_snapshot_selectors_use_the_body_and_exclude_revisions() {
+        use tower::ServiceExt;
+
+        let directory = tempdir().expect("tempdir");
+        let (router, _state) = app(
+            test_config(directory.path(), "download-selectors"),
+            AppOptions::default(),
+        )
+        .await
+        .expect("app");
+        let snapshot_id = "pin_00000000000000000001-0000000000000002";
+        let route = "/v0/namespaces/demo/filesystem/downloads";
+        for (uri, body, param) in [
+            (
+                format!("{route}?snapshot_id={snapshot_id}"),
+                serde_json::json!({"path": "/report.txt"}),
+                "snapshot_id",
+            ),
+            (
+                route.to_owned(),
+                serde_json::json!({"path": "/report.txt", "revision_no": 1, "snapshot_id": snapshot_id}),
+                "revision_no",
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body");
+            let error: loonfs_api::ApiError = serde_json::from_slice(&bytes).expect("API error");
+            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(error.param.as_deref(), Some(param));
+        }
+    }
+
     /// The read cap these deployments are configured with.
     ///
     /// Small on purpose. The audit's case is a file the deployment refuses

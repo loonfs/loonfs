@@ -11,7 +11,7 @@ use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
-use loonfs_api::v0::CommitResponse as ApiCommitResponse;
+use loonfs_api::v0::Commit;
 use loonfs_api::{CommitId, ContentId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub(super) enum CandidateAdmission {
 }
 
 impl CandidateAdmission {
-    fn independent(outcome: Result<ApiCommitResponse>) -> Self {
+    fn independent(outcome: Result<Commit>) -> Self {
         Self::Settled(BatchOutcomeSlot::Settled {
             outcome,
             depends_on_batch: false,
@@ -210,7 +210,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     record: &CommitReceiptRecord,
-) -> Result<ApiCommitResponse> {
+) -> Result<Commit> {
     let change = match view.find_committed_change_at(record.committed_seq).await {
         Ok(Some(change)) => change,
         Ok(None) => {
@@ -220,7 +220,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
         )))
         }
         Err(CoreError::RebootstrapRequired { .. }) => {
-            return Ok(ApiCommitResponse {
+            return Ok(Commit {
                 namespace_id: namespace_id.clone(),
                 commit_id: record.commit_id.clone(),
                 committed_seq: record.committed_seq,
@@ -238,10 +238,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
             record.commit_id, record.committed_seq, change.commit_id
         )));
     }
-    Ok(ApiCommitResponse::from_committed_change(
-        namespace_id.clone(),
-        change,
-    ))
+    Ok(change)
 }
 
 /// Checks that each put has a matching content preparation proof.

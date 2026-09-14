@@ -18,7 +18,7 @@ use crate::protocol::{
 };
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_api::v0::CommitResponse as ApiCommitResponse;
+use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::{ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -242,7 +242,7 @@ impl std::io::Write for RequestByteCounter {
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
-    pub results: Vec<Result<ApiCommitResponse>>,
+    pub results: Vec<Result<Commit>>,
     /// WAL tail length observed by this publish, for opportunistic
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
@@ -591,7 +591,7 @@ impl NamespaceCommitEngine {
     }
 }
 
-fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitResponse>> {
+fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {
     (0..count).map(|_| Err(error.clone())).collect()
 }
 
@@ -601,7 +601,7 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<CommitCandidate>,
     context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse>> {
+) -> Vec<Result<Commit>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     engine
         .publish_batch(store, candidates, context, &PublishTailOptions::default())

@@ -30,10 +30,11 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::resolve::ResolvedTarget;
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
+use loonfs_api::SnapshotId;
 use loonfs_api::{
-    AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq,
-    CheckpointId, CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior,
-    InodeKind, ListPathEntriesResponse, NamespaceId, RevisionNo,
+    AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, Commit,
+    CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, ListPathEntriesResponse,
+    NamespaceId, RevisionNo,
 };
 use loonfs_client::{
     CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
@@ -58,10 +59,10 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
         .transpose()
 }
 
-fn parse_snapshot_id_arg(snapshot_id: Option<&str>) -> Result<Option<CheckpointId>, CliError> {
+fn parse_snapshot_id_arg(snapshot_id: Option<&str>) -> Result<Option<SnapshotId>, CliError> {
     snapshot_id
         .map(|value| {
-            CheckpointId::parse(value).map_err(|error| {
+            SnapshotId::parse(value).map_err(|error| {
                 CliError::invalid_request(format!("invalid --snapshot-id: {error}"))
                     .with_param("--snapshot-id")
             })
@@ -92,7 +93,7 @@ async fn follow_path_entry_pages(
     spec: &NamespacePath,
     pagination: &PaginationArgs,
     cursor: Option<&str>,
-    snapshot_id: Option<&CheckpointId>,
+    snapshot_id: Option<&SnapshotId>,
     mut visit: impl FnMut(Vec<loonfs_api::PathEntry>) -> Result<(), CliError>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut heads = ListingHeadObservation::default();
@@ -594,7 +595,7 @@ pub(super) async fn open_resumable_download(
     context: &CommandContext,
     spec: &NamespacePath,
     revision_no: Option<RevisionNo>,
-    snapshot_id: Option<&CheckpointId>,
+    snapshot_id: Option<&SnapshotId>,
     destination: &Path,
 ) -> Result<(FileDownload, Option<PartialMeta>), CliError> {
     let mut download = context
@@ -1024,7 +1025,7 @@ pub(super) async fn put_payload(
     payload: &LocalPayload,
     options: &PutFileOptions,
     progress: &Arc<ProgressReporter>,
-) -> Result<CommitResponse, CliError> {
+) -> Result<Commit, CliError> {
     // File-backed remote PUTs retain their exact request across interruptions.
     let journal = match (&context.target, payload.file_path()) {
         (ResolvedTarget::Remote(remote), Some(path)) => Some(resume_journal(
@@ -1115,7 +1116,7 @@ async fn commit_a_finished_upload(
     options: &PutFileOptions,
     journal: &UploadJournal,
     progress: &ProgressReporter,
-) -> Result<Option<CommitResponse>, CliError> {
+) -> Result<Option<Commit>, CliError> {
     let Some(resume) = journal.resume() else {
         return Ok(None);
     };
@@ -1144,7 +1145,7 @@ async fn commit_a_finished_upload(
 
 fn acknowledge_committed_upload(
     journal: &UploadJournal,
-    committed: &CommitResponse,
+    committed: &Commit,
 ) -> Result<(), CliError> {
     journal.acknowledge().map_err(|error| {
         CliError::io_error(format!(

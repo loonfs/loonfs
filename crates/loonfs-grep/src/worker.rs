@@ -854,17 +854,21 @@ async fn collect_incremental_unit(
             .map_err(|_| {
                 CoreError::Internal("grep event cursor does not fit in memory".to_owned())
             })?;
-        if start_event_index > change.events.len() {
+        let events = change
+            .events
+            .as_ref()
+            .expect("change feed commits should carry events");
+        if start_event_index > events.len() {
             return Err(GrepError::CorruptIndex {
                 message: format!(
                     "grep event cursor `{}` exceeds commit `{}` length `{}`",
                     resume.next_event_index(),
                     change.committed_seq,
-                    change.events.len()
+                    events.len()
                 ),
             });
         }
-        for (event_index, event) in change.events.iter().enumerate().skip(start_event_index) {
+        for (event_index, event) in events.iter().enumerate().skip(start_event_index) {
             if matches!(event, FilesystemChange::Undeleted { .. }) {
                 return Ok(IncrementalWork::Restart);
             }
@@ -875,12 +879,7 @@ async fn collect_incremental_unit(
                 && planned_content_bytes.saturating_add(revision.content_ref.size_bytes)
                     > policy.max_content_bytes_per_step.get();
             if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
-                cursor.stop_at(
-                    change.committed_seq,
-                    event_index,
-                    change.events.len(),
-                    false,
-                )?;
+                cursor.stop_at(change.committed_seq, event_index, events.len(), false)?;
                 break 'changes;
             }
             examined_files += 1;
@@ -897,7 +896,7 @@ async fn collect_incremental_unit(
             if examined_files >= policy.max_files_per_step.get()
                 || planned_content_bytes >= policy.max_content_bytes_per_step.get()
             {
-                cursor.stop_at(change.committed_seq, event_index, change.events.len(), true)?;
+                cursor.stop_at(change.committed_seq, event_index, events.len(), true)?;
                 break 'changes;
             }
         }

@@ -30,7 +30,7 @@ from loonfs.server import (
     BeginUploadResponse_ServiceProxied,
     Checksum,
     CommitPrecondition,
-    CommitResponse,
+    Commit,
     CompletedUploadPart,
     ConflictError,
     FilesystemOperation_CreateDirectory,
@@ -626,7 +626,7 @@ def _proxy_create_commit(
     commit_id: str,
     operation: JsonObject,
     content_token: JsonObject | None = None,
-) -> CommitResponse:
+) -> Commit:
     body: JsonObject = {
         "actor_id": request.actor_id,
         "commit_id": commit_id,
@@ -638,7 +638,7 @@ def _proxy_create_commit(
         f"/v0/namespace-aliases/{request.namespace_alias}/commits",
         json=body,
     )
-    return CommitResponse(**_proxy_response_json(response, "proxy commit response"))
+    return Commit(**_proxy_response_json(response, "proxy commit response"))
 
 
 
@@ -1081,6 +1081,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
     )
     assert len(feed.changes) == 1
     events = feed.changes[0].events
+    assert events is not None
     assert len(events) == 1
     assert events[0].kind == "moved"
     assert events[0].binding_generation == moved_entry.binding_generation
@@ -1478,6 +1479,7 @@ def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     change = feed.changes[0]
     assert change.commit_id == request.commit_id
     assert change.committed_by == request.actor_id
+    assert change.events is not None
     assert len(change.events) == 1
     assert change.events[0].kind == "directory_created"
 

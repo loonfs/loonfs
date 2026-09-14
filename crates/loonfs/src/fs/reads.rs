@@ -10,7 +10,7 @@ use crate::{
     ListChangesResponse, ListFileRevisionsResponse, ListInodeChildrenOptions,
     ListInodeChildrenResponse, ListPathEntriesOptions, ListPathEntriesResponse, Namespace,
     NamespaceId, PathEntry, ReadFileStreamOptions, RevisionNo, RuntimeError, SharedObjectStore,
-    StatPathOptions,
+    SnapshotId, StatPathOptions,
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
@@ -19,7 +19,7 @@ use loonfs_api::{
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 
 /// Runtime readers require callers to pin snapshots explicitly.
-fn reject_snapshot_option(snapshot_id: &Option<CheckpointId>, reader: &str) -> Result<()> {
+fn reject_snapshot_option(snapshot_id: &Option<SnapshotId>, reader: &str) -> Result<()> {
     if snapshot_id.is_some() {
         return Err(loonfs_core::Error::InvalidCheckpointRequest(format!(
             "snapshot_id is not supported by {reader}"
@@ -32,7 +32,7 @@ fn reject_snapshot_option(snapshot_id: &Option<CheckpointId>, reader: &str) -> R
 fn validate_pinned_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
     pinned_head_seq: ChangeSeq,
-    snapshot_id: Option<&CheckpointId>,
+    snapshot_id: Option<&SnapshotId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
         return Ok(());
@@ -80,7 +80,7 @@ fn reject_snapshot_bound_directory_cursor(cursor: Option<&DirectoryPageCursor>) 
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
     context: RuntimeReadContext,
-    snapshot_id: Option<CheckpointId>,
+    snapshot_id: Option<SnapshotId>,
     max_read_content_bytes: Option<u64>,
 }
 
@@ -241,7 +241,7 @@ impl FsReader {
         &self,
         engine: NamespaceReaderEngine<SharedObjectStore>,
         context: RuntimeReadContext,
-        snapshot_id: Option<CheckpointId>,
+        snapshot_id: Option<SnapshotId>,
     ) -> FsReadSnapshot {
         FsReadSnapshot {
             engine,
@@ -324,7 +324,7 @@ impl FsReader {
     pub async fn pin_namespace_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
     ) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let now_ms = loonfs_core::time::current_time_ms()?;

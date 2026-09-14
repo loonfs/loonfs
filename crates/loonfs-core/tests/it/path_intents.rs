@@ -42,7 +42,7 @@ async fn delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::CommitResponse, CoreError> {
+) -> Result<loonfs_api::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
@@ -63,7 +63,7 @@ async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::CommitResponse, CoreError> {
+) -> Result<loonfs_api::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
@@ -85,7 +85,7 @@ async fn move_path<S: ObjectStore + ?Sized>(
     destination_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::CommitResponse, CoreError> {
+) -> Result<loonfs_api::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
@@ -111,7 +111,7 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
     destination_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::CommitResponse, CoreError> {
+) -> Result<loonfs_api::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
@@ -138,7 +138,7 @@ async fn put_file_with_preconditions<S: ObjectStore + ?Sized>(
     preconditions: WritePreconditions,
     context: &MutationContext,
     commit_id: &str,
-) -> Result<loonfs_api::CommitResponse, CoreError> {
+) -> Result<loonfs_api::Commit, CoreError> {
     let content = store_bytes_as_content(store, namespace_id, bytes).await?;
     submit_operation(
         store,
@@ -163,7 +163,7 @@ async fn restore_file_revision<S: ObjectStore + ?Sized>(
     source_revision_no: RevisionNo,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::CommitResponse, CoreError> {
+) -> Result<loonfs_api::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
@@ -1404,7 +1404,7 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
         .expect("change feed")
         .changes
         .iter()
-        .flat_map(|change| &change.events)
+        .flat_map(|change| change.events.as_ref().expect("change feed events"))
         .filter(|event| matches!(event, FilesystemChange::Moved { .. }))
         .count();
     assert_eq!(move_count, 1);

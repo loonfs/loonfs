@@ -19,7 +19,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::time::MonotonicTimer;
 use crate::wal::prepare_wal_segment;
-use loonfs_api::v0::CommitResponse as ApiCommitResponse;
+use loonfs_api::v0::Commit;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
@@ -27,7 +27,7 @@ use tracing::Instrument;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishBatchAgainstViewResult {
-    pub(crate) results: Vec<Result<ApiCommitResponse>>,
+    pub(crate) results: Vec<Result<Commit>>,
     pub(crate) effect: PublishViewEffect,
 }
 
@@ -51,7 +51,7 @@ pub(crate) enum PublishViewEffect {
 }
 
 impl PublishBatchAgainstViewResult {
-    fn unchanged(results: Vec<Result<ApiCommitResponse>>) -> Self {
+    fn unchanged(results: Vec<Result<Commit>>) -> Self {
         Self {
             results,
             effect: PublishViewEffect::Unchanged,
@@ -64,14 +64,14 @@ impl PublishBatchAgainstViewResult {
 pub(super) enum BatchOutcomeSlot {
     Accepted,
     Settled {
-        outcome: Result<ApiCommitResponse>,
+        outcome: Result<Commit>,
         depends_on_batch: bool,
     },
     AliasOf(usize),
 }
 
 impl BatchOutcomeSlot {
-    fn settled(&self) -> Option<&Result<ApiCommitResponse>> {
+    fn settled(&self) -> Option<&Result<Commit>> {
         match self {
             Self::Settled { outcome, .. } => Some(outcome),
             Self::Accepted | Self::AliasOf(_) => None,
@@ -273,9 +273,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 .next()
                 .expect("accepted slot count should match WAL record count");
             *slot = BatchOutcomeSlot::Settled {
-                outcome: committed_change_from_wal_record(namespace_id, record).map(|change| {
-                    ApiCommitResponse::from_committed_change(namespace_id.clone(), change)
-                }),
+                outcome: committed_change_from_wal_record(namespace_id, record),
                 depends_on_batch: false,
             };
         }
@@ -336,7 +334,7 @@ fn fail_unpublished_slots(slots: &mut [BatchOutcomeSlot], error: &CoreError) {
 }
 
 /// Resolves aliases and rejects any slot that did not settle.
-fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<ApiCommitResponse>> {
+fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<Commit>> {
     slots
         .iter()
         .map(|slot| {

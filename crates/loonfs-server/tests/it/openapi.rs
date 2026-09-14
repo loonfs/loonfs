@@ -322,7 +322,7 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/filesystem/downloads",
         "post",
-        &["snapshot_id"],
+        &[],
     );
     assert_query_params(
         paths,
@@ -377,6 +377,18 @@ fn openapi_documents_current_server_paths() {
             assert!(!path_parameter_names.contains("namespace"));
         }
     }
+
+    let inode_download = &paths
+        ["/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads"]
+        ["post"];
+    assert!(inode_download.get("requestBody").is_none());
+    assert_eq!(
+        inode_download["x-fern-request-name"],
+        "CreateDownloadByInodeRequest"
+    );
+    assert!(spec["components"]["schemas"]
+        .get("CreateDownloadByInodeRequest")
+        .is_none());
 
     for (path, method, parameter, schema_name) in [
         (

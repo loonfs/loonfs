@@ -40,6 +40,8 @@ fn event_kinds(changes: &ListChangesResponse, id: &str) -> Vec<&'static str> {
         .find(|change| change.commit_id.as_str() == id)
         .unwrap_or_else(|| panic!("missing change for commit `{id}`"))
         .events
+        .as_ref()
+        .expect("change feed events")
         .iter()
         .map(event_kind)
         .collect()

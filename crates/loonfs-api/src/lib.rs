@@ -107,9 +107,10 @@ pub use ids::{
     ChangeSeq, CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
     GeneratedIdValidationError, IndexSegmentId, InodeId, InodeKind, ManifestNo,
     MetadataCompactionId, MetadataSegmentId, NameKey, NameKeyValidationError, NamespaceId,
-    NamespaceIdValidationError, PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo,
-    WriterEpoch, WriterId, WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES,
-    MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
+    NamespaceIdValidationError, PublicOrdinalRangeError, RevisionNo, RunNo, SnapshotId,
+    SnapshotIdValidationError, UploadId, WalNo, WriterEpoch, WriterId, WriterIdValidationError,
+    FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER,
+    ROOT_INODE_ID,
 };
 pub use manifest::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;
@@ -135,14 +136,14 @@ pub use secret::SecretString;
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, AttributesProjection, Checkpoint,
-    CheckpointOwnerSummary, CommitPrecondition, CommitRequest, CommitResponse,
-    CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,
-    DeleteCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
-    DestinationPrecondition, DestinationPreconditionError, ErrorDetails, ExpectedFileState,
-    ExtendSnapshotRequest, FileBytes, FileRevision, FilesystemOperation, FlushWalOutcome,
-    FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest,
-    GrepResponse, ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    CheckpointOwnerSummary, Commit, CommitPrecondition, CommitRequest, CreateCheckpointRequest,
+    CreateNamespaceRequest, CreateSnapshotRequest, DeleteCheckpointResponse,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DeleteSnapshotResponse,
+    DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior, DestinationPrecondition,
+    DestinationPreconditionError, ErrorDetails, ExpectedFileState, ExtendSnapshotRequest,
+    FileBytes, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,
+    ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse, MetadataCompactionOutcome,
     MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceRequest,
     MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, PathEntry, PathEntryKind,

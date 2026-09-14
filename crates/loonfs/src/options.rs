@@ -4,7 +4,7 @@
 //! [`loonfs_api::options`]. Runtime-only options remain in this module.
 //!
 //! Results are the `loonfs-api` wire shapes themselves, the same way handles
-//! already return `CommitResponse` and `FlushWalResponse`.
+//! already return `Commit` and `FlushWalResponse`.
 
 use crate::{EffectiveLimit, GcConfig, MetadataCompactionPolicy, Result, RuntimeError};
 use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};

@@ -555,17 +555,21 @@ async fn tail_revisions(
                     .map_err(|_| {
                         CoreError::Internal("grep event cursor does not fit in memory".to_owned())
                     })?;
-            if start_event_index > change.events.len() {
+            let events = change
+                .events
+                .as_ref()
+                .expect("change feed commits should carry events");
+            if start_event_index > events.len() {
                 let next_event_index = resume.next_event_index();
                 return Err(GrepError::CorruptIndex {
                     message: format!(
                         "grep event cursor `{next_event_index}` exceeds commit `{}` length `{}`",
                         change.committed_seq,
-                        change.events.len()
+                        events.len()
                     ),
                 });
             }
-            for event in change.events.iter().skip(start_event_index) {
+            for event in events.iter().skip(start_event_index) {
                 if matches!(event, FilesystemChange::Undeleted { .. }) {
                     return Ok(TailScan::RebuildRequired);
                 }

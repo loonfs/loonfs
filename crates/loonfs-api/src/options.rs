@@ -1,8 +1,9 @@
 //! Per-operation options shared by the embedded runtime and HTTP client.
 
+use crate::SnapshotId;
 use crate::{
-    ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, CheckpointId, CommitId,
-    CommitPrecondition, DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
+    ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, CommitId, CommitPrecondition,
+    DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
 };
 use std::collections::BTreeMap;
 
@@ -58,7 +59,7 @@ pub struct StatPathOptions {
     /// Whether to include the inode's attribute map and revision, enabled by default.
     pub include_attributes: AttributeInclusion,
     /// The snapshot for the path read; inode lookups do not support snapshots.
-    pub snapshot_id: Option<CheckpointId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 impl Default for StatPathOptions {
@@ -76,7 +77,7 @@ pub struct ListPathEntriesOptions {
     /// Whether to include each entry's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
     /// Read the directory from this snapshot.
-    pub snapshot_id: Option<CheckpointId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// Options for listing a directory's children by parent inode.
@@ -279,5 +280,5 @@ pub struct DirectMultipartUploadOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForkNamespaceOptions {
     /// Fork from this live snapshot instead of the current head.
-    pub snapshot_id: Option<crate::CheckpointId>,
+    pub snapshot_id: Option<crate::SnapshotId>,
 }

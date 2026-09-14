@@ -1888,7 +1888,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         encodeURIComponent(request.namespace_alias);
     const payload = new TextEncoder().encode(request.content_utf8);
 
-    const mkdir = await proxyJson<LoonFS.CommitResponse>(
+    const mkdir = await proxyJson<LoonFS.Commit>(
         `${namespaceAliasBase}/commits`,
         {
             method: "POST",
@@ -1939,7 +1939,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         ),
     );
     assert.deepEqual(proxiedCompleted.content_ref, uploadedContent.content_ref);
-    const proxiedCommit = await proxyJson<LoonFS.CommitResponse>(
+    const proxiedCommit = await proxyJson<LoonFS.Commit>(
         `${namespaceAliasBase}/commits`,
         {
             method: "POST",
@@ -1984,7 +1984,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         ),
     );
     assert.deepEqual(directCompleted.content_ref.checksum, directClaim.checksum);
-    const directCommit = await proxyJson<LoonFS.CommitResponse>(
+    const directCommit = await proxyJson<LoonFS.Commit>(
         `${namespaceAliasBase}/commits`,
         {
             method: "POST",
@@ -2127,6 +2127,7 @@ conformanceTest("changes", async (activeHarness, testCase) => {
     const change = feed.changes[0];
     assert.equal(change.commit_id, request.commit_id);
     assert.deepEqual(change.committed_by, request.actor_id);
+    assert.ok(change.events);
     assert.equal(change.events.length, 1);
     assert.equal(change.events[0]?.kind, "directory_created");
 });

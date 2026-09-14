@@ -6,10 +6,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// The result of one commit, including its attribution and filesystem events.
+/// One committed logical commit: its identity and the events it applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CommitResponse {
+pub struct Commit {
     /// Namespace that changed.
     pub namespace_id: NamespaceId,
     /// The idempotency key for the commit.
@@ -24,26 +24,11 @@ pub struct CommitResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
-    /// The filesystem events in commit order, or `None` when replaying a commit
-    /// without retained WAL history.
+    /// Always present on the change feed. Absent only from a replayed
+    /// `POST /commits` response whose WAL record has been retired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub events: Option<Vec<FilesystemChange>>,
-}
-
-impl CommitResponse {
-    /// Builds the response for a commit the change feed reports in full.
-    pub fn from_committed_change(namespace_id: NamespaceId, change: CommittedChange) -> Self {
-        Self {
-            namespace_id,
-            commit_id: change.commit_id,
-            committed_seq: change.committed_seq,
-            committed_by: change.committed_by,
-            committed_at_ms: change.committed_at_ms,
-            message: change.message,
-            events: Some(change.events),
-        }
-    }
 }
 
 /// A directory entry's parent and name.
@@ -171,26 +156,6 @@ pub enum FilesystemChange {
     },
 }
 
-/// One committed change in namespace order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CommittedChange {
-    /// Namespace sequence for this logical commit.
-    pub committed_seq: ChangeSeq,
-    /// Client idempotency key for this logical commit.
-    pub commit_id: CommitId,
-    /// Actor responsible for the commit, as supplied by the application.
-    pub committed_by: crate::ActorId,
-    /// The commit time in Unix milliseconds; `committed_seq` defines commit order.
-    pub committed_at_ms: u64,
-    /// Caller annotation, omitted when absent and carrying no filesystem semantics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub message: Option<String>,
-    /// The filesystem events for this commit in commit order.
-    pub events: Vec<FilesystemChange>,
-}
-
 /// Change-feed response after a cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -206,12 +171,12 @@ pub struct ListChangesResponse {
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_after_seq: Option<ChangeSeq>,
     /// Logical commits after `after_seq`, ordered by ascending namespace sequence.
-    pub changes: Vec<CommittedChange>,
+    pub changes: Vec<Commit>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitResponse, CommittedChange, FilesystemChange};
+    use super::{Commit, FilesystemChange};
     use crate::InodeId;
 
     fn binding_generation() -> crate::BindingGeneration {
@@ -219,19 +184,21 @@ mod tests {
     }
 
     #[test]
-    fn committed_change_uses_committed_by_on_the_wire() {
-        let change = CommittedChange {
+    fn commit_uses_committed_by_on_the_wire() {
+        let change = Commit {
+            namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
             committed_seq: crate::ChangeSeq(7),
             commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: None,
-            events: Vec::new(),
+            events: Some(Vec::new()),
         };
 
         assert_eq!(
             serde_json::to_value(change).expect("serialize committed change"),
             serde_json::json!({
+                "namespace_id": "demo",
                 "committed_seq": 7,
                 "commit_id": "example-commit",
                 "committed_by": "loonfs",
@@ -242,23 +209,21 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_response_carries_the_committed_change_at_the_top_level() {
-        let response = CommitResponse::from_committed_change(
-            crate::NamespaceId::parse("demo").expect("valid namespace id"),
-            CommittedChange {
-                committed_seq: crate::ChangeSeq(419),
-                commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
-                committed_by: crate::ActorId::loonfs(),
-                committed_at_ms: 1_752_624_000_000,
-                message: Some("import the reports".to_owned()),
-                events: vec![FilesystemChange::DirectoryCreated {
-                    inode_id: InodeId(43),
-                    parent_inode_id: InodeId(1),
-                    display_name: crate::DisplayName::parse("docs").expect("valid display name"),
-                    binding_generation: binding_generation(),
-                }],
-            },
-        );
+    fn a_commit_carries_events_at_the_top_level() {
+        let response = Commit {
+            namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
+            committed_seq: crate::ChangeSeq(419),
+            commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
+            committed_by: crate::ActorId::loonfs(),
+            committed_at_ms: 1_752_624_000_000,
+            message: Some("import the reports".to_owned()),
+            events: Some(vec![FilesystemChange::DirectoryCreated {
+                inode_id: InodeId(43),
+                parent_inode_id: InodeId(1),
+                display_name: crate::DisplayName::parse("docs").expect("valid display name"),
+                binding_generation: binding_generation(),
+            }]),
+        };
 
         assert_eq!(
             serde_json::to_value(response).expect("serialize commit response"),
@@ -281,8 +246,8 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_response_omits_absent_events_and_message() {
-        let response = CommitResponse {
+    fn a_commit_omits_absent_events_and_message() {
+        let response = Commit {
             namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
             committed_seq: crate::ChangeSeq(419),

@@ -19,6 +19,7 @@ use crate::resolve::parse_namespace_id;
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
+use loonfs_api::SnapshotId;
 use loonfs_api::{
     AdvanceRetentionRequest, ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode,
     GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest, RunMaintenanceRequest,
@@ -413,7 +414,7 @@ pub(crate) async fn run_changes(
     let snapshot_id = args
         .snapshot_id
         .as_deref()
-        .map(CheckpointId::parse)
+        .map(SnapshotId::parse)
         .transpose()
         .map_err(|error| {
             context.fail(

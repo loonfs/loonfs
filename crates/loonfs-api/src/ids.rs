@@ -50,6 +50,10 @@ validation_error!(
     "invalid generated id {value:?}: {reason}"
 );
 validation_error!(
+    SnapshotIdValidationError,
+    "invalid snapshot_id {value:?}: {reason}"
+);
+validation_error!(
     NameKeyValidationError,
     "invalid name_key {value:?}: {reason}"
 );
@@ -587,6 +591,35 @@ string_id! {
     )
 }
 
+string_id! {
+    /// Id of a snapshot.
+    ///
+    /// A snapshot is backed by a checkpoint record and uses that record's
+    /// id, `pin_{manifest_no:020}-{16 lowercase hex}`.
+    SnapshotId,
+    error = SnapshotIdValidationError,
+    validate = |value: &str| validate_checkpoint_id(value).map_err(|error| SnapshotIdValidationError {
+        value: error.value,
+        reason: error.reason,
+    }),
+    schema(
+        pattern = r"^pin_[0-9]{20}-[0-9a-f]{16}$",
+        example = "pin_00000000000000000001-0000000000000002"
+    )
+}
+
+impl From<SnapshotId> for CheckpointId {
+    fn from(snapshot_id: SnapshotId) -> Self {
+        Self(snapshot_id.0)
+    }
+}
+
+impl From<CheckpointId> for SnapshotId {
+    fn from(checkpoint_id: CheckpointId) -> Self {
+        Self(checkpoint_id.0)
+    }
+}
+
 impl CheckpointId {
     /// Generates a new pin for the given manifest number.
     pub fn generate(manifest_no: ManifestNo) -> Self {
@@ -862,7 +895,7 @@ mod tests {
     use super::{
         next_public_ordinal, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentId,
         ContentStoreId, InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
-        RunNo, UploadId, WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
+        RunNo, SnapshotId, UploadId, WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributeRevisionNo;
     use std::collections::BTreeSet;
@@ -1122,6 +1155,12 @@ mod tests {
         let second = CheckpointId::parse("pin_00000000000000000010-0000000000000000").expect("pin");
         assert!(first < second);
         assert_eq!(second.manifest_no(), ManifestNo(10));
+        let snapshot_id = SnapshotId::from(second.clone());
+        let decoded: SnapshotId = serde_json::from_str(
+            &serde_json::to_string(&snapshot_id).expect("serialize snapshot id"),
+        )
+        .expect("decode snapshot id");
+        assert_eq!(CheckpointId::from(decoded), second);
         for invalid in [
             "pin_00000000000000000000-0000000000000000".to_owned(),
             format!("pin_{:020}-0000000000000000", MAX_PUBLIC_INTEGER + 1),
@@ -1129,7 +1168,8 @@ mod tests {
             "pin_1-0000000000000000".to_owned(),
             "pin_00000000000000000001-00000000000000000".to_owned(),
         ] {
-            assert!(CheckpointId::parse(invalid).is_err());
+            assert!(CheckpointId::parse(&invalid).is_err());
+            assert!(SnapshotId::parse(&invalid).is_err());
         }
     }
 

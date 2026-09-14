@@ -4,7 +4,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::{ApiError, CommitResponse};
+use loonfs_api::{ApiError, Commit};
 use loonfs_client::NamespacePath;
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
@@ -114,7 +114,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
         .send_json(move_request("move-replace", "replace"))
         .expect("replace is a valid move behavior");
     assert_eq!(accepted.status(), 200);
-    let committed: CommitResponse =
+    let committed: Commit =
         serde_json::from_reader(accepted.into_reader()).expect("decode commit response");
     assert_eq!(committed.commit_id.as_str(), "move-replace");
 
