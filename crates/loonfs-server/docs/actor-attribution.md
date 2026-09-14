@@ -1,11 +1,13 @@
 # Actor attribution
 
-Every mutation includes an `actor_id`, such as `"usr_8f3c"`.
+A commit, a namespace creation, and a namespace fork each carry an actor id
+in the `Loonfs-Actor` request header, such as `Loonfs-Actor: usr_8f3c`.
 
 Your backend authenticates and authorizes the request. LoonFS records the
-`actor_id` exactly as sent; it does not verify or manage identities. Use
+header value exactly as sent; it does not verify or manage identities. Use
 a stable internal ID, not an email address or display name.
-LoonFS does not parse the id.
+LoonFS checks only that the id is 1 to 256 visible ASCII characters; it
+does not parse it.
 
 Use `committed_by` to identify the actor for each commit. Do not infer the actor
 from a commit message or error message.

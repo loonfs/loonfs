@@ -459,8 +459,8 @@ not the input ref.
 ### 5.1 Commit identity and preconditions
 
 A commit is one request: a `commit_id` — a client-generated stable
-idempotency key that must be reused verbatim for safe retries — a required
-application-supplied opaque `actor_id` identifier, an optional `message` (a human-readable annotation that is part of the commit's
+idempotency key that must be reused verbatim for safe retries — an actor id
+carried in the `Loonfs-Actor` request header, an optional `message` (a human-readable annotation that is part of the commit's
 identity), an optional ordered `preconditions` array, and an ordered, non-empty list of path operations. A request with
 one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same commit and fingerprint alike.
@@ -586,7 +586,7 @@ authenticate the user and authorize the operation before sending the request.
 Use a stable internal ID, not an email address or display name.
 
 The header's value is the semantic commit fingerprint's `actor_id`. Reusing a
-`commit_id` with a different `actor_id` fails with
+`commit_id` with a different actor fails with
 `commit_id_reuse_conflict`. The commit timestamp is not part of the
 fingerprint.
 
@@ -656,7 +656,7 @@ commit retries; that is the cheapest retry and the one the server can
 answer on its own.
 
 **Prepared content.** Prepare bytes once, retain the returned content, then publish
-with the same explicit commit ID, path, `actor_id`, and options on each attempt.
+with the same explicit commit ID, path, actor, and options on each attempt.
 Preparation alone does not publish a file or extend the completed upload's
 lifetime.
 
@@ -668,7 +668,7 @@ lifetime.
 | TypeScript server and browser clients | `files.prepare()` | `files.uploadPrepared()` |
 
 The helpers generate a `commit_id` when the caller omits one and return it
-on the commit; an `actor_id` may be set once on the client.
+on the commit; the actor may be set once on the client.
 
 The whole-file convenience calls (`files.upload` / `files.uploadStream` /
 `files.upload_stream` / `Files.Upload` / `Files.UploadStream` in generated SDKs,
