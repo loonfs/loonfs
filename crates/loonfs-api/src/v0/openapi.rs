@@ -127,6 +127,16 @@ impl NamedSchemas {
             if let Some(fields) = fields {
                 merge_fields(&mut variant, fields);
             }
+            let description = match name {
+                "PathEntry" => Some("Whether the entry is a file or a directory."),
+                "UploadSession" => {
+                    Some("Whether the upload session is open, completed, or aborted.")
+                }
+                _ => None,
+            };
+            if let Some(description) = description {
+                variant["properties"][tag]["description"] = json!(description);
+            }
             let reference = reference(&variant_name);
             assert!(
                 mapping.insert(value, json!(reference)).is_none(),

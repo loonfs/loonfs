@@ -250,7 +250,7 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
         .join(", ");
     let mut summary = format!(
         "gc deleted {deleted} ({} retained)",
-        report.retained_candidates
+        report.retained.total()
     );
     push_top_retention_reason(&mut summary, report);
     if let Some(deadline) = report.reclaim_after_ms {

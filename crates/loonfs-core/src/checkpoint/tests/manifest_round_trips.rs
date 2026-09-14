@@ -484,7 +484,7 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
         .expect("repeat checkpoint");
     assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
     assert_eq!(repeated.manifest_no, first.manifest_no);
-    assert_eq!(repeated.checkpoint_seq, first.checkpoint_seq);
+    assert_eq!(repeated.captured_seq, first.captured_seq);
 
     let record = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
@@ -492,7 +492,7 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
         .expect("record exists")
         .state;
     assert_eq!(record.manifest_no, first.manifest_no);
-    assert_eq!(record.manifest_head_seq, first.checkpoint_seq);
+    assert_eq!(record.manifest_head_seq, first.captured_seq);
 
     // A new basis mints a new record; both files exist side by side.
     write_file_bytes(
@@ -638,8 +638,8 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     );
     let delta_runs = delta_runs(&second_materialized.manifest);
     assert_eq!(delta_runs.len(), 2);
-    assert_eq!(delta_runs[0].run_seq, first.checkpoint_seq);
-    assert_eq!(delta_runs[1].run_seq, second.checkpoint_seq);
+    assert_eq!(delta_runs[0].run_seq, first.captured_seq);
+    assert_eq!(delta_runs[1].run_seq, second.captured_seq);
     assert!(delta_runs.iter().all(|run| run.tier == RunTier::Delta));
     for response in [&first, &second] {
         let record = load_checkpoint_record(&store, &namespace_id, &response.checkpoint_id)
@@ -654,7 +654,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         &second_materialized.metadata_state
     ));
 
-    let mut checkpoint_seqs = vec![first.checkpoint_seq, second.checkpoint_seq];
+    let mut checkpoint_seqs = vec![first.captured_seq, second.captured_seq];
     let mut latest = second;
     for index in 3..=4u64 {
         write_file_bytes(
@@ -670,7 +670,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         latest = create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("create checkpoint");
-        checkpoint_seqs.push(latest.checkpoint_seq);
+        checkpoint_seqs.push(latest.captured_seq);
     }
     let latest_materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, latest.manifest_no)
@@ -683,8 +683,8 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     );
     let chained_delta_runs = super::delta_runs(&latest_materialized.manifest);
     assert_eq!(chained_delta_runs.len(), checkpoint_seqs.len());
-    for (run, checkpoint_seq) in chained_delta_runs.iter().zip(&checkpoint_seqs) {
-        assert_eq!(run.run_seq, *checkpoint_seq);
+    for (run, captured_seq) in chained_delta_runs.iter().zip(&checkpoint_seqs) {
+        assert_eq!(run.run_seq, *captured_seq);
         assert_eq!(run.tier, RunTier::Delta);
     }
 }

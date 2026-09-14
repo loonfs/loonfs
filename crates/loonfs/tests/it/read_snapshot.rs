@@ -489,7 +489,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         pinned.get_path_entry("/pinned.txt", snapshot_options).await,
         ErrorCode::InvalidRequest,
     );
-    assert_eq!(pinned.head_seq(), snapshot.checkpoint_seq);
+    assert_eq!(pinned.head_seq(), snapshot.captured_seq);
     assert_eq!(
         pinned
             .get_file_bytes("/pinned.txt")

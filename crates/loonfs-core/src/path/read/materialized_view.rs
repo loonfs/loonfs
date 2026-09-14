@@ -465,6 +465,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .into_iter()
             .map(|deletion| TrashEntry {
                 inode_id: deletion.root_inode_id,
+                inode_kind: deletion.inode_kind,
                 deletion_seq: deletion.deletion_seq,
                 deleted_at_ms: deletion.deleted_at_ms,
                 deleted_by: deletion.deleted_by,

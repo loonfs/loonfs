@@ -500,8 +500,8 @@ pub(super) fn trash_recovery_command(output: &Output, display_name: &str) -> Str
     let table = stdout_string(output);
     let cell = table
         .lines()
-        .find(|line| line.split('\t').nth(2) == Some(display_name))
-        .and_then(|row| row.split('\t').nth(5))
+        .find(|line| line.split('\t').nth(3) == Some(display_name))
+        .and_then(|row| row.split('\t').nth(6))
         .map(ToOwned::to_owned);
     assert!(
         cell.is_some(),

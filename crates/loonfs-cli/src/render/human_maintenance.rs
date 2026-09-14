@@ -40,7 +40,7 @@ pub(super) fn human_snapshot_created(snapshot: &SnapshotSummary) -> String {
         "snapshot {} created for {} at sequence {} (name: {}, expires: {})",
         snapshot.snapshot_id,
         snapshot.namespace_id,
-        snapshot.head_seq.0,
+        snapshot.captured_seq.0,
         snapshot.name,
         format_utc_ms(snapshot.expires_at_ms)
     )
@@ -56,7 +56,7 @@ pub(super) fn human_snapshots_listed(response: &ListSnapshotsResponse) -> String
             "{}\t{}\t{}\t{}\t{}",
             snapshot.snapshot_id,
             snapshot.name,
-            snapshot.head_seq.0,
+            snapshot.captured_seq.0,
             format_utc_ms(snapshot.created_at_ms),
             format_utc_ms(snapshot.expires_at_ms),
         ));
@@ -94,7 +94,7 @@ pub(super) fn human_checkpoint_created(checkpoint: &Checkpoint) -> String {
     format!(
         "checkpointed {} @ seq {} (checkpoint {}, manifest {}{expiry})",
         checkpoint.namespace_id,
-        checkpoint.checkpoint_seq.0,
+        checkpoint.captured_seq.0,
         checkpoint.checkpoint_id,
         checkpoint.manifest_no
     )
@@ -113,7 +113,7 @@ pub(super) fn human_checkpoints_listed(response: &ListCheckpointsResponse) -> St
         lines.push(format!(
             "{}\t{expiry}\t{}\t{owner}\t{}",
             format_utc_ms(checkpoint.created_at_ms),
-            checkpoint.checkpoint_seq.0,
+            checkpoint.captured_seq.0,
             checkpoint.checkpoint_id,
         ));
     }

@@ -571,7 +571,7 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
     let report = gc_namespace(&store, &namespace_id, &config(), &inside)
         .await
         .expect("gc pass inside the lease");
-    assert_eq!(report.retained_candidates, 2);
+    assert_eq!(report.retained.total(), 2);
     assert_eq!(
         report.next_reclamation_at_ms,
         Some(expires_at_ms + GRACE_MS),
@@ -1111,25 +1111,12 @@ async fn gc_retains_everything_inside_the_grace_window() {
     assert_eq!(report.deleted.wal_segments, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
-    assert!(report.retained_candidates > 0);
-    // The breakdown is the same total, said in reasons: nothing is counted
-    // into one without the other, so the two can never disagree.
-    assert_eq!(reason_total(&report), report.retained_candidates);
+    assert!(report.retained.total() > 0);
     // Everything unreachable here is simply young, and the pass says so
     // rather than leaving the operator to guess between age and reachability.
     assert!(report.retained.within_grace_window > 0);
     assert_eq!(report.retained.no_provider_timestamp, 0);
     stat_root(&store, &namespace_id).await;
-}
-
-/// The sum of every reason, which `retained_candidates` must equal.
-fn reason_total(report: &GcResponse) -> u64 {
-    report
-        .retained
-        .by_reason()
-        .into_iter()
-        .map(|(_, count)| count)
-        .sum()
 }
 
 #[tokio::test]
@@ -1280,7 +1267,6 @@ async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
     assert_eq!(report.retained.checkpoint_not_deletable, 1);
-    assert_eq!(reason_total(&report), report.retained_candidates);
 }
 
 #[tokio::test]
@@ -2145,7 +2131,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
-    assert!(report.retained_candidates > 0);
+    assert!(report.retained.total() > 0);
     stat_root(&store, &namespace_id).await;
 }
 

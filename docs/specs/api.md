@@ -781,9 +781,9 @@ The table below lists the retry class for every v0 operation.
 | Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces` |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
-| Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false` (the parameter is optional and defaults to `true`) |
+| Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
 | List path entries | `list_path_entries` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entries?path=/docs&limit=100&cursor=...&include_attributes=true&snapshot_id=...` (`include_attributes` is optional and defaults to `false`; `snapshot_id` is optional) |
-| List directory children by inode | `list_inode_children` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/children?limit=100&cursor=...&include_attributes=true` (the parameter is optional and defaults to `false`) |
+| List directory children by inode | `list_inode_children` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/children?limit=100&cursor=...&include_attributes=true&snapshot_id=...` (`include_attributes` is optional and defaults to `false`; `snapshot_id` is optional) |
 | List file revisions by path | `list_file_revisions` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
@@ -910,7 +910,7 @@ floor has advanced.
 
 #### Checkpoint inventory
 
-A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `checkpoint_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
+A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `captured_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
 
 The id is `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the
 manifest used by checkpoint and snapshot reads. Every pin has a fresh id.
@@ -918,7 +918,7 @@ manifest used by checkpoint and snapshot reads. Every pin has a fresh id.
 For example, a create response is:
 
 ```json
-{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}
+{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9}
 ```
 
 `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing
@@ -928,7 +928,7 @@ id. Fork checkpoints retain their `fork` owner and remain while their target
 namespace still reads through them.
 
 ```json
-{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"checkpoint_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9}]}
 ```
 
 Deletion removes the pin and returns the addressed namespace and checkpoint.
@@ -954,7 +954,8 @@ namespace requires explicit deletion.
 #### Snapshots
 
 A snapshot is a time-bounded view of a namespace. Its checkpoint record id is
-its `snapshot_id`. Creation requires `name` and `ttl_ms`. The ttl cannot exceed
+its `snapshot_id`. The `captured_seq` is the namespace sequence the snapshot captured.
+Creation requires `name` and `ttl_ms`. The ttl cannot exceed
 `snapshot.max_ttl_ms` or `snapshot.max_lifetime_ms`.
 
 An extension measures its requested ttl from the server's current time. It
@@ -967,8 +968,8 @@ expired. The maintenance checkpoint listing keeps expired records visible until
 collection deletes them. Snapshot deletion removes the pin. A second delete returns
 `snapshot_not_found`.
 
-These operations manage the snapshot lifetime. Path stat, directory listing,
-file content, download, and change-feed requests accept an optional
+These operations manage the snapshot lifetime. Path stat, inode stat, path directory listing,
+inode children listing, file content, download, and change-feed requests accept an optional
 `snapshot_id`; the download request carries it in its body. File content and download requests cannot combine `snapshot_id`
 with `revision_no`; the snapshot selects the revision. A snapshot change feed
 ends at the captured sequence, and `after_seq` cannot exceed that sequence.
@@ -1056,8 +1057,8 @@ namespace's owner prefix, including a delete that finds the key already absent.
 A retry can repeat a count; these are attempt counts, not a count of distinct
 objects.
 
-Every core GC response also carries `retained`, which is `retained_candidates`
-split by the decision that spared each candidate. The reasons are a closed
+Every core GC response carries `retained`, the candidates the pass kept, split by
+the decision that spared each one. The reasons are a closed
 set, so every field is always present and a zero means nothing was kept for
 that reason, and the fields sum to the total:
 
@@ -1420,6 +1421,7 @@ starts at sequence 0 with a retention floor of 0:
 ```json
 {
   "namespace_id": "demo",
+  "created_at_ms": 1752623000000,
   "head_seq": 0,
   "retention_floor_seq": 0
 }
@@ -1460,6 +1462,7 @@ namespace returns `410` with `namespace_deleted`.
 ```json
 {
   "namespace_id": "demo",
+  "created_at_ms": 1752623000000,
   "head_seq": 418,
   "retention_floor_seq": 120
 }
@@ -1470,6 +1473,8 @@ The `Namespace` object has exactly these fields:
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
+| `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
+| `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 
@@ -1496,6 +1501,8 @@ namespace state plus storage details used by maintenance:
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
+| `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
+| `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 | `current_manifest_no` | Current manifest number, present from namespace creation. |
@@ -1506,6 +1513,7 @@ namespace state plus storage details used by maintenance:
 ```json
 {
   "namespace_id": "demo",
+  "created_at_ms": 1752623000000,
   "head_seq": 418,
   "retention_floor_seq": 120,
   "current_manifest_no": 410,
@@ -1621,7 +1629,8 @@ projection never means "no attributes".
 
 The namespace root is nameless, so its entry omits `parent_inode_id`, `display_name`, and `binding_generation`. Every other entry includes a validated `display_name` and a `binding_generation` for its current parent/name binding (section 5.1). The empty string is not a valid name for the root or any named path component.
 
-The inode route returns the same entry shape, including the current `path`.
+The inode route accepts `snapshot_id` and returns the same entry shape, including
+the `path` at the selected sequence.
 Renaming an entry changes its path and name but not its inode id or metadata.
 An unknown or hidden inode returns `inode_not_found`. The root inode returns
 `/`. `include_attributes` behaves the same as it does for the path entry route.
@@ -1638,8 +1647,8 @@ the inode route; the cursor carries the resume position, but the request
 target remains the authority for what is being listed. Responses include
 `next_cursor` only when another page is available.
 
-The inode route addresses the directory by its stable identity instead of a
-name, so a listing and its resumption stay on the same directory across
+The inode route accepts `snapshot_id` and addresses the directory by its stable
+identity instead of a name, so a listing and its resumption stay on the same directory across
 concurrent renames or moves of the parent; entry paths reflect the parent's
 location at each page's head. It is gated by the `filesystem.inodes.list_children`
 feature. An unknown or hidden target inode answers `inode_not_found`, and a
@@ -1723,7 +1732,7 @@ Lists the namespace's recoverable deletions, oldest deletion first — ascending
 by `(deletion_seq, inode_id)` — paged with the standard `limit`/`cursor`
 pattern (the cursor is an ordering resume like every other). The listing is a
 range scan over the derived active-deletions family ([format: file deletion](format.md#16-file-and-subtree-deletion)), so a page costs the page rather than the namespace's deletion history.
-Those rows represent current state and are not removed when the retention floor advances. Each entry includes the inode id and deletion sequence required by `undelete`, plus `deleted_by`, `deleted_at_ms`, and the removed `deleted_binding`. Nested deletions remain separate entries, and recovering an outer deletion does not remove an inner deletion from the list.
+Those rows represent current state and are not removed when the retention floor advances. Each entry includes the inode id and deletion sequence required by `undelete`, plus `inode_kind`, `deleted_by`, `deleted_at_ms`, and the removed `deleted_binding`. Nested deletions remain separate entries, and recovering an outer deletion does not remove an inner deletion from the list.
 
 ```json
 {
@@ -1732,6 +1741,7 @@ Those rows represent current state and are not removed when the retention floor 
   "entries": [
     {
       "inode_id": "ino_42",
+      "inode_kind": "file",
       "deletion_seq": 417,
       "deleted_at_ms": 1752625000000,
       "deleted_by": "usr_8f3c",
@@ -2557,6 +2567,11 @@ Representative response:
 ```json
 {
   "namespace_id": "demo-branch",
+  "created_at_ms": 1752625000000,
+  "fork_basis": {
+    "source_namespace_id": "demo",
+    "source_head_seq": 418
+  },
   "head_seq": 418,
   "retention_floor_seq": 418
 }

@@ -19,7 +19,7 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
     assert_eq!(created_data["kind"], "snapshot_created");
     assert_eq!(created_data["namespace_id"], "demo");
     assert_eq!(created_data["name"], "report");
-    assert_eq!(created_data["head_seq"], 1);
+    assert_eq!(created_data["captured_seq"], 1);
     let snapshot_id = created_data["snapshot_id"]
         .as_str()
         .expect("snapshot id")

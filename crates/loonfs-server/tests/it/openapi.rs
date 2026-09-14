@@ -984,6 +984,7 @@ fn openapi_publishes_namespace_diagnostics_in_the_maintenance_api_group() {
     assert_eq!(
         required_fields(diagnostics),
         BTreeSet::from([
+            "created_at_ms",
             "head_seq",
             "live_checkpoints",
             "live_snapshots",

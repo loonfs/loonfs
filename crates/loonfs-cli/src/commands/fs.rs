@@ -210,7 +210,7 @@ pub(crate) async fn run_filesystem_stat(
         Some(inode_id) => {
             context
                 .target
-                .get_inode(context.namespace(), inode_id)
+                .get_inode(context.namespace(), inode_id, snapshot_id.as_ref())
                 .await
         }
         None => {

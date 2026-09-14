@@ -2,7 +2,7 @@
 
 use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
-use super::handlers_filesystem::PageQuery;
+use super::handlers_filesystem::{parse_optional_snapshot_id, pin_requested_snapshot, PageQuery};
 use super::query_params::{
     decode_optional_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
     resolve_page_limit,
@@ -40,6 +40,7 @@ pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
 #[serde(deny_unknown_fields)]
 pub(super) struct StatInodeQuery {
     include_attributes: Option<String>,
+    snapshot_id: Option<String>,
 }
 
 #[cfg_attr(
@@ -51,18 +52,19 @@ pub(super) struct StatInodeQuery {
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         tag = "inodes",
         summary = "Stat inode",
-        description = "Returns the current path entry for a visible inode. Unknown or hidden inodes answer `inode_not_found`.",
+        description = "Returns the path entry for a visible inode from the current state or a live snapshot. Unknown or hidden inodes answer `inode_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "Inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB.")
+            ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
+            ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the path state captured by this snapshot")
         ),
         responses(
             (status = 200, description = "Authoritative current inode entry", body = loonfs_api::PathEntry),
-            (status = 400, description = "Invalid inode ID or include_attributes", body = ApiError),
+            (status = 400, description = "Invalid inode ID, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or visible inode not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -78,9 +80,10 @@ pub(super) async fn get_inode(
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
-    let entry = state
-        .reader
-        .get_inode(&namespace_id, inode_id, options)
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let entry = target
+        .get_inode(inode_id, options)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(entry))
@@ -92,6 +95,7 @@ pub(super) struct ListInodeChildrenQuery {
     limit: Option<String>,
     cursor: Option<String>,
     include_attributes: Option<String>,
+    snapshot_id: Option<String>,
 }
 
 #[cfg_attr(
@@ -110,21 +114,22 @@ pub(super) struct ListInodeChildrenQuery {
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         tag = "inodes",
         summary = "List directory children by inode",
-        description = "Lists one page of a directory's children addressed by parent inode ID, in canonical name-key order. Inode addressing keeps a listing and its resumption on the same directory across concurrent renames or moves of the parent.",
+        description = "Lists one page of a directory's children from the current state or a live snapshot, addressed by parent inode ID, in canonical name-key order. Inode addressing keeps a listing and its resumption on the same directory across concurrent renames or moves of the parent.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "Directory inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory page cursor"),
-            ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked.")
+            ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
+            ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the directory state captured by this snapshot")
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_api::ListInodeChildrenResponse),
-            (status = 400, description = "Invalid inode ID, limit, cursor, or include_attributes", body = ApiError),
+            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or visible inode not found", body = ApiError),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
             (status = 409, description = "Inode is not a directory", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -140,10 +145,10 @@ pub(super) async fn list_inode_children(
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
-    let listing = state
-        .reader
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let listing = target
         .list_inode_children_page(
-            &namespace_id,
             inode_id,
             PageRequest::<DirectoryPageCursor> {
                 limit: resolve_page_limit(query.limit)?,

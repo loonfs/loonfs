@@ -139,13 +139,13 @@
       "Checkpoint": {
         "description": "One checkpoint resource described by its durable record.",
         "properties": {
+          "captured_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence captured by the checkpoint."
+          },
           "checkpoint_id": {
             "$ref": "#/components/schemas/CheckpointId",
             "description": "Durable checkpoint id used to address the checkpoint for deletion."
-          },
-          "checkpoint_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence covered by the checkpoint's pinned basis."
           },
           "created_at_ms": {
             "description": "Time the checkpoint record was created, in Unix milliseconds.",
@@ -177,7 +177,7 @@
           "checkpoint_id",
           "owner",
           "created_at_ms",
-          "checkpoint_seq",
+          "captured_seq",
           "manifest_no"
         ],
         "type": "object"
@@ -520,10 +520,7 @@
           },
           "message": {
             "description": "The caller annotation that forms part of the commit identity.",
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "operations": {
             "description": "The non-empty ordered operations to commit atomically.",
@@ -738,10 +735,7 @@
             "description": "The checkpoint lifetime in milliseconds, or `None` for an explicit deletion only.",
             "format": "int64",
             "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
+            "type": "integer"
           }
         },
         "required": [
@@ -2398,6 +2392,14 @@
         "pattern": "^ino_[1-9][0-9]*$",
         "type": "string"
       },
+      "InodeKind": {
+        "description": "Filesystem item kind.",
+        "enum": [
+          "file",
+          "dir"
+        ],
+        "type": "string"
+      },
       "ListChangesResponse": {
         "description": "Change-feed response after a cursor.",
         "properties": {
@@ -2797,6 +2799,16 @@
       "Namespace": {
         "description": "Current state for one namespace.",
         "properties": {
+          "created_at_ms": {
+            "description": "Time the namespace was created, in Unix milliseconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fork_basis": {
+            "$ref": "#/components/schemas/NamespaceForkBasis",
+            "description": "Present only for a fork: the source it was forked from."
+          },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Current visible namespace sequence."
@@ -2812,6 +2824,7 @@
         },
         "required": [
           "namespace_id",
+          "created_at_ms",
           "head_seq",
           "retention_floor_seq"
         ],
@@ -2820,9 +2833,19 @@
       "NamespaceDiagnostics": {
         "description": "Namespace state and storage details used by maintenance.",
         "properties": {
+          "created_at_ms": {
+            "description": "Time the namespace was created, in Unix milliseconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "current_manifest_no": {
             "$ref": "#/components/schemas/ManifestNo",
             "description": "The namespace's current manifest number."
+          },
+          "fork_basis": {
+            "$ref": "#/components/schemas/NamespaceForkBasis",
+            "description": "Present only for a fork: the source it was forked from."
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -2857,11 +2880,30 @@
         },
         "required": [
           "namespace_id",
+          "created_at_ms",
           "head_seq",
           "retention_floor_seq",
           "wal_tail_segments",
           "live_snapshots",
           "live_checkpoints"
+        ],
+        "type": "object"
+      },
+      "NamespaceForkBasis": {
+        "description": "The source a forked namespace started from.",
+        "properties": {
+          "source_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Source sequence the fork captured."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the fork was taken from."
+          }
+        },
+        "required": [
+          "source_namespace_id",
+          "source_head_seq"
         ],
         "type": "object"
       },
@@ -2993,6 +3035,7 @@
             "description": "Stable inode identity for this item."
           },
           "inode_kind": {
+            "description": "Whether the entry is a file or a directory.",
             "enum": [
               "dir"
             ],
@@ -3074,6 +3117,7 @@
             "description": "Stable inode identity for this item."
           },
           "inode_kind": {
+            "description": "Whether the entry is a file or a directory.",
             "enum": [
               "file"
             ],
@@ -3229,7 +3273,7 @@
         "type": "object"
       },
       "RetainedCandidates": {
-        "description": "The candidates inspected but not deleted by one garbage-collection pass.\n\nEvery field is present and contributes to [`GcResponse::retained_candidates`].",
+        "description": "The candidates inspected but not deleted by one garbage-collection pass.",
         "properties": {
           "checkpoint_not_deletable": {
             "description": "Checkpoint records whose owner or grace window prevents deletion.",
@@ -3325,10 +3369,7 @@
             "description": "The minimum object age for deletion in milliseconds, which must meet the\nserver's advertised safety floor.",
             "format": "int64",
             "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
+            "type": "integer"
           },
           "kind": {
             "enum": [
@@ -3355,10 +3396,7 @@
             "description": "The WAL-tail threshold for flushing, or `None` for the server default.",
             "format": "int64",
             "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
+            "type": "integer"
           }
         },
         "required": [
@@ -3457,20 +3495,13 @@
           },
           "retained": {
             "$ref": "#/components/schemas/RetainedCandidates",
-            "description": "`retained_candidates` grouped by reason."
-          },
-          "retained_candidates": {
-            "description": "The number of candidates retained at deletion time.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "Candidates retained at deletion time, grouped by reason."
           }
         },
         "required": [
           "namespace_id",
           "deleted",
           "deleted_checkpoints_by_owner",
-          "retained_candidates",
           "retained",
           "kind"
         ],
@@ -3629,6 +3660,10 @@
       "Snapshot": {
         "description": "A live snapshot.",
         "properties": {
+          "captured_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence captured by the snapshot."
+          },
           "created_at_ms": {
             "description": "Time the snapshot record was created, in Unix milliseconds.",
             "format": "int64",
@@ -3640,10 +3675,6 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
-          },
-          "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace sequence captured by the snapshot."
           },
           "name": {
             "description": "Snapshot label.",
@@ -3662,7 +3693,7 @@
           "snapshot_id",
           "namespace_id",
           "name",
-          "head_seq",
+          "captured_seq",
           "created_at_ms",
           "expires_at_ms"
         ],
@@ -3755,10 +3786,15 @@
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
             "description": "Inode hidden by the deletion."
+          },
+          "inode_kind": {
+            "$ref": "#/components/schemas/InodeKind",
+            "description": "Whether the deleted root is a file or a directory."
           }
         },
         "required": [
           "inode_id",
+          "inode_kind",
           "deletion_seq",
           "deleted_at_ms",
           "deleted_by",
@@ -3863,6 +3899,7 @@
             "description": "Namespace that owns the session."
           },
           "status": {
+            "description": "Whether the upload session is open, completed, or aborted.",
             "enum": [
               "aborted"
             ],
@@ -3908,6 +3945,7 @@
             "description": "Namespace that owns the session."
           },
           "status": {
+            "description": "Whether the upload session is open, completed, or aborted.",
             "enum": [
               "completed"
             ],
@@ -3964,6 +4002,7 @@
             "type": "integer"
           },
           "status": {
+            "description": "Whether the upload session is open, completed, or aborted.",
             "enum": [
               "open"
             ],
@@ -6643,7 +6682,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}": {
       "get": {
-        "description": "Returns the current path entry for a visible inode. Unknown or hidden inodes answer `inode_not_found`.",
+        "description": "Returns the path entry for a visible inode from the current state or a live snapshot. Unknown or hidden inodes answer `inode_not_found`.",
         "operationId": "get_inode",
         "parameters": [
           {
@@ -6675,6 +6714,15 @@
               "default": true,
               "type": "boolean"
             }
+          },
+          {
+            "description": "Use the path state captured by this snapshot",
+            "in": "query",
+            "name": "snapshot_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SnapshotId"
+            }
           }
         ],
         "responses": {
@@ -6696,7 +6744,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID or include_attributes"
+            "description": "Invalid inode ID, include_attributes, snapshot id, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -6716,7 +6764,7 @@
                 }
               }
             },
-            "description": "Namespace or visible inode not found"
+            "description": "Namespace, visible inode, or snapshot not found"
           },
           "410": {
             "content": {
@@ -6726,7 +6774,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6746,7 +6794,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children": {
       "get": {
-        "description": "Lists one page of a directory's children addressed by parent inode ID, in canonical name-key order. Inode addressing keeps a listing and its resumption on the same directory across concurrent renames or moves of the parent.",
+        "description": "Lists one page of a directory's children from the current state or a live snapshot, addressed by parent inode ID, in canonical name-key order. Inode addressing keeps a listing and its resumption on the same directory across concurrent renames or moves of the parent.",
         "operationId": "list_inode_children",
         "parameters": [
           {
@@ -6800,6 +6848,15 @@
               "default": false,
               "type": "boolean"
             }
+          },
+          {
+            "description": "Use the directory state captured by this snapshot",
+            "in": "query",
+            "name": "snapshot_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SnapshotId"
+            }
           }
         ],
         "responses": {
@@ -6821,7 +6878,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, limit, cursor, or include_attributes"
+            "description": "Invalid inode ID, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -6841,7 +6898,7 @@
                 }
               }
             },
-            "description": "Namespace or visible inode not found"
+            "description": "Namespace, visible inode, or snapshot not found"
           },
           "409": {
             "content": {
@@ -6861,7 +6918,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

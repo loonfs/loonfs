@@ -117,14 +117,14 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
     }
     .expect("a GC request should return a GC response");
     assert!(
-        gc.retained_candidates > 0,
+        gc.retained.total() > 0,
         "the live namespace gives the pass candidates to retain"
     );
 
     let snapshot = recorder.snapshot();
     assert_eq!(
         counter(&snapshot, "loonfs.gc.retained", &[]),
-        gc.retained_candidates,
+        gc.retained.total(),
         "the maintenance pass records its retained count exactly once"
     );
     for (category, reclaimed) in [

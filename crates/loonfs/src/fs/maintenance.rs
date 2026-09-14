@@ -176,6 +176,8 @@ impl FsMaintenance {
     ) -> NamespaceDiagnostics {
         NamespaceDiagnostics {
             namespace_id: diagnostics.namespace_id,
+            created_at_ms: diagnostics.created_at_ms,
+            fork_basis: diagnostics.fork_basis,
             head_seq: diagnostics.head_seq,
             retention_floor_seq: diagnostics.retention_floor_seq,
             current_manifest_no: diagnostics.current_manifest_no,

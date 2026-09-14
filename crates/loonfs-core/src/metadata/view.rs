@@ -788,14 +788,27 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         };
         let upper_bound = string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX);
 
-        let mut tail: Vec<(String, ActiveDeletionRecord)> = self
+        let mut tail: Vec<(String, ActiveDeletionRecord)> = Vec::new();
+        for tombstone in self
             .row_states()
             .flat_map(|state| state.subtree_tombstones())
             .filter(|tombstone| tombstone.generation.seq <= visible_seq)
-            .map(active_deletion_from_tombstone)
-            .map(|record| (record.row_key(), record))
-            .filter(|(row_key, _)| row_key.as_str() >= lower_bound.as_str())
-            .collect();
+        {
+            let inode = self
+                .inode_at_seq(tombstone.root_inode_id)
+                .await?
+                .ok_or_else(|| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "deletion root inode `{}` is missing",
+                        tombstone.root_inode_id
+                    ))
+                })?;
+            let record = active_deletion_from_tombstone(tombstone, inode.inode_kind);
+            let row_key = record.row_key();
+            if row_key >= lower_bound {
+                tail.push((row_key, record));
+            }
+        }
         tail.sort_by(|(left, _), (right, _)| left.cmp(right));
 
         let mut durable = ActiveDeletionScan::new(lower_bound, self.manifest_segments().is_none());

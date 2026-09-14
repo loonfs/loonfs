@@ -53,7 +53,12 @@ pub(super) fn manifest_rows_for_family(
         MetadataRowFamily::ActiveDeletions => metadata_state
             .subtree_tombstones()
             .iter()
-            .map(active_deletion_from_tombstone)
+            .map(|tombstone| {
+                let inode = metadata_state
+                    .inode_at_seq(tombstone.root_inode_id, tombstone.generation.seq)
+                    .expect("checkpoint projection should include deletion root inodes");
+                active_deletion_from_tombstone(tombstone, inode.inode_kind)
+            })
             .map(MetadataRow::ActiveDeletion)
             .collect::<Vec<_>>(),
         MetadataRowFamily::ContentPublications => metadata_state

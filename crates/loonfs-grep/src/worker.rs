@@ -242,7 +242,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next = match backfilling_manifest(
             namespace_id,
             manifest_no,
-            checkpoint.checkpoint_seq,
+            checkpoint.captured_seq,
             checkpoint.checkpoint_id.clone(),
             next_run_no,
         ) {
@@ -466,7 +466,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let next = match backfilling_manifest(
             namespace_id,
             manifest_no,
-            checkpoint.checkpoint_seq,
+            checkpoint.captured_seq,
             checkpoint.checkpoint_id.clone(),
             current.manifest_state().index().next_run_no,
         ) {
@@ -494,7 +494,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         .await?;
                 }
                 Ok(GrepBuildOutcome::BackfillRestarted {
-                    target_seq: checkpoint.checkpoint_seq,
+                    target_seq: checkpoint.captured_seq,
                 })
             }
             Err(GrepError::PublicationConflict { .. }) => {
