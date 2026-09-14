@@ -209,13 +209,14 @@ fn human_trash(listing: &TrashListing) -> String {
             "trash for {} (head seq {})",
             response.namespace_id, response.head_seq.0
         ),
-        "DELETED\tDELETED_BY\tNAME\tINODE\tSEQ\tRECOVER".to_owned(),
+        "DELETED\tDELETED_BY\tKIND\tNAME\tINODE\tSEQ\tRECOVER".to_owned(),
     ];
     for (entry, recovery_command) in response.entries.iter().zip(&listing.recovery_commands) {
         lines.push(format!(
-            "{}\t{}\t{}\t{}\t{}\t{recovery_command}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{recovery_command}",
             format_utc_ms(entry.deleted_at_ms),
             render_actor(&entry.deleted_by),
+            entry.inode_kind,
             entry.deleted_binding.display_name,
             public_inode_id(entry.inode_id),
             entry.deletion_seq.0,

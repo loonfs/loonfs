@@ -16,7 +16,7 @@ use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
 use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
-use crate::metadata::MetadataState;
+use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::{load_read_anchor, resolve_retention_floor_seq};
@@ -261,6 +261,35 @@ pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) tail_state: Arc<MetadataState>,
 }
 
+impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
+    pub(super) async fn tail_with_deletion_inodes(
+        &self,
+    ) -> Result<std::borrow::Cow<'_, MetadataState>> {
+        let mut tail = std::borrow::Cow::Borrowed(self.tail_state.as_ref());
+        let view =
+            MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state);
+        for tombstone in self.tail_state.subtree_tombstones() {
+            if tail
+                .inode_at_seq(tombstone.root_inode_id, self.head.seq)
+                .is_some()
+            {
+                continue;
+            }
+            let inode = view
+                .inode_at_seq(tombstone.root_inode_id)
+                .await?
+                .ok_or_else(|| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "deletion root inode `{}` is missing",
+                        tombstone.root_inode_id
+                    ))
+                })?;
+            tail.to_mut().push_inode_record(inode);
+        }
+        Ok(tail)
+    }
+}
+
 pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
@@ -366,6 +395,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     manifest_no: ManifestNo,
 ) -> Result<NamespaceManifestPayload> {
     let head_seq = projection.head.seq;
+    let tail_state = projection.tail_with_deletion_inodes().await?;
     // A WAL flush keeps existing runs and writes the WAL delta as one new delta
     // run. Reorganization merges delta runs into the base separately.
     //
@@ -387,7 +417,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                     build_manifest_segments(
                         store,
                         namespace_id,
-                        &projection.tail_state,
+                        &tail_state,
                         MetadataLsmPolicy::default(),
                     )
                     .await?,
@@ -412,7 +442,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                         store,
                         namespace_id,
                         previous_manifest.payload().head_seq,
-                        &projection.tail_state,
+                        &tail_state,
                         MetadataLsmPolicy::default(),
                     )
                     .await?,

@@ -1154,7 +1154,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     )
     assert snapshot.namespace_id == namespace_id
     assert snapshot.name == request.snapshot_name
-    assert snapshot.head_seq == expected.snapshot_head_seq
+    assert snapshot.captured_seq == expected.snapshot_head_seq
     assert snapshot.expires_at_ms > snapshot.created_at_ms
 
     client.files.upload(
@@ -1243,7 +1243,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         ttl_ms=request.extend_ttl_ms,
     )
     assert extended.snapshot_id == snapshot.snapshot_id
-    assert extended.head_seq == expected.snapshot_head_seq
+    assert extended.captured_seq == expected.snapshot_head_seq
     assert extended.name == request.snapshot_name
     assert extended.expires_at_ms > snapshot.expires_at_ms
 

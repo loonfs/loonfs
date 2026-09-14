@@ -21,8 +21,9 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
-    payload_class, ErrorCode, FsReadSnapshot, FsReader, ListChangesOptions, ListPathEntriesOptions,
-    NamespaceId, SnapshotId, StatPathOptions, TraceMode, TraceStoreKind,
+    payload_class, ErrorCode, FsReadSnapshot, FsReader, InodeId, ListChangesOptions,
+    ListInodeChildrenOptions, ListPathEntriesOptions, NamespaceId, SnapshotId, StatPathOptions,
+    TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -131,6 +132,43 @@ impl ReadTarget {
                 reader,
                 namespace_id,
             } => reader.get_path_entry(namespace_id, path, options).await,
+        }
+    }
+
+    pub(super) async fn list_inode_children_page(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<loonfs::DirectoryPageCursor>,
+        options: ListInodeChildrenOptions,
+    ) -> loonfs::Result<loonfs::ListInodeChildrenResponse> {
+        match self {
+            Self::Snapshot(snapshot) => {
+                snapshot
+                    .list_inode_children_page(inode_id, request, options)
+                    .await
+            }
+            Self::Live {
+                reader,
+                namespace_id,
+            } => {
+                reader
+                    .list_inode_children_page(namespace_id, inode_id, request, options)
+                    .await
+            }
+        }
+    }
+
+    pub(super) async fn get_inode(
+        &self,
+        inode_id: InodeId,
+        options: StatPathOptions,
+    ) -> loonfs::Result<loonfs::PathEntry> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.get_inode(inode_id, options).await,
+            Self::Live {
+                reader,
+                namespace_id,
+            } => reader.get_inode(namespace_id, inode_id, options).await,
         }
     }
 

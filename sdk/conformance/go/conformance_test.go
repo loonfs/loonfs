@@ -1545,8 +1545,8 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if snapshot.Name != request.SnapshotName {
 		t.Errorf("snapshot name = %q, want %q", snapshot.Name, request.SnapshotName)
 	}
-	if int64(snapshot.HeadSeq) != expected.SnapshotHeadSeq {
-		t.Errorf("snapshot head_seq = %d, want %d", snapshot.HeadSeq, expected.SnapshotHeadSeq)
+	if int64(snapshot.CapturedSeq) != expected.SnapshotHeadSeq {
+		t.Errorf("snapshot captured_seq = %d, want %d", snapshot.CapturedSeq, expected.SnapshotHeadSeq)
 	}
 	if snapshot.ExpiresAtMs <= snapshot.CreatedAtMs {
 		t.Errorf("snapshot expires_at_ms = %d, want greater than created_at_ms %d", snapshot.ExpiresAtMs, snapshot.CreatedAtMs)
@@ -1676,7 +1676,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("extend snapshot: %v", err)
 	}
-	if extended.SnapshotID != snapshotID || int64(extended.HeadSeq) != expected.SnapshotHeadSeq || extended.Name != request.SnapshotName {
+	if extended.SnapshotID != snapshotID || int64(extended.CapturedSeq) != expected.SnapshotHeadSeq || extended.Name != request.SnapshotName {
 		t.Errorf("extended snapshot = %#v, want the created snapshot", extended)
 	}
 	if extended.ExpiresAtMs <= snapshot.ExpiresAtMs {

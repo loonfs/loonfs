@@ -374,7 +374,7 @@ fn the_typed_wrappers_are_single_action_steps() {
     let advanced = fs
         .advance_retention_floor_blocking(&namespace_id)
         .expect("advance retention");
-    assert_eq!(advanced.retention_floor_seq, checkpoint.checkpoint_seq);
+    assert_eq!(advanced.retention_floor_seq, checkpoint.captured_seq);
     let retention = fs
         .maintenance_run_namespace_blocking(
             &namespace_id,

@@ -665,6 +665,8 @@ mod tests {
         drop(transport);
 
         let response = NamespaceDiagnostics {
+            created_at_ms: 1_000,
+            fork_basis: None,
             namespace_id: namespace_id.clone(),
             head_seq: ChangeSeq(3),
             retention_floor_seq: ChangeSeq(1),
@@ -722,6 +724,8 @@ mod tests {
     async fn retry_policy_read_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let response = Namespace {
+            created_at_ms: 1_000,
+            fork_basis: None,
             namespace_id: namespace_id.clone(),
             head_seq: ChangeSeq(0),
             retention_floor_seq: ChangeSeq(0),

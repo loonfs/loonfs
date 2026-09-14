@@ -268,6 +268,8 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     assert_eq!(created.namespace_id.as_str(), "demo");
     assert_eq!(created.head_seq, ChangeSeq(0));
     assert_eq!(created.retention_floor_seq, ChangeSeq(0));
+    assert!(created.created_at_ms > 0);
+    assert!(created.fork_basis.is_none());
     let directory = NamespacePath::parse("demo", "/notes").expect("parse directory path");
     harness
         .client
@@ -381,6 +383,14 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(forked.namespace_id.as_str(), "clone");
     assert_eq!(forked.head_seq, ChangeSeq(1));
     assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
+    assert!(forked.created_at_ms > 0);
+    assert_eq!(
+        forked.fork_basis,
+        Some(loonfs_api::NamespaceForkBasis {
+            source_namespace_id: namespace_id("demo"),
+            source_head_seq: ChangeSeq(1),
+        })
+    );
 
     let source_entry = harness
         .client
@@ -506,6 +516,14 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
         )
         .await
         .expect("fork snapshot");
-    assert_eq!(fork.head_seq, snapshot.head_seq);
+    assert_eq!(fork.head_seq, snapshot.captured_seq);
+    assert!(fork.created_at_ms > 0);
+    assert_eq!(
+        fork.fork_basis,
+        Some(loonfs_api::NamespaceForkBasis {
+            source_namespace_id: source,
+            source_head_seq: snapshot.captured_seq,
+        })
+    );
     harness.server.abort();
 }

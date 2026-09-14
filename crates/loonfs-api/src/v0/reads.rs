@@ -217,6 +217,8 @@ pub struct TrashEntry {
     /// Inode hidden by the deletion.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
+    /// Whether the deleted root is a file or a directory.
+    pub inode_kind: InodeKind,
     /// Commit sequence that identifies this deletion.
     pub deletion_seq: ChangeSeq,
     /// Time of the deletion, in Unix milliseconds.
@@ -478,6 +480,7 @@ mod tests {
     fn a_trash_entry_nests_the_binding_the_deletion_removed() {
         let trash = TrashEntry {
             inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1,
             deleted_by: ActorId::loonfs(),
@@ -491,6 +494,7 @@ mod tests {
             serde_json::to_value(&trash).expect("serialize trash entry"),
             serde_json::json!({
                 "inode_id": "ino_42",
+                "inode_kind": "file",
                 "deletion_seq": 417,
                 "deleted_at_ms": 1,
                 "deleted_by": "loonfs",
@@ -507,6 +511,7 @@ mod tests {
     fn trash_handle_copies_directly_into_an_undelete_operation() {
         let trash = TrashEntry {
             inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1_752_625_000_000,
             deleted_by: ActorId::loonfs(),

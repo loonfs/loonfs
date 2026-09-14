@@ -1701,7 +1701,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     });
     assert.equal(snapshot.namespace_id, namespaceId);
     assert.equal(snapshot.name, request.snapshot_name);
-    assert.equal(snapshot.head_seq, expected.snapshot_head_seq);
+    assert.equal(snapshot.captured_seq, expected.snapshot_head_seq);
     assert.ok(snapshot.expires_at_ms > snapshot.created_at_ms);
 
     await client.files.upload({
@@ -1790,7 +1790,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         ttl_ms: request.extend_ttl_ms,
     });
     assert.equal(extended.snapshot_id, snapshot.snapshot_id);
-    assert.equal(extended.head_seq, expected.snapshot_head_seq);
+    assert.equal(extended.captured_seq, expected.snapshot_head_seq);
     assert.equal(extended.name, request.snapshot_name);
     assert.ok(extended.expires_at_ms > snapshot.expires_at_ms);
 

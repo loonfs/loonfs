@@ -144,6 +144,53 @@ impl FsReadSnapshot {
         })
     }
 
+    /// Reads a visible inode against this snapshot.
+    pub async fn get_inode(
+        &self,
+        inode_id: InodeId,
+        options: StatPathOptions,
+    ) -> Result<PathEntry> {
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReadSnapshot because it is already pinned",
+        )?;
+        Ok(self
+            .engine
+            .stat_inode(inode_id, options, &self.context)
+            .await?)
+    }
+
+    /// Lists one directory inode page against this snapshot.
+    pub async fn list_inode_children_page(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<DirectoryPageCursor>,
+        options: ListInodeChildrenOptions,
+    ) -> Result<ListInodeChildrenResponse> {
+        reject_snapshot_option(&options.snapshot_id, "here; this view is already pinned")?;
+        validate_pinned_directory_cursor(
+            request.cursor.as_ref(),
+            self.head_seq(),
+            self.snapshot_id.as_ref(),
+        )?;
+        let mut page = self
+            .engine
+            .list_inode_children_page(inode_id, request, options, &self.context)
+            .await?;
+        if let (Some(cursor), Some(snapshot_id)) =
+            (page.next_cursor.as_mut(), self.snapshot_id.as_ref())
+        {
+            cursor.snapshot_id = Some(snapshot_id.clone());
+        }
+        Ok(ListInodeChildrenResponse {
+            namespace_id: self.namespace_id().clone(),
+            parent_inode_id: inode_id,
+            head_seq: self.head_seq(),
+            entries: page.items,
+            next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+        })
+    }
+
     /// Resolves current visibility, revision, and path against this snapshot.
     pub async fn resolve_current_files(
         &self,
@@ -409,6 +456,10 @@ impl FsReader {
         inode_id: InodeId,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReader; call pin_namespace_at_snapshot first",
+        )?;
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
@@ -567,6 +618,10 @@ impl FsReader {
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReader; call pin_namespace_at_snapshot first",
+        )?;
         reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;

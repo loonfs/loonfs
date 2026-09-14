@@ -282,6 +282,58 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         entry_paths(&pinned_listing),
         BTreeSet::from(["/deleted.txt".to_owned(), "/keep.txt".to_owned()])
     );
+    let inode_entry = harness
+        .client
+        .get_inode(
+            &namespace,
+            captured_entry.inode_id,
+            &loonfs_client::StatPathOptions {
+                snapshot_id: Some(snapshot.snapshot_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("snapshot inode stat");
+    assert_eq!(inode_entry, pinned_entry);
+    let options = loonfs_client::ListInodeChildrenOptions {
+        snapshot_id: Some(snapshot.snapshot_id.clone()),
+        ..Default::default()
+    };
+    let first = harness
+        .client
+        .list_inode_children_page(&namespace, loonfs_api::InodeId(1), Some(1), None, &options)
+        .await
+        .expect("snapshot children first page");
+    assert_eq!(first.head_seq, snapshot.captured_seq);
+    assert_eq!(first.entries[0], pinned_listing.entries[0]);
+    let cursor = first.next_cursor.as_deref().expect("children cursor");
+    let error = harness
+        .client
+        .list_inode_children_page(
+            &namespace,
+            loonfs_api::InodeId(1),
+            Some(1),
+            Some(cursor),
+            &Default::default(),
+        )
+        .await
+        .expect_err("snapshot children cursor cannot resume live");
+    assert_eq!(error.code(), Some(loonfs_api::ErrorCode::InvalidRequest));
+    let second = harness
+        .client
+        .list_inode_children_page(
+            &namespace,
+            loonfs_api::InodeId(1),
+            Some(1),
+            Some(cursor),
+            &options,
+        )
+        .await
+        .expect("snapshot children second page");
+    assert_eq!(second.head_seq, snapshot.captured_seq);
+    assert_eq!(second.entries[0], pinned_listing.entries[1]);
+    assert!(second.next_cursor.is_none());
+
     assert_eq!(
         get_bytes(&content_url(
             &harness.server_url,
@@ -345,11 +397,11 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
             Some(snapshot.snapshot_id.as_str()),
         ))
         .expect("snapshot change page");
-        assert_eq!(page.through_seq, snapshot.head_seq);
+        assert_eq!(page.through_seq, snapshot.captured_seq);
         seen.extend(page.changes.iter().map(|change| change.committed_seq));
         match page.next_after_seq {
             Some(next) => {
-                assert!(next < snapshot.head_seq);
+                assert!(next < snapshot.captured_seq);
                 after_seq = next;
             }
             None => break,
@@ -357,22 +409,24 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     }
     assert_eq!(
         seen,
-        (1..=snapshot.head_seq.0).map(ChangeSeq).collect::<Vec<_>>()
+        (1..=snapshot.captured_seq.0)
+            .map(ChangeSeq)
+            .collect::<Vec<_>>()
     );
 
     let empty: ListChangesResponse = get_json(&changes_url(
         &harness.server_url,
         namespace.as_str(),
-        snapshot.head_seq,
+        snapshot.captured_seq,
         "2",
         Some(snapshot.snapshot_id.as_str()),
     ))
     .expect("empty terminal page");
     assert!(empty.changes.is_empty());
-    assert_eq!(empty.through_seq, snapshot.head_seq);
+    assert_eq!(empty.through_seq, snapshot.captured_seq);
     assert_eq!(empty.next_after_seq, None);
 
-    let above = ChangeSeq(snapshot.head_seq.0 + 1);
+    let above = ChangeSeq(snapshot.captured_seq.0 + 1);
     let (status, error) = get_json::<ListChangesResponse>(&changes_url(
         &harness.server_url,
         namespace.as_str(),
@@ -384,7 +438,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     assert_eq!(status, 400);
     assert_eq!(error.code, "invalid_request");
     assert!(error.message.contains(&above.to_string()));
-    assert!(error.message.contains(&snapshot.head_seq.to_string()));
+    assert!(error.message.contains(&snapshot.captured_seq.to_string()));
 
     harness.server.abort();
 }

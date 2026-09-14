@@ -500,8 +500,8 @@ impl RuntimeInstruments {
                 count.increment(reclaimed);
             }
         }
-        if gc.retained_candidates > 0 {
-            installed.gc.retained.increment(gc.retained_candidates);
+        if gc.retained.total() > 0 {
+            installed.gc.retained.increment(gc.retained.total());
         }
     }
 
@@ -1623,7 +1623,6 @@ mod tests {
                 expired: 3,
                 snapshot: 7,
             },
-            retained_candidates: 2,
             retained: loonfs_api::RetainedCandidates {
                 referenced: 2,
                 ..loonfs_api::RetainedCandidates::default()

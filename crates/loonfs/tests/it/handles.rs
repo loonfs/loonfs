@@ -990,6 +990,6 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .advance_retention_floor(&namespace_id)
             .await
             .expect("advance retention");
-        assert_eq!(retention.retention_floor_seq, checkpoint.checkpoint_seq);
+        assert_eq!(retention.retention_floor_seq, checkpoint.captured_seq);
     });
 }

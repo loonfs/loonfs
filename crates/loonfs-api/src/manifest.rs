@@ -470,6 +470,8 @@ pub enum ActiveDeletionRowAction {
     /// The deletion is recoverable; these are the fields the trash entry
     /// renders, denormalized so a page needs no per-entry join.
     Listed {
+        /// Whether the deleted root is a file or a directory.
+        inode_kind: InodeKind,
         /// Wall-clock stamp of the deleting commit. Observational, like every
         /// `committed_at_ms`.
         deleted_at_ms: u64,
@@ -1649,6 +1651,7 @@ mod tests {
                         root_inode_id: InodeId(42),
                         deletion_seq: ChangeSeq(12),
                         action: super::ActiveDeletionRowAction::Listed {
+                            inode_kind: crate::InodeKind::File,
                             deleted_at_ms: 12_000,
                             deleted_by: actor.clone(),
                             deleted_direntry: deleted_direntry(),

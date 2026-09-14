@@ -1318,7 +1318,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     .await;
     assert_eq!(snapshot.namespace_id, namespace);
     assert_eq!(snapshot.name, request.snapshot_name);
-    assert_eq!(snapshot.head_seq.0, expected.snapshot_head_seq);
+    assert_eq!(snapshot.captured_seq.0, expected.snapshot_head_seq);
     assert!(snapshot.expires_at_ms > snapshot.created_at_ms);
 
     let mut replace_options = put_options(&request.actor_id, "conf-snapshots-replace-file");
@@ -1499,7 +1499,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     )
     .await;
     assert_eq!(extended.snapshot_id, snapshot.snapshot_id);
-    assert_eq!(extended.head_seq.0, expected.snapshot_head_seq);
+    assert_eq!(extended.captured_seq.0, expected.snapshot_head_seq);
     assert_eq!(extended.name, request.snapshot_name);
     assert!(extended.expires_at_ms > snapshot.expires_at_ms);
 

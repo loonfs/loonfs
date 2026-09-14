@@ -100,6 +100,7 @@ async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> crate::error::Result<(NamespaceReadState, MetadataState)> {
     let projection = super::flush::load_manifest_projection(store, namespace_id).await?;
+    let tail_state = projection.tail_with_deletion_inodes().await?;
     let mut metadata_state = MetadataStateBuilder::default();
     for family in CHECKPOINT_ROW_FAMILIES {
         let mut rows = projection
@@ -109,13 +110,19 @@ async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
-        rows.extend(manifest_rows_for_family(&projection.tail_state, family));
+        let state = if family == ApiMetadataRowFamily::ActiveDeletions {
+            tail_state.as_ref()
+        } else {
+            projection.tail_state.as_ref()
+        };
+        rows.extend(manifest_rows_for_family(state, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));
         append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
     }
+    drop(tail_state);
     Ok((projection.head, metadata_state.finish()))
 }
 
@@ -685,7 +692,7 @@ async fn write_file_and_checkpoint(
     create_checkpoint(store, namespace_id, context)
         .await
         .expect("create checkpoint")
-        .checkpoint_seq
+        .captured_seq
 }
 
 #[derive(Debug)]

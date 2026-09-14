@@ -1105,6 +1105,7 @@ fn external_remote_profile_executes_through_http() {
         serde_json::json!({
             "kind": "namespace_status",
             "namespace_id": "demo",
+            "created_at_ms": json_data(&create)["created_at_ms"],
             "head_seq": 0,
             "retention_floor_seq": 0
         })
@@ -1116,6 +1117,8 @@ fn external_remote_profile_executes_through_http() {
         serde_json::json!({
             "kind": "namespace_status",
             "namespace_id": "clone",
+            "created_at_ms": json_data(&fork)["created_at_ms"],
+            "fork_basis": {"source_namespace_id": "demo", "source_head_seq": 0},
             "head_seq": 0,
             "retention_floor_seq": 0
         })

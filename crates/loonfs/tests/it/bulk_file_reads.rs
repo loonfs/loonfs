@@ -392,7 +392,7 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
             .expect("resume from a cursor");
         assert_eq!(resumed.files, whole[index + 1..]);
         assert!(resumed.next_cursor.is_none());
-        assert_eq!(resumed.checkpoint_seq, checkpoint.checkpoint_seq);
+        assert_eq!(resumed.checkpoint_seq, checkpoint.captured_seq);
     }
 }
 
@@ -423,7 +423,7 @@ async fn an_empty_namespace_answers_one_empty_page() {
         .expect("enumerate an empty namespace");
     assert!(page.files.is_empty());
     assert!(page.next_cursor.is_none());
-    assert_eq!(page.checkpoint_seq, checkpoint.checkpoint_seq);
+    assert_eq!(page.checkpoint_seq, checkpoint.captured_seq);
 }
 
 #[tokio::test]

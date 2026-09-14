@@ -274,6 +274,9 @@ impl Client {
             self.base_url
         ));
         query.push("include_attributes", options.include_attributes);
+        if let Some(snapshot_id) = &options.snapshot_id {
+            query.push("snapshot_id", snapshot_id.as_str());
+        }
         let url = query.finish();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -446,6 +449,9 @@ impl Client {
         ));
         query.pagination(limit, cursor);
         query.push("include_attributes", options.include_attributes);
+        if let Some(snapshot_id) = &options.snapshot_id {
+            query.push("snapshot_id", snapshot_id.as_str());
+        }
         let url = query.finish();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await

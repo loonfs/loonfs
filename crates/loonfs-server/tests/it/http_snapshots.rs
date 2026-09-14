@@ -135,7 +135,7 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
     let after_create = loonfs::current_time_ms().expect("current time");
     assert_eq!(created.namespace_id, namespace);
     assert_eq!(created.name, "report");
-    assert_eq!(created.head_seq, ChangeSeq(0));
+    assert_eq!(created.captured_seq, ChangeSeq(0));
     assert!(created.created_at_ms >= before_create);
     assert!(created.created_at_ms <= after_create);
     assert!(created.expires_at_ms >= before_create + 5_000);

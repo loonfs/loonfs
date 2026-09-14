@@ -23,10 +23,10 @@ pub use operations::{
     GcRequest, GcResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListSnapshotsResponse, MetadataCompactionOutcome, MetadataCompactionRequest,
     MetadataCompactionResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse, Namespace,
-    NamespaceDiagnostics, PreconditionFields, ReorganizeStepOutcome, RetainedCandidates,
-    RetainedReason, RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary,
-    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
-    WalFlushStepOutcome,
+    NamespaceDiagnostics, NamespaceForkBasis, PreconditionFields, ReorganizeStepOutcome,
+    RetainedCandidates, RetainedReason, RunMaintenanceRequest, RunMaintenanceResponse,
+    SnapshotSummary, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest,
+    StoreProbeResponse, WalFlushStepOutcome,
 };
 pub use reads::{
     AttributesProjection, FileBytes, ListInodeChildrenResponse, ListPathEntriesResponse,
