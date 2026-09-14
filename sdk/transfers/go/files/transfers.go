@@ -203,10 +203,10 @@ func createUploadRequest(
 	if capabilities == nil {
 		return nil, fmt.Errorf("transfers: capability response is nil")
 	}
-	request := &loonfs.BeginUploadRequest{}
+	request := &loonfs.CreateUploadBody{}
 	worthCutting := sizeBytes >= multipartMinimumBytes
 	if worthCutting && capabilities.Features[featureDirectMultipart] {
-		request.DirectMultipart = &loonfs.BeginUploadDirectMultipart{}
+		request.DirectMultipart = &loonfs.CreateUploadBodyDirectMultipart{}
 	} else {
 		proxyLimit, hasProxyLimit := capabilities.Limits[limitUploadMaximumBytes]
 		fitsProxy := !hasProxyLimit || sizeBytes <= proxyLimit
@@ -214,11 +214,11 @@ func createUploadRequest(
 		fitsDirectPut := !hasDirectPutLimit || sizeBytes <= directPutLimit
 		switch {
 		case (worthCutting || !fitsProxy) && capabilities.Features[featureDirectPut] && fitsDirectPut:
-			request.DirectPut = &loonfs.BeginUploadDirectPut{
+			request.DirectPut = &loonfs.CreateUploadBodyDirectPut{
 				SizeBytes: &sizeBytes,
 			}
 		case fitsProxy:
-			request.ServiceProxied = &loonfs.BeginUploadServiceProxied{}
+			request.ServiceProxied = &loonfs.CreateUploadBodyServiceProxied{}
 		default:
 			return nil, fmt.Errorf(
 				"transfers: %d-byte upload fits no advertised transport",

@@ -94,7 +94,14 @@ for (const browser of [false, true])
                     };
                 else if (path.endsWith("/uploads")) {
                     assert.equal((await request.json()).mode, fixture.mode);
-                    value = { ...session, checksum_algorithm: fixture.algorithm, part_size_bytes: 4, access };
+                    value = {
+                        ...session,
+                        status: "open",
+                        expires_at_ms: 2000000000000,
+                        checksum_algorithm: fixture.algorithm,
+                        part_size_bytes: 4,
+                        access,
+                    };
                 } else if (path.endsWith("/parts")) {
                     const { parts } = await request.json();
                     assert.equal(parts.length, 1);
@@ -118,7 +125,7 @@ for (const browser of [false, true])
                         });
                     if (fixture.fault === "payload_error") return new Response(null, { status: 503 });
                     return Response.json(
-                        { ...session, content_ref: claim },
+                        { ...session, status: "open", expires_at_ms: 2000000000000, content_ref: claim },
                         { headers: { ETag: "test-etag" } },
                     );
                 } else if (path.endsWith("/abort")) {

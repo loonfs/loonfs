@@ -8,10 +8,9 @@
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
-        BeginUploadRequest, BeginUploadResponse, Commit, CompleteUploadRequest, ContentToken,
-        CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
-        DirectoryBinding, ListChangesResponse, ObjectTransferAccess, UploadContentResponse,
-        UploadMode, UploadSession, UploadSessionStatus,
+        Commit, CompleteUploadBody, ContentToken, CreateDownloadByInodeResponse,
+        CreateDownloadRequest, CreateDownloadResponse, CreateUploadBody, DirectoryBinding,
+        ListChangesResponse, ObjectTransferAccess, UploadMode, UploadSession, UploadSessionStatus,
     },
     AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, Checkpoint, CheckpointId,
     CheckpointOwnerSummary, CommitRequest, ContentRef, CreateCheckpointRequest,
@@ -156,10 +155,8 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         loonfs_api::ListPathEntriesResponse,
         loonfs_api::ListInodeChildrenResponse,
         UploadMode,
-        BeginUploadRequest,
-        BeginUploadResponse,
-        UploadContentResponse,
-        CompleteUploadRequest,
+        CreateUploadBody,
+        CompleteUploadBody,
         UploadSession,
         UploadSessionStatus,
         loonfs_api::v0::UploadPartChecksumClaim,

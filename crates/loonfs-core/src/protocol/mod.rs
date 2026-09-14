@@ -23,19 +23,19 @@ pub(crate) use self::uploads::{
 pub use self::uploads::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
     DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
-    ResolvedUploadCompletion,
+    ResolvedUploadCompletion, UploadSessionView,
 };
 
 #[cfg(test)]
 pub(crate) async fn begin_upload<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &loonfs_api::NamespaceId,
-    request: loonfs_api::v0::BeginUploadRequest,
+    request: loonfs_api::v0::CreateUploadBody,
     context: &crate::MutationContext,
-) -> crate::error::Result<loonfs_api::v0::BeginUploadResponse> {
+) -> crate::error::Result<loonfs_api::v0::UploadSession> {
     assert!(matches!(
         request,
-        loonfs_api::v0::BeginUploadRequest::ServiceProxied {}
+        loonfs_api::v0::CreateUploadBody::ServiceProxied {}
     ));
     uploads::begin_service_proxied_upload(store, namespace_id, context).await
 }

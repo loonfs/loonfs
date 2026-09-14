@@ -97,7 +97,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let targets = crate::protocol::direct_multipart_part_targets(
         &inner,
         &namespace_id,
-        &upload.upload_id,
+        &upload.session.upload_id,
         &[loonfs_api::v0::UploadPartChecksumClaim {
             part_number: 1,
             checksum: loonfs_api::Checksum::crc64nvme(b"part"),
@@ -150,7 +150,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     assert_eq!(store.inner().open_uploads(), 1);
     assert_eq!(store.inner().aborts(), 0);
     assert!(matches!(
-        read_upload_session(&store, &namespace_id, &upload.upload_id)
+        read_upload_session(&store, &namespace_id, &upload.session.upload_id)
             .await
             .expect("open session")
             .status,
@@ -171,7 +171,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     assert_eq!(reaped.deleted.upload_sessions, 1);
     assert_eq!(store.inner().aborts(), 2);
     assert!(
-        read_upload_session(&store, &namespace_id, &upload.upload_id)
+        read_upload_session(&store, &namespace_id, &upload.session.upload_id)
             .await
             .is_none()
     );

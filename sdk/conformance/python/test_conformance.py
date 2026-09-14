@@ -23,11 +23,9 @@ import uvicorn
 from loonfs.server import (
     ActorId,
     BadRequestError,
-    BeginUploadRequest_DirectMultipart,
-    BeginUploadRequest_DirectPut,
-    BeginUploadRequest_ServiceProxied,
-    BeginUploadResponse_DirectPut,
-    BeginUploadResponse_ServiceProxied,
+    CreateUploadBody_DirectMultipart,
+    CreateUploadBody_DirectPut,
+    CreateUploadBody_ServiceProxied,
     Checksum,
     CommitPrecondition,
     Commit,
@@ -48,13 +46,13 @@ from loonfs.server import (
     PathEntry,
     PathEntry_File,
     UnauthorizedError,
-    UploadCompletion_DirectMultipart,
-    UploadCompletion_DirectPut,
-    UploadCompletion_ServiceProxied,
+    CompleteUploadBody_DirectMultipart,
+    CompleteUploadBody_DirectPut,
+    CompleteUploadBody_ServiceProxied,
     UploadContentClaim,
-    UploadContentResponse,
     UploadPartChecksumClaim,
     UploadSession,
+    UploadSession_Open,
     UploadSession_Aborted,
     UploadSession_Completed,
 )
@@ -136,6 +134,7 @@ class DirectPutRequest:
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class DirectPutExpected:
+    begin_status: str
     mode: str
     size_bytes: int
     checksum_algorithm: str
@@ -160,6 +159,7 @@ class MultipartRequest:
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class MultipartExpected:
+    begin_status: str
     mode: str
     part_count: int
     size_bytes: int
@@ -174,6 +174,7 @@ class AbortRequest:
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class AbortExpected:
+    begin_status: str
     mode: str
     status: str
 
@@ -590,15 +591,15 @@ def _stage_content(
     client: LoonFS, namespace_id: str, payload: bytes
 ) -> UploadSession_Completed:
     begin = client.uploads.create(
-        namespace_id, request=BeginUploadRequest_ServiceProxied()
+        namespace_id, request=CreateUploadBody_ServiceProxied()
     )
-    assert isinstance(begin, BeginUploadResponse_ServiceProxied)
+    assert isinstance(begin, UploadSession_Open)
     client.uploads.put_content(namespace_id, begin.upload_id, request=payload)
     return _completed_upload(
         client.uploads.complete(
             namespace_id,
             begin.upload_id,
-            request=UploadCompletion_ServiceProxied(),
+            request=CompleteUploadBody_ServiceProxied(),
         )
     )
 
@@ -1343,7 +1344,7 @@ def test_proxy(
             f"{namespace_alias_base}/uploads",
             json={"mode": "service_proxied"},
         )
-        proxied_begin = BeginUploadResponse_ServiceProxied(
+        proxied_begin = UploadSession_Open(
             **_proxy_response_json(
                 proxied_begin_response,
                 "proxy service-proxied begin response",
@@ -1355,7 +1356,7 @@ def test_proxy(
             headers={"Content-Type": "application/octet-stream"},
             content=iter((payload[:split], payload[split:])),
         )
-        uploaded = UploadContentResponse(
+        uploaded = UploadSession_Open(
             **_proxy_response_json(
                 uploaded_response,
                 "proxy upload-content response",
@@ -1389,13 +1390,15 @@ def test_proxy(
             f"{namespace_alias_base}/uploads",
             json={"mode": "direct_put", "size_bytes": len(payload)},
         )
-        direct_begin = BeginUploadResponse_DirectPut(
+        direct_begin = UploadSession_Open(
             **_proxy_response_json(
                 direct_begin_response,
                 "proxy direct-PUT begin response",
             )
         )
         direct_access = direct_begin.access
+        assert direct_access is not None
+        assert direct_begin.checksum_algorithm is not None
         assert direct_access.method.upper() == "PUT"
         direct_put_response = httpx.request(
             direct_access.method,
@@ -1573,12 +1576,16 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     payload = request.content_utf8.encode()
     begin = harness.client.uploads.create(
         request.namespace_id,
-        request=BeginUploadRequest_DirectPut(size_bytes=len(payload)),
+        request=CreateUploadBody_DirectPut(size_bytes=len(payload)),
     )
 
+    assert isinstance(begin, UploadSession_Open)
+    assert begin.status == expected.begin_status
     assert begin.mode == expected.mode
+    assert begin.checksum_algorithm is not None
     assert begin.checksum_algorithm == expected.checksum_algorithm
 
+    assert begin.access is not None
     _put_presigned(begin.access, payload)
     claim = UploadContentClaim(
         size_bytes=len(payload),
@@ -1587,7 +1594,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     completed = harness.client.uploads.complete(
         request.namespace_id,
         begin.upload_id,
-        request=UploadCompletion_DirectPut(content=claim),
+        request=CompleteUploadBody_DirectPut(content=claim),
     )
     completed = _completed_upload(completed)
     content_ref = completed.content_ref
@@ -1621,16 +1628,20 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     payload = _byte_pattern(request.content_pattern)
     begin = harness.client.uploads.create(
         request.namespace_id,
-        request=BeginUploadRequest_DirectMultipart(
+        request=CreateUploadBody_DirectMultipart(
             part_size_bytes=request.part_size_bytes,
         ),
     )
 
+    assert isinstance(begin, UploadSession_Open)
+    assert begin.status == expected.begin_status
     assert begin.mode == expected.mode
     assert begin.part_size_bytes == request.part_size_bytes
+    assert begin.checksum_algorithm is not None
     assert begin.checksum_algorithm == expected.checksum_algorithm
 
     part_size = begin.part_size_bytes
+    assert part_size is not None
     chunks = [
         payload[offset : offset + part_size]
         for offset in range(0, len(payload), part_size)
@@ -1667,7 +1678,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         )
     completed_parts.sort(key=lambda part: part.part_number)
     whole_checksum = _checksum(begin.checksum_algorithm, payload)
-    completion_request = UploadCompletion_DirectMultipart(
+    completion_request = CompleteUploadBody_DirectMultipart(
         content=UploadContentClaim(
             size_bytes=len(payload),
             checksum=whole_checksum,
@@ -1741,8 +1752,10 @@ def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> No
     harness.client.namespaces.create(namespace_id=request.namespace_id)
     begin = harness.client.uploads.create(
         request.namespace_id,
-        request=BeginUploadRequest_ServiceProxied(),
+        request=CreateUploadBody_ServiceProxied(),
     )
+    assert isinstance(begin, UploadSession_Open)
+    assert begin.status == expected.begin_status
     first = _aborted_upload(
         harness.client.uploads.abort(request.namespace_id, begin.upload_id)
     )

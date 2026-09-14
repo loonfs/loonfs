@@ -1172,19 +1172,11 @@ fn openapi_names_tagged_one_of_alternatives() {
     for (schema_name, expected_names) in [
         ("PathEntry", &["PathEntryDirectory", "PathEntryFile"][..]),
         (
-            "BeginUploadRequest",
+            "CreateUploadBody",
             &[
-                "BeginUploadServiceProxied",
-                "BeginUploadDirectPut",
-                "BeginUploadDirectMultipart",
-            ][..],
-        ),
-        (
-            "BeginUploadResponse",
-            &[
-                "BeginUploadResponseServiceProxied",
-                "BeginUploadResponseDirectPut",
-                "BeginUploadResponseDirectMultipart",
+                "CreateUploadBodyServiceProxied",
+                "CreateUploadBodyDirectPut",
+                "CreateUploadBodyDirectMultipart",
             ][..],
         ),
         (
@@ -1238,11 +1230,11 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "UploadCompletion",
+            "CompleteUploadBody",
             &[
-                "CompleteUploadServiceProxied",
-                "CompleteUploadDirectPut",
-                "CompleteUploadDirectMultipart",
+                "CompleteUploadBodyServiceProxied",
+                "CompleteUploadBodyDirectPut",
+                "CompleteUploadBodyDirectMultipart",
             ][..],
         ),
         (
@@ -1635,6 +1627,11 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     }
 
     for (path, method) in [
+        ("/v0/namespaces/{namespace_id}/uploads", "post"),
+        (
+            "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
+            "put",
+        ),
         ("/v0/namespaces/{namespace_id}/uploads/{upload_id}", "get"),
         (
             "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
@@ -1665,35 +1662,35 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         "public checksum-bearing shapes should reuse Checksum; found {checksum_ref_count} refs"
     );
 
-    // Each direct response keeps its mode-specific fields at the top level.
-    for (schema_name, expected_fields) in [
-        (
-            "BeginUploadResponseDirectPut",
-            &["checksum_algorithm", "access"][..],
-        ),
-        (
-            "BeginUploadResponseDirectMultipart",
-            &["part_size_bytes", "checksum_algorithm"][..],
-        ),
+    let open = schemas
+        .get("UploadSessionStatusOpen")
+        .expect("open session schema");
+    let required = required_fields(open);
+    for field in [
+        "checksum_algorithm",
+        "access",
+        "part_size_bytes",
+        "content_ref",
     ] {
-        let variant = schemas
-            .get(schema_name)
-            .unwrap_or_else(|| panic!("{schema_name} schema"));
-        let required = required_fields(variant);
-        for field in expected_fields {
-            assert!(
-                required.contains(field),
-                "{schema_name} should require `{field}` beside `mode`"
-            );
-        }
+        assert!(
+            open["properties"].get(field).is_some(),
+            "open session includes `{field}`"
+        );
+        assert!(
+            !required.contains(field),
+            "open session leaves `{field}` optional"
+        );
     }
     assert!(required_fields(
         schemas
-            .get("BeginUploadDirectMultipart")
-            .expect("BeginUploadDirectMultipart schema")
+            .get("CreateUploadBodyDirectMultipart")
+            .expect("CreateUploadBodyDirectMultipart schema")
     )
     .contains("mode"));
     for retired_schema in [
+        "BeginUploadResponse",
+        "UploadContentResponse",
+        "UploadCompletion",
         "DirectPutUpload",
         "DirectMultipartUpload",
         "DirectMultipartUploadOptions",
@@ -1705,15 +1702,15 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     }
 
     let completion_variants = schemas
-        .get("UploadCompletion")
+        .get("CompleteUploadBody")
         .and_then(|schema| schema.get("oneOf"))
         .and_then(Value::as_array)
         .expect("completion variants");
     assert_eq!(completion_variants.len(), 3);
     for (variant_ref, (schema_name, mode)) in completion_variants.iter().zip([
-        ("CompleteUploadServiceProxied", "service_proxied"),
-        ("CompleteUploadDirectPut", "direct_put"),
-        ("CompleteUploadDirectMultipart", "direct_multipart"),
+        ("CompleteUploadBodyServiceProxied", "service_proxied"),
+        ("CompleteUploadBodyDirectPut", "direct_put"),
+        ("CompleteUploadBodyDirectMultipart", "direct_multipart"),
     ]) {
         let reference = variant_ref
             .get("$ref")

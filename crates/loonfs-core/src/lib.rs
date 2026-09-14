@@ -184,7 +184,7 @@ pub use path::read::{
 pub use protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
     DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
-    ResolvedUploadCompletion,
+    ResolvedUploadCompletion, UploadSessionView,
 };
 // The streaming read `loonfs`'s reader handle returns, and the chunk size it
 // reads in.

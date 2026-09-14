@@ -184,6 +184,7 @@ interface DirectPutRequest {
 }
 
 interface DirectPutExpected {
+    begin_status: "open";
     mode: string;
     size_bytes: number;
     checksum_algorithm: string;
@@ -205,6 +206,7 @@ interface MultipartRequest {
 }
 
 interface MultipartExpected {
+    begin_status: "open";
     mode: string;
     part_count: number;
     size_bytes: number;
@@ -217,6 +219,7 @@ interface AbortRequest {
 }
 
 interface AbortExpected {
+    begin_status: "open";
     mode: string;
     status: string;
 }
@@ -447,6 +450,7 @@ const DIRECT_PUT_REQUEST_FIELDS = [
     "content_utf8",
 ] as const;
 const DIRECT_PUT_EXPECTED_FIELDS = [
+    "begin_status",
     "mode",
     "size_bytes",
     "checksum_algorithm",
@@ -461,6 +465,7 @@ const MULTIPART_REQUEST_FIELDS = [
     "content_pattern",
 ] as const;
 const MULTIPART_EXPECTED_FIELDS = [
+    "begin_status",
     "mode",
     "part_count",
     "size_bytes",
@@ -468,7 +473,7 @@ const MULTIPART_EXPECTED_FIELDS = [
     "committed_seq",
 ] as const;
 const ABORT_REQUEST_FIELDS = ["namespace_id"] as const;
-const ABORT_EXPECTED_FIELDS = ["mode", "status"] as const;
+const ABORT_EXPECTED_FIELDS = ["begin_status", "mode", "status"] as const;
 const DOWNLOAD_REQUEST_FIELDS = [
     "namespace_id",
     "path",
@@ -1925,7 +1930,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(mkdir.committed_seq, expected.mkdir_committed_seq);
 
-    const proxiedBegin = await proxyJson<LoonFS.BeginUploadResponse>(
+    const proxiedBegin = await proxyJson<LoonFS.UploadSession>(
         `${namespaceAliasBase}/uploads`,
         {
             method: "POST",
@@ -1945,7 +1950,9 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         },
     );
     await requireSuccessfulResponse(contentResponse, "proxy content upload");
-    const uploadedContent = (await contentResponse.json()) as LoonFS.UploadContentResponse;
+    const uploadedContent = (await contentResponse.json()) as LoonFS.UploadSession;
+    assert.ok(uploadedContent.status === "open");
+    assert.ok(uploadedContent.content_ref);
     assert.equal(uploadedContent.content_ref.size_bytes, payload.byteLength);
     const proxiedCompleted = completedUpload(
         await proxyJson<LoonFS.UploadSession>(
@@ -1977,7 +1984,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(proxiedCommit.committed_seq, expected.proxied_committed_seq);
 
-    const directBegin = await proxyJson<LoonFS.BeginUploadResponse>(
+    const directBegin = await proxyJson<LoonFS.UploadSession>(
         `${namespaceAliasBase}/uploads`,
         {
             method: "POST",
@@ -1987,6 +1994,8 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         "proxy direct upload begin",
     );
     assert.equal(directBegin.mode, "direct_put");
+    assert.ok(directBegin.status === "open");
+    assert.ok(directBegin.access && directBegin.checksum_algorithm);
     await uploadPresigned(directBegin.access, payload, "proxy direct PUT");
     const directClaim: LoonFS.UploadContentClaim = {
         size_bytes: payload.byteLength,
@@ -2212,7 +2221,10 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
         body: { mode: "direct_put", size_bytes: payload.byteLength },
     });
     assert.equal(begin.mode, expected.mode);
-    const directPut = begin as LoonFS.BeginUploadResponse.DirectPut;
+    assert.equal(begin.status, expected.begin_status);
+    assert.ok(begin.status === "open");
+    const directPut = begin;
+    assert.ok(directPut.access && directPut.checksum_algorithm);
     assert.equal(directPut.checksum_algorithm, expected.checksum_algorithm);
 
     await uploadPresigned(directPut.access, payload, "direct PUT");
@@ -2271,7 +2283,10 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         },
     });
     assert.equal(begin.mode, expected.mode);
-    const multipart = begin as LoonFS.BeginUploadResponse.DirectMultipart;
+    assert.equal(begin.status, expected.begin_status);
+    assert.ok(begin.status === "open");
+    const multipart = begin;
+    assert.ok(multipart.part_size_bytes !== undefined && multipart.checksum_algorithm);
     assert.equal(multipart.part_size_bytes, request.part_size_bytes);
     assert.equal(multipart.checksum_algorithm, expected.checksum_algorithm);
 
@@ -2279,7 +2294,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     assert.equal(chunks.length, expected.part_count);
     const claims: LoonFS.UploadPartChecksumClaim[] = chunks.map((chunk, index) => ({
         part_number: index + 1,
-        checksum: checksum(multipart.checksum_algorithm, chunk),
+        checksum: checksum(multipart.checksum_algorithm!, chunk),
     }));
     const signed = await activeHarness.client.uploads.signParts({
         namespace_id: request.namespace_id,
@@ -2309,8 +2324,8 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         });
     }
     completedParts.sort((left, right) => left.part_number - right.part_number);
-    const wholeChecksum = checksum(multipart.checksum_algorithm, payload);
-    const completion: LoonFS.UploadCompletion = {
+    const wholeChecksum = checksum(multipart.checksum_algorithm!, payload);
+    const completion: LoonFS.CompleteUploadBody = {
         mode: "direct_multipart",
         content: {
             size_bytes: payload.byteLength,
@@ -2385,6 +2400,7 @@ conformanceTest("upload_abort", async (activeHarness, testCase) => {
         namespace_id: request.namespace_id,
         body: { mode: "service_proxied" },
     });
+    assert.equal(begin.status, expected.begin_status);
     const first = abortedUpload(
         await activeHarness.client.uploads.abort({
             namespace_id: request.namespace_id,

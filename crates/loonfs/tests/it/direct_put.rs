@@ -72,18 +72,21 @@ fn upload_flow_is_available_from_runtime() {
         .begin_upload_blocking(&namespace_id)
         .expect("begin upload");
     let staged = fs
-        .upload_content_blocking(&namespace_id, begin.upload_id(), b"uploaded")
+        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
         .expect("upload content");
     let staged_again = fs
-        .upload_content_blocking(&namespace_id, begin.upload_id(), b"uploaded")
+        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
         .expect("repeat upload content");
-    assert_eq!(staged.content_ref, staged_again.content_ref);
+    assert_eq!(
+        staged.content_ref().expect("staged content").clone(),
+        staged_again.content_ref().expect("staged content").clone()
+    );
 
     let completed = fs
-        .complete_upload_blocking(&namespace_id, begin.upload_id())
+        .complete_upload_blocking(&namespace_id, &begin.upload_id)
         .expect("complete upload");
     let completed_again = fs
-        .complete_upload_blocking(&namespace_id, begin.upload_id())
+        .complete_upload_blocking(&namespace_id, &begin.upload_id)
         .expect("repeat complete upload");
     assert_eq!(completed, completed_again);
     assert_eq!(completed.mode, UploadMode::ServiceProxied);
@@ -114,8 +117,9 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
     block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
-    let completed = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
-        .expect("complete direct put");
+    let completed =
+        block_on(fs.complete_direct_put(&namespace_id, &begin.session.upload_id, claim))
+            .expect("complete direct put");
     assert_eq!(completed.mode, UploadMode::DirectPut);
     let content_ref = completed
         .content_ref()
@@ -162,8 +166,9 @@ fn direct_put_completion_proves_upload_without_reading_content() {
         .expect("write direct object");
 
     raw_store.reset();
-    let completed = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
-        .expect("complete direct put");
+    let completed =
+        block_on(fs.complete_direct_put(&namespace_id, &begin.session.upload_id, claim))
+            .expect("complete direct put");
     assert_eq!(completed.mode, UploadMode::DirectPut);
     assert_eq!(
         completed
@@ -199,7 +204,7 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
     block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
-    let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
+    let error = block_on(fs.complete_direct_put(&namespace_id, &begin.session.upload_id, claim))
         .expect_err("mis-declared size must fail completion");
     assert_eq!(
         error.code(),
@@ -227,7 +232,7 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
     block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(delivered)))
         .expect("write mismatched direct object");
 
-    let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
+    let error = block_on(fs.complete_direct_put(&namespace_id, &begin.session.upload_id, claim))
         .expect_err("mismatched bytes must fail completion");
     assert_eq!(
         error.code(),
@@ -263,8 +268,9 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
         .expect("write direct object");
 
     raw_store.fail_next(1);
-    let error = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim.clone()))
-        .expect_err("a verification that cannot run does not complete the upload");
+    let error =
+        block_on(fs.complete_direct_put(&namespace_id, &begin.session.upload_id, claim.clone()))
+            .expect_err("a verification that cannot run does not complete the upload");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert_eq!(raw_store.attempts(), 1, "the checksum head is what failed");
     assert!(
@@ -273,15 +279,21 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
             .is_some(),
         "a store failure must not delete the client's object"
     );
-    let (status, _) =
-        block_on(fs.writer.get_upload(&namespace_id, &begin.upload_id)).expect("get upload status");
+    let loonfs::uploads::UploadSessionView {
+        session: status, ..
+    } = block_on(
+        fs.writer
+            .get_upload(&namespace_id, &begin.session.upload_id),
+    )
+    .expect("get upload status");
     assert!(
         matches!(status.status, UploadSessionStatus::Open { .. }),
         "a store failure must not end the session"
     );
 
-    let completed = block_on(fs.complete_direct_put(&namespace_id, &begin.upload_id, claim))
-        .expect("the retried completion verifies and completes");
+    let completed =
+        block_on(fs.complete_direct_put(&namespace_id, &begin.session.upload_id, claim))
+            .expect("the retried completion verifies and completes");
     assert_eq!(completed.mode, UploadMode::DirectPut);
     assert_eq!(
         completed
@@ -455,14 +467,14 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 .await
                 .expect("begin upload");
             fs.writer
-                .put_upload_content(&namespace_id, begin.upload_id(), bytes)
+                .put_upload_content(&namespace_id, &begin.upload_id, bytes)
                 .await
                 .expect("upload content");
             let completed = fs
                 .writer
                 .complete_upload(
                     &namespace_id,
-                    begin.upload_id(),
+                    &begin.upload_id,
                     ResolvedUploadCompletion::KnownContent,
                 )
                 .await

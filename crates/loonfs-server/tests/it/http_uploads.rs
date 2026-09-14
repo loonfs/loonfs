@@ -6,7 +6,7 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{
     v0::{
-        BeginUploadRequest, CompleteUploadRequest, FilesystemChange, UploadMode, UploadSession,
+        CompleteUploadBody, CreateUploadBody, FilesystemChange, UploadMode, UploadSession,
         UploadSessionStatus,
     },
     AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
@@ -120,14 +120,13 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         .expect("create namespace");
     let begin = harness
         .client
-        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
 
     let completion_url = format!(
         "{}/v0/namespaces/{namespace}/uploads/{}/complete",
-        harness.server_url,
-        begin.upload_id()
+        harness.server_url, begin.upload_id
     );
     let wrong = "completion request mode `direct_multipart` does not match stored upload mode \
                  `service_proxied`";
@@ -153,17 +152,35 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         error.message
     );
 
-    harness
+    let staged = harness
         .client
-        .put_upload_content(&namespace, begin.upload_id(), b"hello")
+        .put_upload_content(&namespace, &begin.upload_id, b"hello")
         .await
         .expect("stage content");
+    assert_eq!(staged.namespace_id, namespace);
+    assert_eq!(staged.upload_id, begin.upload_id);
+    assert_eq!(staged.mode, UploadMode::ServiceProxied);
+    let UploadSessionStatus::Open {
+        content_ref: Some(content_ref),
+        ..
+    } = &staged.status
+    else {
+        panic!("content PUT returns the open session with staged content");
+    };
+    assert_eq!(content_ref.size_bytes, 5);
+    assert_eq!(content_ref.checksum, loonfs_api::Checksum::sha256(b"hello"));
+    let read = harness
+        .client
+        .get_upload(&namespace, &begin.upload_id)
+        .await
+        .expect("read staged session");
+    assert_eq!(read, staged);
     harness
         .client
         .complete_upload(
             &namespace,
-            begin.upload_id(),
-            &CompleteUploadRequest::ServiceProxied {},
+            &begin.upload_id,
+            &CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("tagged completion succeeds for proxied mode");
@@ -187,7 +204,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         .expect("create namespace");
     let begin = harness
         .client
-        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
     let limit = harness
@@ -202,8 +219,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         .expect("completion body limit is advertised and fits usize");
     let completion_url = format!(
         "{}/v0/namespaces/{namespace}/uploads/{}/complete",
-        harness.server_url,
-        begin.upload_id()
+        harness.server_url, begin.upload_id
     );
 
     let mut just_under = vec![b' '; limit - 1];
@@ -275,23 +291,23 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let begin = harness
         .client
-        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
     let first_content = harness
         .client
-        .put_upload_content(&namespace, begin.upload_id(), file_bytes)
+        .put_upload_content(&namespace, &begin.upload_id, file_bytes)
         .await
         .expect("upload content");
     let repeated_content = harness
         .client
-        .put_upload_content(&namespace, begin.upload_id(), file_bytes)
+        .put_upload_content(&namespace, &begin.upload_id, file_bytes)
         .await
         .expect("repeat upload content");
     assert_eq!(first_content, repeated_content);
     match harness
         .client
-        .put_upload_content(&namespace, begin.upload_id(), b"different bytes")
+        .put_upload_content(&namespace, &begin.upload_id, b"different bytes")
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
@@ -401,21 +417,21 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
 
     let open = harness
         .client
-        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
-    let status = get_upload(&harness.server_url, open.upload_id());
+    let status = get_upload(&harness.server_url, &open.upload_id);
     assert_eq!(status.namespace_id, namespace);
-    assert_eq!(&status.upload_id, open.upload_id());
+    assert_eq!(&status.upload_id, &open.upload_id);
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     assert!(matches!(status.status, UploadSessionStatus::Open { .. }));
 
     // Abort is idempotent.
-    let aborted = abort_upload(&harness.server_url, open.upload_id()).expect("abort");
-    let repeated = abort_upload(&harness.server_url, open.upload_id()).expect("repeated abort");
+    let aborted = abort_upload(&harness.server_url, &open.upload_id).expect("abort");
+    let repeated = abort_upload(&harness.server_url, &open.upload_id).expect("repeated abort");
     assert_eq!(repeated, aborted);
     assert_eq!(aborted.namespace_id, namespace);
-    assert_eq!(&aborted.upload_id, open.upload_id());
+    assert_eq!(&aborted.upload_id, &open.upload_id);
     assert_eq!(aborted.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Aborted {
         aborted_at_ms: response_aborted_at_ms,
@@ -423,7 +439,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     else {
         panic!("abort reports an aborted session")
     };
-    let status = get_upload(&harness.server_url, open.upload_id());
+    let status = get_upload(&harness.server_url, &open.upload_id);
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Aborted { aborted_at_ms } = status.status else {
         panic!("an aborted session reports itself aborted");
@@ -435,8 +451,8 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .client
         .complete_upload(
             &namespace,
-            open.upload_id(),
-            &CompleteUploadRequest::ServiceProxied {},
+            &open.upload_id,
+            &CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect_err("an aborted session cannot complete");
@@ -501,20 +517,20 @@ async fn complete_upload_session(
 ) -> (loonfs_api::UploadId, ContentRef, u64) {
     let begin = harness
         .client
-        .create_upload(namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
     harness
         .client
-        .put_upload_content(namespace, begin.upload_id(), bytes)
+        .put_upload_content(namespace, &begin.upload_id, bytes)
         .await
         .expect("upload content");
     let completed = harness
         .client
         .complete_upload(
             namespace,
-            begin.upload_id(),
-            &CompleteUploadRequest::ServiceProxied {},
+            &begin.upload_id,
+            &CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("complete upload");
@@ -527,7 +543,7 @@ async fn complete_upload_session(
     else {
         panic!("completion reports a completed session")
     };
-    (begin.upload_id().clone(), content_ref, completed_at_ms)
+    (begin.upload_id.clone(), content_ref, completed_at_ms)
 }
 
 fn get_upload(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSession {

@@ -95,6 +95,8 @@ func TestStreamingUploads(t *testing.T) {
 					if body.Mode != fixture.Mode {
 						t.Errorf("mode %s", body.Mode)
 					}
+					session["status"] = "open"
+					session["expires_at_ms"] = 2000000000000
 					session["checksum_algorithm"] = fixture.Algorithm
 					session["part_size_bytes"] = 4
 					session["access"] = access
@@ -132,6 +134,8 @@ func TestStreamingUploads(t *testing.T) {
 						return
 					}
 					w.Header().Set("ETag", "test-etag")
+					session["status"] = "open"
+					session["expires_at_ms"] = 2000000000000
 					session["content_ref"] = claim
 					value = session
 				case strings.HasSuffix(path, "/abort"):

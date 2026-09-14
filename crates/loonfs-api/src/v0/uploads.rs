@@ -40,18 +40,18 @@ impl UploadMode {
     }
 }
 
-/// A request to start an upload session for one required transport mode.
+/// Selects the transport for a new upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BeginUploadRequest {
+pub enum CreateUploadBody {
     // Empty braces make serde reject fields from another transport. A unit
     // variant would silently ignore them.
     /// Send the bytes to the service, which writes the content object.
-    #[cfg_attr(feature = "openapi", schema(title = "BeginUploadServiceProxied"))]
+    #[cfg_attr(feature = "openapi", schema(title = "CreateUploadBodyServiceProxied"))]
     ServiceProxied {},
     /// Write the whole object through one presigned request.
-    #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectPut"))]
+    #[cfg_attr(feature = "openapi", schema(title = "CreateUploadBodyDirectPut"))]
     DirectPut {
         /// Advisory byte length for an early provider-limit check.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,7 +59,7 @@ pub enum BeginUploadRequest {
         size_bytes: Option<u64>,
     },
     /// Write the object in parts through presigned part uploads.
-    #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectMultipart"))]
+    #[cfg_attr(feature = "openapi", schema(title = "CreateUploadBodyDirectMultipart"))]
     DirectMultipart {
         /// The byte length of every part except the last, or `None` for the server default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,7 +68,7 @@ pub enum BeginUploadRequest {
     },
 }
 
-impl BeginUploadRequest {
+impl CreateUploadBody {
     /// The transport this request asks for.
     pub fn mode(&self) -> UploadMode {
         match self {
@@ -168,109 +168,28 @@ pub struct ContentToken {
     pub token: String,
 }
 
-/// The response from starting an upload session for one transport mode.
+/// Completes an upload using the mode that started it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum BeginUploadResponse {
-    /// The service will receive the bytes and write the content object.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "BeginUploadResponseServiceProxied")
-    )]
-    ServiceProxied {
-        /// Namespace authorized to consume the eventual staged content.
-        namespace_id: NamespaceId,
-        /// The session identity used by later append and completion calls.
-        upload_id: UploadId,
-    },
-    /// One presigned request writes the whole object.
-    #[cfg_attr(feature = "openapi", schema(title = "BeginUploadResponseDirectPut"))]
-    DirectPut {
-        /// Namespace authorized to consume the eventual staged content.
-        namespace_id: NamespaceId,
-        /// Durable session identity used by subsequent completion calls.
-        upload_id: UploadId,
-        /// Checksum algorithm the client must use for its completion claim.
-        checksum_algorithm: ChecksumAlgorithm,
-        /// Short-lived permission to write the object.
-        access: ObjectTransferAccess,
-    },
-    /// Presigned part uploads assemble the object.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "BeginUploadResponseDirectMultipart")
-    )]
-    DirectMultipart {
-        /// Namespace authorized to consume the eventual staged content.
-        namespace_id: NamespaceId,
-        /// The session identity used by later part-signing and completion calls.
-        upload_id: UploadId,
-        /// The byte length of every part except the last, with at most 10,000 parts allowed.
-        part_size_bytes: u64,
-        /// Checksum algorithm for every part and for the complete payload.
-        checksum_algorithm: ChecksumAlgorithm,
-    },
-}
-
-impl BeginUploadResponse {
-    /// Namespace that owns the session.
-    pub fn namespace_id(&self) -> &NamespaceId {
-        match self {
-            Self::ServiceProxied { namespace_id, .. }
-            | Self::DirectPut { namespace_id, .. }
-            | Self::DirectMultipart { namespace_id, .. } => namespace_id,
-        }
-    }
-
-    /// Session the later append, part, completion, and abort calls name.
-    pub fn upload_id(&self) -> &UploadId {
-        match self {
-            Self::ServiceProxied { upload_id, .. }
-            | Self::DirectPut { upload_id, .. }
-            | Self::DirectMultipart { upload_id, .. } => upload_id,
-        }
-    }
-
-    /// The transport this session was opened with.
-    pub fn mode(&self) -> UploadMode {
-        match self {
-            Self::ServiceProxied { .. } => UploadMode::ServiceProxied,
-            Self::DirectPut { .. } => UploadMode::DirectPut,
-            Self::DirectMultipart { .. } => UploadMode::DirectMultipart,
-        }
-    }
-}
-
-/// Response after uploading bytes into a session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct UploadContentResponse {
-    /// Namespace that owns the upload session.
-    pub namespace_id: NamespaceId,
-    /// Session into which the service staged these bytes.
-    pub upload_id: UploadId,
-    /// Digest and byte length computed from the accepted body.
-    pub content_ref: ContentRef,
-}
-
-/// A request to complete an upload session using the mode that started it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(as = UploadCompletion))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CompleteUploadRequest {
+pub enum CompleteUploadBody {
     /// Complete a service-proxied upload.
-    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadServiceProxied"))]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CompleteUploadBodyServiceProxied")
+    )]
     ServiceProxied {},
     /// Complete a direct-PUT upload.
-    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadDirectPut"))]
+    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadBodyDirectPut"))]
     DirectPut {
         /// Expected length and checksum of the stored object.
         content: UploadContentClaim,
     },
     /// Complete a direct multipart upload.
-    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadDirectMultipart"))]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CompleteUploadBodyDirectMultipart")
+    )]
     DirectMultipart {
         /// Expected length and checksum of the assembled object.
         content: UploadContentClaim,
@@ -279,7 +198,7 @@ pub enum CompleteUploadRequest {
     },
 }
 
-impl CompleteUploadRequest {
+impl CompleteUploadBody {
     /// Returns the upload mode in this request.
     pub const fn mode(&self) -> UploadMode {
         match self {
@@ -313,6 +232,22 @@ pub enum UploadSessionStatus {
     Open {
         /// The Unix-millisecond time after which cleanup may abort the session.
         expires_at_ms: u64,
+        /// Present for `direct_put` and `direct_multipart` sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        checksum_algorithm: Option<ChecksumAlgorithm>,
+        /// Present for `direct_multipart` sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        part_size_bytes: Option<u64>,
+        /// Present for `direct_put` sessions; minted fresh on every read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        access: Option<ObjectTransferAccess>,
+        /// Present after content is staged in a `service_proxied` session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        content_ref: Option<ContentRef>,
     },
     /// Final: the content is durable and verified.
     #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusCompleted"))]
@@ -350,11 +285,12 @@ pub struct UploadSession {
 }
 
 impl UploadSession {
-    /// Returns the completed content reference, or `None` before completion.
+    /// Returns the staged or completed content reference, when present.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match &self.status {
             UploadSessionStatus::Completed { content_ref, .. } => Some(content_ref),
-            UploadSessionStatus::Open { .. } | UploadSessionStatus::Aborted { .. } => None,
+            UploadSessionStatus::Open { content_ref, .. } => content_ref.as_ref(),
+            UploadSessionStatus::Aborted { .. } => None,
         }
     }
 
@@ -370,24 +306,24 @@ impl UploadSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, ContentToken,
-        ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
+        CompleteUploadBody, ContentToken, CreateUploadBody, ObjectTransferAccess,
+        UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
 
     #[test]
-    fn a_begin_request_without_a_mode_does_not_decode() {
-        assert!(serde_json::from_str::<BeginUploadRequest>("{}").is_err());
+    fn a_create_upload_body_without_a_mode_does_not_decode() {
+        assert!(serde_json::from_str::<CreateUploadBody>("{}").is_err());
         assert_eq!(
-            serde_json::from_str::<BeginUploadRequest>(r#"{"mode":"service_proxied"}"#)
+            serde_json::from_str::<CreateUploadBody>(r#"{"mode":"service_proxied"}"#)
                 .expect("decode proxied begin request"),
-            BeginUploadRequest::ServiceProxied {}
+            CreateUploadBody::ServiceProxied {}
         );
     }
 
     #[test]
-    fn a_begin_request_carrying_another_modes_fields_does_not_decode() {
+    fn a_create_upload_body_carrying_another_modes_fields_does_not_decode() {
         for body in [
             r#"{"mode":"service_proxied","part_size_bytes":8388608}"#,
             r#"{"mode":"service_proxied","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
@@ -397,7 +333,7 @@ mod tests {
             r#"{"mode":"direct_multipart","size_bytes":5}"#,
         ] {
             assert!(
-                serde_json::from_str::<BeginUploadRequest>(body).is_err(),
+                serde_json::from_str::<CreateUploadBody>(body).is_err(),
                 "decoded a begin request that mixes modes: {body}"
             );
         }
@@ -406,23 +342,23 @@ mod tests {
     #[test]
     fn a_multipart_begin_names_its_part_size_beside_the_mode() {
         assert_eq!(
-            serde_json::from_str::<BeginUploadRequest>(
+            serde_json::from_str::<CreateUploadBody>(
                 r#"{"mode":"direct_multipart","part_size_bytes":8388608}"#
             )
             .expect("decode multipart begin request"),
-            BeginUploadRequest::DirectMultipart {
+            CreateUploadBody::DirectMultipart {
                 part_size_bytes: Some(8 * 1024 * 1024),
             }
         );
         assert_eq!(
-            serde_json::from_str::<BeginUploadRequest>(r#"{"mode":"direct_multipart"}"#)
+            serde_json::from_str::<CreateUploadBody>(r#"{"mode":"direct_multipart"}"#)
                 .expect("decode multipart begin without a part size"),
-            BeginUploadRequest::DirectMultipart {
+            CreateUploadBody::DirectMultipart {
                 part_size_bytes: None,
             }
         );
         assert_eq!(
-            serde_json::to_value(BeginUploadRequest::DirectMultipart {
+            serde_json::to_value(CreateUploadBody::DirectMultipart {
                 part_size_bytes: None,
             })
             .expect("serialize multipart begin request"),
@@ -433,11 +369,11 @@ mod tests {
     #[test]
     fn completion_requests_are_tagged_and_mode_specific() {
         assert_eq!(
-            serde_json::from_str::<CompleteUploadRequest>(r#"{"mode":"service_proxied"}"#)
+            serde_json::from_str::<CompleteUploadBody>(r#"{"mode":"service_proxied"}"#)
                 .expect("decode proxied completion"),
-            CompleteUploadRequest::ServiceProxied {}
+            CompleteUploadBody::ServiceProxied {}
         );
-        let direct_put = CompleteUploadRequest::DirectPut {
+        let direct_put = CompleteUploadBody::DirectPut {
             content: UploadContentClaim {
                 size_bytes: 5,
                 checksum: Checksum::crc32c(b"hello"),
@@ -460,20 +396,20 @@ mod tests {
             r#"{"mode":"direct_multipart"}"#,
         ] {
             assert!(
-                serde_json::from_str::<CompleteUploadRequest>(body).is_err(),
+                serde_json::from_str::<CompleteUploadBody>(body).is_err(),
                 "decoded an invalid completion request: {body}"
             );
         }
 
         let missing_parts = r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#;
-        let error = serde_json::from_str::<CompleteUploadRequest>(missing_parts)
+        let error = serde_json::from_str::<CompleteUploadBody>(missing_parts)
             .expect_err("multipart parts are required");
         assert!(
             error.to_string().contains("parts"),
             "the rejection should name the missing field: {error}"
         );
 
-        let multipart = CompleteUploadRequest::DirectMultipart {
+        let multipart = CompleteUploadBody::DirectMultipart {
             content: UploadContentClaim {
                 size_bytes: 5,
                 checksum: Checksum::crc64nvme(b"hello"),
@@ -495,98 +431,102 @@ mod tests {
     }
 
     #[test]
-    fn a_begin_response_carries_only_its_transports_fields() {
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let upload_id =
-            UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id");
-        assert_eq!(
-            serde_json::to_value(BeginUploadResponse::ServiceProxied {
-                namespace_id: namespace_id.clone(),
-                upload_id: upload_id.clone(),
-            })
-            .expect("serialize proxied response"),
-            serde_json::json!({
-                "mode": "service_proxied",
-                "namespace_id": "demo",
-                "upload_id": "upl_00000000000000000000000000000001"
-            })
+    fn open_sessions_carry_only_their_modes_fields() {
+        let content_ref = ContentRef::blob_v1(
+            NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
+            b"hello",
         );
-
-        assert_eq!(
-            serde_json::to_value(BeginUploadResponse::DirectPut {
-                namespace_id: namespace_id.clone(),
-                upload_id: upload_id.clone(),
-                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-                access: ObjectTransferAccess::PresignedUrl {
-                    method: "PUT".to_owned(),
-                    url: "https://bucket.example/object".to_owned(),
-                    headers: BTreeMap::new(),
-                    expires_at_ms: 1,
-                },
-            })
-            .expect("serialize direct-put response"),
-            serde_json::json!({
-                "mode": "direct_put",
-                "namespace_id": "demo",
-                "upload_id": "upl_00000000000000000000000000000001",
-                "checksum_algorithm": "crc64nvme",
-                "access": {
-                    "kind": "presigned_url",
-                    "method": "PUT",
-                    "url": "https://bucket.example/object",
-                    "expires_at_ms": 1
-                }
-            })
-        );
-
-        assert_eq!(
-            serde_json::to_value(BeginUploadResponse::DirectMultipart {
-                namespace_id,
-                upload_id,
-                part_size_bytes: 8 * 1024 * 1024,
-                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
-            })
-            .expect("serialize multipart response"),
-            serde_json::json!({
-                "mode": "direct_multipart",
-                "namespace_id": "demo",
-                "upload_id": "upl_00000000000000000000000000000001",
-                "part_size_bytes": 8 * 1024 * 1024,
-                "checksum_algorithm": "crc64nvme"
-            })
-        );
-    }
-
-    #[test]
-    fn a_begin_response_carrying_a_later_servers_field_still_decodes() {
-        assert_eq!(
-            serde_json::from_str::<BeginUploadResponse>(
-                r#"{"mode":"service_proxied","namespace_id":"demo","upload_id":"upl_00000000000000000000000000000001","invented_later":true}"#
-            )
-            .expect("decode a proxied response carrying an unknown field"),
-            BeginUploadResponse::ServiceProxied {
+        let access = ObjectTransferAccess::PresignedUrl {
+            method: "PUT".to_owned(),
+            url: "https://bucket.example/object".to_owned(),
+            headers: BTreeMap::new(),
+            expires_at_ms: 1,
+        };
+        for (mode, checksum_algorithm, part_size_bytes, access, content_ref, fields) in [
+            (
+                UploadMode::DirectPut,
+                Some(ChecksumAlgorithm::Crc64nvme),
+                None,
+                Some(access.clone()),
+                None,
+                serde_json::json!({"checksum_algorithm": "crc64nvme", "access": access}),
+            ),
+            (
+                UploadMode::DirectMultipart,
+                Some(ChecksumAlgorithm::Crc64nvme),
+                Some(8388608),
+                None,
+                None,
+                serde_json::json!({"checksum_algorithm": "crc64nvme", "part_size_bytes": 8388608}),
+            ),
+            (
+                UploadMode::ServiceProxied,
+                None,
+                None,
+                None,
+                Some(content_ref.clone()),
+                serde_json::json!({"content_ref": content_ref}),
+            ),
+            (
+                UploadMode::ServiceProxied,
+                None,
+                None,
+                None,
+                None,
+                serde_json::json!({}),
+            ),
+        ] {
+            let session = UploadSession {
                 namespace_id: NamespaceId::parse("demo").expect("namespace id"),
                 upload_id: UploadId::parse("upl_00000000000000000000000000000001")
-                    .expect("valid upload id"),
-            }
-        );
+                    .expect("upload id"),
+                mode,
+                status: UploadSessionStatus::Open {
+                    expires_at_ms: 1000,
+                    checksum_algorithm,
+                    part_size_bytes,
+                    access,
+                    content_ref,
+                },
+            };
+            let mut expected = serde_json::json!({
+                "namespace_id": "demo",
+                "upload_id": "upl_00000000000000000000000000000001",
+                "mode": mode,
+                "status": "open",
+                "expires_at_ms": 1000,
+            });
+            expected
+                .as_object_mut()
+                .expect("session object")
+                .extend(fields.as_object().expect("mode fields").clone());
+            assert_eq!(
+                serde_json::to_value(&session).expect("serialize session"),
+                expected
+            );
+            assert_eq!(
+                serde_json::from_value::<UploadSession>(expected).expect("decode session"),
+                session
+            );
+        }
     }
 
     #[test]
     fn an_upload_content_claim_names_only_size_and_checksum() {
-        let request: BeginUploadRequest =
+        let request: CreateUploadBody =
             serde_json::from_str(r#"{"mode":"direct_put","size_bytes":5}"#)
                 .expect("decode direct-put begin request");
         assert_eq!(
             request,
-            BeginUploadRequest::DirectPut {
+            CreateUploadBody::DirectPut {
                 size_bytes: Some(5),
             }
         );
         assert_eq!(
-            serde_json::from_str::<BeginUploadRequest>(r#"{"mode":"direct_put"}"#)
+            serde_json::from_str::<CreateUploadBody>(r#"{"mode":"direct_put"}"#)
                 .expect("decode direct-put begin without a size"),
-            BeginUploadRequest::DirectPut { size_bytes: None }
+            CreateUploadBody::DirectPut { size_bytes: None }
         );
 
         assert!(
@@ -602,26 +542,6 @@ mod tests {
     fn an_upload_session_is_flat_and_uses_one_status_vocabulary() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
-        let open = serde_json::to_value(UploadSession {
-            namespace_id: namespace_id.clone(),
-            upload_id: upload_id.clone(),
-            mode: UploadMode::DirectMultipart,
-            status: UploadSessionStatus::Open {
-                expires_at_ms: 1_000,
-            },
-        })
-        .expect("serialize open status");
-        assert_eq!(
-            open,
-            serde_json::json!({
-                "namespace_id": "demo",
-                "upload_id": "upl_00000000000000000000000000000001",
-                "mode": "direct_multipart",
-                "status": "open",
-                "expires_at_ms": 1_000,
-            })
-        );
-
         let aborted = serde_json::to_value(UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),

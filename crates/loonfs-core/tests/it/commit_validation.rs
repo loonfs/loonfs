@@ -229,7 +229,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine.begin_upload().await.expect("begin upload");
     engine
-        .upload_content(upload.upload_id(), b"admitted")
+        .upload_content(&upload.upload_id, b"admitted")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -238,7 +238,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     let completed = engine
         .complete_upload(
             &catalog,
-            upload.upload_id(),
+            &upload.upload_id,
             ResolvedUploadCompletion::KnownContent,
         )
         .await
@@ -352,7 +352,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine.begin_upload().await.expect("begin upload");
     engine
-        .upload_content(upload.upload_id(), b"deadline")
+        .upload_content(&upload.upload_id, b"deadline")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -361,7 +361,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
     let completed = engine
         .complete_upload(
             &catalog,
-            upload.upload_id(),
+            &upload.upload_id,
             ResolvedUploadCompletion::KnownContent,
         )
         .await
@@ -1134,7 +1134,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine.begin_upload().await.expect("begin upload");
     let staged = engine
-        .upload_content(upload.upload_id(), b"re-minted")
+        .upload_content(&upload.upload_id, b"re-minted")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -1143,7 +1143,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     let completed = engine
         .complete_upload(
             &catalog,
-            upload.upload_id(),
+            &upload.upload_id,
             ResolvedUploadCompletion::KnownContent,
         )
         .await
@@ -1165,13 +1165,20 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     assert_eq!(refused, ContentTokenError::Expired);
 
     // Reading the session mints another one for the same durable bytes.
-    let (status, receipt) = engine
-        .get_upload_status(upload.upload_id())
+    let loonfs_core::UploadSessionView {
+        session: status,
+        receipt,
+        ..
+    } = engine
+        .get_upload_status(&upload.upload_id)
         .await
         .expect("get upload status");
     match status.status {
         UploadSessionStatus::Completed { content_ref, .. } => {
-            assert_eq!(content_ref, staged.content_ref);
+            assert_eq!(
+                content_ref,
+                staged.content_ref().expect("staged content").clone()
+            );
         }
         other => panic!("expected a completed session, got {other:?}"),
     }
@@ -1197,7 +1204,10 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
                 commit_id("put-re-minted-content"),
                 loonfs_test_support::test_actor(),
                 None,
-                put_file("/docs/re-minted.txt", staged.content_ref),
+                put_file(
+                    "/docs/re-minted.txt",
+                    staged.content_ref().expect("staged content").clone(),
+                ),
             ),
             vec![prepared],
         )],

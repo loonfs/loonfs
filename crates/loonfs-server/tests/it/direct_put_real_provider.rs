@@ -8,8 +8,8 @@ use futures::StreamExt;
 use loonfs_api::{
     options::DirectMultipartUploadOptions,
     v0::{
-        BeginUploadResponse, CompleteUploadRequest, ObjectTransferAccess, UploadContentClaim,
-        UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
+        CompleteUploadBody, ObjectTransferAccess, UploadContentClaim, UploadMode,
+        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
     },
     ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, DestinationBehavior,
     FilesystemOperation, NamespaceId,
@@ -61,26 +61,26 @@ fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> UploadContent
 }
 
 /// Extracts the checksum algorithm and write access from a direct PUT response.
-fn direct_put_of(begin: &BeginUploadResponse) -> (ChecksumAlgorithm, &ObjectTransferAccess) {
-    match begin {
-        BeginUploadResponse::DirectPut {
-            checksum_algorithm,
-            access,
+fn direct_put_of(begin: &UploadSession) -> (ChecksumAlgorithm, &ObjectTransferAccess) {
+    match &begin.status {
+        UploadSessionStatus::Open {
+            checksum_algorithm: Some(checksum_algorithm),
+            access: Some(access),
             ..
         } => (*checksum_algorithm, access),
-        other => panic!("a direct_put begin answered as {:?}", other.mode()),
+        other => panic!("a direct_put begin answered as {:?}", other),
     }
 }
 
 /// The part geometry a `direct_multipart` begin answered with.
-fn direct_multipart_of(begin: &BeginUploadResponse) -> (u64, ChecksumAlgorithm) {
-    match begin {
-        BeginUploadResponse::DirectMultipart {
-            part_size_bytes,
-            checksum_algorithm,
+fn direct_multipart_of(begin: &UploadSession) -> (u64, ChecksumAlgorithm) {
+    match &begin.status {
+        UploadSessionStatus::Open {
+            part_size_bytes: Some(part_size_bytes),
+            checksum_algorithm: Some(checksum_algorithm),
             ..
         } => (*part_size_bytes, *checksum_algorithm),
-        other => panic!("a direct_multipart begin answered as {:?}", other.mode()),
+        other => panic!("a direct_multipart begin answered as {:?}", other),
     }
 }
 
@@ -182,8 +182,8 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .client
         .complete_upload(
             &namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::DirectPut {
+            &begin.upload_id,
+            &CompleteUploadBody::DirectPut {
                 content: direct_put_claim(bytes, checksum_algorithm),
             },
         )
@@ -337,8 +337,8 @@ async fn assert_wrong_direct_put_bytes_rejected(
         client
             .complete_upload(
                 namespace_id,
-                begin.upload_id(),
-                &CompleteUploadRequest::DirectPut {
+                &begin.upload_id,
+                &CompleteUploadBody::DirectPut {
                     content: direct_put_claim(bytes, checksum_algorithm),
                 },
             )
@@ -382,8 +382,8 @@ async fn assert_direct_put_requires_its_signed_headers(
             client
                 .complete_upload(
                     namespace_id,
-                    begin.upload_id(),
-                    &CompleteUploadRequest::DirectPut {
+                    &begin.upload_id,
+                    &CompleteUploadBody::DirectPut {
                         content: direct_put_claim(bytes, checksum_algorithm),
                     },
                 )
@@ -420,8 +420,8 @@ async fn assert_direct_put_is_no_replace(
     let complete = client
         .complete_upload(
             namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::DirectPut {
+            &begin.upload_id,
+            &CompleteUploadBody::DirectPut {
                 content: direct_put_claim(bytes, checksum_algorithm),
             },
         )
@@ -713,8 +713,8 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
     let complete = client
         .complete_upload(
             namespace_id,
-            begin.upload_id(),
-            &CompleteUploadRequest::DirectPut {
+            &begin.upload_id,
+            &CompleteUploadBody::DirectPut {
                 content: direct_put_claim(bytes, checksum_algorithm),
             },
         )
@@ -1005,7 +1005,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .create_direct_multipart_upload(&namespace_id, DirectMultipartUploadOptions::default())
         .await
         .expect("begin direct multipart");
-    let upload_id = begin.upload_id().clone();
+    let upload_id = begin.upload_id.clone();
     let (part_size_bytes, checksum_algorithm) = direct_multipart_of(&begin);
     assert_eq!(
         part_size_bytes as usize, part_size,
@@ -1065,7 +1065,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
 
     // The claim rides with the completion, and the identity comes back with
     // the answer: the client never named the object it wrote.
-    let request = CompleteUploadRequest::DirectMultipart {
+    let request = CompleteUploadBody::DirectMultipart {
         content: UploadContentClaim {
             size_bytes: payload.len() as u64,
             checksum: whole_object.clone(),

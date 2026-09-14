@@ -591,7 +591,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         let engine = namespace_engine(store, namespace_id, context);
         let upload = engine.begin_upload().await.expect("begin upload");
         let staged = engine
-            .upload_content(upload.upload_id(), bytes)
+            .upload_content(&upload.upload_id, bytes)
             .await
             .expect("upload bytes");
         let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
@@ -600,13 +600,13 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         let completed = engine
             .complete_upload(
                 &catalog,
-                upload.upload_id(),
+                &upload.upload_id,
                 loonfs_core::ResolvedUploadCompletion::KnownContent,
             )
             .await
             .expect("complete upload");
-        assert_eq!(completed.response.content_ref(), Some(&staged.content_ref));
-        staged.content_ref
+        assert_eq!(completed.response.content_ref(), staged.content_ref());
+        staged.content_ref().expect("staged content").clone()
     }
 
     let temp_dir = tempdir().expect("tempdir");
