@@ -473,22 +473,22 @@ generated_import = "    from .client import AsyncLoonFS, LoonFS\n"
 assert source.count(generated_import) == 1, "generated server.py client import not found"
 source = source.replace(
     generated_import,
-    "    from .client import AsyncLoonFS\n"
     "    from .core.api_error import ApiError\n"
-    "    from .transfers import DownloadResult, DownloadStream, PreparedContent, LoonFS\n",
+    "    from .transfers import AsyncDownloadStream, AsyncLoonFS, DownloadResult, DownloadStream, PreparedContent, LoonFS\n",
 )
-generated_mapping = '    "LoonFS": ".client",\n'
-assert source.count(generated_mapping) == 1, "generated server.py client mapping not found"
-source = source.replace(generated_mapping, '    "LoonFS": ".transfers",\n')
+for client_name in ("LoonFS", "AsyncLoonFS"):
+    generated_mapping = f'    "{client_name}": ".client",\n'
+    assert source.count(generated_mapping) == 1, f"generated server.py {client_name} mapping not found exactly once"
+    source = source.replace(generated_mapping, f'    "{client_name}": ".transfers",\n')
 for anchor, insertion, label in (
-    ('    "AsyncLoonFS": ".client",\n', '    "ApiError": ".core.api_error",\n', "ApiError mapping"),
+    ('    "AsyncLoonFS": ".transfers",\n', '    "ApiError": ".core.api_error",\n    "AsyncDownloadStream": ".transfers",\n', "async transfer and ApiError mappings"),
     ('    "FileRevision": ".types",\n', '    "DownloadResult": ".transfers",\n    "DownloadStream": ".transfers",\n', "DownloadResult mapping"),
     ('    "FileRevision": ".types",\n', '    "PreparedContent": ".transfers",\n', "PreparedContent mapping"),
 ):
     assert source.count(anchor) == 1, f"generated server.py anchor for {label} not found exactly once"
     source = source.replace(anchor, insertion + anchor)
 for anchor, insertion, label in (
-    ('    "AsyncLoonFS",\n', '    "ApiError",\n', "ApiError __all__ entry"),
+    ('    "AsyncLoonFS",\n', '    "ApiError",\n    "AsyncDownloadStream",\n', "async transfer and ApiError __all__ entries"),
     ('    "FileRevision",\n', '    "DownloadResult",\n    "DownloadStream",\n', "DownloadResult __all__ entry"),
     ('    "FileRevision",\n', '    "PreparedContent",\n', "PreparedContent __all__ entry"),
 ):

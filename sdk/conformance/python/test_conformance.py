@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -22,6 +23,7 @@ import pytest
 import uvicorn
 from loonfs.server import (
     ActorId,
+    AsyncLoonFS,
     BadRequestError,
     CreateUploadBody_DirectMultipart,
     CreateUploadBody_DirectPut,
@@ -1752,6 +1754,45 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     # Content ids are random per upload and the helper may choose a different
     # checksum algorithm; the comparable content fact is the size.
     assert helper_read.content_ref.size_bytes == first_content_ref.size_bytes
+
+
+def test_async_upload_download(cases: dict[str, ConformanceCase]) -> None:
+    request, expected = _decode(
+        cases["upload_multipart"], MultipartRequest, MultipartExpected
+    )
+    namespace_id = request.namespace_id + "-python-async"
+    payload = _byte_pattern(request.content_pattern)
+
+    async def transfer() -> None:
+        async with httpx.AsyncClient() as http:
+            client = AsyncLoonFS(
+                base_url=_required_environment("LOONFS_CONFORMANCE_URL"),
+                token=_required_environment("LOONFS_CONFORMANCE_TOKEN"),
+                actor_id=request.actor_id,
+                httpx_client=http,
+            )
+            await client.namespaces.create(namespace_id=namespace_id)
+            committed = await client.files.upload(
+                namespace_id, path=request.path, content=payload
+            )
+            assert committed.commit_id.startswith("c_") and len(committed.commit_id) == 34
+            assert committed.committed_by == request.actor_id
+            assert committed.committed_seq == expected.committed_seq
+            downloaded = await client.files.download(namespace_id, path=request.path)
+            stat = _file_entry(
+                await client.files.retrieve(namespace_id, path=request.path)
+            )
+            assert downloaded.namespace_id == namespace_id
+            assert downloaded.path == request.path
+            assert downloaded.revision_no == stat.revision_no
+            assert downloaded.content == payload
+            assert downloaded.content_ref == stat.content_ref
+            assert downloaded.content_ref.size_bytes == expected.size_bytes
+            assert downloaded.content_ref.checksum == _checksum(
+                downloaded.content_ref.checksum.algorithm, payload
+            )
+
+    asyncio.run(transfer())
 
 
 def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> None:
