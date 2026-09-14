@@ -2075,7 +2075,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     }));
     context.after(() => authorizedProxy.close());
     const authorizedBase = `${authorizedProxy.baseUrl}/v0/namespace-aliases/${encodeURIComponent(request.namespace_alias)}`;
-    const stamped = await proxyJson<LoonFS.CommitResponse>(`${authorizedBase}/commits`, {
+    const stamped = await proxyJson<LoonFS.Commit>(`${authorizedBase}/commits`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(namespaceAliasDirectoryCommit(

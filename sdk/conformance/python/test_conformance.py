@@ -1510,7 +1510,7 @@ def test_proxy(
                     }],
                 },
             )
-            stamped = CommitResponse(
+            stamped = Commit(
                 **_proxy_response_json(stamped_response, "proxy stamped commit")
             )
             assert stamped.committed_by == expected.stamped_committed_by
