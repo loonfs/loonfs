@@ -2,7 +2,7 @@
 
 use crate::config::absolute_env_path;
 use loonfs_api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
-use loonfs_api::{Checksum, ChecksumAlgorithm, CommitId, UploadId};
+use loonfs_api::{ActorId, Checksum, ChecksumAlgorithm, CommitId, UploadId};
 use loonfs_client::{MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -28,6 +28,7 @@ enum UploadProgress {
         multipart: Option<MultipartUploadResume>,
     },
     Prepared {
+        actor_id: ActorId,
         request: Box<CommitRequest>,
     },
 }
@@ -142,8 +143,8 @@ impl UploadJournal {
                 if requested != recorded.options {
                     return Err(journal_error(&path, "PUT options changed; resume with the original options or use a new --commit-id for another attempt"));
                 }
-                if let UploadProgress::Prepared { request } = &recorded.progress {
-                    if !request_matches_options(request, &recorded.options) {
+                if let UploadProgress::Prepared { request, actor_id } = &recorded.progress {
+                    if !request_matches_options(request, actor_id, &recorded.options) {
                         return Err(journal_error(
                             &path,
                             "prepared request does not match its PUT options",
@@ -191,7 +192,7 @@ impl UploadJournal {
     /// A saved request is replayed directly, even after its upload session expires.
     pub(crate) fn prepared_request(&self) -> Option<CommitRequest> {
         match &self.lock().progress {
-            UploadProgress::Prepared { request } => Some((**request).clone()),
+            UploadProgress::Prepared { request, .. } => Some((**request).clone()),
             UploadProgress::Uploading { .. } => None,
         }
     }
@@ -283,18 +284,22 @@ impl PutFileJournal for UploadJournal {
         })
     }
 
-    fn commit_prepared(&self, request: &CommitRequest) -> io::Result<()> {
-        if !request_matches_options(request, &self.options()) {
+    fn commit_prepared(&self, request: &CommitRequest, actor_id: &ActorId) -> io::Result<()> {
+        if !request_matches_options(request, actor_id, &self.options()) {
             return Err(self.error("prepared request does not match its PUT options"));
         }
         self.update(|progress| match progress {
             UploadProgress::Uploading { .. } => {
                 *progress = UploadProgress::Prepared {
+                    actor_id: actor_id.clone(),
                     request: Box::new(request.clone()),
                 };
                 Ok(())
             }
-            UploadProgress::Prepared { request: saved } if **saved == *request => Ok(()),
+            UploadProgress::Prepared {
+                request: saved,
+                actor_id: saved_actor,
+            } if **saved == *request && saved_actor == actor_id => Ok(()),
             UploadProgress::Prepared { .. } => {
                 Err(self.error("the prepared commit request cannot change"))
             }
@@ -302,9 +307,13 @@ impl PutFileJournal for UploadJournal {
     }
 }
 
-fn request_matches_options(request: &CommitRequest, options: &PutFileOptions) -> bool {
+fn request_matches_options(
+    request: &CommitRequest,
+    actor_id: &ActorId,
+    options: &PutFileOptions,
+) -> bool {
     options.commit.commit_id.as_ref() == Some(&request.commit_id)
-        && options.commit.actor_id == request.actor_id
+        && &options.commit.actor_id == actor_id
         && options.commit.message == request.message
         && options.commit.preconditions == request.preconditions
         && matches!(request.operations.as_slice(), [FilesystemOperation::PutFile {
@@ -388,7 +397,6 @@ mod tests {
         let options = journal.options();
         CommitRequest::single(
             options.commit.commit_id.expect("chosen ID"),
-            options.commit.actor_id,
             options.commit.message,
             FilesystemOperation::PutFile {
                 path: loonfs_api::AbsolutePath::parse("/file").expect("path"),
@@ -424,9 +432,12 @@ mod tests {
         let expected = request(&next);
         let mut wrong_options = expected.clone();
         wrong_options.message = Some("different intent".to_owned());
-        assert!(next.commit_prepared(&wrong_options).is_err());
+        assert!(next
+            .commit_prepared(&wrong_options, &next.options().commit.actor_id)
+            .is_err());
         assert!(next.prepared_request().is_none());
-        next.commit_prepared(&expected).expect("save commit");
+        next.commit_prepared(&expected, &next.options().commit.actor_id)
+            .expect("save commit");
         drop(next);
         let replay = open(&path);
         assert!(replay.resume().is_none());
@@ -434,7 +445,9 @@ mod tests {
         assert!(replay.part_completed(&part(3)).is_err());
         let mut changed = expected;
         changed.commit_id = CommitId::generate();
-        assert!(replay.commit_prepared(&changed).is_err());
+        assert!(replay
+            .commit_prepared(&changed, &replay.options().commit.actor_id)
+            .is_err());
         replay.acknowledge().expect("acknowledged");
         assert!(!path.exists());
         replay.acknowledge().expect("already removed");
@@ -449,7 +462,9 @@ mod tests {
         let journal =
             UploadJournal::open_at(path.clone(), source(1024), &options).expect("journal");
         let expected = request(&journal);
-        journal.commit_prepared(&expected).expect("record");
+        journal
+            .commit_prepared(&expected, &journal.options().commit.actor_id)
+            .expect("record");
         journal.acknowledge().expect("acknowledged");
         drop(journal);
         assert!(path.exists());
@@ -525,7 +540,9 @@ mod tests {
         std::fs::rename(&parent, &saved).expect("move directory");
         std::fs::write(&parent, b"blocked").expect("block writes");
         assert!(journal.part_completed(&part(2)).is_err());
-        assert!(journal.commit_prepared(&request(&journal)).is_err());
+        assert!(journal
+            .commit_prepared(&request(&journal), &journal.options().commit.actor_id)
+            .is_err());
         assert_eq!(
             journal.resume().expect("original state").parts,
             vec![part(1)]

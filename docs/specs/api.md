@@ -210,6 +210,7 @@ depends on where the input came from:
 | Input source | `param` value |
 | --- | --- |
 | JSON request body | JSON Pointer |
+| Request header | Header name |
 | Query parameter | Parameter name |
 | Path parameter | Parameter name |
 | CLI-local input | Flag or argument spelling |
@@ -334,6 +335,8 @@ conditional-request failures.
 
 One SDK serves both backends; deployment mode never forks the client
 codebase.
+
+Generated clients accept a default actor at construction and a per-request header override.
 
 Generated SDKs use schema names as public type names. A resource body uses the resource name, such as `Checkpoint` or `UploadSession`. A response envelope uses `<Verb><Noun>Response`, such as `ListCheckpointsResponse`. The request and response schemas of an operation share its verb, as in `CreateDownloadRequest` for `create_download`. Namespace-owned resources include `namespace_id`.
 
@@ -573,16 +576,16 @@ Preconditions are admission conditions, stored only through the fingerprint in W
 
 ### Actor attribution
 
-Every commit, namespace creation, and namespace fork includes a required
-`actor_id` as a JSON string. The application supplies
-a stable opaque identifier with the identity scope it needs. LoonFS preserves
+Every commit, namespace creation, and namespace fork requires the
+`Loonfs-Actor` header. The application supplies a stable opaque identifier
+of 1 to 256 visible ASCII characters (0x21 through 0x7E), with the identity scope it needs. LoonFS preserves
 it on the commit and the metadata created by that commit. Namespace creation
 and forking record it as `created_by` on the namespace. LoonFS does not
 authenticate the actor or resolve profile information. The application must
 authenticate the user and authorize the operation before sending the request.
 Use a stable internal ID, not an email address or display name.
 
-The `actor_id` is part of the semantic commit fingerprint. Reusing a
+The header's value is the semantic commit fingerprint's `actor_id`. Reusing a
 `commit_id` with a different `actor_id` fails with
 `commit_id_reuse_conflict`. The commit timestamp is not part of the
 fingerprint.
@@ -749,6 +752,18 @@ Everything else, `GET /v0/capabilities` included, requires the token. The
 generated `openapi.json` states this as a global `bearer_auth` requirement
 with those two operations overriding it.
 
+The `Loonfs-Actor` request header is required by `create_commit`,
+`create_namespace`, and `fork_namespace`. Other operations ignore it. Its value
+is an actor id containing 1 to 256 visible ASCII characters (0x21 through 0x7E).
+A future operation that records attribution reads the same header. Header names
+are case-insensitive; HTTP/2 sends them lowercase. Missing required headers answer
+`invalid_request` with `param` `Loonfs-Actor` and message
+`missing required header Loonfs-Actor`. Malformed values answer `invalid_request`
+with the same `param` and the actor validator's reason. Authorization is checked
+first. Retries and replayed requests must carry the same header value, so saved
+requests must keep the actor beside the body. Request headers reach access logs,
+so the value must be an opaque identifier, never an email or a display name.
+
 Request bodies reject unknown fields, at every level of nesting, with 400
 `invalid_request`. Most request fields are optional and several of those are
 preconditions, so a field the server does not recognize cannot be ignored: a
@@ -786,7 +801,7 @@ The table below lists the retry class for every v0 operation.
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`; requires `actor_id` |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`; requires the `Loonfs-Actor` header |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
@@ -799,7 +814,7 @@ The table below lists the retry class for every v0 operation.
 | Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` with body `path`, optional `revision_no`, and optional `snapshot_id` (`snapshot_id` cannot be combined with `revision_no`) |
 | Start a download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
-| Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits` |
+| Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits`; requires the `Loonfs-Actor` header |
 | Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads`; returns the open session |
 | Upload content through the server | `put_upload_content` | `idempotent` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content`; returns the open session with the staged `content_ref` |
 | Create multipart upload URLs | `sign_upload_parts` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
@@ -811,7 +826,7 @@ The table below lists the retry class for every v0 operation.
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling |
 | Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin; a missing id returns `snapshot_not_found`) |
-| Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`; requires `actor_id` |
+| Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`; requires the `Loonfs-Actor` header |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `filesystem.namespaces.delete`; the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
@@ -1387,10 +1402,11 @@ in-memory proof's binding and deadline. A missing or expired proof answers
 expired token that names the put's ref also answers `content_not_prepared`;
 tokens naming other refs are ignored.
 
+`Loonfs-Actor: document-importer`
+
 ```json
 {
   "commit_id": "commit-a",
-  "actor_id": "document-importer",
   "content_tokens": [
     {
       "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
@@ -1417,10 +1433,11 @@ interaction.
 Namespace creation uses the namespace id directly. v0 has no namespace aliases
 or separate display names. Representative request:
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
-  "namespace_id": "demo",
-  "actor_id": "usr_8f3c"
+  "namespace_id": "demo"
 }
 ```
 
@@ -1825,8 +1842,9 @@ retained. A directory returns `path_conflict`, an unknown inode returns
 
 ### 6.8 `POST /commits`
 
-This is the binding for the commit model in section 5.1: one `commit_id`, one
-required `actor_id`, an optional `message`, optional `preconditions`, and `operations` — an ordered,
+This is the binding for the commit model in section 5.1. The `Loonfs-Actor`
+header is required. The body contains one `commit_id`, an optional `message`,
+optional `preconditions`, and `operations` — an ordered,
 non-empty array of path operations. An empty array is `invalid_request`.
 
 The root path `/` is readable but never a mutation target. An operation that
@@ -1839,10 +1857,11 @@ first.
 
 Representative request:
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "actor_id": "usr_8f3c",
   "preconditions": [
     { "kind": "namespace_head", "expected_head_seq": 42 },
     { "kind": "file_revision", "inode_id": "ino_7", "expected_revision_no": 3 }
@@ -1868,10 +1887,11 @@ every operation commits or none does. Operation `k` sees authoritative
 namespace state plus everything operations `0..k` do, so one request can
 create a directory and write into it:
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
   "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",
-  "actor_id": "usr_8f3c",
   "message": "import the January report",
   "content_tokens": [
     {
@@ -1947,10 +1967,11 @@ Five operations use inode IDs instead of paths. They let clients act on an entry
 
 `move_by_inode` and `delete_by_inode` require `expected_binding_generation` (section 5.1). Their destination, replacement, and recursive-delete behavior matches `move_path` and `delete_path`. The namespace root cannot be moved or deleted.
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
   "commit_id": "c_1b2c3d4e5f60718293a4b5c6d7e8f901",
-  "actor_id": "usr_8f3c",
   "operations": [
     {
       "kind": "create_directory_by_inode",
@@ -1998,20 +2019,22 @@ Representative response:
 
 The same endpoint also accepts path directory creation:
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
   "commit_id": "c_8b7d4ef098ec4c1fbde15edbe02f9a64",
-  "actor_id": "usr_8f3c",
   "operations": [{ "kind": "create_directory", "path": "/docs" }]
 }
 ```
 
 and path revision restore:
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
   "commit_id": "c_8f9a1b2c3d4e4f50a6b7c8d9e0f12345",
-  "actor_id": "usr_8f3c",
   "operations": [
     {
       "kind": "restore_revision",
@@ -2028,10 +2051,11 @@ come back with it. The request names both halves of the recovery handle the
 delete reported (and the change feed carries): the inode id and the
 deletion's committed sequence.
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
   "commit_id": "c_5d6e7f8091a2b3c4d5e6f70812345678",
-  "actor_id": "usr_8f3c",
   "operations": [
     {
       "kind": "undelete",
@@ -2057,10 +2081,11 @@ Only the root of a deletion can be undeleted, and `deletion_seq` must match the 
 and `update_attributes`, which writes and removes attributes on the inode a
 path resolves to:
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
   "commit_id": "c_6e7f8091a2b3c4d5e6f7081234567890",
-  "actor_id": "usr_8f3c",
   "operations": [
     {
       "kind": "update_attributes",
@@ -2570,10 +2595,11 @@ a consumer silently skip commits as the namespace catches up.
 
 Representative request:
 
+`Loonfs-Actor: usr_8f3c`
+
 ```json
 {
-  "new_namespace_id": "demo-branch",
-  "actor_id": "usr_8f3c"
+  "new_namespace_id": "demo-branch"
 }
 ```
 
@@ -2600,7 +2626,7 @@ snapshots and ids owned by another namespace or checkpoint kind return
 `snapshot_not_found`. Expired snapshots and snapshots deleted during fork
 verification return `snapshot_gone`.
 Forking does not extend the snapshot, and later deletion does not affect the fork.
-The fork records the request's `actor_id` as `created_by`, independently of the source's creator.
+The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator.
 Namespace creation and forking produce no change-feed event.
 
 The new namespace shares the source namespace's content store and starts with

@@ -1688,7 +1688,7 @@ mod tests {
         let actors = [
             crate::ActorId::parse("auth0|x").expect("actor id"),
             crate::ActorId::parse("x".repeat(256)).expect("256-byte actor id"),
-            crate::ActorId::parse("雪-actor").expect("unicode actor id"),
+            crate::ActorId::parse("external|actor").expect("external actor id"),
         ];
         let baseline = rows(actors[0].clone());
         for actor in actors.into_iter().skip(1) {

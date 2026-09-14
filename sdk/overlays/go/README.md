@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 
+	loonfs "github.com/loonfs/loonfs-sdk-go"
 	"github.com/loonfs/loonfs-sdk-go/files"
 	"github.com/loonfs/loonfs-sdk-go/option"
 	"github.com/loonfs/loonfs-sdk-go/server"
@@ -30,7 +31,7 @@ func main() {
 	loon := server.NewClient(
 		option.WithBaseURL(os.Getenv("LOONFS_URL")),
 		option.WithToken(os.Getenv("LOONFS_AUTH_TOKEN")),
-		option.WithActorID("example-user"),
+		option.WithActorID(loonfs.String("example-user")),
 	)
 
 	capabilities, err := loon.Capabilities.Retrieve(context.Background())
@@ -52,7 +53,8 @@ func main() {
 ```
 
 Publishing helpers return the commit, including its events. Pass `CommitID`
-explicitly if you may retry. A call's `ActorID` overrides the client default.
+explicitly if you may retry. Use `option.WithHTTPHeader` with `Loonfs-Actor`
+to override the client default for a request.
 
 `client.Files.DownloadStream(ctx, input)` opens a live, verified `io.ReadCloser`
 in its `Content` field. Consume it through successful EOF to verify size and
@@ -78,7 +80,8 @@ generated API reference.
 Use the `proxy` package in your backend to forward client requests while
 keeping the LoonFS credential on the server.
 
-Set `Authorize` to check each request and replace `actor_id` in commit bodies.
+Set `Authorize` to check each request and set `Loonfs-Actor` on forwarded
+requests. The proxy always removes the browser's actor header.
 Here, `authorizedActor` checks the application's session and namespace access.
 
 ```go

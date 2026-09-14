@@ -23,7 +23,6 @@ export interface UploadInput {
     namespace_id: LoonFS.NamespaceId;
     path: LoonFS.AbsolutePath;
     content: Uint8Array;
-    actor_id?: LoonFS.ActorId;
     commit_id?: LoonFS.CommitId;
     message?: string;
     behavior?: LoonFS.DestinationBehavior;
@@ -76,8 +75,6 @@ export declare namespace LoonFSClient {
     export type Options = Omit<GeneratedLoonFSClient.Options, "environment"> & {
         /** Base URL of the LoonFS server. */
         baseUrl: core.Supplier<string>;
-        /** Default `actor_id` for the transfer helpers that publish. */
-        actorId?: string;
     };
     export interface RequestOptions extends GeneratedLoonFSClient.RequestOptions {}
 }
@@ -186,14 +183,9 @@ export class FilesClient extends GeneratedFilesClient {
         return this.root.commits.create(request, requestOptions);
     }
 
-    private publicationIds(input: Pick<UploadInput, "actor_id" | "commit_id">): {
-        actor_id: LoonFS.ActorId;
+    private publicationIds(input: Pick<UploadInput, "commit_id">): {
         commit_id: LoonFS.CommitId;
     } {
-        const actor_id = input.actor_id ?? this.root.actorId;
-        if (!actor_id) {
-            throw new Error("actor_id is required: pass it or set the client default");
-        }
         let commit_id = input.commit_id;
         if (commit_id === undefined) {
             if (typeof globalThis.crypto?.randomUUID !== "function") {
@@ -201,7 +193,7 @@ export class FilesClient extends GeneratedFilesClient {
             }
             commit_id = `c_${globalThis.crypto.randomUUID().replace(/-/g, "")}`;
         }
-        return { actor_id, commit_id };
+        return { commit_id };
     }
 
     /** Opens a verified stream; cancel its reader to release an unfinished download. */
@@ -258,7 +250,6 @@ export class FilesClient extends GeneratedFilesClient {
 /** The generated client with streaming and buffered transfer helpers. */
 export class LoonFSClient extends GeneratedLoonFSClient {
     private _transferFiles: FilesClient | undefined;
-    public readonly actorId?: string;
 
     constructor(options: LoonFSClient.Options) {
         super({
@@ -266,7 +257,6 @@ export class LoonFSClient extends GeneratedLoonFSClient {
             environment: options.baseUrl,
             fetch: streamingFetch(options.fetch ?? globalThis.fetch.bind(globalThis)),
         });
-        this.actorId = options.actorId;
     }
 
     public override get files(): FilesClient {

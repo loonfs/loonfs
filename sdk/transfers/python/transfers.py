@@ -17,7 +17,6 @@ from .files.client import AsyncFilesClient as _GeneratedAsyncFilesClient
 from .files.client import FilesClient as _GeneratedFilesClient
 from .core.request_options import RequestOptions
 from .types import (
-    ActorId,
     Commit,
     CommitId,
     InodeId,
@@ -213,7 +212,6 @@ class FilesClient(_GeneratedFilesClient):
         *,
         path: str,
         content: bytes,
-        actor_id: ActorId | None = None,
         commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -228,7 +226,6 @@ class FilesClient(_GeneratedFilesClient):
             path=path,
             content=io.BytesIO(content),
             size_bytes=len(content),
-            actor_id=actor_id,
             commit_id=commit_id,
             message=message,
             behavior=behavior,
@@ -245,7 +242,6 @@ class FilesClient(_GeneratedFilesClient):
         path: str,
         content: typing.BinaryIO,
         size_bytes: int | None = None,
-        actor_id: ActorId | None = None,
         commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -255,7 +251,7 @@ class FilesClient(_GeneratedFilesClient):
         request_options: RequestOptions | None = None,
     ) -> Commit:
         """Pass commit_id explicitly if you may retry. The caller owns the source."""
-        actor_id, commit_id = self._publication_ids(actor_id, commit_id)
+        commit_id = self._publication_ids(commit_id)
         prepared = self.prepare_stream(
             namespace_id,
             content=content,
@@ -267,7 +263,6 @@ class FilesClient(_GeneratedFilesClient):
             namespace_id,
             path=path,
             prepared=prepared,
-            actor_id=actor_id,
             commit_id=commit_id,
             message=message,
             behavior=behavior,
@@ -373,7 +368,6 @@ class FilesClient(_GeneratedFilesClient):
         *,
         path: str,
         prepared: PreparedContent,
-        actor_id: ActorId | None = None,
         commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -382,7 +376,7 @@ class FilesClient(_GeneratedFilesClient):
         request_options: RequestOptions | None = None,
     ) -> Commit:
         """Pass commit_id explicitly if you may retry. Reuse identical inputs."""
-        actor_id, commit_id = self._publication_ids(actor_id, commit_id)
+        commit_id = self._publication_ids(commit_id)
         operation_arguments = {"path": path, "content_ref": prepared.content_ref}
         if behavior is not None:
             operation_arguments["behavior"] = behavior
@@ -392,7 +386,6 @@ class FilesClient(_GeneratedFilesClient):
             operation_arguments["expected_revision_no"] = expected_revision_no
         operation = FilesystemOperation_PutFile(**operation_arguments)
         commit_arguments = {
-            "actor_id": actor_id,
             "commit_id": commit_id,
             "operations": [operation],
             "content_tokens": [prepared.content_token]
@@ -405,15 +398,10 @@ class FilesClient(_GeneratedFilesClient):
             namespace_id, request_options=request_options, **commit_arguments
         )
 
-    def _publication_ids(
-        self, actor_id: ActorId | None, commit_id: CommitId | None
-    ) -> tuple[ActorId, CommitId]:
-        actor_id = actor_id if actor_id is not None else self._root._actor_id
-        if not actor_id:
-            raise ValueError("actor_id is required: pass it or set the client default")
+    def _publication_ids(self, commit_id: CommitId | None) -> CommitId:
         if commit_id is None:
             commit_id = "c_" + uuid.uuid4().hex
-        return actor_id, commit_id
+        return commit_id
 
     def download_stream(
         self,
@@ -511,9 +499,8 @@ class FilesClient(_GeneratedFilesClient):
 class LoonFS(_GeneratedLoonFS):
     """The generated client with ``files.upload`` and ``files.download``."""
 
-    def __init__(self, *, actor_id: str | None = None, **kwargs: typing.Any) -> None:
+    def __init__(self, **kwargs: typing.Any) -> None:
         super().__init__(**kwargs)
-        self._actor_id = actor_id
         self._transfer_files: FilesClient | None = None
 
     @property
@@ -608,7 +595,6 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         *,
         path: str,
         content: bytes,
-        actor_id: ActorId | None = None,
         commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -623,7 +609,6 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
             path=path,
             content=io.BytesIO(content),
             size_bytes=len(content),
-            actor_id=actor_id,
             commit_id=commit_id,
             message=message,
             behavior=behavior,
@@ -640,7 +625,6 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         path: str,
         content: typing.AsyncIterator[bytes] | typing.BinaryIO,
         size_bytes: int | None = None,
-        actor_id: ActorId | None = None,
         commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -650,7 +634,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         request_options: RequestOptions | None = None,
     ) -> Commit:
         """Pass commit_id explicitly if you may retry. The caller owns the source."""
-        actor_id, commit_id = self._publication_ids(actor_id, commit_id)
+        commit_id = self._publication_ids(commit_id)
         prepared = await self.prepare_stream(
             namespace_id,
             content=content,
@@ -662,7 +646,6 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
             namespace_id,
             path=path,
             prepared=prepared,
-            actor_id=actor_id,
             commit_id=commit_id,
             message=message,
             behavior=behavior,
@@ -772,7 +755,6 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         *,
         path: str,
         prepared: PreparedContent,
-        actor_id: ActorId | None = None,
         commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -781,7 +763,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         request_options: RequestOptions | None = None,
     ) -> Commit:
         """Pass commit_id explicitly if you may retry. Reuse identical inputs."""
-        actor_id, commit_id = self._publication_ids(actor_id, commit_id)
+        commit_id = self._publication_ids(commit_id)
         operation_arguments = {"path": path, "content_ref": prepared.content_ref}
         if behavior is not None:
             operation_arguments["behavior"] = behavior
@@ -791,7 +773,6 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
             operation_arguments["expected_revision_no"] = expected_revision_no
         operation = FilesystemOperation_PutFile(**operation_arguments)
         commit_arguments = {
-            "actor_id": actor_id,
             "commit_id": commit_id,
             "operations": [operation],
             "content_tokens": [prepared.content_token]
@@ -804,15 +785,10 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
             namespace_id, request_options=request_options, **commit_arguments
         )
 
-    def _publication_ids(
-        self, actor_id: ActorId | None, commit_id: CommitId | None
-    ) -> tuple[ActorId, CommitId]:
-        actor_id = actor_id if actor_id is not None else self._root._actor_id
-        if not actor_id:
-            raise ValueError("actor_id is required: pass it or set the client default")
+    def _publication_ids(self, commit_id: CommitId | None) -> CommitId:
         if commit_id is None:
             commit_id = "c_" + uuid.uuid4().hex
-        return actor_id, commit_id
+        return commit_id
 
     async def download_stream(
         self,
@@ -911,9 +887,8 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
 
 
 class AsyncLoonFS(_GeneratedAsyncLoonFS):
-    def __init__(self, *, actor_id: str | None = None, **kwargs: typing.Any) -> None:
+    def __init__(self, **kwargs: typing.Any) -> None:
         super().__init__(**kwargs)
-        self._actor_id = actor_id
         self._transfer_files: AsyncFilesClient | None = None
 
     @property

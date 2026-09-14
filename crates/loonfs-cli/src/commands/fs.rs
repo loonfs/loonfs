@@ -1044,7 +1044,7 @@ pub(super) async fn put_payload(
             progress.phase("committing");
             let committed = context
                 .target
-                .replay_file_commit(context.namespace(), &request)
+                .replay_file_commit(context.namespace(), &request, &options.commit.actor_id)
                 .await?;
             acknowledge_committed_upload(journal, &committed)?;
             return Ok(committed);

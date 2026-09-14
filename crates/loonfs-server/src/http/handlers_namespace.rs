@@ -2,6 +2,7 @@
 //! handlers.
 
 use super::error::ApiResponseError;
+use super::extractors::ActorHeader;
 use super::query_params::{parse_path_id, parse_public_ordinal, resolve_page_limit};
 use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -187,6 +188,7 @@ pub(super) async fn get_capabilities(
         post,
         operation_id = "create_namespace",
         extensions(
+            ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-retries" = json!({"disabled": true})),
         ),
@@ -207,15 +209,13 @@ pub(super) async fn get_capabilities(
 )]
 pub(super) async fn create_namespace(
     State(state): State<AppState>,
+    ActorHeader(actor_id): ActorHeader,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
     let namespace = state
         .writer
-        .create_namespace(
-            &request.namespace_id,
-            CreateNamespaceOptions::new(request.actor_id),
-        )
+        .create_namespace(&request.namespace_id, CreateNamespaceOptions::new(actor_id))
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(namespace))
@@ -347,6 +347,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         post,
         operation_id = "fork_namespace",
         extensions(
+            ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-retries" = json!({"disabled": true})),
         ),
@@ -369,6 +370,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
 )]
 pub(super) async fn fork_namespace(
     State(state): State<AppState>,
+    ActorHeader(actor_id): ActorHeader,
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
@@ -379,7 +381,7 @@ pub(super) async fn fork_namespace(
             &source_namespace_id,
             &request.new_namespace_id,
             loonfs::ForkNamespaceOptions {
-                actor_id: request.actor_id,
+                actor_id,
                 snapshot_id: request.snapshot_id,
             },
         )

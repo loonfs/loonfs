@@ -497,7 +497,7 @@ def harness() -> Iterator[Harness]:
     )
     try:
         yield Harness(
-            client=LoonFS(base_url=base_url, token=token),
+            client=LoonFS(base_url=base_url, token=token, actor_id="conformance"),
             unauthenticated=LoonFS(
                 base_url=base_url,
                 token="",
@@ -513,10 +513,14 @@ def proxy_harness(
     cases: dict[str, ConformanceCase],
 ) -> Iterator[str]:
     request, _ = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
+    async def authorize(_scope: dict[str, Any], _context: ProxyRouteContext) -> ProxyAuthorization:
+        return ProxyAuthorization(actor_id=request.actor_id)
+
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),
         _required_environment("LOONFS_CONFORMANCE_TOKEN"),
         {request.namespace_alias: request.namespace_id},
+        authorize=authorize,
     )
     with _serve_asgi(app, "loonfs-python-proxy") as base_url:
         yield base_url
@@ -542,7 +546,7 @@ def _apply(
         extra["preconditions"] = preconditions
     return client.commits.create(
         namespace_id,
-        actor_id=actor_id,
+        request_options={"additional_headers": {"Loonfs-Actor": actor_id}},
         commit_id=commit_id,
         operations=[operation],
         **extra,
@@ -646,7 +650,6 @@ def _proxy_create_commit(
     content_token: JsonObject | None = None,
 ) -> Commit:
     body: JsonObject = {
-        "actor_id": request.actor_id,
         "commit_id": commit_id,
         "operations": [operation],
     }
@@ -655,6 +658,7 @@ def _proxy_create_commit(
     response = client.post(
         f"/v0/namespace-aliases/{request.namespace_alias}/commits",
         json=body,
+        headers={"Loonfs-Actor": request.actor_id},
     )
     return Commit(**_proxy_response_json(response, "proxy commit response"))
 
@@ -725,7 +729,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
     request, expected = _decode(
         cases["commit_replay"], CommitReplayRequest, CommitReplayExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     first = _apply(
         harness.client,
         request.namespace_id,
@@ -781,7 +785,7 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
     request, expected = _decode(
         cases["pagination"], PaginationRequest, PaginationExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     _apply(
         harness.client,
         request.namespace_id,
@@ -846,7 +850,7 @@ def test_children_by_inode(
     request, expected = _decode(
         cases["children_by_inode"], ChildrenByInodeRequest, ChildrenByInodeExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     _apply(
         harness.client,
         request.namespace_id,
@@ -947,7 +951,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
     def child_path(name: str) -> str:
         return f"{request.directory}/{name}"
 
-    client.namespaces.create(namespace_id=namespace_id, actor_id=request.actor_id)
+    client.namespaces.create(namespace_id=namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     _apply(
         client,
         namespace_id,
@@ -968,7 +972,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         namespace_id,
         path=child_path(request.path_file_name),
         content=request.content_utf8.encode(),
-        actor_id=request.actor_id,
+        request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}},
         commit_id="conf-inode-mutations-path-file",
     )
 
@@ -1127,7 +1131,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     def child_path(name: str) -> str:
         return f"{request.directory}/{name}"
 
-    client.namespaces.create(namespace_id=namespace_id, actor_id=request.actor_id)
+    client.namespaces.create(namespace_id=namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     _apply(
         client,
         namespace_id,
@@ -1139,14 +1143,14 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         namespace_id,
         path=child_path(request.replaced_file_name),
         content=request.captured_content_utf8.encode(),
-        actor_id=request.actor_id,
+        request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}},
         commit_id="conf-snapshots-create-replaced",
     )
     client.files.upload(
         namespace_id,
         path=child_path(request.deleted_file_name),
         content=request.deleted_content_utf8.encode(),
-        actor_id=request.actor_id,
+        request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}},
         commit_id="conf-snapshots-create-deleted",
     )
 
@@ -1164,7 +1168,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         namespace_id,
         path=child_path(request.replaced_file_name),
         content=request.current_content_utf8.encode(),
-        actor_id=request.actor_id,
+        request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}},
         commit_id="conf-snapshots-replace-file",
         behavior="replace",
     )
@@ -1172,7 +1176,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         namespace_id,
         path=child_path(request.added_file_name),
         content=request.added_content_utf8.encode(),
-        actor_id=request.actor_id,
+        request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}},
         commit_id="conf-snapshots-add-file",
     )
     _apply(
@@ -1323,7 +1327,7 @@ def test_proxy(
     proxy_harness: str,
 ) -> None:
     request, expected = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     payload = request.content_utf8.encode()
     namespace_alias_base = f"/v0/namespace-aliases/{request.namespace_alias}"
 
@@ -1503,8 +1507,8 @@ def test_proxy(
         with httpx.Client(base_url=base_url) as client:
             stamped_response = client.post(
                 f"{namespace_alias_base}/commits",
+                headers={"Loonfs-Actor": request.authorize.browser_actor_id},
                 json={
-                    "actor_id": request.authorize.browser_actor_id,
                     "commit_id": request.authorize.commit_id,
                     "operations": [{
                         "kind": "create_directory",
@@ -1536,18 +1540,12 @@ def test_proxy(
             assert refused.status_code == expected.refused_status
             assert refused.headers["content-type"] == "application/json"
             assert refused.json() == refusal_body
-            invalid = client.post(f"{namespace_alias_base}/commits", json="nope")
-            assert invalid.status_code == 400
-            assert invalid.headers["content-type"] == "application/json"
-            assert invalid.json() == {
-                "code": "invalid_request",
-                "message": "commit body must be a JSON object",
-            }
+
 
 
 def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(cases["changes"], ChangesRequest, ChangesExpected)
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     committed = _apply(
         harness.client,
         request.namespace_id,
@@ -1575,7 +1573,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     request, expected = _decode(
         cases["upload_direct_put"], DirectPutRequest, DirectPutExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     payload = request.content_utf8.encode()
     begin = harness.client.uploads.create(
         request.namespace_id,
@@ -1627,7 +1625,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     request, expected = _decode(
         cases["upload_multipart"], MultipartRequest, MultipartExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     payload = _byte_pattern(request.content_pattern)
     begin = harness.client.uploads.create(
         request.namespace_id,
@@ -1772,7 +1770,7 @@ def test_async_upload_download(cases: dict[str, ConformanceCase]) -> None:
                 actor_id=request.actor_id,
                 httpx_client=http,
             )
-            await client.namespaces.create(namespace_id=namespace_id, actor_id=request.actor_id)
+            await client.namespaces.create(namespace_id=namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
             committed = await client.files.upload(
                 namespace_id, path=request.path, content=payload
             )
@@ -1798,7 +1796,7 @@ def test_async_upload_download(cases: dict[str, ConformanceCase]) -> None:
 
 def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(cases["upload_abort"], AbortRequest, AbortExpected)
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     begin = harness.client.uploads.create(
         request.namespace_id,
         request=CreateUploadBody_ServiceProxied(),
@@ -1822,13 +1820,13 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(
         cases["download"], DownloadRequest, DownloadExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     payload = request.content_utf8.encode()
     committed = harness.client.files.upload(
         request.namespace_id,
         path=request.path,
         content=payload,
-        actor_id=request.actor_id,
+        request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}},
         commit_id=request.commit_id,
     )
     assert committed.committed_seq == expected.committed_seq
@@ -1856,15 +1854,15 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
 
     client = harness.client
     namespace_id = "conf-python-prepared"
-    client.namespaces.create(namespace_id=namespace_id, actor_id="conformance")
+    client.namespaces.create(namespace_id=namespace_id, request_options={"additional_headers": {"Loonfs-Actor": "conformance"}})
     prepared = client.files.prepare_stream(namespace_id, content=io.BytesIO(b"original bytes"))
     assert isinstance(prepared, PreparedContent)
     inputs = dict(path="/original", prepared=prepared,
-                  actor_id="prepared-user", commit_id="prepared-put")
+                  request_options={"additional_headers": {"Loonfs-Actor": "prepared-user"}}, commit_id="prepared-put")
     with pytest.raises(NotFoundError):
         client.files.retrieve(namespace_id, path="/original")
     first = client.files.upload_prepared(namespace_id, **inputs)
-    _apply(client, namespace_id, "prepared-rename", inputs["actor_id"],
+    _apply(client, namespace_id, "prepared-rename", "prepared-user",
            FilesystemOperation_MovePath(source_path="/original", destination_path="/renamed"))
     replayed = client.files.upload_prepared(namespace_id, **inputs)
     assert replayed.commit_id == first.commit_id
@@ -1889,7 +1887,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     request, expected = _decode(
         cases["end_to_end"], EndToEndRequest, EndToEndExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})
     mkdir = _apply(
         harness.client,
         request.namespace_id,
@@ -1904,7 +1902,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         request.namespace_id,
         path=request.upload_path,
         content=payload,
-        actor_id=request.actor_id,
+        request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}},
         commit_id=request.commit_ids.upload,
     )
     assert upload.committed_seq == expected.upload_committed_seq

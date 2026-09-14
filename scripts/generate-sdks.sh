@@ -122,15 +122,6 @@ source = remove_exact(
     1,
     "WithoutStreamReconnection option",
 )
-source = replace_once(
-    source,
-    "// WithToken sets the 'Authorization: Bearer <token>' request header.\n",
-    "// Default actor_id for the transfer helpers that publish.\n"
-    "func WithActorID(actorID string) *core.ActorIDOption {\n"
-    "\treturn &core.ActorIDOption{ActorID: actorID}\n"
-    "}\n\n"
-    "// WithToken sets the 'Authorization: Bearer <token>' request header.\n",
-)
 option_path.write_text(source)
 
 core_option_path = module_root / "core/request_option.go"
@@ -176,22 +167,6 @@ source = remove_exact(
     "}\n\n",
     1,
     "WithoutStreamReconnectionOption type",
-)
-source = replace_once(
-    source,
-    "type RequestOptions struct {\n",
-    "type RequestOptions struct {\n\tActorID string\n",
-)
-source = replace_once(
-    source,
-    "// TokenOption implements the RequestOption interface.\n",
-    "type ActorIDOption struct {\n"
-    "\tActorID string\n"
-    "}\n\n"
-    "func (a *ActorIDOption) applyRequestOptions(opts *RequestOptions) {\n"
-    "\topts.ActorID = a.ActorID\n"
-    "}\n\n"
-    "// TokenOption implements the RequestOption interface.\n",
 )
 core_option_path.write_text(source)
 

@@ -183,9 +183,9 @@ async fn run_error_contract(harness: &Harness, case: &Case) {
             harness.server_url, request.namespace_id
         ))
         .bearer_auth(AUTH_TOKEN)
+        .header("Loonfs-Actor", "conformance-error")
         .json(&serde_json::json!({
             "commit_id": "conf-error-malformed-body",
-            "actor_id": "conformance-error",
             "operations": [{
                 "kind": "create_directory",
                 "path": "relative",
@@ -260,7 +260,6 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
         .expect("create replay namespace");
     let commit = CommitRequest::single(
         commit_id(&request.commit_id),
-        request.actor_id,
         Some(request.message),
         FilesystemOperation::CreateDirectory {
             path: loonfs_api::AbsolutePath::parse(&request.path).expect("fixture path"),
@@ -270,12 +269,12 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
     .preconditions(request.preconditions);
     let first = harness
         .client
-        .create_commit(&namespace, &commit)
+        .create_commit(&namespace, &commit, &request.actor_id)
         .await
         .expect("first commit");
     let replayed = harness
         .client
-        .create_commit(&namespace, &commit)
+        .create_commit(&namespace, &commit, &request.actor_id)
         .await
         .expect("replayed commit");
 
@@ -952,13 +951,13 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &namespace,
             &CommitRequest::single(
                 commit_id("conf-inode-mutations-inode-directory"),
-                request.actor_id.clone(),
                 None,
                 FilesystemOperation::CreateDirectoryByInode {
                     parent_inode_id,
                     display_name: display_name(&request.inode_directory_name),
                 },
             ),
+            &request.actor_id,
         )
         .await
         .expect("create directory by inode");
@@ -971,7 +970,6 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-inode-file"),
-                actor_id: request.actor_id.clone(),
                 message: None,
                 content_tokens,
                 operations: vec![FilesystemOperation::CreateFileByInode {
@@ -980,6 +978,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                     content_ref,
                 }],
             },
+            &request.actor_id,
         )
         .await
         .expect("put file by inode");
@@ -1047,7 +1046,6 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-revision"),
-                actor_id: request.actor_id.clone(),
                 message: None,
                 content_tokens,
                 operations: vec![FilesystemOperation::PutFileRevisionByInode {
@@ -1056,6 +1054,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                     expected_revision_no,
                 }],
             },
+            &request.actor_id,
         )
         .await
         .expect("put file revision by inode");
@@ -1093,7 +1092,6 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
     let move_by_inode = |id: &str, expected_binding_generation: BindingGeneration| {
         CommitRequest::single(
             commit_id(id),
-            request.actor_id.clone(),
             None,
             FilesystemOperation::MoveByInode {
                 inode_id: file_inode_id,
@@ -1113,6 +1111,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .create_commit(
             &namespace,
             &move_by_inode("conf-inode-mutations-stale-move", stale_generation),
+            &request.actor_id,
         )
         .await
         .expect_err("stale binding generation must fail");
@@ -1124,9 +1123,9 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             harness.server_url, request.namespace_id
         ))
         .bearer_auth(AUTH_TOKEN)
+        .header("Loonfs-Actor", request.actor_id.as_str())
         .json(&serde_json::json!({
             "commit_id": "conf-inode-mutations-malformed-move",
-            "actor_id": request.actor_id,
             "operations": [{
                 "kind": "move_by_inode",
                 "inode_id": file_inode_id,
@@ -1153,6 +1152,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .create_commit(
             &namespace,
             &move_by_inode("conf-inode-mutations-move", fresh_generation.clone()),
+            &request.actor_id,
         )
         .await
         .expect("move by inode");
@@ -1209,7 +1209,6 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &namespace,
             &CommitRequest::single(
                 commit_id("conf-inode-mutations-delete"),
-                request.actor_id.clone(),
                 None,
                 FilesystemOperation::DeleteByInode {
                     inode_id: file_inode_id,
@@ -1217,6 +1216,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                 },
             ),
+            &request.actor_id,
         )
         .await
         .expect("delete by inode");
@@ -1828,7 +1828,6 @@ async fn run_changes(harness: &Harness, case: &Case) {
         .expect("create changes namespace");
     let commit = CommitRequest::single(
         commit_id(&request.commit_id),
-        request.actor_id.clone(),
         None,
         FilesystemOperation::CreateDirectory {
             path: loonfs_api::AbsolutePath::parse(&request.path).expect("fixture path"),
@@ -1837,7 +1836,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     );
     let committed = harness
         .client
-        .create_commit(&namespace, &commit)
+        .create_commit(&namespace, &commit, &request.actor_id)
         .await
         .expect("commit change");
     assert_eq!(committed.committed_seq.0, expected.committed_seq);

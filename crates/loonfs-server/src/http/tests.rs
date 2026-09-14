@@ -49,6 +49,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "active_acquired_at_ms",
     "active_writer",
     "active_writer_epoch",
+    "actor_id",
     "actual_attributes_revision_no",
     "actual_deletion_seq",
     "actual_head_seq",
@@ -518,10 +519,9 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
                 .method(axum::http::Method::POST)
                 .uri("/v0/namespaces")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"namespace_id":"customer-a","actor_id":"customer-creator"}"#,
-                ))
+                .body(axum::body::Body::from(r#"{"namespace_id":"customer-a"}"#))
                 .expect("create namespace request"),
         )
         .await
@@ -2404,6 +2404,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .post(&create_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Actor", "test-actor")
                 .set("content-type", "application/json")
                 .send_string(r#"{"namespace_id":"bad-actor","actor_id":7}"#)
         },
@@ -2417,6 +2418,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .post(&create_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Actor", "test-actor")
                 .set("content-type", "application/json")
                 .send_string("{not json")
         },
@@ -2441,7 +2443,6 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let commits_url = format!("http://{addr}/v0/namespaces/demo/commits");
     let invalid_operation = r#"{
         "commit_id":"invalid-path",
-        "actor_id":"test-service",
         "operations":[{"kind":"create_directory","path":"relative"}]
     }"#;
     let body = expect_enveloped(
@@ -2449,6 +2450,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .post(&commits_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Actor", "test-actor")
                 .set("content-type", "application/json")
                 .send_string(invalid_operation)
         },
@@ -2469,41 +2471,35 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "unauthorized",
     );
 
-    for (body, description) in [
-        (
-            r#"{"commit_id":"missing-actor","operations":[{"kind":"create_directory","path":"/docs"}]}"#,
-            "missing actor",
-        ),
-        (
-            r#"{"commit_id":"malformed-actor","actor_id":{"kind":"robot","id":"x"},"operations":[{"kind":"create_directory","path":"/docs"}]}"#,
-            "malformed actor",
-        ),
-    ] {
-        expect_enveloped(
-            || {
-                raw_agent()
-                    .post(&commits_url)
-                    .set("authorization", "Bearer test-token")
-                    .set("content-type", "application/json")
-                    .send_string(body)
-            },
-            description,
-            400,
-            "invalid_request",
-        );
-        expect_enveloped(
-            || {
-                raw_agent()
-                    .post(&commits_url)
-                    .set("content-type", "application/json")
-                    .send_string(body)
-            },
-            description,
-            401,
-            "unauthorized",
-        );
-    }
-
+    let (body, description) = (
+        r#"{"commit_id":"stale-actor","actor_id":"old-body-actor","operations":[{"kind":"create_directory","path":"/docs"}]}"#,
+        "body actor is unknown",
+    );
+    let stale = expect_enveloped(
+        || {
+            raw_agent()
+                .post(&commits_url)
+                .set("authorization", "Bearer test-token")
+                .set("Loonfs-Actor", "test-actor")
+                .set("content-type", "application/json")
+                .send_string(body)
+        },
+        description,
+        400,
+        "invalid_request",
+    );
+    assert_eq!(stale["param"], "/actor_id");
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&commits_url)
+                .set("content-type", "application/json")
+                .send_string(body)
+        },
+        description,
+        401,
+        "unauthorized",
+    );
     // Invalid grep path prefixes return invalid_request after authentication.
     let grep_url =
         format!("http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=relative");
@@ -2732,6 +2728,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
             axum::http::Request::builder()
                 .uri("/v0/capabilities")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
                 .body(axum::body::Body::empty())
                 .expect("capabilities request"),
         )
@@ -2764,6 +2761,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
             axum::http::Request::builder()
                 .uri("/v0/maintenance/namespaces/hidden/diagnostics")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
                 .body(axum::body::Body::empty())
                 .expect("diagnostics request"),
         )
@@ -2793,11 +2791,11 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
                 .method(axum::http::Method::POST)
                 .uri("/v0/namespaces/hidden/commits")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(
                     r#"{
                         "commit_id":"hidden-maintenance-commit",
-                        "actor_id":"test-service",
                         "operations":[{"kind":"create_directory","path":"/docs"}]
                     }"#,
                 ))
@@ -3185,6 +3183,7 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
             axum::http::Request::builder()
                 .uri("/v0/namespaces/demo/filesystem/content?path=%2Fnote.txt")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
                 .body(axum::body::Body::empty())
                 .expect("download request"),
         )
@@ -3822,6 +3821,7 @@ mod direct_download {
                         .method("POST")
                         .uri(uri)
                         .header("authorization", "Bearer test-token")
+                        .header("Loonfs-Actor", "test-actor")
                         .header("content-type", "application/json")
                         .body(axum::body::Body::from(body.to_string()))
                         .expect("request"),
@@ -4603,6 +4603,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
                 axum::http::Request::builder()
                     .uri("/v0/namespaces/demo/filesystem/content?path=%2Flarge.bin")
                     .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                    .header("Loonfs-Actor", "test-actor")
                     .body(axum::body::Body::empty())
                     .expect("request"),
             )
@@ -4694,11 +4695,11 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
                 .method("POST")
                 .uri("/v0/namespaces/demo/commits")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(
                     serde_json::json!({
                         "commit_id": "stale-precondition",
-                        "actor_id": "test-actor",
                         "preconditions": [{"kind": "namespace_head", "expected_head_seq": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })
@@ -4747,11 +4748,11 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
                 .method("POST")
                 .uri("/v0/namespaces/demo/commits")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(
                     serde_json::json!({
                         "commit_id": "stale-precondition",
-                        "actor_id": "test-actor",
                         "preconditions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_99", "expected_revision_no": 1}],
                         "operations": [{"kind": "create_directory", "path": "/docs"}]
                     })

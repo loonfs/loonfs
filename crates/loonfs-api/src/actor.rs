@@ -16,14 +16,13 @@ validation_error!(
 string_id! {
     /// A validated actor identifier supplied by the application.
     ///
-    /// Actor IDs may use the syntax of the application's identity system. They
-    /// must contain between 1 and 256 UTF-8 bytes, must not begin or end with
-    /// whitespace, and must not contain control characters.
+    /// Actor IDs contain 1 to 256 visible ASCII characters (0x21 through 0x7E).
     ActorId,
     error = ActorIdValidationError,
     validate = validate_actor_id,
     schema(
-        description = "Opaque hosting-platform actor id: non-empty, at most 256 UTF-8 bytes, without leading or trailing whitespace or control characters.",
+        description = "Stable opaque actor id containing 1 to 256 visible ASCII characters.",
+        pattern = r"^[\x21-\x7E]{1,256}$",
         example = "usr_8f3c"
     )
 }
@@ -45,14 +44,11 @@ fn validate_actor_id(value: &str) -> Result<(), ActorIdValidationError> {
             &format!("must be {MAX_ACTOR_ID_BYTES} bytes or fewer"),
         ));
     }
-    if value.trim() != value {
+    if !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
         return Err(actor_id_error(
             value,
-            "must not have leading or trailing whitespace",
+            "must contain only visible ASCII characters",
         ));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(actor_id_error(value, "must not contain control characters"));
     }
     Ok(())
 }
@@ -74,11 +70,16 @@ mod tests {
         for (value, reason) in [
             ("", "must not be empty"),
             (&too_long, "must be 256 bytes or fewer"),
-            (" actor", "must not have leading or trailing whitespace"),
-            ("actor ", "must not have leading or trailing whitespace"),
-            ("actor\nid", "must not contain control characters"),
-            ("actor\0id", "must not contain control characters"),
-            ("actor\u{7f}id", "must not contain control characters"),
+            (" actor", "must contain only visible ASCII characters"),
+            ("actor ", "must contain only visible ASCII characters"),
+            ("actor id", "must contain only visible ASCII characters"),
+            ("actor-雪", "must contain only visible ASCII characters"),
+            ("actor\nid", "must contain only visible ASCII characters"),
+            ("actor\0id", "must contain only visible ASCII characters"),
+            (
+                "actor\u{7f}id",
+                "must contain only visible ASCII characters",
+            ),
         ] {
             let error = ActorId::parse(value).expect_err("invalid actor id");
             assert_eq!(error.value(), value);
@@ -92,7 +93,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            r#"invalid actor_id "actor\nid": must not contain control characters"#
+            r#"invalid actor_id "actor\nid": must contain only visible ASCII characters"#
         );
     }
 
@@ -117,19 +118,5 @@ mod tests {
                 parsed
             );
         }
-    }
-
-    #[test]
-    fn actor_id_utf8_limit_counts_bytes_not_characters() {
-        let exactly_256_bytes = "é".repeat(128);
-        let too_long = format!("{exactly_256_bytes}a");
-
-        ActorId::parse(&exactly_256_bytes).expect("256-byte unicode actor id");
-        assert_eq!(
-            ActorId::parse(&too_long)
-                .expect_err("257-byte unicode actor id")
-                .reason(),
-            "must be 256 bytes or fewer"
-        );
     }
 }

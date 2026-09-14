@@ -205,7 +205,6 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         &CommitRequest {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("direct-put-e2e").expect("valid commit id"),
-            actor_id: loonfs_test_support::test_actor(),
             message: None,
             content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {
@@ -498,6 +497,7 @@ fn post_commit(server_url: &str, namespace: &str, request: &CommitRequest) -> Co
     let response = raw_agent()
         .post(&format!("{server_url}/v0/namespaces/{namespace}/commits"))
         .set("authorization", &format!("Bearer {AUTH_TOKEN}"))
+        .set("Loonfs-Actor", "test-actor")
         .send_json(request)
         .expect("post mutation");
 
@@ -1121,7 +1121,6 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         &CommitRequest {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("direct-multipart-e2e").expect("valid commit id"),
-            actor_id: loonfs_test_support::test_actor(),
             message: None,
             content_tokens: vec![content_token],
             operations: vec![FilesystemOperation::PutFile {

@@ -2,14 +2,11 @@
 package proxy
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
@@ -21,7 +18,7 @@ type RouteContext struct {
 }
 
 type Authorization struct {
-	ActorID string // Written into commit bodies as actor_id when non-empty.
+	ActorID string // Sent upstream in Loonfs-Actor when non-empty.
 }
 
 // Refusal is returned from Authorize as the error to send the refusal back.
@@ -203,24 +200,9 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 	if outgoing.Header.Get("User-Agent") == "" {
 		outgoing.Header.Set("User-Agent", "")
 	}
-	if authorization.ActorID != "" && routeContext.Method == http.MethodPost &&
-		routeContext.Template == "/v0/namespace-aliases/{namespace_alias}/commits" {
-		body, err := stampCommitBody(request.Body, authorization.ActorID)
-		if err != nil {
-			(&Refusal{
-				Status:      http.StatusBadRequest,
-				ContentType: "application/json",
-				Body:        []byte(`{"code":"invalid_request","message":"commit body must be a JSON object"}`),
-			}).write(responseWriter)
-			return
-		}
-		outgoing.Body = io.NopCloser(bytes.NewReader(body))
-		outgoing.GetBody = nil
-		outgoing.ContentLength = int64(len(body))
-		outgoing.TransferEncoding = nil
-		outgoing.Trailer = nil
-		outgoing.Header.Set("Content-Type", "application/json")
-		outgoing.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	outgoing.Header.Del("Loonfs-Actor")
+	if authorization.ActorID != "" {
+		outgoing.Header.Set("Loonfs-Actor", authorization.ActorID)
 	}
 
 	response, err := h.transport.RoundTrip(outgoing)
@@ -241,22 +223,6 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 		// downstream EOF. net/http aborts the response for this sentinel.
 		panic(http.ErrAbortHandler)
 	}
-}
-
-func stampCommitBody(body io.Reader, actorID string) ([]byte, error) {
-	encoded, err := io.ReadAll(body)
-	if err != nil {
-		return nil, err
-	}
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &object); err != nil {
-		return nil, err
-	}
-	if object == nil {
-		return nil, fmt.Errorf("commit body must be a JSON object")
-	}
-	object["actor_id"], _ = json.Marshal(actorID)
-	return json.Marshal(object)
 }
 
 func (r *Refusal) write(responseWriter http.ResponseWriter) {

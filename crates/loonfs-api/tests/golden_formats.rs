@@ -2519,7 +2519,6 @@ fn commit_precondition_wire_shapes_match_golden() {
 
     let request = CommitRequest::single(
         CommitId::parse("preconditions").expect("commit id"),
-        actor(),
         None,
         FilesystemOperation::CreateDirectory {
             path: AbsolutePath::parse("/docs").expect("path"),

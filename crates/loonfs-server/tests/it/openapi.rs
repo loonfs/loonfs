@@ -2246,3 +2246,43 @@ fn path_parameter<'a>(
             panic!("missing path parameter `{parameter_name}` for `{method} {path}`")
         })
 }
+
+#[test]
+fn actor_headers_are_global_and_only_attributed_operations_require_them() {
+    let (full, proxy) =
+        openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())
+            .expect("generate documents");
+    let full: Value = serde_json::from_str(&full).expect("full document");
+    let proxy: Value = serde_json::from_str(&proxy).expect("proxy document");
+    assert_eq!(
+        full["x-fern-global-headers"],
+        json!([
+            {"header": "Loonfs-Actor", "name": "actorId", "optional": true}
+        ])
+    );
+    assert!(proxy.get("x-fern-global-headers").is_none());
+    let mut required = BTreeSet::new();
+    for path in full["paths"].as_object().expect("paths").values() {
+        for operation in path.as_object().expect("path").values() {
+            let Some(id) = operation["operationId"].as_str() else {
+                continue;
+            };
+            if let Some(actor) = operation.get("x-loonfs-actor") {
+                assert_eq!(actor, "required");
+                required.insert(id);
+            }
+            if let Some(parameters) = operation["parameters"].as_array() {
+                assert!(!parameters.iter().any(|parameter| {
+                    parameter["in"] == "header"
+                        && parameter["name"]
+                            .as_str()
+                            .is_some_and(|name| name.eq_ignore_ascii_case("Loonfs-Actor"))
+                }));
+            }
+        }
+    }
+    assert_eq!(
+        required,
+        BTreeSet::from(["create_commit", "create_namespace", "fork_namespace"])
+    );
+}

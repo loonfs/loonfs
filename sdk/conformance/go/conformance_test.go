@@ -79,6 +79,7 @@ func TestSDKConformance(t *testing.T) {
 		client: server.NewClient(
 			option.WithBaseURL(baseURL),
 			option.WithToken(token),
+			option.WithActorID(loonfs.String("conformance")),
 		),
 		unauthenticated: server.NewClient(option.WithBaseURL(baseURL)),
 		serverBaseURL:   baseURL,
@@ -265,19 +266,21 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[commitReplayRequest, commitReplayExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
-	commit := createDirectoryCommit(
-		request.NamespaceID,
-		request.CommitID,
-		request.ActorID,
-		request.Path,
-		&request.Message,
-	)
+	commit := createDirectoryCommit(request.NamespaceID, request.CommitID, request.Path, &request.Message)
 	commit.Preconditions = request.Preconditions
-	first, err := h.client.Commits.Create(context.Background(), commit)
+	first, err := h.client.Commits.Create(
+		context.Background(),
+		commit,
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
+	)
 	if err != nil {
 		t.Fatalf("first commit: %v", err)
 	}
-	replayed, err := h.client.Commits.Create(context.Background(), commit)
+	replayed, err := h.client.Commits.Create(
+		context.Background(),
+		commit,
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
+	)
 	if err != nil {
 		t.Fatalf("replayed commit: %v", err)
 	}
@@ -298,7 +301,11 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	stale := *commit
 	stale.CommitID = request.CommitID + "-stale"
-	_, err = h.client.Commits.Create(context.Background(), &stale)
+	_, err = h.client.Commits.Create(
+		context.Background(),
+		&stale,
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
+	)
 	var preconditionConflict *loonfs.ConflictError
 	if !errors.As(err, &preconditionConflict) || preconditionConflict.Body == nil || preconditionConflict.Body.Code != "stale_head" {
 		t.Fatalf("stale precondition: got %v, want stale_head", err)
@@ -312,7 +319,11 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	changedPreconditions := *commit
 	changedPreconditions.Preconditions = nil
-	_, err = h.client.Commits.Create(context.Background(), &changedPreconditions)
+	_, err = h.client.Commits.Create(
+		context.Background(),
+		&changedPreconditions,
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
+	)
 	if !errors.As(err, &preconditionConflict) || preconditionConflict.Body == nil || preconditionConflict.Body.Code != "commit_id_reuse_conflict" {
 		t.Fatalf("changed preconditions: got %v, want commit_id_reuse_conflict", err)
 	}
@@ -321,26 +332,26 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("prepare: %v", err)
 	}
 	input := files.PreparedUploadInput{NamespaceID: loonfs.NamespaceID(request.NamespaceID), Path: "/prepared", Prepared: prepared,
-		ActorID: request.ActorID, CommitID: "prepared-put"}
-	published, err := h.client.Files.UploadPrepared(context.Background(), input)
+		CommitID: "prepared-put"}
+	published, err := h.client.Files.UploadPrepared(context.Background(), input, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	_, err = h.client.Commits.Create(context.Background(), &loonfs.CommitRequest{
-		NamespaceID: request.NamespaceID, ActorID: request.ActorID, CommitID: "prepared-rename",
+		NamespaceID: request.NamespaceID, CommitID: "prepared-rename",
 		Operations: []*loonfs.FilesystemOperation{{MovePath: &loonfs.FilesystemOperationMovePath{SourcePath: input.Path, DestinationPath: "/renamed"}}},
-	})
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	replay, err := h.client.Files.UploadPrepared(context.Background(), input)
+	replay, err := h.client.Files.UploadPrepared(context.Background(), input, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil || replay == nil || replay.CommitID != published.CommitID || replay.CommittedSeq != published.CommittedSeq {
 		t.Fatalf("replay = %#v, %v; want %#v", replay, err, published)
 	}
 	message := "changed"
 	changed := input
 	changed.Message = &message
-	_, err = h.client.Files.UploadPrepared(context.Background(), changed)
+	_, err = h.client.Files.UploadPrepared(context.Background(), changed, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	var conflict *loonfs.ConflictError
 	if !errors.As(err, &conflict) || conflict.Body.Code != "commit_id_reuse_conflict" {
 		t.Fatalf("changed publication: %v", err)
@@ -351,7 +362,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	changed = input
 	changed.Prepared = fresh
-	_, err = h.client.Files.UploadPrepared(context.Background(), changed)
+	_, err = h.client.Files.UploadPrepared(context.Background(), changed, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if !errors.As(err, &conflict) {
 		t.Fatalf("fresh content reused a committed id: %v", err)
 	}
@@ -365,11 +376,11 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	input.Behavior = loonfs.DestinationBehaviorReplace
 	input.ExpectedInodeID = &inode
 	input.ExpectedRevisionNo = &entry.File.RevisionNo
-	published, err = h.client.Files.UploadPrepared(context.Background(), input)
+	published, err = h.client.Files.UploadPrepared(context.Background(), input, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay, err = h.client.Files.UploadPrepared(context.Background(), input)
+	replay, err = h.client.Files.UploadPrepared(context.Background(), input, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil || replay == nil || replay.CommitID != published.CommitID || replay.CommittedSeq != published.CommittedSeq {
 		t.Fatalf("replay with preconditions: %#v, %v", replay, err)
 	}
@@ -628,13 +639,13 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	client := server.NewClient(
 		option.WithBaseURL(h.serverBaseURL),
 		option.WithToken(h.serverToken),
-		option.WithActorID(string(request.ActorID)),
+		option.WithActorID(loonfs.String(string(request.ActorID))),
 	)
 	helperCommit, err := client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(helperPath),
 		Content:     payload,
-	})
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("helper multipart put: %v", err)
 	}
@@ -740,9 +751,8 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(request.Path),
 		Content:     payload,
-		ActorID:     request.ActorID,
 		CommitID:    commitID,
-	})
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("put download file: %v", err)
 	}
@@ -809,13 +819,12 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[endToEndRequest, endToEndExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
-	mkdir := applyCommit(t, h.client, createDirectoryCommit(
-		request.NamespaceID,
-		request.CommitIDs.Mkdir,
+	mkdir := applyCommit(
+		t,
+		h.client,
+		createDirectoryCommit(request.NamespaceID, request.CommitIDs.Mkdir, request.Directory, nil),
 		request.ActorID,
-		request.Directory,
-		nil,
-	))
+	)
 	if int64(mkdir.CommittedSeq) != expected.MkdirCommittedSeq {
 		t.Errorf("mkdir committed_seq = %d, want %d", mkdir.CommittedSeq, expected.MkdirCommittedSeq)
 	}
@@ -825,9 +834,8 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(request.UploadPath),
 		Content:     []byte(request.ContentUTF8),
-		ActorID:     request.ActorID,
 		CommitID:    uploadCommitID,
-	})
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("upload end-to-end file: %v", err)
 	}
@@ -853,7 +861,6 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	moved := applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID(request.CommitIDs.Move),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -864,7 +871,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 				},
 			},
 		},
-	})
+	}, request.ActorID)
 	if int64(moved.CommittedSeq) != expected.MoveCommittedSeq {
 		t.Errorf("move committed_seq = %d, want %d", moved.CommittedSeq, expected.MoveCommittedSeq)
 	}
@@ -894,7 +901,6 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
 	removed := applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID(request.CommitIDs.Remove),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -904,7 +910,7 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 				},
 			},
 		},
-	})
+	}, request.ActorID)
 	if int64(removed.CommittedSeq) != expected.RemoveCommittedSeq {
 		t.Errorf("remove committed_seq = %d, want %d", removed.CommittedSeq, expected.RemoveCommittedSeq)
 	}
@@ -1057,7 +1063,6 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 			noReplace := loonfs.DestinationBehaviorNoReplace
 			renamed := applyCommit(t, h.client, &loonfs.CommitRequest{
 				NamespaceID: request.NamespaceID,
-				ActorID:     request.ActorID,
 				CommitID:    loonfs.CommitID(request.RenameCommitID),
 				Operations: []*loonfs.FilesystemOperation{
 					{
@@ -1068,7 +1073,7 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 						},
 					},
 				},
-			})
+			}, request.ActorID)
 			if int64(renamed.CommittedSeq) != expected.RenamedHeadSeq {
 				t.Errorf("rename committed_seq = %d, want %d", renamed.CommittedSeq, expected.RenamedHeadSeq)
 			}
@@ -1192,16 +1197,14 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.PathFileName)),
 		Content:     []byte(request.ContentUTF8),
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-path-file"),
-	}); err != nil {
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}})); err != nil {
 		t.Fatalf("put path-addressed file: %v", err)
 	}
 
 	parentInodeID := identityOf(statPath(t, h.client, request.NamespaceID, request.Directory)).inodeID
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-inode-directory"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -1211,11 +1214,10 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 				},
 			},
 		},
-	})
+	}, request.ActorID)
 	contentRef, contentToken := stageContent(t, h.client, request.NamespaceID, []byte(request.ContentUTF8))
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID:   request.NamespaceID,
-		ActorID:       request.ActorID,
 		CommitID:      loonfs.CommitID("conf-inode-mutations-inode-file"),
 		ContentTokens: contentTokens(contentToken),
 		Operations: []*loonfs.FilesystemOperation{
@@ -1227,7 +1229,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 				},
 			},
 		},
-	})
+	}, request.ActorID)
 
 	listing := listPathEntries(t, h.client, request.NamespaceID, request.Directory)
 	names := make([]string, 0, len(listing))
@@ -1271,7 +1273,6 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	contentRef, contentToken = stageContent(t, h.client, request.NamespaceID, []byte(request.RevisedContentUTF8))
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID:   request.NamespaceID,
-		ActorID:       request.ActorID,
 		CommitID:      loonfs.CommitID("conf-inode-mutations-revision"),
 		ContentTokens: contentTokens(contentToken),
 		Operations: []*loonfs.FilesystemOperation{
@@ -1283,7 +1284,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 				},
 			},
 		},
-	})
+	}, request.ActorID)
 	revised := requireFileProjection(
 		t,
 		statPath(t, h.client, request.NamespaceID, childPath(request.InodeFileName)),
@@ -1300,7 +1301,6 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-rename"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -1311,11 +1311,10 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 				},
 			},
 		},
-	})
+	}, request.ActorID)
 	moveByInode := func(commitID string, generation string) *loonfs.CommitRequest {
 		return &loonfs.CommitRequest{
 			NamespaceID: request.NamespaceID,
-			ActorID:     request.ActorID,
 			CommitID:    loonfs.CommitID(commitID),
 			Operations: []*loonfs.FilesystemOperation{
 				{
@@ -1334,6 +1333,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	_, err := h.client.Commits.Create(
 		context.Background(),
 		moveByInode("conf-inode-mutations-stale-move", staleGeneration),
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
 	)
 	var conflict *loonfs.ConflictError
 	if !errors.As(err, &conflict) {
@@ -1348,6 +1348,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	_, err = h.client.Commits.Create(
 		context.Background(),
 		moveByInode("conf-inode-mutations-malformed-move", request.MalformedBindingGeneration),
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
 	)
 	var badRequest *loonfs.BadRequestError
 	if !errors.As(err, &badRequest) {
@@ -1366,7 +1367,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		request.NamespaceID,
 		childPath(request.RenamedFileName),
 	)).bindingGeneration
-	moved := applyCommit(t, h.client, moveByInode("conf-inode-mutations-move", freshGeneration))
+	moved := applyCommit(t, h.client, moveByInode("conf-inode-mutations-move", freshGeneration), request.ActorID)
 	if int64(moved.CommittedSeq) != expected.MovedCommittedSeq {
 		t.Errorf("move committed_seq = %d, want %d", moved.CommittedSeq, expected.MovedCommittedSeq)
 	}
@@ -1407,7 +1408,6 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
 	deleted := applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-inode-mutations-delete"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -1418,7 +1418,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 				},
 			},
 		},
-	})
+	}, request.ActorID)
 	if int64(deleted.CommittedSeq) != expected.DeletedCommittedSeq {
 		t.Errorf("delete committed_seq = %d, want %d", deleted.CommittedSeq, expected.DeletedCommittedSeq)
 	}
@@ -1512,21 +1512,15 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	applyCommit(
 		t,
 		h.client,
-		createDirectoryCommit(
-			request.NamespaceID,
-			"conf-snapshots-create-directory",
-			request.ActorID,
-			request.Directory,
-			nil,
-		),
+		createDirectoryCommit(request.NamespaceID, "conf-snapshots-create-directory", request.Directory, nil),
+		request.ActorID,
 	)
 	_, err := h.client.Files.Upload(ctx, files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
 		Content:     []byte(request.CapturedContentUTF8),
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-create-replaced"),
-	})
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("create replaced snapshot file: %v", err)
 	}
@@ -1534,9 +1528,8 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.DeletedFileName)),
 		Content:     []byte(request.DeletedContentUTF8),
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-create-deleted"),
-	})
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("create deleted snapshot file: %v", err)
 	}
@@ -1567,10 +1560,9 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.ReplacedFileName)),
 		Content:     []byte(request.CurrentContentUTF8),
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-replace-file"),
 		Behavior:    replace,
-	})
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("replace snapshot file: %v", err)
 	}
@@ -1578,16 +1570,14 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
 		Path:        loonfs.AbsolutePath(childPath(request.AddedFileName)),
 		Content:     []byte(request.AddedContentUTF8),
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-add-file"),
-	})
+	}, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}))
 	if err != nil {
 		t.Fatalf("add file after snapshot: %v", err)
 	}
 	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		ActorID:     request.ActorID,
 		CommitID:    loonfs.CommitID("conf-snapshots-delete-file"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
@@ -1597,7 +1587,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 				},
 			},
 		},
-	})
+	}, request.ActorID)
 
 	snapshotID := snapshot.SnapshotID
 	capturedEntry, err := h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
@@ -2021,10 +2011,11 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[proxyCaseRequest, proxyExpected](t, testCase)
 	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
-		ServerBaseURL: h.serverBaseURL,
-		Token:         h.serverToken,
-		NamespaceAliases: map[string]string{
-			request.NamespaceAlias: request.NamespaceID,
+		ServerBaseURL:    h.serverBaseURL,
+		Token:            h.serverToken,
+		NamespaceAliases: map[string]string{request.NamespaceAlias: request.NamespaceID},
+		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
+			return loonfsproxy.Authorization{ActorID: string(request.ActorID)}, nil
 		},
 	})
 	if err != nil {
@@ -2035,13 +2026,13 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 
 	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(request.NamespaceAlias)
-	mkdir := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL, createDirectoryCommit(
-		request.NamespaceID,
-		request.CommitIDs.Directory,
+	mkdir := proxyCreateCommit(
+		t,
+		proxyServer.Client(),
+		namespaceAliasBaseURL,
+		createDirectoryCommit(request.NamespaceID, request.CommitIDs.Directory, request.Directory, nil),
 		request.ActorID,
-		request.Directory,
-		nil,
-	))
+	)
 	if int64(mkdir.CommittedSeq) != expected.MkdirCommittedSeq {
 		t.Errorf("proxy mkdir committed_seq = %d, want %d", mkdir.CommittedSeq, expected.MkdirCommittedSeq)
 	}
@@ -2208,13 +2199,13 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 	proxyServer := httptest.NewServer(proxyHandler)
 	defer proxyServer.Close()
 	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(request.NamespaceAlias)
-	stamped := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL, createDirectoryCommit(
-		request.NamespaceID,
-		request.Authorize.CommitID,
+	stamped := proxyCreateCommit(
+		t,
+		proxyServer.Client(),
+		namespaceAliasBaseURL,
+		createDirectoryCommit(request.NamespaceID, request.Authorize.CommitID, request.Authorize.Directory, nil),
 		request.Authorize.BrowserActorID,
-		request.Authorize.Directory,
-		nil,
-	))
+	)
 	if stamped.CommittedBy != expected.StampedCommittedBy || int64(stamped.CommittedSeq) != expected.StampedCommittedSeq {
 		t.Errorf("stamped commit = (%q, %d), want (%q, %d)", stamped.CommittedBy, stamped.CommittedSeq, expected.StampedCommittedBy, expected.StampedCommittedSeq)
 	}
@@ -2249,16 +2240,7 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 	if refused.StatusCode != expected.RefusedStatus || refused.Header.Get("Content-Type") != "application/json" || !bytes.Equal(actualBody, refusalBody) {
 		t.Errorf("refused response = (%d, %q, %s)", refused.StatusCode, refused.Header.Get("Content-Type"), actualBody)
 	}
-	invalid := sendProxyRequest(t, proxyServer.Client(), http.MethodPost, namespaceAliasBaseURL+"/commits", strings.NewReader(`"nope"`), "application/json")
-	defer invalid.Body.Close()
-	var invalidBody map[string]string
-	if err := json.NewDecoder(invalid.Body).Decode(&invalidBody); err != nil {
-		t.Fatalf("decode invalid commit response: %v", err)
-	}
-	if invalid.StatusCode != http.StatusBadRequest || invalid.Header.Get("Content-Type") != "application/json" ||
-		invalidBody["code"] != "invalid_request" || invalidBody["message"] != "commit body must be a JSON object" {
-		t.Errorf("invalid commit response = (%d, %q, %v)", invalid.StatusCode, invalid.Header.Get("Content-Type"), invalidBody)
-	}
+
 }
 
 func proxyCreateUpload(
@@ -2313,7 +2295,6 @@ func proxyCommitCompletedFile(
 	}
 	return proxyCreateCommit(t, httpClient, namespaceAliasBaseURL, &loonfs.CommitRequest{
 		NamespaceID:   namespaceID,
-		ActorID:       actor,
 		CommitID:      loonfs.CommitID(commitID),
 		ContentTokens: contentTokens,
 		Operations: []*loonfs.FilesystemOperation{
@@ -2325,7 +2306,7 @@ func proxyCommitCompletedFile(
 				},
 			},
 		},
-	})
+	}, actor)
 }
 
 func proxyCreateCommit(
@@ -2333,6 +2314,7 @@ func proxyCreateCommit(
 	httpClient *http.Client,
 	namespaceAliasBaseURL string,
 	request *loonfs.CommitRequest,
+	actor loonfs.ActorID,
 ) *loonfs.Commit {
 	t.Helper()
 	return proxyJSONRequest[loonfs.Commit](
@@ -2341,6 +2323,7 @@ func proxyCreateCommit(
 		http.MethodPost,
 		namespaceAliasBaseURL+"/commits",
 		request,
+		http.Header{"Loonfs-Actor": []string{string(actor)}},
 	)
 }
 
@@ -2350,6 +2333,7 @@ func proxyJSONRequest[T any](
 	method string,
 	requestURL string,
 	body any,
+	headers ...http.Header,
 ) *T {
 	t.Helper()
 	var requestBody io.Reader
@@ -2362,7 +2346,7 @@ func proxyJSONRequest[T any](
 		requestBody = bytes.NewReader(payload)
 		contentType = "application/json"
 	}
-	response := sendProxyRequest(t, httpClient, method, requestURL, requestBody, contentType)
+	response := sendProxyRequest(t, httpClient, method, requestURL, requestBody, contentType, headers...)
 	return decodeProxyJSONResponse[T](t, response)
 }
 
@@ -2373,6 +2357,7 @@ func sendProxyRequest(
 	requestURL string,
 	body io.Reader,
 	contentType string,
+	headers ...http.Header,
 ) *http.Response {
 	t.Helper()
 	request, err := http.NewRequestWithContext(context.Background(), method, requestURL, body)
@@ -2383,6 +2368,12 @@ func sendProxyRequest(
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
+	for _, extra := range headers {
+		for name, values := range extra {
+			request.Header[name] = values
+		}
+	}
+
 	response, err := httpClient.Do(request)
 	if err != nil {
 		t.Fatalf("send proxy request: %v", err)
@@ -2445,14 +2436,12 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[changesRequest, changesExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
-	commit := createDirectoryCommit(
-		request.NamespaceID,
-		request.CommitID,
-		request.ActorID,
-		request.Path,
-		nil,
+	commit := createDirectoryCommit(request.NamespaceID, request.CommitID, request.Path, nil)
+	committed, err := h.client.Commits.Create(
+		context.Background(),
+		commit,
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
 	)
-	committed, err := h.client.Commits.Create(context.Background(), commit)
 	if err != nil {
 		t.Fatalf("commit change: %v", err)
 	}
@@ -2750,7 +2739,6 @@ func commitCompletedFile(
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	return applyCommit(t, sdk, &loonfs.CommitRequest{
 		NamespaceID:   namespaceID,
-		ActorID:       actor,
 		CommitID:      loonfs.CommitID(commitID),
 		ContentTokens: contentTokens(contentToken),
 		Operations: []*loonfs.FilesystemOperation{
@@ -2762,12 +2750,12 @@ func commitCompletedFile(
 				},
 			},
 		},
-	})
+	}, actor)
 }
 
-func applyCommit(t *testing.T, sdk *server.Client, request *loonfs.CommitRequest) *loonfs.Commit {
+func applyCommit(t *testing.T, sdk *server.Client, request *loonfs.CommitRequest, actor loonfs.ActorID) *loonfs.Commit {
 	t.Helper()
-	response, err := sdk.Commits.Create(context.Background(), request)
+	response, err := sdk.Commits.Create(context.Background(), request, option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(actor)}}))
 	if err != nil {
 		t.Fatalf("apply commit %q: %v", request.CommitID, err)
 	}
@@ -2840,7 +2828,8 @@ func createNamespace(t *testing.T, sdk *server.Client, namespaceID string, actor
 	t.Helper()
 	_, err := sdk.Namespaces.Create(
 		context.Background(),
-		&loonfs.CreateNamespaceRequest{NamespaceID: loonfs.NamespaceID(namespaceID), ActorID: actorID},
+		&loonfs.CreateNamespaceRequest{NamespaceID: loonfs.NamespaceID(namespaceID)},
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(actorID)}}),
 	)
 	if err != nil {
 		t.Fatalf("create namespace: %v", err)
@@ -2858,24 +2847,18 @@ func applyCreateDirectory(
 	t.Helper()
 	_, err := sdk.Commits.Create(
 		context.Background(),
-		createDirectoryCommit(namespaceID, commitID, actor, path, nil),
+		createDirectoryCommit(namespaceID, commitID, path, nil),
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(actor)}}),
 	)
 	if err != nil {
 		t.Fatalf("create directory %s: %v", path, err)
 	}
 }
 
-func createDirectoryCommit(
-	namespaceID string,
-	commitID string,
-	actor loonfs.ActorID,
-	path string,
-	message *string,
-) *loonfs.CommitRequest {
+func createDirectoryCommit(namespaceID string, commitID string, path string, message *string) *loonfs.CommitRequest {
 	parents := false
 	return &loonfs.CommitRequest{
 		NamespaceID: namespaceID,
-		ActorID:     actor,
 		CommitID:    loonfs.CommitID(commitID),
 		Message:     message,
 		Operations: []*loonfs.FilesystemOperation{

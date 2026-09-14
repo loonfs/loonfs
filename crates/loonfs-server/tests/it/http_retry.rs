@@ -125,7 +125,6 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     let commit_request = |content_ref, token| CommitRequest {
         preconditions: Vec::new(),
         commit_id: commit_id.clone(),
-        actor_id: loonfs_test_support::test_actor(),
         message: None,
         content_tokens: vec![token],
         operations: vec![FilesystemOperation::PutFile {
@@ -142,6 +141,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .create_commit(
             &namespace_id("demo"),
             &commit_request(staged.content_ref.clone(), token.clone()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("first put");
@@ -152,6 +152,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .create_commit(
             &namespace_id("demo"),
             &commit_request(staged.content_ref.clone(), token),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("repeat put");
@@ -543,7 +544,6 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id.clone(),
-                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: vec![content_token(&staged)],
                 operations: vec![
@@ -560,6 +560,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
                     },
                 ],
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("first two-operation commit");
@@ -623,7 +624,6 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     let commit_request = |message: &str| {
         CommitRequest::single(
             commit_id.clone(),
-            loonfs_test_support::test_actor(),
             Some(message.to_owned()),
             FilesystemOperation::CreateDirectory {
                 path: AbsolutePath::parse("/direct").expect("path"),
@@ -633,18 +633,30 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     };
     let first = harness
         .client
-        .create_commit(&namespace, &commit_request("one"))
+        .create_commit(
+            &namespace,
+            &commit_request("one"),
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("first commit");
     let replay = harness
         .client
-        .create_commit(&namespace, &commit_request("one"))
+        .create_commit(
+            &namespace,
+            &commit_request("one"),
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
     match harness
         .client
-        .create_commit(&namespace, &commit_request("two"))
+        .create_commit(
+            &namespace,
+            &commit_request("two"),
+            &loonfs_test_support::test_actor(),
+        )
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),

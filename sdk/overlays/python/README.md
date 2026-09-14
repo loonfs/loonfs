@@ -30,7 +30,9 @@ print(commit.commit_id, commit.events)
 ```
 
 Publishing helpers return the commit, including its events. Pass `commit_id`
-explicitly if you may retry. A call's `actor_id` overrides the client default.
+explicitly if you may retry. Use
+`request_options={"additional_headers": {"Loonfs-Actor": actor_id}}`
+to override the client default for a request.
 
 Use `client.files.download_stream` in a `with` block for bounded download memory:
 
@@ -74,7 +76,8 @@ blocking source read; an HTTP timeout cannot interrupt arbitrary Python code.
 Use `loonfs.proxy` in your backend to forward client requests while keeping the
 LoonFS credential on the server.
 
-Set `authorize` to check each request and replace `actor_id` in commit bodies.
+Set `authorize` to check each request and set `Loonfs-Actor` on forwarded
+requests. The proxy always removes the browser's actor header.
 Here, `authorized_actor` checks the application's session and namespace access.
 
 ```python
@@ -106,7 +109,7 @@ tune the retry count.
 For publication retries, call `client.files.prepare(namespace_id,
 content=payload)` once and retain its `PreparedContent`. Pass it to
 `client.files.upload_prepared(namespace_id, path=path, prepared=prepared,
-actor_id=actor_id, commit_id=commit_id)` on each attempt, keeping all publication
+commit_id=commit_id, request_options={"additional_headers": {"Loonfs-Actor": actor_id}})` on each attempt, keeping all publication
 inputs identical. Preparation does not create a visible file or extend the
 upload lifetime. Calling `upload` again starts a fresh upload and cannot replay
 a previously committed ID.

@@ -38,6 +38,7 @@ async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
         raw_agent()
             .post(&format!("{}/v0/namespaces", harness.server_url))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Actor", "test-actor")
             .send_json(json!({ "namespace_id": "bad/name" })),
     );
 
@@ -83,7 +84,6 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     let move_request = |commit_id: &str, behavior: &str| {
         json!({
             "commit_id": commit_id,
-            "actor_id": loonfs_test_support::test_actor(),
             "operations": [{
                 "kind": "move_path",
                 "source_path": "/docs/source.txt",
@@ -97,6 +97,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     match raw_agent()
         .post(&commits_url)
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Actor", "test-actor")
         .send_json(move_request("move-exchange", "exchange"))
     {
         Err(ureq::Error::Status(status, response)) => {
@@ -111,6 +112,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     let accepted = raw_agent()
         .post(&commits_url)
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Actor", "test-actor")
         .send_json(move_request("move-replace", "replace"))
         .expect("replace is a valid move behavior");
     assert_eq!(accepted.status(), 200);
