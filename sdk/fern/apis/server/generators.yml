@@ -12,7 +12,7 @@ groups:
           module:
             path: github.com/loonfs/loonfs-sdk-go
           packageName: loonfs
-          maxRetries: 0
+          maxRetries: 2
         output:
           location: local-file-system
           path: ../../../generated/go

@@ -42,7 +42,9 @@ prune_generated() {
             rm "generated/go/${name}_test.go"
         done
         python3 - <<'PY'
+import json
 import pathlib
+import re
 
 module_root = pathlib.Path("generated/go")
 server_package = module_root / "server"
@@ -55,6 +57,13 @@ def remove_exact(source, snippet, expected_count, label):
         f"expected {expected_count} {label}, found {actual_count}"
     )
     return source.replace(snippet, "")
+
+
+def replace_once(source, old, new):
+    actual_count = source.count(old)
+    assert actual_count == 1, f"expected exactly one match for {old!r}, found {actual_count}"
+    return source.replace(old, new)
+
 
 for source_path in [*module_root.rglob("*.go"), *module_root.rglob("*.md")]:
     source = source_path.read_text()
@@ -166,6 +175,62 @@ source = test_path.read_text()
 start = source.index("// Test for backwards compatibility")
 end = source.index("// Helper functions", start)
 test_path.write_text(source[:start] + source[end:])
+
+retrier_path = module_root / "internal/retrier.go"
+source = retrier_path.read_text()
+source = replace_once(
+    source,
+    "// shouldRetry returns true if the request should be retried based on the given\n"
+    "// response status code.\n"
+    "func (r *Retrier) shouldRetry(response *http.Response) bool {\n"
+    "\treturn response.StatusCode == http.StatusTooManyRequests ||\n"
+    "\t\tresponse.StatusCode == http.StatusRequestTimeout ||\n"
+    "\t\tresponse.StatusCode >= http.StatusInternalServerError\n"
+    "}\n",
+    "func (r *Retrier) shouldRetry(response *http.Response) bool {\n"
+    '\treturn response.Header.Get("Retry-After") != ""\n'
+    "}\n",
+)
+retrier_path.write_text(source)
+
+spec = json.loads(pathlib.Path("../docs/specs/openapi.json").read_text())
+for path_item in spec["paths"].values():
+    for method, operation in path_item.items():
+        if method not in {"get", "post", "put", "patch", "delete", "options", "head"}:
+            continue
+        if operation.get("x-fern-retries") != {"disabled": True}:
+            continue
+        operation_id = operation["operationId"]
+        raw_client_path = module_root.joinpath(
+            *(segment.lower() for segment in operation["x-fern-sdk-group-name"]),
+            "raw_client.go",
+        )
+        method_name = "".join(
+            word[:1].upper() + word[1:]
+            for word in operation["x-fern-sdk-method-name"].split("_")
+        )
+        source = raw_client_path.read_text()
+        functions = list(re.finditer(
+            rf"^func \(r \*RawClient\) {re.escape(method_name)}\(\n.*?^\}}",
+            source,
+            re.MULTILINE | re.DOTALL,
+        ))
+        assert len(functions) == 1, (
+            f"expected one raw-client function for {operation_id} in {raw_client_path}, "
+            f"found {len(functions)}"
+        )
+        function = functions[0]
+        body, count = re.subn(
+            r"^(\s*DisableRetries:[ \t]+)options\.DisableRetries,",
+            r"\g<1>true,",
+            function.group(),
+            flags=re.MULTILINE,
+        )
+        assert count == 1, (
+            f"expected one DisableRetries assignment for {operation_id} in {raw_client_path}, "
+            f"found {count}"
+        )
+        raw_client_path.write_text(source[:function.start()] + body + source[function.end():])
 PY
         ;;
     python)
@@ -228,7 +293,51 @@ source = remove_exact(
     4,
     "http client timeout_in_seconds fallbacks",
 )
+source = replace_once(
+    source,
+    "def _should_retry(response: httpx.Response) -> bool:\n"
+    "    return response.status_code >= 500 or response.status_code in [429, 408, 409]\n",
+    "def _should_retry(response: httpx.Response) -> bool:\n"
+    '    return "retry-after" in response.headers\n',
+)
 http_client_path.write_text(source)
+
+api_error_path = pathlib.Path("generated/python/core/api_error.py")
+source = api_error_path.read_text()
+source = replace_once(
+    source,
+    "    def __str__(self) -> str:\n"
+    '        return f"headers: {self.headers}, status_code: {self.status_code}, body: {self.body}"\n',
+    '''    def __str__(self) -> str:
+        if isinstance(self.body, dict):
+            body = self.body
+        else:
+            body = {
+                field: getattr(self.body, field, None)
+                for field in ("code", "message", "param", "request_id", "details")
+            }
+        if body.get("code") is None or body.get("message") is None:
+            return f"headers: {self.headers}, status_code: {self.status_code}, body: {self.body}"
+
+        result = f"{body['code']}: {body['message']}"
+        param = body.get("param")
+        if param is not None:
+            result += f" (param {param})"
+        request_id = body.get("request_id")
+        if request_id is not None:
+            result += f" [request {request_id}]"
+        details = body.get("details")
+        if details is not None:
+            if isinstance(details, dict):
+                details = {key: value for key, value in details.items() if value is not None}
+            else:
+                details = details.model_dump(exclude_none=True)
+            if details:
+                result += f"\\ndetails: {details}"
+        return result
+''',
+)
+api_error_path.write_text(source)
 
 client_path = pathlib.Path("generated/python/client.py")
 source = client_path.read_text()
@@ -383,6 +492,22 @@ def replace_once(source, old, new):
     return source.replace(old, new)
 
 package_root = pathlib.Path("generated") / sys.argv[1]
+
+retry_path = package_root / "core/fetcher/requestWithRetries.ts"
+source = retry_path.read_text()
+source = replace_once(
+    source,
+    "function isRetryableStatusCode(statusCode: number): boolean {\n"
+    "    return [408, 429].includes(statusCode) || statusCode >= 500;\n"
+    "}\n\n",
+    "",
+)
+source = replace_once(
+    source,
+    "        if (isRetryableStatusCode(response.status)) {\n",
+    '        if (response.headers.has("retry-after")) {\n',
+)
+retry_path.write_text(source)
 
 base_client_path = package_root / "BaseClient.ts"
 source = base_client_path.read_text()
