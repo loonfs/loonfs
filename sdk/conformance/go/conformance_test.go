@@ -1959,6 +1959,16 @@ type proxyCaseRequest struct {
 	CommitIDs             proxyCommitIDs `json:"commit_ids"`
 	ContentUTF8           string         `json:"content_utf8"`
 	DisallowedPathSuffix  string         `json:"disallowed_path_suffix"`
+	Authorize             proxyAuthorize `json:"authorize"`
+}
+
+type proxyAuthorize struct {
+	ActorID        loonfs.ActorID `json:"actor_id"`
+	BrowserActorID loonfs.ActorID `json:"browser_actor_id"`
+	CommitID       string         `json:"commit_id"`
+	Directory      string         `json:"directory"`
+	RefuseHeader   string         `json:"refuse_header"`
+	RefusedStatus  int            `json:"refused_status"`
 }
 
 type proxyCommitIDs struct {
@@ -1968,12 +1978,15 @@ type proxyCommitIDs struct {
 }
 
 type proxyExpected struct {
-	MkdirCommittedSeq           int64 `json:"mkdir_committed_seq"`
-	ProxiedCommittedSeq         int64 `json:"proxied_committed_seq"`
-	DirectCommittedSeq          int64 `json:"direct_committed_seq"`
-	EntryCount                  int   `json:"entry_count"`
-	UnknownNamespaceAliasStatus int   `json:"unknown_namespace_alias_status"`
-	DisallowedStatus            int   `json:"disallowed_route_status"`
+	MkdirCommittedSeq           int64          `json:"mkdir_committed_seq"`
+	ProxiedCommittedSeq         int64          `json:"proxied_committed_seq"`
+	DirectCommittedSeq          int64          `json:"direct_committed_seq"`
+	EntryCount                  int            `json:"entry_count"`
+	UnknownNamespaceAliasStatus int            `json:"unknown_namespace_alias_status"`
+	DisallowedStatus            int            `json:"disallowed_route_status"`
+	StampedCommittedBy          loonfs.ActorID `json:"stamped_committed_by"`
+	StampedCommittedSeq         int64          `json:"stamped_committed_seq"`
+	RefusedStatus               int            `json:"refused_status"`
 }
 
 func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
@@ -2136,6 +2149,84 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	)
 	if disallowedStatus != expected.DisallowedStatus {
 		t.Errorf("disallowed route status = %d, want %d", disallowedStatus, expected.DisallowedStatus)
+	}
+	runProxyAuthorize(t, h, request, expected)
+}
+
+func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expected proxyExpected) {
+	t.Helper()
+	refusalBody := []byte(`{"code":"unauthorized","message":"refused by the conformance hook"}`)
+	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
+		ServerBaseURL:    h.serverBaseURL,
+		Token:            h.serverToken,
+		NamespaceAliases: map[string]string{request.NamespaceAlias: request.NamespaceID},
+		Authorize: func(incoming *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
+			if _, present := incoming.Header[http.CanonicalHeaderKey(request.Authorize.RefuseHeader)]; present {
+				return loonfsproxy.Authorization{}, &loonfsproxy.Refusal{
+					Status:      request.Authorize.RefusedStatus,
+					ContentType: "application/json",
+					Body:        refusalBody,
+				}
+			}
+			return loonfsproxy.Authorization{ActorID: string(request.Authorize.ActorID)}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("create authorized proxy: %v", err)
+	}
+	proxyServer := httptest.NewServer(proxyHandler)
+	defer proxyServer.Close()
+	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(request.NamespaceAlias)
+	stamped := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL, createDirectoryCommit(
+		request.NamespaceID,
+		request.Authorize.CommitID,
+		request.Authorize.BrowserActorID,
+		request.Authorize.Directory,
+		nil,
+	))
+	if stamped.CommittedBy != expected.StampedCommittedBy || int64(stamped.CommittedSeq) != expected.StampedCommittedSeq {
+		t.Errorf("stamped commit = (%q, %d), want (%q, %d)", stamped.CommittedBy, stamped.CommittedSeq, expected.StampedCommittedBy, expected.StampedCommittedSeq)
+	}
+	feed, err := h.client.Changes.List(context.Background(), &loonfs.ListChangesRequest{
+		NamespaceID: request.NamespaceID,
+		AfterSeq:    loonfs.ChangeSeq(expected.DirectCommittedSeq),
+	})
+	if err != nil {
+		t.Fatalf("list stamped changes: %v", err)
+	}
+	if len(feed.Changes) != 1 {
+		t.Fatalf("stamped change count = %d, want 1", len(feed.Changes))
+	}
+	change := feed.Changes[0]
+	if string(change.CommitID) != request.Authorize.CommitID || change.CommittedBy != expected.StampedCommittedBy {
+		t.Errorf("stamped change = (%q, %q), want (%q, %q)", change.CommitID, change.CommittedBy, request.Authorize.CommitID, expected.StampedCommittedBy)
+	}
+	refusedRequest, err := http.NewRequestWithContext(context.Background(), http.MethodGet, namespaceAliasBaseURL+"/filesystem/entry?path=/", nil)
+	if err != nil {
+		t.Fatalf("build refused request: %v", err)
+	}
+	refusedRequest.Header.Set(request.Authorize.RefuseHeader, "1")
+	refused, err := proxyServer.Client().Do(refusedRequest)
+	if err != nil {
+		t.Fatalf("send refused request: %v", err)
+	}
+	defer refused.Body.Close()
+	actualBody, err := io.ReadAll(refused.Body)
+	if err != nil {
+		t.Fatalf("read refused response: %v", err)
+	}
+	if refused.StatusCode != expected.RefusedStatus || refused.Header.Get("Content-Type") != "application/json" || !bytes.Equal(actualBody, refusalBody) {
+		t.Errorf("refused response = (%d, %q, %s)", refused.StatusCode, refused.Header.Get("Content-Type"), actualBody)
+	}
+	invalid := sendProxyRequest(t, proxyServer.Client(), http.MethodPost, namespaceAliasBaseURL+"/commits", strings.NewReader(`"nope"`), "application/json")
+	defer invalid.Body.Close()
+	var invalidBody map[string]string
+	if err := json.NewDecoder(invalid.Body).Decode(&invalidBody); err != nil {
+		t.Fatalf("decode invalid commit response: %v", err)
+	}
+	if invalid.StatusCode != http.StatusBadRequest || invalid.Header.Get("Content-Type") != "application/json" ||
+		invalidBody["code"] != "invalid_request" || invalidBody["message"] != "commit body must be a JSON object" {
+		t.Errorf("invalid commit response = (%d, %q, %v)", invalid.StatusCode, invalid.Header.Get("Content-Type"), invalidBody)
 	}
 }
 

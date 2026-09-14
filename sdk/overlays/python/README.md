@@ -67,6 +67,26 @@ blocking source read; an HTTP timeout cannot interrupt arbitrary Python code.
 Use `loonfs.proxy` in your backend to forward client requests while keeping the
 LoonFS credential on the server.
 
+Set `authorize` to check each request and replace `actor_id` in commit bodies.
+Here, `authorized_actor` checks the application's session and namespace access.
+
+```python
+from loonfs.proxy import LoonFSProxy, ProxyAuthorization, ProxyRefusal
+
+async def authorize(scope, context):
+    actor_id = await authorized_actor(scope, context.namespace_id)
+    if actor_id is None:
+        return ProxyRefusal(status=403)
+    return ProxyAuthorization(actor_id=actor_id)
+
+app = LoonFSProxy(
+    os.environ["LOONFS_URL"],
+    os.environ["LOONFS_AUTH_TOKEN"],
+    {"team-files": "demo"},
+    authorize=authorize,
+)
+```
+
 See the [generated API reference](https://github.com/loonfs/loonfs-sdk-python/blob/main/reference.md).
 
 ## Retries

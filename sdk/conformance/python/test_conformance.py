@@ -58,7 +58,7 @@ from loonfs.server import (
     UploadSession_Aborted,
     UploadSession_Completed,
 )
-from loonfs.proxy import LoonFSProxy
+from loonfs.proxy import LoonFSProxy, ProxyAuthorization, ProxyRefusal, ProxyRouteContext
 
 
 RUNNER_SKIP = "run scripts/run-sdk-conformance.sh python"
@@ -327,6 +327,16 @@ class ProxyCommitIds:
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class ProxyAuthorize:
+    actor_id: ActorId
+    browser_actor_id: ActorId
+    commit_id: str
+    directory: str
+    refuse_header: str
+    refused_status: int
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ProxyRequest:
     namespace_alias: str
     namespace_id: str
@@ -338,6 +348,7 @@ class ProxyRequest:
     commit_ids: ProxyCommitIds
     content_utf8: str
     disallowed_path_suffix: str
+    authorize: ProxyAuthorize
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -348,6 +359,9 @@ class ProxyExpected:
     entry_count: int
     unknown_namespace_alias_status: int
     disallowed_route_status: int
+    stamped_committed_by: ActorId
+    stamped_committed_seq: int
+    refused_status: int
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -1455,6 +1469,73 @@ def test_proxy(
         )
         assert disallowed_route.status_code == expected.disallowed_route_status
         assert disallowed_route.content == b""
+
+    refusal_body = {"code": "unauthorized", "message": "refused by the conformance hook"}
+
+    async def authorize(
+        scope: dict[str, Any], _context: ProxyRouteContext
+    ) -> ProxyAuthorization | ProxyRefusal:
+        if any(
+            name.lower() == request.authorize.refuse_header.encode("ascii")
+            for name, _ in scope.get("headers", [])
+        ):
+            return ProxyRefusal(
+                status=request.authorize.refused_status,
+                body=json.dumps(refusal_body).encode("utf-8"),
+                content_type="application/json",
+            )
+        return ProxyAuthorization(actor_id=request.authorize.actor_id)
+
+    app = LoonFSProxy(
+        _required_environment("LOONFS_CONFORMANCE_URL"),
+        _required_environment("LOONFS_CONFORMANCE_TOKEN"),
+        {request.namespace_alias: request.namespace_id},
+        authorize=authorize,
+    )
+    with _serve_asgi(app, "loonfs-python-authorized-proxy") as base_url:
+        with httpx.Client(base_url=base_url) as client:
+            stamped_response = client.post(
+                f"{namespace_alias_base}/commits",
+                json={
+                    "actor_id": request.authorize.browser_actor_id,
+                    "commit_id": request.authorize.commit_id,
+                    "operations": [{
+                        "kind": "create_directory",
+                        "path": request.authorize.directory,
+                        "parents": False,
+                    }],
+                },
+            )
+            stamped = CommitResponse(
+                **_proxy_response_json(stamped_response, "proxy stamped commit")
+            )
+            assert stamped.committed_by == expected.stamped_committed_by
+            assert stamped.committed_seq == expected.stamped_committed_seq
+            feed = harness.client.changes.list(
+                request.namespace_id, after_seq=expected.direct_committed_seq
+            )
+            stamped_changes = [
+                change for change in feed.changes
+                if change.commit_id == request.authorize.commit_id
+            ]
+            assert len(stamped_changes) == 1
+            assert stamped_changes[0].committed_by == expected.stamped_committed_by
+
+            refused = client.get(
+                f"{namespace_alias_base}/filesystem/entry",
+                params={"path": "/"},
+                headers={request.authorize.refuse_header: "1"},
+            )
+            assert refused.status_code == expected.refused_status
+            assert refused.headers["content-type"] == "application/json"
+            assert refused.json() == refusal_body
+            invalid = client.post(f"{namespace_alias_base}/commits", json="nope")
+            assert invalid.status_code == 400
+            assert invalid.headers["content-type"] == "application/json"
+            assert invalid.json() == {
+                "code": "invalid_request",
+                "message": "commit body must be a JSON object",
+            }
 
 
 def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
