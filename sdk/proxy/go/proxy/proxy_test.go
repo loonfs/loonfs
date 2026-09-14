@@ -1,36 +1,32 @@
 package proxy
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 )
 
-func TestAuthorizeRefusesOrStampsCommitBodies(t *testing.T) {
+func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 	type forwardedRequest struct {
-		body             []byte
-		path             string
-		contentType      string
-		contentLength    int64
-		transferEncoding []string
+		body        []byte
+		path        string
+		contentType string
+		actor       string
 	}
 	forwarded := make(chan forwardedRequest, 3)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read forwarded body: %v", err)
 		}
-		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.ContentLength, r.TransferEncoding}
+		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor")}
 		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer upstream.Close()
+	})}
 	refusal := &Refusal{Status: http.StatusForbidden, ContentType: "application/json", Body: []byte(`{"code":"unauthorized","message":"refused"}`)}
 	proxy, err := NewHandler(Config{
-		ServerBaseURL:    upstream.URL,
+		ServerBaseURL:    "http://upstream.invalid",
 		Token:            "server-token",
 		NamespaceAliases: map[string]string{"team-files": "namespace-id"},
 		Authorize: func(r *http.Request, c RouteContext) (Authorization, error) {
@@ -41,12 +37,13 @@ func TestAuthorizeRefusesOrStampsCommitBodies(t *testing.T) {
 			if r.Header.Get("X-Refuse") != "" {
 				return Authorization{}, refusal
 			}
-			return Authorization{ActorID: "proxy-actor-雪"}, nil
+			return Authorization{ActorID: "proxy-actor"}, nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("create proxy: %v", err)
 	}
+	proxy.(*handler).transport = upstream
 	for _, testCase := range []struct {
 		name   string
 		body   string
@@ -55,15 +52,12 @@ func TestAuthorizeRefusesOrStampsCommitBodies(t *testing.T) {
 		result string
 	}{
 		{"refusal", `"nope"`, true, refusal.Status, string(refusal.Body)},
-		{"stamped", `{"actor_id":"browser-actor","expected_head_seq":9007199254740993}`, false, http.StatusAccepted, ""},
-		{"non_object", `"nope"`, false, http.StatusBadRequest, `{"code":"invalid_request","message":"commit body must be a JSON object"}`},
+		{"stamped", `{"expected_head_seq":9007199254740993}`, false, http.StatusAccepted, ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/v0/namespace-aliases/team-files/commits", strings.NewReader(testCase.body))
 			request.Header.Set("Content-Type", "text/plain")
-			request.Header.Set("Content-Length", strconv.Itoa(len(testCase.body)))
-			request.Header.Set("Transfer-Encoding", "chunked")
-			request.TransferEncoding = []string{"chunked"}
+			request.Header.Set("Loonfs-Actor", "browser-actor")
 			if testCase.refuse {
 				request.Header.Set("X-Refuse", "1")
 			}
@@ -81,15 +75,41 @@ func TestAuthorizeRefusesOrStampsCommitBodies(t *testing.T) {
 		t.Fatalf("forwarded request count = %d, want 1", len(forwarded))
 	}
 	actual := <-forwarded
-	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "application/json" ||
-		actual.contentLength != int64(len(actual.body)) || len(actual.transferEncoding) != 0 {
+	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" {
 		t.Errorf("forwarded request = %#v", actual)
 	}
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(actual.body, &body); err != nil {
-		t.Fatalf("decode forwarded body: %v", err)
-	}
-	if string(body["actor_id"]) != `"proxy-actor-雪"` || string(body["expected_head_seq"]) != "9007199254740993" || len(body) != 2 {
+	if string(actual.body) != `{"expected_head_seq":9007199254740993}` {
 		t.Errorf("forwarded body = %s", actual.body)
 	}
+}
+
+func TestActorHeaderIsRemovedWithoutAuthorize(t *testing.T) {
+	upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if actor := r.Header.Get("Loonfs-Actor"); actor != "" {
+			t.Errorf("forwarded actor = %q", actor)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})}
+	proxy, err := NewHandler(Config{ServerBaseURL: "http://upstream.invalid", Token: "server-token"})
+	if err != nil {
+		t.Fatalf("create proxy: %v", err)
+	}
+	proxy.(*handler).transport = upstream
+	request := httptest.NewRequest(http.MethodGet, "/v0/capabilities", nil)
+	request.Header.Set("Loonfs-Actor", "browser-actor")
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Errorf("response status = %d", response.Code)
+	}
+}
+
+type recordingTransport struct {
+	http.Handler
+}
+
+func (transport recordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response := httptest.NewRecorder()
+	transport.ServeHTTP(response, request)
+	return response.Result(), nil
 }

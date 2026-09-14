@@ -387,6 +387,7 @@ pub(crate) mod http_split_support {
                 "{server_url}/v0/namespaces/{namespace_id}/commits"
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Actor", "test-actor")
             .send_json(request)
             .map_err(Box::new)
     }

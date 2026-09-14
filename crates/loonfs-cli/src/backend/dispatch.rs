@@ -559,10 +559,14 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         request: &loonfs_api::v0::CommitRequest,
+        actor_id: &loonfs_api::ActorId,
     ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
-            Self::Remote(target) => Ok(target.client.create_commit(namespace_id, request).await?),
+            Self::Remote(target) => Ok(target
+                .client
+                .create_commit(namespace_id, request, actor_id)
+                .await?),
         }
     }
 

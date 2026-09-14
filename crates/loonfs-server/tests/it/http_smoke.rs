@@ -260,13 +260,14 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     ))
     .await;
 
+    let creator = loonfs_api::ActorId::parse("namespace-creator").expect("actor");
     let created = harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(&namespace_id("demo"), &creator)
         .await
         .expect("create namespace");
     assert_eq!(created.namespace_id.as_str(), "demo");
-    assert_eq!(created.created_by, loonfs_test_support::test_actor());
+    assert_eq!(created.created_by, creator);
     assert_eq!(created.head_seq, ChangeSeq(0));
     assert_eq!(created.retention_floor_seq, ChangeSeq(0));
     assert!(created.created_at_ms > 0);

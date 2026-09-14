@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -104,7 +103,7 @@ def _connection_headers(headers: list[tuple[bytes, bytes]]) -> set[bytes]:
 
 
 # Remove the browser-facing host and application cookies before forwarding.
-_REQUEST_EXCLUDED_HEADERS = frozenset({b"host", b"cookie", b"authorization"})
+_REQUEST_EXCLUDED_HEADERS = frozenset({b"host", b"cookie", b"authorization", b"loonfs-actor"})
 # Do not forward LoonFS cookies to the application.
 _RESPONSE_EXCLUDED_HEADERS = frozenset({b"set-cookie"})
 
@@ -176,44 +175,13 @@ class LoonFSProxy:
         )
         headers = _forwarded_headers(scope.get("headers", []), _REQUEST_EXCLUDED_HEADERS)
         headers.append((b"authorization", self._authorization))
-        content: bytes | AsyncIterator[bytes] = _request_body(receive)
-        if (
-            authorization.actor_id is not None
-            and context.method == "POST"
-            and context.template == "/v0/namespace-aliases/{namespace_alias}/commits"
-        ):
-            try:
-                body = json.loads(b"".join([chunk async for chunk in content]))
-            except ValueError:
-                body = None
-            if not isinstance(body, dict):
-                await self._refuse(
-                    send,
-                    ProxyRefusal(
-                        status=400,
-                        body=b'{"code":"invalid_request","message":"commit body must be a JSON object"}',
-                        content_type="application/json",
-                    ),
-                )
-                return
-            body["actor_id"] = authorization.actor_id
-            content = json.dumps(body).encode("utf-8")
-            headers = [
-                (name, value)
-                for name, value in headers
-                if name.lower() not in {b"content-type", b"content-length"}
-            ]
-            headers.extend(
-                [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(content)).encode("ascii")),
-                ]
-            )
+        if authorization.actor_id is not None:
+            headers.append((b"loonfs-actor", authorization.actor_id.encode("ascii")))
         request = self._client.build_request(
             scope["method"],
             target,
             headers=headers,
-            content=content,
+            content=_request_body(receive),
         )
         response = await self._client.send(request, stream=True)
         try:

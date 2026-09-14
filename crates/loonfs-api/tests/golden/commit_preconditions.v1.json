@@ -1,7 +1,6 @@
 [
   {
     "commit_id": "preconditions",
-    "actor_id": "loonfs-golden",
     "operations": [
       {
         "kind": "create_directory",
@@ -11,7 +10,6 @@
   },
   {
     "commit_id": "preconditions",
-    "actor_id": "loonfs-golden",
     "preconditions": [
       {
         "kind": "namespace_head",

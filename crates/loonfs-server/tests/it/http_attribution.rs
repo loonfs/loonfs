@@ -72,7 +72,9 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         )
         .await
         .expect("create file and implicit parents");
+    assert_eq!(create.committed_by, creator);
     let create_change = change_at(&harness, create.committed_seq).await;
+    assert_eq!(create_change.committed_by, creator);
     let created = harness
         .client
         .get_path_entry(&path("/implicit/parent/report.txt"), &Default::default())
@@ -252,4 +254,28 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .is_empty());
 
     harness.server.abort();
+}
+
+#[tokio::test]
+async fn a_read_ignores_the_actor_header() {
+    use tower::ServiceExt as _;
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, _state) = loonfs_server::app(
+        test_config(temp_dir.path().join("store"), "actor-read", "actor-read"),
+        loonfs_server::AppOptions::default(),
+    )
+    .await
+    .expect("build app");
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v0/capabilities")
+                .header("authorization", "Bearer test-token")
+                .header("Loonfs-Actor", "ignored invalid actor")
+                .body(axum::body::Body::empty())
+                .expect("read request"),
+        )
+        .await
+        .expect("read response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
 }

@@ -12,6 +12,7 @@ import (
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
 	"github.com/loonfs/loonfs-sdk-go/capabilities"
+	"github.com/loonfs/loonfs-sdk-go/core"
 	"github.com/loonfs/loonfs-sdk-go/option"
 	"github.com/loonfs/loonfs-sdk-go/uploads"
 )
@@ -24,7 +25,6 @@ type StreamUploadInput struct {
 	Path               loonfs.AbsolutePath
 	Content            io.Reader
 	SizeBytes          *int64
-	ActorID            loonfs.ActorID
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
@@ -33,8 +33,8 @@ type StreamUploadInput struct {
 }
 
 // Pass CommitID explicitly if you may retry. The caller owns Content.
-func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput) (*loonfs.Commit, error) {
-	actorID, commitID, err := c.publicationIDs(in.ActorID, in.CommitID)
+func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput, opts ...core.RequestOption) (*loonfs.Commit, error) {
+	commitID, err := c.publicationIDs(in.CommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -46,9 +46,9 @@ func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput) (*loonf
 	}
 	return c.UploadPrepared(ctx, PreparedUploadInput{
 		NamespaceID: in.NamespaceID, Path: in.Path, Prepared: prepared,
-		ActorID: actorID, CommitID: commitID, Message: in.Message, Behavior: in.Behavior,
+		CommitID: commitID, Message: in.Message, Behavior: in.Behavior,
 		ExpectedInodeID: in.ExpectedInodeID, ExpectedRevisionNo: in.ExpectedRevisionNo,
-	})
+	}, opts...)
 }
 
 // PrepareStream stages a source once with bounded memory and no payload

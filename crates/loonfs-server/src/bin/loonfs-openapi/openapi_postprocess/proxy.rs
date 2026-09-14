@@ -166,6 +166,7 @@ pub(super) fn remove_proxy_security(document: &mut Value) -> Result<(), OpenapiP
         .as_object_mut()
         .ok_or_else(|| invalid_document("$"))?;
     document.remove("security");
+    document.remove("x-fern-global-headers");
     if let Some(components) = document.get_mut("components") {
         components
             .as_object_mut()

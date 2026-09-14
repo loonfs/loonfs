@@ -55,8 +55,12 @@ pub trait PutFileJournal: Send + Sync {
     /// Records a part after it has been uploaded successfully.
     fn part_completed(&self, part: &CompletedUploadPart) -> std::io::Result<()>;
     /// Persists the complete request before any attempt to submit its commit.
-    /// Replay this value with [`Client::create_commit`] after an interruption.
-    fn commit_prepared(&self, request: &CommitRequest) -> std::io::Result<()>;
+    /// Replay this request and actor with [`Client::create_commit`] after an interruption.
+    fn commit_prepared(
+        &self,
+        request: &CommitRequest,
+        actor_id: &loonfs_api::ActorId,
+    ) -> std::io::Result<()>;
 }
 
 /// Optional multipart resume state and a journal for the complete PUT attempt.

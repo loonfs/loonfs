@@ -19,11 +19,16 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &CommitRequest,
+        actor_id: &loonfs_api::ActorId,
     ) -> Result<Commit> {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         // The request's commit id resolves an ambiguous resend through a durable receipt.
-        self.request_json::<_, Commit>(self.post(&url), Some(request), SendPolicy::Retry)
-            .await
+        self.request_json::<_, Commit>(
+            self.post(&url).header("Loonfs-Actor", actor_id.as_str()),
+            Some(request),
+            SendPolicy::Retry,
+        )
+        .await
     }
 
     /// Uploads bytes and commits them at a path.
@@ -67,7 +72,7 @@ impl Client {
     ///
     /// The journal records the complete commit request before submission for
     /// every transport. Multipart uploads also record session geometry and parts.
-    /// Save the request and replay it with [`Self::create_commit`] after an
+    /// Save the request and actor and replay them with [`Self::create_commit`] after an
     /// interruption; it carries the original content reference and commit ID.
     ///
     /// A resumed multipart attempt still receives the source from the
@@ -181,7 +186,6 @@ impl Client {
         let request = CommitRequest {
             preconditions: options.commit.preconditions.clone(),
             commit_id: commit_id.clone(),
-            actor_id: options.commit.actor_id.clone(),
             message: options.commit.message.clone(),
             content_tokens: staged.content_token.into_iter().collect(),
             operations: vec![FilesystemOperation::PutFile {
@@ -193,13 +197,16 @@ impl Client {
             }],
         };
         if let Some(journal) = journal {
-            journal.commit_prepared(&request).map_err(|error| {
-                ClientError::Io(format!(
-                    "could not record file commit `{commit_id}` before submission: {error}"
-                ))
-            })?;
+            journal
+                .commit_prepared(&request, &options.commit.actor_id)
+                .map_err(|error| {
+                    ClientError::Io(format!(
+                        "could not record file commit `{commit_id}` before submission: {error}"
+                    ))
+                })?;
         }
-        self.create_commit(spec.namespace(), &request).await
+        self.create_commit(spec.namespace(), &request, &options.commit.actor_id)
+            .await
     }
 
     /// Creates a directory at the requested path.
@@ -212,7 +219,6 @@ impl Client {
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::CreateDirectory {
                     path: spec.absolute_path().clone(),
@@ -220,6 +226,7 @@ impl Client {
                 },
             )
             .preconditions(options.commit.preconditions.clone()),
+            &options.commit.actor_id,
         )
         .await
     }
@@ -234,7 +241,6 @@ impl Client {
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::DeletePath {
                     path: spec.absolute_path().clone(),
@@ -243,6 +249,7 @@ impl Client {
                 },
             )
             .preconditions(options.commit.preconditions.clone()),
+            &options.commit.actor_id,
         )
         .await
     }
@@ -258,7 +265,6 @@ impl Client {
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::UpdateAttributes {
                     path: spec.absolute_path().clone(),
@@ -269,6 +275,7 @@ impl Client {
                 },
             )
             .preconditions(options.commit.preconditions.clone()),
+            &options.commit.actor_id,
         )
         .await
     }
@@ -291,7 +298,6 @@ impl Client {
             source_path.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::MovePath {
                     source_path: source_path.absolute_path().clone(),
@@ -304,6 +310,7 @@ impl Client {
                 },
             )
             .preconditions(options.commit.preconditions.clone()),
+            &options.commit.actor_id,
         )
         .await
     }
@@ -326,7 +333,6 @@ impl Client {
             source_path.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::CopyPath {
                     source_path: source_path.absolute_path().clone(),
@@ -339,6 +345,7 @@ impl Client {
                 },
             )
             .preconditions(options.commit.preconditions.clone()),
+            &options.commit.actor_id,
         )
         .await
     }
@@ -358,7 +365,6 @@ impl Client {
             namespace_id,
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::Undelete {
                     inode_id,
@@ -367,6 +373,7 @@ impl Client {
                 },
             )
             .preconditions(options.commit.preconditions.clone()),
+            &options.commit.actor_id,
         )
         .await
     }
@@ -382,7 +389,6 @@ impl Client {
             spec.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
-                options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::RestoreRevision {
                     path: spec.absolute_path().clone(),
@@ -390,6 +396,7 @@ impl Client {
                 },
             )
             .preconditions(options.commit.preconditions.clone()),
+            &options.commit.actor_id,
         )
         .await
     }

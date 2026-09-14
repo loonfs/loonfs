@@ -114,11 +114,11 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("batch-one"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: Some("import the reports".to_owned()),
                 content_tokens: vec![content_token(&first), content_token(&second)],
                 operations: batch(&first.content_ref, &second.content_ref),
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("batch commits");
@@ -246,7 +246,6 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     let request = || CommitRequest {
         preconditions: Vec::new(),
         commit_id: commit_id("returns-its-change"),
-        actor_id: loonfs_test_support::test_actor(),
         message: Some("the first report".to_owned()),
         content_tokens: vec![content_token(&staged)],
         operations: vec![FilesystemOperation::PutFile {
@@ -260,7 +259,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
 
     let committed = harness
         .client
-        .create_commit(&namespace, &request())
+        .create_commit(&namespace, &request(), &loonfs_test_support::test_actor())
         .await
         .expect("the put commits");
     assert_eq!(committed.committed_by, loonfs_test_support::test_actor());
@@ -315,7 +314,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     // nothing new.
     let replayed = harness
         .client
-        .create_commit(&namespace, &request())
+        .create_commit(&namespace, &request(), &loonfs_test_support::test_actor())
         .await
         .expect("an identical resubmission replays");
     assert_eq!(replayed, committed);
@@ -355,7 +354,6 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
     let request = || CommitRequest {
         preconditions: Vec::new(),
         commit_id: commit_id("outlives-its-history"),
-        actor_id: loonfs_test_support::test_actor(),
         message: Some("retired later".to_owned()),
         content_tokens: vec![content_token(&staged)],
         operations: vec![FilesystemOperation::PutFile {
@@ -369,7 +367,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
 
     let committed = harness
         .client
-        .create_commit(&namespace, &request())
+        .create_commit(&namespace, &request(), &loonfs_test_support::test_actor())
         .await
         .expect("the put commits");
     assert!(
@@ -409,7 +407,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
 
     let replayed = harness
         .client
-        .create_commit(&namespace, &request())
+        .create_commit(&namespace, &request(), &loonfs_test_support::test_actor())
         .await
         .expect("an identical resubmission still replays");
     assert_eq!(replayed.committed_seq, committed.committed_seq);
@@ -451,7 +449,6 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("batch-stops-at-two"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: vec![content_token(&staged)],
                 operations: vec![
@@ -473,6 +470,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
                     },
                 ],
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("the third operation has nothing to delete");
@@ -549,11 +547,11 @@ async fn an_empty_operation_list_is_rejected() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("empty-batch"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: Vec::new(),
                 operations: Vec::new(),
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("an empty request has nothing to commit");
@@ -600,7 +598,6 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("revision-without-inode"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: vec![content_token(&content)],
                 operations: vec![FilesystemOperation::PutFile {
@@ -611,6 +608,7 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
                     expected_revision_no: Some(RevisionNo(1)),
                 }],
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("revision requires an inode");
@@ -682,7 +680,6 @@ async fn a_foreign_binding_precondition_identifies_the_generation_field() {
             &namespace,
             &CommitRequest::single(
                 commit_id("foreign-generation"),
-                loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::CreateDirectory {
                     path: absolute("/unwritten"),
@@ -696,6 +693,7 @@ async fn a_foreign_binding_precondition_identifies_the_generation_field() {
                     foreign.binding_generation.expect("named binding"),
                 ),
             }]),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("generation belongs to another namespace");
@@ -746,7 +744,6 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("root-alone"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: Vec::new(),
                 operations: vec![FilesystemOperation::CreateDirectory {
@@ -754,6 +751,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
                     parents: false,
                 }],
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("the root cannot be created");
@@ -783,7 +781,6 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("root-in-batch"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: Vec::new(),
                 operations: vec![
@@ -798,6 +795,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
                     },
                 ],
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("the root cannot be deleted");
@@ -847,7 +845,6 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("root-unknown-namespace"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: Vec::new(),
                 operations: vec![FilesystemOperation::CreateDirectory {
@@ -855,6 +852,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
                     parents: false,
                 }],
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("the namespace does not exist");
@@ -889,7 +887,6 @@ async fn a_batch_replays_under_its_commit_id() {
     let batch = |ops: Vec<FilesystemOperation>| CommitRequest {
         preconditions: Vec::new(),
         commit_id: commit_id("replayed-batch"),
-        actor_id: loonfs_test_support::test_actor(),
         message: Some("two directories".to_owned()),
         content_tokens: Vec::new(),
         operations: ops,
@@ -907,12 +904,20 @@ async fn a_batch_replays_under_its_commit_id() {
 
     let first = harness
         .client
-        .create_commit(&namespace, &batch(operations.clone()))
+        .create_commit(
+            &namespace,
+            &batch(operations.clone()),
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("batch commits");
     let replayed = harness
         .client
-        .create_commit(&namespace, &batch(operations.clone()))
+        .create_commit(
+            &namespace,
+            &batch(operations.clone()),
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("identical resubmission replays");
     assert_eq!(replayed, first);
@@ -931,7 +936,11 @@ async fn a_batch_replays_under_its_commit_id() {
     // id, so the id is spent.
     let conflict = harness
         .client
-        .create_commit(&namespace, &batch(operations[..1].to_vec()))
+        .create_commit(
+            &namespace,
+            &batch(operations[..1].to_vec()),
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect_err("a different batch cannot reuse the id");
     match conflict {
@@ -1044,11 +1053,11 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: Some("shaped once".to_owned()),
                 content_tokens: Vec::new(),
                 operations: wire_operations.clone(),
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("the embedded commit replays over http");
@@ -1073,11 +1082,11 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: Some("shaped once".to_owned()),
                 content_tokens: Vec::new(),
                 operations: wire_operations[..2].to_vec(),
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("a different batch cannot reuse the embedded id");
@@ -1117,7 +1126,6 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("with_preconditions-create"),
-                actor_id: loonfs_test_support::test_actor(),
                 message: None,
                 content_tokens: vec![content_token(&first)],
                 operations: vec![FilesystemOperation::PutFile {
@@ -1128,6 +1136,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
                     expected_revision_no: None,
                 }],
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("the file is created at revision 1");
@@ -1153,7 +1162,6 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
         put[precondition] = serde_json::json!(1);
         serde_json::json!({
             "commit_id": commit,
-            "actor_id": loonfs_test_support::test_actor(),
             "content_tokens": [content_token(&second)],
             "operations": [put]
         })

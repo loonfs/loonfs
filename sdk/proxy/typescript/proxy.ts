@@ -6,7 +6,7 @@ export interface ProxyRouteContext {
 }
 
 export interface ProxyAuthorization {
-    /** Written into commit bodies as `actor_id`. */
+    /** Sent upstream in `Loonfs-Actor`. */
     actorId?: string;
 }
 
@@ -109,31 +109,16 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
 
         const headers = forwardedHeaders(request.headers, REQUEST_STRIPPED_HEADERS);
         headers.set("authorization", `Bearer ${token}`);
+        if (authorization?.actorId !== undefined) {
+            headers.set("Loonfs-Actor", authorization.actorId);
+        }
         const init: RequestInit & { duplex?: "half" } = {
             method: request.method,
             headers,
             redirect: "manual",
             signal: request.signal,
         };
-        if (
-            authorization?.actorId !== undefined && resolved.context.method === "POST" &&
-            resolved.context.template === "/v0/namespace-aliases/{namespace_alias}/commits"
-        ) {
-            let body: unknown;
-            try {
-                body = await request.json();
-            } catch {
-                return invalidCommitBody();
-            }
-            if (body === null || typeof body !== "object" || Array.isArray(body)) {
-                return invalidCommitBody();
-            }
-            (body as Record<string, unknown>).actor_id = authorization.actorId;
-            const encoded = new TextEncoder().encode(JSON.stringify(body));
-            headers.set("content-type", "application/json");
-            headers.set("content-length", String(encoded.byteLength));
-            init.body = encoded;
-        } else if (request.body !== null) {
+        if (request.body !== null) {
             init.body = request.body;
             init.duplex = "half";
         }
@@ -202,18 +187,11 @@ function forwardedHeaders(source: Headers, extra: readonly string[]): Headers {
 }
 
 // Do not forward application cookies to LoonFS.
-const REQUEST_STRIPPED_HEADERS = ["cookie"] as const;
+const REQUEST_STRIPPED_HEADERS = ["cookie", "loonfs-actor"] as const;
 // Fetch decompresses responses, so remove the old encoding and length headers.
 // Do not forward LoonFS cookies to the application.
 const RESPONSE_STRIPPED_HEADERS = ["content-encoding", "content-length", "set-cookie"] as const;
 
 function notFound(): Response {
     return new Response(null, { status: 404 });
-}
-
-function invalidCommitBody(): Response {
-    return new Response(JSON.stringify({
-        code: "invalid_request",
-        message: "commit body must be a JSON object",
-    }), { status: 400, headers: { "content-type": "application/json" } });
 }

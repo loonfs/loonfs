@@ -11,7 +11,7 @@ use axum::Json;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
-use loonfs_api::{AbsolutePath, NamespaceId};
+use loonfs_api::{AbsolutePath, ActorId, NamespaceId};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -68,6 +68,27 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[derive(Debug)]
+pub(super) struct ActorHeader(pub(super) ActorId);
+
+impl<S: Send + Sync> FromRequestParts<S> for ActorHeader {
+    type Rejection = ApiResponseError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let invalid = |message: &str| {
+            ApiResponseError::new(ErrorCode::InvalidRequest, message).with_param("Loonfs-Actor")
+        };
+        let value = parts
+            .headers
+            .get("Loonfs-Actor")
+            .ok_or_else(|| invalid("missing required header Loonfs-Actor"))?;
+        let value = String::from_utf8_lossy(value.as_bytes());
+        ActorId::parse(&value)
+            .map(Self)
+            .map_err(|error| invalid(error.reason()))
+    }
 }
 
 fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
@@ -600,6 +621,52 @@ mod tests {
         path: u64,
     }
 
+    #[tokio::test]
+    async fn actor_header_validates_and_names_the_header() {
+        use axum::response::IntoResponse as _;
+        let too_long = "x".repeat(257);
+        for (value, message) in [
+            (None, "missing required header Loonfs-Actor"),
+            (
+                Some("actor id"),
+                "must contain only visible ASCII characters",
+            ),
+            (
+                Some("actor-雪"),
+                "must contain only visible ASCII characters",
+            ),
+            (Some(too_long.as_str()), "must be 256 bytes or fewer"),
+        ] {
+            let mut request = axum::http::Request::builder();
+            if let Some(value) = value {
+                request = request.header("loonfs-actor", value);
+            }
+            let (mut parts, ()) = request.body(()).expect("request").into_parts();
+            let error = ActorHeader::from_request_parts(&mut parts, &())
+                .await
+                .expect_err("invalid actor");
+            assert_eq!(error.param(), Some("Loonfs-Actor"));
+            assert_eq!(error.message(), message);
+            let response = error.into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("error body");
+            let error: loonfs_api::ApiError =
+                serde_json::from_slice(&body).expect("error envelope");
+            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+        }
+        let (mut parts, ()) = axum::http::Request::builder()
+            .header("LOONFS-ACTOR", "usr_8f3c")
+            .body(())
+            .expect("request")
+            .into_parts();
+        let ActorHeader(actor) = ActorHeader::from_request_parts(&mut parts, &())
+            .await
+            .map_err(|error| error.message().to_owned())
+            .expect("valid actor");
+        assert_eq!(actor.as_str(), "usr_8f3c");
+    }
+
     #[test]
     fn typed_json_decode_reports_json_pointer() {
         let error = decode_json::<Request>(
@@ -628,7 +695,6 @@ mod tests {
         let error = decode_json::<loonfs_api::CommitRequest>(
             br#"{
                 "commit_id": "invalid-path",
-                "actor_id": "test-service",
                 "operations": [{ "kind": "create_directory", "path": "relative" }]
             }"#,
         )
@@ -638,7 +704,6 @@ mod tests {
         let error = decode_json::<loonfs_api::CommitRequest>(
             br#"{
                 "commit_id": "invalid-source-path",
-                "actor_id": "test-service",
                 "operations": [{
                     "kind": "move_path",
                     "source_path": "relative",
@@ -651,23 +716,26 @@ mod tests {
     }
 
     #[test]
-    fn api_commit_decode_names_an_invalid_actor_id() {
-        for actor_id in [
-            serde_json::Value::Null,
-            serde_json::json!(42),
-            serde_json::json!(" bad"),
-        ] {
-            let request = serde_json::json!({
-                "commit_id": "invalid-actor",
-                "actor_id": actor_id,
-                "operations": [{ "kind": "create_directory", "path": "/docs" }],
-            });
-            let error = decode_json::<loonfs_api::CommitRequest>(
-                &serde_json::to_vec(&request).expect("request JSON"),
-            )
-            .expect_err("actor_id must be a valid string");
-            assert_eq!(error.param(), Some("/actor_id"));
-        }
+    fn api_commit_decode_rejects_a_body_actor() {
+        let error = decode_json::<loonfs_api::CommitRequest>(
+            br#"{
+            "commit_id": "stale-actor",
+            "actor_id": "test-service",
+            "operations": [{"kind": "create_directory", "path": "/docs"}]
+        }"#,
+        )
+        .expect_err("body actor is unknown");
+        assert_eq!(error.param(), Some("/actor_id"));
+        use axum::response::IntoResponse as _;
+        assert_eq!(
+            error
+                .into_response()
+                .extensions()
+                .get::<super::super::error::ServedErrorCode>(),
+            Some(&super::super::error::ServedErrorCode(
+                ErrorCode::InvalidRequest
+            ))
+        );
     }
 
     #[test]
@@ -675,7 +743,6 @@ mod tests {
         let error = decode_json::<loonfs_api::CommitRequest>(
             br#"{
                 "commit_id": "invalid-paths",
-                "actor_id": "test-service",
                 "operations": [{
                     "kind": "move_path",
                     "source_path": "relative",

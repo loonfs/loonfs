@@ -363,7 +363,7 @@ mod tests {
         let actors = [
             ActorId::parse("auth0|x").expect("actor id"),
             ActorId::parse("x".repeat(256)).expect("256-byte actor id"),
-            ActorId::parse("雪-actor").expect("unicode actor id"),
+            ActorId::parse("external|actor").expect("external actor id"),
         ];
 
         for (offset, actor) in actors.into_iter().enumerate() {

@@ -50,8 +50,9 @@
         "type": "string"
       },
       "ActorId": {
-        "description": "Opaque hosting-platform actor id: non-empty, at most 256 UTF-8 bytes, without leading or trailing whitespace or control characters.",
+        "description": "Stable opaque actor id containing 1 to 256 visible ASCII characters.",
         "example": "usr_8f3c",
+        "pattern": "^[\\x21-\\x7E]{1,256}$",
         "type": "string"
       },
       "AttributeKey": {
@@ -369,10 +370,6 @@
         "additionalProperties": false,
         "description": "A request to commit one or more filesystem operations atomically in order.\n\nUnknown fields are rejected.",
         "properties": {
-          "actor_id": {
-            "$ref": "#/components/schemas/ActorId",
-            "description": "Actor responsible for the commit, as supplied by the application."
-          },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Caller-supplied idempotency key for the whole request."
@@ -405,7 +402,6 @@
         },
         "required": [
           "commit_id",
-          "actor_id",
           "operations"
         ],
         "type": "object"
@@ -2988,6 +2984,7 @@
           "commits"
         ],
         "x-fern-sdk-method-name": "create",
+        "x-loonfs-actor": "required",
         "x-loonfs-retry": "replayable"
       }
     },

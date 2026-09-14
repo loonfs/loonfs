@@ -339,6 +339,7 @@ struct RecordingJournal {
     began: Mutex<Option<(UploadId, u64, ChecksumAlgorithm)>>,
     parts: Mutex<Vec<CompletedUploadPart>>,
     request: Mutex<Option<CommitRequest>>,
+    actor_id: Mutex<Option<loonfs_api::ActorId>>,
 }
 
 impl RecordingJournal {
@@ -374,8 +375,13 @@ impl RecordingJournal {
 }
 
 impl PutFileJournal for RecordingJournal {
-    fn commit_prepared(&self, request: &CommitRequest) -> std::io::Result<()> {
+    fn commit_prepared(
+        &self,
+        request: &CommitRequest,
+        actor_id: &loonfs_api::ActorId,
+    ) -> std::io::Result<()> {
         *self.request.lock().expect("journal lock") = Some(request.clone());
+        *self.actor_id.lock().expect("journal lock") = Some(actor_id.clone());
         Ok(())
     }
 
@@ -957,7 +963,7 @@ struct FailingJournal {
 }
 
 impl PutFileJournal for FailingJournal {
-    fn commit_prepared(&self, _: &CommitRequest) -> std::io::Result<()> {
+    fn commit_prepared(&self, _: &CommitRequest, _: &loonfs_api::ActorId) -> std::io::Result<()> {
         Err(std::io::Error::other("journal disk full"))
     }
 
@@ -1062,7 +1068,13 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         .clone()
         .expect("request saved before submission");
     assert_eq!(Some(&saved.commit_id), options.commit.commit_id.as_ref());
-    assert_eq!(saved.actor_id, options.commit.actor_id);
+    let saved_actor = journal
+        .actor_id
+        .lock()
+        .expect("journal")
+        .clone()
+        .expect("saved actor");
+    assert_eq!(saved_actor, options.commit.actor_id);
     assert_eq!(saved.message, options.commit.message);
     assert_eq!(
         saved.operations,
@@ -1078,7 +1090,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
     drop(transport);
     let transport = test_transport::script(vec![commit_landed()]);
     client_without_retry()
-        .create_commit(&namespace_id(), &saved)
+        .create_commit(&namespace_id(), &saved, &saved_actor)
         .await
         .expect("replay exact request");
     assert_eq!(transport.attempts(), 1);

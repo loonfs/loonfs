@@ -4,6 +4,7 @@
 
 use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
+use super::extractors::ActorHeader;
 use super::handlers_uploads::{
     content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
 };
@@ -485,13 +486,13 @@ pub(super) async fn list_file_revisions(
     Ok(Json(response))
 }
 
-/// The server stores the `actor_id` from the request; the shared token does not verify it.
+/// The server stores the `Loonfs-Actor` header; the shared token does not verify it.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         post,
         operation_id = "create_commit",
-        extensions(("x-loonfs-retry" = json!("replayable"))),
+        extensions(("x-loonfs-actor" = json!("required")), ("x-loonfs-retry" = json!("replayable"))),
         path = "/v0/namespaces/{namespace_id}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
@@ -511,6 +512,7 @@ pub(super) async fn list_file_revisions(
 )]
 pub(super) async fn create_commit(
     State(state): State<AppState>,
+    ActorHeader(actor_id): ActorHeader,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ApiCommitRequest>,
@@ -518,7 +520,6 @@ pub(super) async fn create_commit(
     let ApiCommitRequest {
         preconditions,
         commit_id,
-        actor_id,
         message,
         content_tokens,
         operations,

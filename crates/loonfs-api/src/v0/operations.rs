@@ -162,8 +162,6 @@ pub struct ErrorDetails {
 pub struct CreateNamespaceRequest {
     /// Durable namespace id to create.
     pub namespace_id: NamespaceId,
-    /// Application-supplied actor creating the namespace.
-    pub actor_id: ActorId,
 }
 
 /// Request to fork a namespace.
@@ -173,8 +171,6 @@ pub struct CreateNamespaceRequest {
 pub struct ForkNamespaceRequest {
     /// Durable namespace id for the fork target.
     pub new_namespace_id: NamespaceId,
-    /// Application-supplied actor creating the namespace.
-    pub actor_id: ActorId,
     /// Fork from this live snapshot instead of the current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -698,8 +694,6 @@ pub enum CommitPrecondition {
 pub struct CommitRequest {
     /// Caller-supplied idempotency key for the whole request.
     pub commit_id: CommitId,
-    /// Actor responsible for the commit, as supplied by the application.
-    pub actor_id: crate::ActorId,
     /// The caller annotation that forms part of the commit identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -724,13 +718,11 @@ impl CommitRequest {
     /// A request carrying exactly one operation.
     pub fn single(
         commit_id: CommitId,
-        actor: crate::ActorId,
         message: Option<String>,
         operation: FilesystemOperation,
     ) -> Self {
         Self {
             commit_id,
-            actor_id: actor,
             message,
             content_tokens: Vec::new(),
             preconditions: Vec::new(),
@@ -1432,31 +1424,6 @@ mod tests {
     use crate::ContentId;
 
     #[test]
-    fn commit_actor_requires_a_string() {
-        let request = serde_json::json!({
-            "commit_id": "actor-shape",
-            "actor_id": "usr_8f3c",
-            "operations": [{ "kind": "create_directory", "path": "/docs" }],
-        });
-        serde_json::from_value::<CommitRequest>(request.clone()).expect("string actor");
-        for actor in [
-            serde_json::json!({ "kind": "user", "id": "usr_8f3c" }),
-            serde_json::Value::Null,
-            serde_json::json!(42),
-        ] {
-            let mut invalid = request.clone();
-            invalid["actor_id"] = actor;
-            assert!(serde_json::from_value::<CommitRequest>(invalid).is_err());
-        }
-        let mut missing = request;
-        missing
-            .as_object_mut()
-            .expect("request object")
-            .remove("actor_id");
-        assert!(serde_json::from_value::<CommitRequest>(missing).is_err());
-    }
-
-    #[test]
     fn file_revision_provenance_fields_are_pinned_on_the_wire() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
@@ -2047,7 +2014,6 @@ mod tests {
             operation[precondition] = serde_json::json!(3);
             serde_json::json!({
                 "commit_id": "with_preconditions-put",
-                "actor_id": crate::ActorId::loonfs(),
                 "operations": [operation]
             })
         };
@@ -2075,7 +2041,6 @@ mod tests {
         let body = |expected_revision_no: u64| {
             serde_json::json!({
                 "commit_id": "bounded-revision-precondition",
-                "actor_id": crate::ActorId::loonfs(),
                 "operations": [{
                     "kind": "put_file",
                     "path": "/docs/a.txt",
@@ -2112,7 +2077,6 @@ mod tests {
         let valid = || {
             serde_json::json!({
                 "commit_id": "strict-commit",
-                "actor_id": crate::ActorId::loonfs(),
                 "content_tokens": [{
                     "content_ref": sample_content_ref(),
                     "token": "opaque-proof"
@@ -2413,13 +2377,11 @@ mod tests {
 
         serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
             "namespace_id": "demo",
-            "actor_id": "test"
         }))
         .expect("the same create body without a typo decodes");
         assert!(
             serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
                 "namespace_id": "demo",
-                "actor_id": "test",
                 "fork_of": "other"
             }))
             .is_err()
@@ -2427,7 +2389,6 @@ mod tests {
         assert!(
             serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
                 "new_namespace_id": "demo",
-                "actor_id": "test",
                 "source_namespace_id": "other"
             }))
             .is_err()

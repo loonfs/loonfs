@@ -7,11 +7,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { test } from "node:test";
 
-import {
-    LoonFS,
-    LoonFSClient,
-    type PreparedContent,
-} from "../../../generated/typescript/index.js";
+import { LoonFS, LoonFSClient, type PreparedContent } from "../../../generated/typescript/index.js";
 import {
     LoonFS as BrowserLoonFS,
     LoonFSClient as BrowserLoonFSClient,
@@ -344,7 +340,9 @@ function strictObject(value: unknown, fields: readonly string[], label: string):
     if (actual.length !== expected.length || actual.some((field, index) => field !== expected[index])) {
         const unknown = actual.filter((field) => !expected.includes(field));
         const missing = expected.filter((field) => !actual.includes(field));
-        throw new Error(`${label} fields differ: unknown=${unknown.join(",")}, missing=${missing.join(",")}`);
+        throw new Error(
+            `${label} fields differ: unknown=${unknown.join(",")}, missing=${missing.join(",")}`,
+        );
     }
     return data;
 }
@@ -548,9 +546,7 @@ function decodeCommitReplay(
     ];
 }
 
-function decodePagination(
-    testCase: ConformanceCase,
-): [PaginationRequest, PaginationExpected] {
+function decodePagination(testCase: ConformanceCase): [PaginationRequest, PaginationExpected] {
     strictObject(testCase.request, PAGINATION_REQUEST_FIELDS, `${testCase.name} request`);
     strictObject(testCase.expected, PAGINATION_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
@@ -562,16 +558,8 @@ function decodePagination(
 function decodeChildrenByInode(
     testCase: ConformanceCase,
 ): [ChildrenByInodeRequest, ChildrenByInodeExpected] {
-    strictObject(
-        testCase.request,
-        CHILDREN_BY_INODE_REQUEST_FIELDS,
-        `${testCase.name} request`,
-    );
-    strictObject(
-        testCase.expected,
-        CHILDREN_BY_INODE_EXPECTED_FIELDS,
-        `${testCase.name} expected`,
-    );
+    strictObject(testCase.request, CHILDREN_BY_INODE_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, CHILDREN_BY_INODE_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
         testCase.request as unknown as ChildrenByInodeRequest,
         testCase.expected as unknown as ChildrenByInodeExpected,
@@ -589,9 +577,7 @@ function decodeInodeMutations(
     ];
 }
 
-function decodeSnapshots(
-    testCase: ConformanceCase,
-): [SnapshotsRequest, SnapshotsExpected] {
+function decodeSnapshots(testCase: ConformanceCase): [SnapshotsRequest, SnapshotsExpected] {
     strictObject(testCase.request, SNAPSHOTS_REQUEST_FIELDS, `${testCase.name} request`);
     strictObject(testCase.expected, SNAPSHOTS_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
@@ -656,9 +642,18 @@ function decodeEndToEnd(testCase: ConformanceCase): [EndToEndRequest, EndToEndEx
 
 function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
     strictObject(testCase.request, PROXY_REQUEST_FIELDS, `${testCase.name} request`);
-    strictObject(testCase.request.authorize, [
-        "actor_id", "browser_actor_id", "commit_id", "directory", "refuse_header", "refused_status",
-    ], `${testCase.name} authorize`);
+    strictObject(
+        testCase.request.authorize,
+        [
+            "actor_id",
+            "browser_actor_id",
+            "commit_id",
+            "directory",
+            "refuse_header",
+            "refused_status",
+        ],
+        `${testCase.name} authorize`,
+    );
     strictObject(testCase.expected, PROXY_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
         testCase.request as unknown as ProxyRequest,
@@ -721,13 +716,11 @@ function caseNamed(cases: Map<string, ConformanceCase>, name: string): Conforman
 function directoryCommit(
     namespaceId: string,
     commitId: string,
-    actorId: LoonFS.ActorId,
     path: string,
     message?: string,
 ): LoonFS.CommitRequest {
     const request: LoonFS.CommitRequest = {
         namespace_id: namespaceId,
-        actor_id: actorId,
         commit_id: commitId,
         operations: [{ kind: "create_directory", parents: false, path }],
     };
@@ -740,14 +733,12 @@ function directoryCommit(
 function fileCommit(
     namespaceId: string,
     commitId: string,
-    actorId: LoonFS.ActorId,
     path: string,
     contentRef: LoonFS.ContentRef,
     contentToken?: LoonFS.ContentToken,
 ): LoonFS.CommitRequest {
     const request: LoonFS.CommitRequest = {
         namespace_id: namespaceId,
-        actor_id: actorId,
         commit_id: commitId,
         operations: [
             {
@@ -766,11 +757,9 @@ function fileCommit(
 
 function namespaceAliasDirectoryCommit(
     commitId: string,
-    actorId: LoonFS.ActorId,
     path: string,
 ): Omit<LoonFS.CommitRequest, "namespace_id"> {
     return {
-        actor_id: actorId,
         commit_id: commitId,
         operations: [{ kind: "create_directory", parents: false, path }],
     };
@@ -778,12 +767,10 @@ function namespaceAliasDirectoryCommit(
 
 function namespaceAliasFileCommit(
     commitId: string,
-    actorId: LoonFS.ActorId,
     path: string,
     completed: CompletedUpload,
 ): Omit<LoonFS.CommitRequest, "namespace_id"> {
     const request: Omit<LoonFS.CommitRequest, "namespace_id"> = {
-        actor_id: actorId,
         commit_id: commitId,
         operations: [
             {
@@ -803,13 +790,11 @@ function namespaceAliasFileCommit(
 function moveCommit(
     namespaceId: string,
     commitId: string,
-    actorId: LoonFS.ActorId,
     fromPath: string,
     toPath: string,
 ): LoonFS.CommitRequest {
     return {
         namespace_id: namespaceId,
-        actor_id: actorId,
         commit_id: commitId,
         operations: [
             {
@@ -822,15 +807,9 @@ function moveCommit(
     };
 }
 
-function deleteCommit(
-    namespaceId: string,
-    commitId: string,
-    actorId: LoonFS.ActorId,
-    path: string,
-): LoonFS.CommitRequest {
+function deleteCommit(namespaceId: string, commitId: string, path: string): LoonFS.CommitRequest {
     return {
         namespace_id: namespaceId,
-        actor_id: actorId,
         commit_id: commitId,
         operations: [{ kind: "delete_path", path, behavior: "non_recursive" }],
     };
@@ -887,7 +866,6 @@ async function assertBrowserTransfer(
     namespaceAlias: string,
     path: string,
     bytes: Uint8Array,
-    actorId: LoonFS.ActorId,
     commitId: string,
     label: string,
 ): Promise<void> {
@@ -895,7 +873,6 @@ async function assertBrowserTransfer(
         namespace_alias: namespaceAlias,
         path,
         content: bytes,
-        actor_id: actorId,
         commit_id: commitId,
     });
     assert.ok(committed.committed_seq > 0, `${label} commit sequence is not positive`);
@@ -934,13 +911,11 @@ async function stageContent(
 function stagedCommit(
     namespaceId: string,
     commitId: string,
-    actorId: LoonFS.ActorId,
     operation: LoonFS.FilesystemOperation,
     staged: CompletedUpload,
 ): LoonFS.CommitRequest {
     const request: LoonFS.CommitRequest = {
         namespace_id: namespaceId,
-        actor_id: actorId,
         commit_id: commitId,
         operations: [operation],
     };
@@ -1165,7 +1140,7 @@ if (environmentSkip === undefined) {
     const token = requiredEnvironment("LOONFS_CONFORMANCE_TOKEN");
     cases = loadCases(requiredEnvironment("LOONFS_CONFORMANCE_CASES"));
     harness = {
-        client: new LoonFSClient({ baseUrl: configuredBaseUrl, token }),
+        client: new LoonFSClient({ baseUrl: configuredBaseUrl, token, actorId: "conformance" }),
         unauthenticated: new LoonFSClient({ baseUrl: configuredBaseUrl, token, auth: false }),
         serverBaseUrl: configuredBaseUrl,
         token,
@@ -1188,7 +1163,9 @@ conformanceTest("error_contract", async (activeHarness, testCase) => {
     const [request, expected] = decodeErrorContract(testCase);
     let caught: unknown;
     try {
-        await activeHarness.unauthenticated.namespaces.retrieve({ namespace_id: request.namespace_id });
+        await activeHarness.unauthenticated.namespaces.retrieve({
+            namespace_id: request.namespace_id,
+        });
     } catch (error) {
         caught = error;
     }
@@ -1201,24 +1178,33 @@ conformanceTest("error_contract", async (activeHarness, testCase) => {
 
 conformanceTest("commit_replay", async (activeHarness, testCase) => {
     const [request, expected] = decodeCommitReplay(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const commit = directoryCommit(
         request.namespace_id,
         request.commit_id,
-        request.actor_id,
         request.path,
         request.message,
     );
     commit.preconditions = request.preconditions;
-    const first = await activeHarness.client.commits.create(commit);
-    const replayed = await activeHarness.client.commits.create(commit);
+    const first = await activeHarness.client.commits.create(commit, {
+        headers: { "Loonfs-Actor": request.actor_id },
+    });
+    const replayed = await activeHarness.client.commits.create(commit, {
+        headers: { "Loonfs-Actor": request.actor_id },
+    });
 
     assert.equal(first.committed_seq, expected.committed_seq);
     assert.equal(first.commit_id, request.commit_id);
     assert.equal(replayed.committed_seq, first.committed_seq);
     assert.deepEqual(replayed, first);
     await assert.rejects(
-        activeHarness.client.commits.create({...commit, commit_id: request.commit_id + "-stale"}),
+        activeHarness.client.commits.create(
+            { ...commit, commit_id: request.commit_id + "-stale" },
+            { headers: { "Loonfs-Actor": request.actor_id } },
+        ),
         (error: unknown) => {
             assert.ok(error instanceof LoonFS.ConflictError);
             assert.equal(error.body.code, "stale_head");
@@ -1228,36 +1214,85 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         },
     );
     await assert.rejects(
-        activeHarness.client.commits.create({...commit, preconditions: []}),
-        (error: unknown) => error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict",
+        activeHarness.client.commits.create(
+            { ...commit, preconditions: [] },
+            { headers: { "Loonfs-Actor": request.actor_id } },
+        ),
+        (error: unknown) =>
+            error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict",
     );
     const prepared: PreparedContent = await activeHarness.client.files.prepareStream({
         namespace_id: request.namespace_id, content: new Blob(["original bytes"]),
     });
-    const input = { namespace_id: request.namespace_id, path: "/prepared", prepared,
-        actor_id: request.actor_id, commit_id: "prepared-put" };
-    const published = await activeHarness.client.files.uploadPrepared(input);
-    await activeHarness.client.commits.create({namespace_id: request.namespace_id,
-        actor_id: request.actor_id, commit_id: "prepared-rename",
-        operations: [{kind: "move_path", source_path: input.path, destination_path: "/renamed"}],
+    const input = {
+        namespace_id: request.namespace_id,
+        path: "/prepared",
+        prepared,
+        commit_id: "prepared-put",
+    };
+    const published = await activeHarness.client.files.uploadPrepared(input, {
+        headers: { "Loonfs-Actor": request.actor_id },
     });
-    const publishedReplay = await activeHarness.client.files.uploadPrepared(input);
+    await activeHarness.client.commits.create(
+        {
+            namespace_id: request.namespace_id,
+            commit_id: "prepared-rename",
+            operations: [
+                { kind: "move_path", source_path: input.path, destination_path: "/renamed" },
+            ],
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
+    const publishedReplay = await activeHarness.client.files.uploadPrepared(input, {
+        headers: { "Loonfs-Actor": request.actor_id },
+    });
     assert.equal(publishedReplay.commit_id, published.commit_id);
     assert.equal(publishedReplay.committed_seq, published.committed_seq);
-    for (const changed of [{message: "changed"}, {path: "/renamed"}, {behavior: "replace" as const}]) {
-        await assert.rejects(activeHarness.client.files.uploadPrepared({...input, ...changed}),
-            (error: unknown) => error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict");
+    for (const changed of [
+        { message: "changed" },
+        { path: "/renamed" },
+        { behavior: "replace" as const },
+    ]) {
+        await assert.rejects(
+            activeHarness.client.files.uploadPrepared(
+                { ...input, ...changed },
+                { headers: { "Loonfs-Actor": request.actor_id } },
+            ),
+            (error: unknown) =>
+                error instanceof LoonFS.ConflictError &&
+                error.body.code === "commit_id_reuse_conflict",
+        );
     }
-    const fresh = await activeHarness.client.files.prepare({namespace_id: request.namespace_id,
-        content: new TextEncoder().encode("original bytes")});
-    await assert.rejects(activeHarness.client.files.uploadPrepared({...input, prepared: fresh}),
-        (error: unknown) => error instanceof LoonFS.ConflictError);
-    const entry = await activeHarness.client.files.retrieve({namespace_id: request.namespace_id, path: "/renamed"});
+    const fresh = await activeHarness.client.files.prepare({
+        namespace_id: request.namespace_id,
+        content: new TextEncoder().encode("original bytes"),
+    });
+    await assert.rejects(
+        activeHarness.client.files.uploadPrepared(
+            { ...input, prepared: fresh },
+            { headers: { "Loonfs-Actor": request.actor_id } },
+        ),
+        (error: unknown) => error instanceof LoonFS.ConflictError,
+    );
+    const entry = await activeHarness.client.files.retrieve({
+        namespace_id: request.namespace_id,
+        path: "/renamed",
+    });
     if (entry.inode_kind !== "file") throw new Error("expected file");
-    const withPreconditions = {...input, path: "/renamed", commit_id: "prepared-replace", behavior: "replace" as const,
-        expected_inode_id: entry.inode_id, expected_revision_no: entry.revision_no};
-    const replaced = await activeHarness.client.files.uploadPrepared(withPreconditions);
-    const replacedReplay = await activeHarness.client.files.uploadPrepared(withPreconditions);
+    const withPreconditions = {
+        ...input,
+        path: "/renamed",
+        commit_id: "prepared-replace",
+        behavior: "replace" as const,
+        expected_inode_id: entry.inode_id,
+        expected_revision_no: entry.revision_no,
+    };
+    const replaced = await activeHarness.client.files.uploadPrepared(withPreconditions, {
+        headers: { "Loonfs-Actor": request.actor_id },
+    });
+    const replacedReplay = await activeHarness.client.files.uploadPrepared(withPreconditions, {
+        headers: { "Loonfs-Actor": request.actor_id },
+    });
     assert.equal(replacedReplay.commit_id, replaced.commit_id);
     assert.equal(replacedReplay.committed_seq, replaced.committed_seq);
 
@@ -1265,23 +1300,22 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
 
 conformanceTest("pagination", async (activeHarness, testCase) => {
     const [request, expected] = decodePagination(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     await activeHarness.client.commits.create(
-        directoryCommit(
-            request.namespace_id,
-            "conf-pagination-directory",
-            request.actor_id,
-            request.directory,
-        ),
+        directoryCommit(request.namespace_id, "conf-pagination-directory", request.directory),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     for (const [index, name] of request.entry_names.entries()) {
         await activeHarness.client.commits.create(
             directoryCommit(
                 request.namespace_id,
                 `conf-pagination-entry-${index.toString().padStart(2, "0")}`,
-                request.actor_id,
                 `${request.directory}/${name}`,
             ),
+            { headers: { "Loonfs-Actor": request.actor_id } },
         );
     }
 
@@ -1332,7 +1366,11 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
         await page.getNextPage();
     }
 
-    assert.equal(new Set(observed).size, observed.length, "pagination returned an entry more than once");
+    assert.equal(
+        new Set(observed).size,
+        observed.length,
+        "pagination returned an entry more than once",
+    );
     assert.deepEqual(observed, request.entry_names);
     assert.ok(resumeOffset <= request.entry_names.length);
     assert.deepEqual(resumed, request.entry_names.slice(resumeOffset));
@@ -1340,23 +1378,26 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
 
 conformanceTest("children_by_inode", async (activeHarness, testCase) => {
     const [request, expected] = decodeChildrenByInode(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     await activeHarness.client.commits.create(
         directoryCommit(
             request.namespace_id,
             "conf-children-by-inode-directory",
-            request.actor_id,
             request.directory,
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     for (const [index, name] of [...request.entry_names].reverse().entries()) {
         await activeHarness.client.commits.create(
             directoryCommit(
                 request.namespace_id,
                 `conf-children-by-inode-entry-${index.toString().padStart(2, "0")}`,
-                request.actor_id,
                 `${request.directory}/${name}`,
             ),
+            { headers: { "Loonfs-Actor": request.actor_id } },
         );
     }
 
@@ -1395,10 +1436,10 @@ conformanceTest("children_by_inode", async (activeHarness, testCase) => {
                 moveCommit(
                     request.namespace_id,
                     request.rename_commit_id,
-                    request.actor_id,
                     request.directory,
                     request.renamed_directory,
                 ),
+                { headers: { "Loonfs-Actor": request.actor_id } },
             );
             assert.equal(renamed.committed_seq, expected.renamed_head_seq);
             const renamedParent = await activeHarness.client.files.retrieve({
@@ -1452,47 +1493,50 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     const client = activeHarness.client;
     const namespaceId = request.namespace_id;
     const childPath = (name: string): string => `${request.directory}/${name}`;
-    await client.namespaces.create({ namespace_id: namespaceId, actor_id: request.actor_id });
+    await client.namespaces.create(
+        { namespace_id: namespaceId },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     await client.commits.create(
-        directoryCommit(
-            namespaceId,
-            "conf-inode-mutations-directory",
-            request.actor_id,
-            request.directory,
-        ),
+        directoryCommit(namespaceId, "conf-inode-mutations-directory", request.directory),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     await client.commits.create(
         directoryCommit(
             namespaceId,
             "conf-inode-mutations-path-directory",
-            request.actor_id,
             childPath(request.path_directory_name),
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
-    await client.files.upload({
-        namespace_id: namespaceId,
-        path: childPath(request.path_file_name),
-        content: new TextEncoder().encode(request.content_utf8),
-        actor_id: request.actor_id,
-        commit_id: "conf-inode-mutations-path-file",
-    });
+    await client.files.upload(
+        {
+            namespace_id: namespaceId,
+            path: childPath(request.path_file_name),
+            content: new TextEncoder().encode(request.content_utf8),
+            commit_id: "conf-inode-mutations-path-file",
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
 
     const parent = await client.files.retrieve({
         namespace_id: namespaceId,
         path: request.directory,
     });
-    await client.commits.create({
-        namespace_id: namespaceId,
-        actor_id: request.actor_id,
-        commit_id: "conf-inode-mutations-inode-directory",
-        operations: [
-            {
-                kind: "create_directory_by_inode",
-                parent_inode_id: parent.inode_id,
-                display_name: request.inode_directory_name,
-            },
-        ],
-    });
+    await client.commits.create(
+        {
+            namespace_id: namespaceId,
+            commit_id: "conf-inode-mutations-inode-directory",
+            operations: [
+                {
+                    kind: "create_directory_by_inode",
+                    parent_inode_id: parent.inode_id,
+                    display_name: request.inode_directory_name,
+                },
+            ],
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     let staged = await stageContent(
         client,
         namespaceId,
@@ -1502,7 +1546,6 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         stagedCommit(
             namespaceId,
             "conf-inode-mutations-inode-file",
-            request.actor_id,
             {
                 kind: "create_file_by_inode",
                 parent_inode_id: parent.inode_id,
@@ -1511,6 +1554,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
             },
             staged,
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
 
     const listing = await client.files.list({
@@ -1548,7 +1592,6 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         stagedCommit(
             namespaceId,
             "conf-inode-mutations-revision",
-            request.actor_id,
             {
                 kind: "put_file_revision_by_inode",
                 inode_id: inodeFile.inode_id,
@@ -1557,6 +1600,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
             },
             staged,
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const revised = fileEntry(
         await client.files.retrieve({
@@ -1574,14 +1618,13 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         moveCommit(
             namespaceId,
             "conf-inode-mutations-rename",
-            request.actor_id,
             childPath(request.inode_file_name),
             childPath(request.renamed_file_name),
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const moveByInode = (commitId: string, generation: string): LoonFS.CommitRequest => ({
         namespace_id: namespaceId,
-        actor_id: request.actor_id,
         commit_id: commitId,
         operations: [
             {
@@ -1599,6 +1642,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     await assert.rejects(
         client.commits.create(
             moveByInode("conf-inode-mutations-stale-move", revised.binding_generation),
+            { headers: { "Loonfs-Actor": request.actor_id } },
         ),
         (error: unknown) => {
             assert.ok(error instanceof LoonFS.ConflictError);
@@ -1613,6 +1657,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
                 "conf-inode-mutations-malformed-move",
                 request.malformed_binding_generation,
             ),
+            { headers: { "Loonfs-Actor": request.actor_id } },
         ),
         (error: unknown) => {
             assert.ok(error instanceof LoonFS.BadRequestError);
@@ -1629,6 +1674,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     assert.ok(renamed.binding_generation != null, "renamed entry has no binding_generation");
     const moved = await client.commits.create(
         moveByInode("conf-inode-mutations-move", renamed.binding_generation),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(moved.committed_seq, expected.moved_committed_seq);
     const movedEntry = await client.files.retrieve({
@@ -1651,19 +1697,21 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     assert.ok(movedEvent?.kind === "moved");
     assert.equal(movedEvent.binding_generation, movedEntry.binding_generation);
 
-    const deleted = await client.commits.create({
-        namespace_id: namespaceId,
-        actor_id: request.actor_id,
-        commit_id: "conf-inode-mutations-delete",
-        operations: [
-            {
-                kind: "delete_by_inode",
-                inode_id: inodeFile.inode_id,
-                expected_binding_generation: movedEntry.binding_generation,
-                behavior: "non_recursive",
-            },
-        ],
-    });
+    const deleted = await client.commits.create(
+        {
+            namespace_id: namespaceId,
+            commit_id: "conf-inode-mutations-delete",
+            operations: [
+                {
+                    kind: "delete_by_inode",
+                    inode_id: inodeFile.inode_id,
+                    expected_binding_generation: movedEntry.binding_generation,
+                    behavior: "non_recursive",
+                },
+            ],
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     assert.equal(deleted.committed_seq, expected.deleted_committed_seq);
 });
 
@@ -1675,29 +1723,32 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     const capturedBytes = new TextEncoder().encode(request.captured_content_utf8);
     const currentBytes = new TextEncoder().encode(request.current_content_utf8);
 
-    await client.namespaces.create({ namespace_id: namespaceId, actor_id: request.actor_id });
-    await client.commits.create(
-        directoryCommit(
-            namespaceId,
-            "conf-snapshots-create-directory",
-            request.actor_id,
-            request.directory,
-        ),
+    await client.namespaces.create(
+        { namespace_id: namespaceId },
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
-    await client.files.upload({
-        namespace_id: namespaceId,
-        path: childPath(request.replaced_file_name),
-        content: capturedBytes,
-        actor_id: request.actor_id,
-        commit_id: "conf-snapshots-create-replaced",
-    });
-    await client.files.upload({
-        namespace_id: namespaceId,
-        path: childPath(request.deleted_file_name),
-        content: new TextEncoder().encode(request.deleted_content_utf8),
-        actor_id: request.actor_id,
-        commit_id: "conf-snapshots-create-deleted",
-    });
+    await client.commits.create(
+        directoryCommit(namespaceId, "conf-snapshots-create-directory", request.directory),
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
+    await client.files.upload(
+        {
+            namespace_id: namespaceId,
+            path: childPath(request.replaced_file_name),
+            content: capturedBytes,
+            commit_id: "conf-snapshots-create-replaced",
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
+    await client.files.upload(
+        {
+            namespace_id: namespaceId,
+            path: childPath(request.deleted_file_name),
+            content: new TextEncoder().encode(request.deleted_content_utf8),
+            commit_id: "conf-snapshots-create-deleted",
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
 
     const snapshot = await client.snapshots.create({
         namespace_id: namespaceId,
@@ -1709,28 +1760,32 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(snapshot.captured_seq, expected.snapshot_head_seq);
     assert.ok(snapshot.expires_at_ms > snapshot.created_at_ms);
 
-    await client.files.upload({
-        namespace_id: namespaceId,
-        path: childPath(request.replaced_file_name),
-        content: currentBytes,
-        actor_id: request.actor_id,
-        commit_id: "conf-snapshots-replace-file",
-        behavior: "replace",
-    });
-    await client.files.upload({
-        namespace_id: namespaceId,
-        path: childPath(request.added_file_name),
-        content: new TextEncoder().encode(request.added_content_utf8),
-        actor_id: request.actor_id,
-        commit_id: "conf-snapshots-add-file",
-    });
+    await client.files.upload(
+        {
+            namespace_id: namespaceId,
+            path: childPath(request.replaced_file_name),
+            content: currentBytes,
+            commit_id: "conf-snapshots-replace-file",
+            behavior: "replace",
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
+    await client.files.upload(
+        {
+            namespace_id: namespaceId,
+            path: childPath(request.added_file_name),
+            content: new TextEncoder().encode(request.added_content_utf8),
+            commit_id: "conf-snapshots-add-file",
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     await client.commits.create(
         deleteCommit(
             namespaceId,
             "conf-snapshots-delete-file",
-            request.actor_id,
             childPath(request.deleted_file_name),
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
 
     const capturedEntry = fileEntry(
@@ -1897,6 +1952,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         serverBaseUrl: activeHarness.serverBaseUrl,
         token: activeHarness.token,
         namespaceAliases: { [request.namespace_alias]: request.namespace_id },
+        authorize: () => ({ actorId: request.actor_id }),
     });
     const beginPath = `/v0/namespace-aliases/${encodeURIComponent(request.namespace_alias)}/uploads`;
     const beginModes: string[] = [];
@@ -1912,7 +1968,10 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxy = await startProxyServer(handler);
     context.after(() => proxy.close());
 
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const namespaceAliasBase =
         `${proxy.baseUrl}/v0/namespace-aliases/` +
         encodeURIComponent(request.namespace_alias);
@@ -1924,11 +1983,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(
-                namespaceAliasDirectoryCommit(
-                    request.commit_ids.directory,
-                    request.actor_id,
-                    request.directory,
-                ),
+                namespaceAliasDirectoryCommit(request.commit_ids.directory, request.directory),
             ),
         },
         "proxy directory commit",
@@ -1979,7 +2034,6 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             body: JSON.stringify(
                 namespaceAliasFileCommit(
                     request.commit_ids.proxied,
-                    request.actor_id,
                     request.proxied_path,
                     proxiedCompleted,
                 ),
@@ -2026,7 +2080,6 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             body: JSON.stringify(
                 namespaceAliasFileCommit(
                     request.commit_ids.direct,
-                    request.actor_id,
                     request.direct_path,
                     directCompleted,
                 ),
@@ -2067,35 +2120,48 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
 
     const refusalBody = { code: "unauthorized", message: "refused by the conformance hook" };
-    const authorizedProxy = await startProxyServer(createProxyHandler({
-        serverBaseUrl: activeHarness.serverBaseUrl,
-        token: activeHarness.token,
-        namespaceAliases: { [request.namespace_alias]: request.namespace_id },
-        authorize: (incoming) => incoming.headers.has(request.authorize.refuse_header)
-            ? new Response(JSON.stringify(refusalBody), {
-                status: request.authorize.refused_status,
-                headers: { "content-type": "application/json" },
-            })
-            : { actorId: request.authorize.actor_id },
-    }));
+    const authorizedProxy = await startProxyServer(
+        createProxyHandler({
+            serverBaseUrl: activeHarness.serverBaseUrl,
+            token: activeHarness.token,
+            namespaceAliases: { [request.namespace_alias]: request.namespace_id },
+            authorize: (incoming) =>
+                incoming.headers.has(request.authorize.refuse_header)
+                    ? new Response(JSON.stringify(refusalBody), {
+                          status: request.authorize.refused_status,
+                          headers: { "content-type": "application/json" },
+                      })
+                    : { actorId: request.authorize.actor_id },
+        }),
+    );
     context.after(() => authorizedProxy.close());
     const authorizedBase = `${authorizedProxy.baseUrl}/v0/namespace-aliases/${encodeURIComponent(request.namespace_alias)}`;
-    const stamped = await proxyJson<LoonFS.Commit>(`${authorizedBase}/commits`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(namespaceAliasDirectoryCommit(
-            request.authorize.commit_id,
-            request.authorize.browser_actor_id,
-            request.authorize.directory,
-        )),
-    }, "proxy stamped commit");
+    const stamped = await proxyJson<LoonFS.Commit>(
+        `${authorizedBase}/commits`,
+        {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                "Loonfs-Actor": request.authorize.browser_actor_id,
+            },
+            body: JSON.stringify(
+                namespaceAliasDirectoryCommit(
+                    request.authorize.commit_id,
+                    request.authorize.directory,
+                ),
+            ),
+        },
+        "proxy stamped commit",
+    );
     assert.equal(stamped.committed_by, expected.stamped_committed_by);
     assert.equal(stamped.committed_seq, expected.stamped_committed_seq);
     const feed = await activeHarness.client.changes.list({
         namespace_id: request.namespace_id,
         after_seq: expected.direct_committed_seq,
     });
-    const stampedChange = feed.changes.find((change) => change.commit_id === request.authorize.commit_id);
+    const stampedChange = feed.changes.find(
+        (change) => change.commit_id === request.authorize.commit_id,
+    );
     assert.ok(stampedChange, "stamped commit is absent from the change feed");
     assert.equal(stampedChange.committed_by, expected.stamped_committed_by);
 
@@ -2105,17 +2171,6 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(refused.status, expected.refused_status);
     assert.equal(refused.headers.get("content-type"), "application/json");
     assert.deepEqual(await refused.json(), refusalBody);
-    const invalid = await fetchThroughProxy(`${authorizedBase}/commits`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify("nope"),
-    });
-    assert.equal(invalid.status, 400);
-    assert.equal(invalid.headers.get("content-type"), "application/json");
-    assert.deepEqual(await invalid.json(), {
-        code: "invalid_request",
-        message: "commit body must be a JSON object",
-    });
 
     beginModes.length = 0;
     const browserClient = new BrowserLoonFSClient({ baseUrl: proxy.baseUrl });
@@ -2125,7 +2180,6 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         request.namespace_alias,
         browserPath,
         payload,
-        request.actor_id,
         `${request.commit_ids.proxied}-browser`,
         "browser service-proxied transfer",
     );
@@ -2143,7 +2197,6 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         request.namespace_alias,
         `${request.direct_path}-browser`,
         directPutBytes,
-        request.actor_id,
         `${request.commit_ids.direct}-browser`,
         "browser direct-PUT transfer",
     );
@@ -2158,25 +2211,41 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         request.namespace_alias,
         `${request.direct_path}-browser-multipart`,
         multipartBytes,
-        request.actor_id,
         `${request.commit_ids.direct}-browser-multipart`,
         "browser multipart transfer",
     );
     assert.deepEqual(beginModes, ["service_proxied", "direct_put", "direct_multipart"]);
 
-    const prepared = await browserClient.files.prepareStream({namespace_alias: request.namespace_alias, content: new Blob([arrayBuffer(payload)])});
-    const input = {namespace_alias: request.namespace_alias, path: "/browser-prepared", prepared,
-        actor_id: request.actor_id, commit_id: "browser-prepared-put"};
+    const prepared = await browserClient.files.prepareStream({
+        namespace_alias: request.namespace_alias,
+        content: new Blob([arrayBuffer(payload)]),
+    });
+    const input = {
+        namespace_alias: request.namespace_alias,
+        path: "/browser-prepared",
+        prepared,
+        commit_id: "browser-prepared-put",
+    };
     const published = await browserClient.files.uploadPrepared(input);
     const publishedReplay = await browserClient.files.uploadPrepared(input);
     assert.equal(publishedReplay.commit_id, published.commit_id);
     assert.equal(publishedReplay.committed_seq, published.committed_seq);
-    await assert.rejects(browserClient.files.uploadPrepared({...input, message: "changed"}),
-        (error: unknown) => error instanceof BrowserLoonFS.ConflictError);
-    const entry = await browserClient.files.retrieve({namespace_alias: request.namespace_alias, path: input.path});
+    await assert.rejects(
+        browserClient.files.uploadPrepared({ ...input, message: "changed" }),
+        (error: unknown) => error instanceof BrowserLoonFS.ConflictError,
+    );
+    const entry = await browserClient.files.retrieve({
+        namespace_alias: request.namespace_alias,
+        path: input.path,
+    });
     if (entry.inode_kind !== "file") throw new Error("expected file");
-    const withPreconditions = {...input, commit_id: "browser-prepared-replace", behavior: "replace" as const,
-        expected_inode_id: entry.inode_id, expected_revision_no: entry.revision_no};
+    const withPreconditions = {
+        ...input,
+        commit_id: "browser-prepared-replace",
+        behavior: "replace" as const,
+        expected_inode_id: entry.inode_id,
+        expected_revision_no: entry.revision_no,
+    };
     const replaced = await browserClient.files.uploadPrepared(withPreconditions);
     const replacedReplay = await browserClient.files.uploadPrepared(withPreconditions);
     assert.equal(replacedReplay.commit_id, replaced.commit_id);
@@ -2188,7 +2257,6 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             namespace_alias: request.unknown_namespace_alias,
             path: `${request.proxied_path}-browser-failure`,
             content: payload,
-            actor_id: request.actor_id,
             commit_id: `${request.commit_ids.proxied}-browser-failure`,
         }),
         (error: unknown) => {
@@ -2201,9 +2269,13 @@ test("proxy", { skip: environmentSkip }, async (context) => {
 
 conformanceTest("changes", async (activeHarness, testCase) => {
     const [request, expected] = decodeChanges(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const committed = await activeHarness.client.commits.create(
-        directoryCommit(request.namespace_id, request.commit_id, request.actor_id, request.path),
+        directoryCommit(request.namespace_id, request.commit_id, request.path),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(committed.committed_seq, expected.committed_seq);
 
@@ -2223,7 +2295,10 @@ conformanceTest("changes", async (activeHarness, testCase) => {
 
 conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     const [request, expected] = decodeDirectPut(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const payload = new TextEncoder().encode(request.content_utf8);
     const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
@@ -2260,11 +2335,11 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
         fileCommit(
             request.namespace_id,
             request.commit_id,
-            request.actor_id,
             request.path,
             completed.content_ref,
             completed.content_token,
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(committed.committed_seq, expected.committed_seq);
     const stat = fileEntry(
@@ -2282,7 +2357,10 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
 
 conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     const [request, expected] = decodeMultipart(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const payload = bytePattern(request.content_pattern);
     const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
@@ -2369,11 +2447,11 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         fileCommit(
             request.namespace_id,
             request.commit_id,
-            request.actor_id,
             request.path,
             first.content_ref,
             replayed.content_token,
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(committed.committed_seq, expected.committed_seq);
     assert.deepEqual(
@@ -2389,11 +2467,14 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         token: activeHarness.token,
         actorId: request.actor_id,
     });
-    const helperCommit = await client.files.upload({
-        namespace_id: request.namespace_id,
-        path: helperPath,
-        content: payload,
-    });
+    const helperCommit = await client.files.upload(
+        {
+            namespace_id: request.namespace_id,
+            path: helperPath,
+            content: payload,
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     assert.ok(helperCommit.commit_id.startsWith("c_") && helperCommit.commit_id.length === 34);
     assert.equal(helperCommit.committed_by, request.actor_id);
     assert.ok(helperCommit.committed_seq > 0, "helper multipart put reported no committed_seq");
@@ -2409,7 +2490,10 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
 
 conformanceTest("upload_abort", async (activeHarness, testCase) => {
     const [request, expected] = decodeAbort(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
         body: { mode: "service_proxied" },
@@ -2435,15 +2519,20 @@ conformanceTest("upload_abort", async (activeHarness, testCase) => {
 
 conformanceTest("download", async (activeHarness, testCase) => {
     const [request, expected] = decodeDownload(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const payload = new TextEncoder().encode(request.content_utf8);
-    const committed = await activeHarness.client.files.upload({
-        namespace_id: request.namespace_id,
-        path: request.path,
-        content: payload,
-        actor_id: request.actor_id,
-        commit_id: request.commit_id,
-    });
+    const committed = await activeHarness.client.files.upload(
+        {
+            namespace_id: request.namespace_id,
+            path: request.path,
+            content: payload,
+            commit_id: request.commit_id,
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     assert.equal(committed.committed_seq, expected.committed_seq);
     const stat = fileEntry(
         await activeHarness.client.files.retrieve({
@@ -2468,25 +2557,26 @@ conformanceTest("download", async (activeHarness, testCase) => {
 
 conformanceTest("end_to_end", async (activeHarness, testCase) => {
     const [request, expected] = decodeEndToEnd(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const mkdir = await activeHarness.client.commits.create(
-        directoryCommit(
-            request.namespace_id,
-            request.commit_ids.mkdir,
-            request.actor_id,
-            request.directory,
-        ),
+        directoryCommit(request.namespace_id, request.commit_ids.mkdir, request.directory),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(mkdir.committed_seq, expected.mkdir_committed_seq);
 
     const payload = new TextEncoder().encode(request.content_utf8);
-    const upload = await activeHarness.client.files.upload({
-        namespace_id: request.namespace_id,
-        path: request.upload_path,
-        content: payload,
-        actor_id: request.actor_id,
-        commit_id: request.commit_ids.upload,
-    });
+    const upload = await activeHarness.client.files.upload(
+        {
+            namespace_id: request.namespace_id,
+            path: request.upload_path,
+            content: payload,
+            commit_id: request.commit_ids.upload,
+        },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     assert.equal(upload.committed_seq, expected.upload_committed_seq);
     const stat = fileEntry(
         await activeHarness.client.files.retrieve({
@@ -2513,10 +2603,10 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
         moveCommit(
             request.namespace_id,
             request.commit_ids.move,
-            request.actor_id,
             request.upload_path,
             request.moved_path,
         ),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(moved.committed_seq, expected.move_committed_seq);
     const movedListing = await activeHarness.client.files.list({
@@ -2538,12 +2628,8 @@ conformanceTest("end_to_end", async (activeHarness, testCase) => {
     });
     assert.equal(changes.changes.length, expected.change_count - 1);
     const removed = await activeHarness.client.commits.create(
-        deleteCommit(
-            request.namespace_id,
-            request.commit_ids.remove,
-            request.actor_id,
-            request.moved_path,
-        ),
+        deleteCommit(request.namespace_id, request.commit_ids.remove, request.moved_path),
+        { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(removed.committed_seq, expected.remove_committed_seq);
 

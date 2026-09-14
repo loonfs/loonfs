@@ -134,10 +134,9 @@ impl Client {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
         self.request_json::<_, Namespace>(
-            self.post(&url),
+            self.post(&url).header("Loonfs-Actor", actor_id.as_str()),
             Some(&CreateNamespaceRequest {
                 namespace_id: namespace_id.clone(),
-                actor_id: actor_id.clone(),
             }),
             SendPolicy::Once,
         )
@@ -188,10 +187,10 @@ impl Client {
         );
         // Namespace forks have no durable request identity to replay after an ambiguous success.
         self.request_json::<_, Namespace>(
-            self.post(&url),
+            self.post(&url)
+                .header("Loonfs-Actor", options.actor_id.as_str()),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),
-                actor_id: options.actor_id.clone(),
                 snapshot_id: options.snapshot_id.clone(),
             }),
             SendPolicy::Once,
