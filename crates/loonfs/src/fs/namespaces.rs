@@ -41,17 +41,21 @@ impl FsWriter {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Forks `source` into `target` at the source's current head.
+    /// Forks `source_namespace_id` into `new_namespace_id` at the current head.
     pub async fn fork_namespace(
         &self,
-        source: &NamespaceId,
-        target: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
     ) -> Result<Namespace> {
-        self.fork_namespace_with(source, target, ForkNamespaceOptions::default())
-            .await
+        self.fork_namespace_with(
+            source_namespace_id,
+            new_namespace_id,
+            ForkNamespaceOptions::default(),
+        )
+        .await
     }
 
-    /// Forks `source` into `target` at the selected current head or live snapshot.
+    /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or live snapshot.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.fork_namespace",
@@ -59,28 +63,28 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "fork_namespace",
-            namespace_id = %source,
+            namespace_id = %source_namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn fork_namespace_with(
         &self,
-        source: &NamespaceId,
-        target: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
         options: ForkNamespaceOptions,
     ) -> Result<Namespace> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
-            .engine(source)
-            .fork_namespace(target, options.snapshot_id.as_ref())
+            .engine(source_namespace_id)
+            .fork_namespace(new_namespace_id, options.snapshot_id.as_ref())
             .await
             .map_err(RuntimeError::from);
         if should_invalidate_after_result(&result) {
-            self.invalidate_namespace(source);
+            self.invalidate_namespace(source_namespace_id);
         }
         if result.is_ok() {
-            self.invalidate_namespace(target);
+            self.invalidate_namespace(new_namespace_id);
         }
         result
     }

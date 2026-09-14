@@ -198,15 +198,15 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::MoveByInode {
             inode_id,
             expected_binding_generation,
-            to_parent_inode_id,
-            to_display_name,
+            destination_parent_inode_id,
+            destination_display_name,
             precondition,
         } => {
             plan_move_by_inode(
                 *inode_id,
                 expected_binding_generation,
-                *to_parent_inode_id,
-                to_display_name,
+                *destination_parent_inode_id,
+                destination_display_name,
                 precondition.behavior,
                 precondition.resolve(PreconditionFields::Destination)?,
                 view,
@@ -214,13 +214,13 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             .await
         }
         FilesystemOperation::MovePath {
-            from_path,
-            to_path,
+            source_path,
+            destination_path,
             precondition,
         } => {
             plan_move_path(
-                from_path,
-                to_path,
+                source_path,
+                destination_path,
                 precondition.behavior,
                 precondition.resolve(PreconditionFields::Destination)?,
                 view,
@@ -228,13 +228,13 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             .await
         }
         FilesystemOperation::CopyPath {
-            from_path,
-            to_path,
+            source_path,
+            destination_path,
             precondition,
         } => {
             plan_copy_file_path(
-                from_path,
-                to_path,
+                source_path,
+                destination_path,
                 precondition.behavior,
                 precondition.resolve(PreconditionFields::Destination)?,
                 view,
@@ -249,8 +249,8 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
-            path,
-        } => plan_undelete(*inode_id, *deletion_seq, path.as_ref(), view).await,
+            destination_path,
+        } => plan_undelete(*inode_id, *deletion_seq, destination_path.as_ref(), view).await,
         FilesystemOperation::UpdateAttributes {
             path,
             set,
@@ -399,7 +399,7 @@ mod tests {
         let mut allocation = allocator.begin_candidate();
         let validated = prepare_commit_against_publish_view(
             request,
-            serde_json::from_str(r#""v4:sha256:test""#).expect("fingerprint"),
+            serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
             view.head(),
             view.projected_metadata_view(),
             &empty_overlay,

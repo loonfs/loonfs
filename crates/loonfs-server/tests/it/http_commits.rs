@@ -951,8 +951,8 @@ async fn a_commit_id_used_embedded_replays_over_http() {
                 parents: false,
             },
             FilesystemOperation::MovePath {
-                from_path: absolute("/reports/2026"),
-                to_path: absolute("/reports/2025"),
+                source_path: absolute("/reports/2026"),
+                destination_path: absolute("/reports/2025"),
                 precondition: loonfs_api::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
@@ -1015,8 +1015,8 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             parents: false,
         },
         FilesystemOperation::MovePath {
-            from_path: absolute("/reports/2026"),
-            to_path: absolute("/reports/2025"),
+            source_path: absolute("/reports/2026"),
+            destination_path: absolute("/reports/2025"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,

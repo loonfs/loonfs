@@ -939,7 +939,7 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
             committed_fingerprint: Some(fingerprint),
         } if commit_id == "attributed-receipt"
             && committed_seq == first.committed_seq
-            && fingerprint.starts_with("v4:sha256:")
+            && fingerprint.starts_with("v1:sha256:")
     ));
 }
 
@@ -1067,7 +1067,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             committed_fingerprint: Some(fingerprint),
         } if commit_id == "same-path-request"
             && committed_seq == Some(first.committed_seq)
-            && fingerprint.starts_with("v4:sha256:")
+            && fingerprint.starts_with("v1:sha256:")
     ));
 
     let wal_keys = data_wal_keys(&store).await;
@@ -1611,8 +1611,8 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
         path: AbsolutePath::parse("/vacant").expect("path"),
     };
     let move_file = |from: &str, to: &str| FilesystemOperation::MovePath {
-        from_path: AbsolutePath::parse(from).expect("source"),
-        to_path: AbsolutePath::parse(to).expect("destination"),
+        source_path: AbsolutePath::parse(from).expect("source"),
+        destination_path: AbsolutePath::parse(to).expect("destination"),
         precondition: loonfs_api::DestinationPrecondition {
             behavior: DestinationBehavior::Replace,
             ..Default::default()

@@ -250,7 +250,7 @@ fn refine_internally_tagged_path(body: &[u8], pointer: String) -> Option<String>
     let invalid_path_fields = object
         .iter()
         .filter(|(name, value)| {
-            matches!(name.as_str(), "path" | "from_path" | "to_path")
+            matches!(name.as_str(), "path" | "source_path" | "destination_path")
                 && serde_json::from_value::<AbsolutePath>((*value).clone()).is_err()
         })
         .map(|(name, _)| name.as_str())
@@ -634,6 +634,20 @@ mod tests {
         )
         .expect_err("relative operation path is invalid");
         assert_eq!(error.param(), Some("/operations/0/path"));
+
+        let error = decode_json::<loonfs_api::CommitRequest>(
+            br#"{
+                "commit_id": "invalid-source-path",
+                "actor_id": "test-service",
+                "operations": [{
+                    "kind": "move_path",
+                    "source_path": "relative",
+                    "destination_path": "/docs/moved"
+                }]
+            }"#,
+        )
+        .expect_err("relative source path is invalid");
+        assert_eq!(error.param(), Some("/operations/0/source_path"));
     }
 
     #[test]
@@ -664,8 +678,8 @@ mod tests {
                 "actor_id": "test-service",
                 "operations": [{
                     "kind": "move_path",
-                    "from_path": "relative",
-                    "to_path": "also-relative"
+                    "source_path": "relative",
+                    "destination_path": "also-relative"
                 }]
             }"#,
         )

@@ -635,7 +635,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        path: Option<&AbsolutePath>,
+        destination_path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
     ) -> Result<CommitResponse, CliError> {
         self.publish_with_maintenance_recovery(namespace_id, || {
@@ -643,7 +643,7 @@ impl EmbeddedBackend {
                 namespace_id,
                 inode_id,
                 deletion_seq,
-                path.map(|path| path.as_str()),
+                destination_path.map(|destination_path| destination_path.as_str()),
                 options.clone(),
             )
         })

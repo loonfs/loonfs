@@ -69,8 +69,8 @@ async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
         namespace_id,
         test_commit_id(Some("rename-report")),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/renamed.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/renamed.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -219,8 +219,8 @@ async fn revision_write_requires_the_current_revision_and_survives_a_move() {
         &namespace_id,
         test_commit_id(Some("move-report")),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            to_path: AbsolutePath::parse("/report.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/report.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -271,8 +271,8 @@ async fn move_requires_the_current_binding_generation() {
         FilesystemOperation::MoveByInode {
             inode_id: report_inode_id,
             expected_binding_generation: stale_generation.clone(),
-            to_parent_inode_id: ROOT_INODE_ID,
-            to_display_name: display_name("moved.txt"),
+            destination_parent_inode_id: ROOT_INODE_ID,
+            destination_display_name: display_name("moved.txt"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -345,8 +345,8 @@ async fn move_requires_the_current_binding_generation() {
         FilesystemOperation::MoveByInode {
             inode_id: report_inode_id,
             expected_binding_generation: fresh_generation,
-            to_parent_inode_id: ROOT_INODE_ID,
-            to_display_name: display_name("moved.txt"),
+            destination_parent_inode_id: ROOT_INODE_ID,
+            destination_display_name: display_name("moved.txt"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -434,8 +434,8 @@ async fn earlier_move_makes_a_later_precondition_stale_and_rolls_back_the_commit
                 FilesystemOperation::MoveByInode {
                     inode_id: report_inode_id,
                     expected_binding_generation: binding_generation.clone(),
-                    to_parent_inode_id: ROOT_INODE_ID,
-                    to_display_name: display_name("moved.txt"),
+                    destination_parent_inode_id: ROOT_INODE_ID,
+                    destination_display_name: display_name("moved.txt"),
                     precondition: loonfs_api::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
@@ -506,8 +506,8 @@ async fn content_write_preserves_the_precondition_for_a_later_move() {
                 FilesystemOperation::MoveByInode {
                     inode_id: report_inode_id,
                     expected_binding_generation: binding_generation.clone(),
-                    to_parent_inode_id: ROOT_INODE_ID,
-                    to_display_name: display_name("moved.txt"),
+                    destination_parent_inode_id: ROOT_INODE_ID,
+                    destination_display_name: display_name("moved.txt"),
                     precondition: loonfs_api::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,

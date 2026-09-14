@@ -313,10 +313,10 @@ pub(super) fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> Stri
             revision_no.0
         ),
         FilesystemChange::Moved {
-            from_display_name,
-            to_display_name,
+            source_display_name,
+            destination_display_name,
             ..
-        } => format!("move '{from_display_name}' -> '{to_display_name}'"),
+        } => format!("move '{source_display_name}' -> '{destination_display_name}'"),
         FilesystemChange::Deleted {
             deleted_binding, ..
         } => format!("delete '{}'", deleted_binding.display_name),

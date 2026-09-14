@@ -1100,8 +1100,8 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
         &namespace_id,
         "move",
         FilesystemOperation::MovePath {
-            from_path: path("/docs/a.txt"),
-            to_path: path("/moved.txt"),
+            source_path: path("/docs/a.txt"),
+            destination_path: path("/moved.txt"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -1204,7 +1204,7 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
         FilesystemOperation::Undelete {
             inode_id: file_inode,
             deletion_seq: deleted.committed_seq,
-            path: None,
+            destination_path: None,
         },
         &context,
     )
@@ -1260,8 +1260,8 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
         &namespace_id,
         "copy",
         FilesystemOperation::CopyPath {
-            from_path: path("/docs/a.txt"),
-            to_path: path("/docs/b.txt"),
+            source_path: path("/docs/a.txt"),
+            destination_path: path("/docs/b.txt"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -1322,8 +1322,8 @@ async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
         &namespace_id,
         "copy",
         FilesystemOperation::CopyPath {
-            from_path: path("/docs/a.txt"),
-            to_path: path("/docs/b.txt"),
+            source_path: path("/docs/a.txt"),
+            destination_path: path("/docs/b.txt"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -1385,8 +1385,8 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
         &namespace_id,
         "copy-over",
         FilesystemOperation::CopyPath {
-            from_path: path("/docs/a.txt"),
-            to_path: path("/docs/b.txt"),
+            source_path: path("/docs/a.txt"),
+            destination_path: path("/docs/b.txt"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,

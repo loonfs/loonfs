@@ -880,8 +880,8 @@ def test_children_by_inode(
                 request.rename_commit_id,
                 request.actor_id,
                 FilesystemOperation_MovePath(
-                    from_path=request.directory,
-                    to_path=request.renamed_directory,
+                    source_path=request.directory,
+                    destination_path=request.renamed_directory,
                 ),
             )
             assert renamed.committed_seq == expected.renamed_head_seq
@@ -1032,8 +1032,8 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         "conf-inode-mutations-rename",
         request.actor_id,
         FilesystemOperation_MovePath(
-            from_path=child_path(request.inode_file_name),
-            to_path=child_path(request.renamed_file_name),
+            source_path=child_path(request.inode_file_name),
+            destination_path=child_path(request.renamed_file_name),
         ),
     )
 
@@ -1046,8 +1046,8 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
             FilesystemOperation_MoveByInode(
                 inode_id=inode_file.inode_id,
                 expected_binding_generation=generation,
-                to_parent_inode_id=entry_named(request.inode_directory_name).inode_id,
-                to_display_name=request.moved_file_name,
+                destination_parent_inode_id=entry_named(request.inode_directory_name).inode_id,
+                destination_display_name=request.moved_file_name,
             ),
         )
 
@@ -1720,7 +1720,7 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
         client.files.retrieve(namespace_id, path="/original")
     first = client.files.put_file_prepared(namespace_id, **inputs)
     _apply(client, namespace_id, "prepared-rename", inputs["actor_id"],
-           FilesystemOperation_MovePath(from_path="/original", to_path="/renamed"))
+           FilesystemOperation_MovePath(source_path="/original", destination_path="/renamed"))
     assert client.files.put_file_prepared(namespace_id, **inputs) == first
     for changed in [dict(message="changed"), dict(path="/renamed"), dict(behavior="replace")]:
         with pytest.raises(ConflictError) as conflict:
@@ -1783,8 +1783,8 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
         request.commit_ids.move,
         request.actor_id,
         FilesystemOperation_MovePath(
-            from_path=request.upload_path,
-            to_path=request.moved_path,
+            source_path=request.upload_path,
+            destination_path=request.moved_path,
         ),
     )
     assert moved.committed_seq == expected.move_committed_seq

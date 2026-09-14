@@ -412,15 +412,15 @@ pub(crate) trait RuntimeTestExt {
     fn move_path_blocking(
         &self,
         namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
+        source_path: &str,
+        destination_path: &str,
         options: MoveOptions,
     ) -> loonfs::Result<CommitResponse>;
     fn copy_path_blocking(
         &self,
         namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
+        source_path: &str,
+        destination_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<CommitResponse>;
     fn begin_upload_blocking(
@@ -571,26 +571,26 @@ impl RuntimeTestExt for TestRuntime {
     fn move_path_blocking(
         &self,
         namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
+        source_path: &str,
+        destination_path: &str,
         options: MoveOptions,
     ) -> loonfs::Result<CommitResponse> {
         block_on(
             self.writer
-                .move_path(namespace_id, from_path, to_path, options),
+                .move_path(namespace_id, source_path, destination_path, options),
         )
     }
 
     fn copy_path_blocking(
         &self,
         namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
+        source_path: &str,
+        destination_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<CommitResponse> {
         block_on(
             self.writer
-                .copy_path(namespace_id, from_path, to_path, options),
+                .copy_path(namespace_id, source_path, destination_path, options),
         )
     }
 

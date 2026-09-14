@@ -788,8 +788,8 @@ function moveCommit(
         operations: [
             {
                 kind: "move_path",
-                from_path: fromPath,
-                to_path: toPath,
+                source_path: fromPath,
+                destination_path: toPath,
                 behavior: "no_replace",
             },
         ],
@@ -1213,7 +1213,7 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
     const published = await activeHarness.client.files.putFilePrepared(input);
     await activeHarness.client.commits.create({namespace_id: request.namespace_id,
         actor_id: request.actor_id, commit_id: "prepared-rename",
-        operations: [{kind: "move_path", from_path: input.path, to_path: "/renamed"}],
+        operations: [{kind: "move_path", source_path: input.path, destination_path: "/renamed"}],
     });
     assert.deepEqual(await activeHarness.client.files.putFilePrepared(input), published);
     for (const changed of [{message: "changed"}, {path: "/renamed"}, {behavior: "replace" as const}]) {
@@ -1558,8 +1558,8 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
                 kind: "move_by_inode",
                 inode_id: inodeFile.inode_id,
                 expected_binding_generation: generation,
-                to_parent_inode_id: entryNamed(request.inode_directory_name).inode_id,
-                to_display_name: request.moved_file_name,
+                destination_parent_inode_id: entryNamed(request.inode_directory_name).inode_id,
+                destination_display_name: request.moved_file_name,
                 behavior: "no_replace",
             },
         ],

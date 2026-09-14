@@ -328,7 +328,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	_, err = h.client.Commits.Create(context.Background(), &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID, ActorID: request.ActorID, CommitID: "prepared-rename",
-		Operations: []*loonfs.FilesystemOperation{{MovePath: &loonfs.FilesystemOperationMovePath{FromPath: input.Path, ToPath: "/renamed"}}},
+		Operations: []*loonfs.FilesystemOperation{{MovePath: &loonfs.FilesystemOperationMovePath{SourcePath: input.Path, DestinationPath: "/renamed"}}},
 	})
 	if err != nil {
 		t.Fatalf("rename: %v", err)
@@ -830,9 +830,9 @@ func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 		Operations: []*loonfs.FilesystemOperation{
 			{
 				MovePath: &loonfs.FilesystemOperationMovePath{
-					Behavior: &noReplace,
-					FromPath: loonfs.AbsolutePath(request.UploadPath),
-					ToPath:   loonfs.AbsolutePath(request.MovedPath),
+					Behavior:        &noReplace,
+					SourcePath:      loonfs.AbsolutePath(request.UploadPath),
+					DestinationPath: loonfs.AbsolutePath(request.MovedPath),
 				},
 			},
 		},
@@ -1034,9 +1034,9 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 				Operations: []*loonfs.FilesystemOperation{
 					{
 						MovePath: &loonfs.FilesystemOperationMovePath{
-							Behavior: &noReplace,
-							FromPath: loonfs.AbsolutePath(request.Directory),
-							ToPath:   loonfs.AbsolutePath(request.RenamedDirectory),
+							Behavior:        &noReplace,
+							SourcePath:      loonfs.AbsolutePath(request.Directory),
+							DestinationPath: loonfs.AbsolutePath(request.RenamedDirectory),
 						},
 					},
 				},
@@ -1277,9 +1277,9 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		Operations: []*loonfs.FilesystemOperation{
 			{
 				MovePath: &loonfs.FilesystemOperationMovePath{
-					Behavior: &noReplace,
-					FromPath: loonfs.AbsolutePath(childPath(request.InodeFileName)),
-					ToPath:   loonfs.AbsolutePath(childPath(request.RenamedFileName)),
+					Behavior:        &noReplace,
+					SourcePath:      loonfs.AbsolutePath(childPath(request.InodeFileName)),
+					DestinationPath: loonfs.AbsolutePath(childPath(request.RenamedFileName)),
 				},
 			},
 		},
@@ -1295,8 +1295,8 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 						Behavior:                  &noReplace,
 						InodeID:                   inodeFile.InodeID,
 						ExpectedBindingGeneration: generation,
-						ToParentInodeID:           identityOf(inodeDirectory).inodeID,
-						ToDisplayName:             request.MovedFileName,
+						DestinationParentInodeID:  identityOf(inodeDirectory).inodeID,
+						DestinationDisplayName:    request.MovedFileName,
 					},
 				},
 			},

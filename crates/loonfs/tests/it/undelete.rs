@@ -614,7 +614,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
                     FilesystemOperation::Undelete {
                         inode_id: entry.inode_id,
                         deletion_seq: guessed_seq,
-                        path: Some(
+                        destination_path: Some(
                             parse_mutation_path("/resurrected.txt").expect("valid mutation path"),
                         ),
                     },

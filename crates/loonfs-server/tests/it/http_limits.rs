@@ -86,8 +86,8 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
             "actor_id": loonfs_test_support::test_actor(),
             "operations": [{
                 "kind": "move_path",
-                "from_path": "/docs/source.txt",
-                "to_path": "/docs/target.txt",
+                "source_path": "/docs/source.txt",
+                "destination_path": "/docs/target.txt",
                 "behavior": behavior,
             }],
         })

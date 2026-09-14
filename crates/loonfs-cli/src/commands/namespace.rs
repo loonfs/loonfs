@@ -154,8 +154,8 @@ async fn run_namespace_fork(
     let explicit_profile = args.profile.profile.as_deref();
     let context =
         resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
-    let source_namespace_id = parse_namespace_id(&args.source)
-        .map_err(|error| error.with_param("source"))
+    let source_namespace_id = parse_namespace_id(&args.source_namespace_id)
+        .map_err(|error| error.with_param("source_namespace_id"))
         .map_err(|error| context.fail(kind, error))?;
     let new_namespace_id = parse_namespace_id(&args.new_namespace_id)
         .map_err(|error| error.with_param("new_namespace_id"))

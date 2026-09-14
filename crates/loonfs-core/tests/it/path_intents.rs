@@ -81,8 +81,8 @@ async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
 async fn move_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    from_path: &str,
-    to_path: &str,
+    source_path: &str,
+    destination_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
@@ -91,8 +91,8 @@ async fn move_path<S: ObjectStore + ?Sized>(
         namespace_id,
         test_commit_id(commit_id),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse(from_path).expect("path"),
-            to_path: AbsolutePath::parse(to_path).expect("path"),
+            source_path: AbsolutePath::parse(source_path).expect("path"),
+            destination_path: AbsolutePath::parse(destination_path).expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -107,8 +107,8 @@ async fn move_path<S: ObjectStore + ?Sized>(
 async fn copy_file_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    from_path: &str,
-    to_path: &str,
+    source_path: &str,
+    destination_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
@@ -117,8 +117,8 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
         namespace_id,
         test_commit_id(commit_id),
         FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse(from_path).expect("path"),
-            to_path: AbsolutePath::parse(to_path).expect("path"),
+            source_path: AbsolutePath::parse(source_path).expect("path"),
+            destination_path: AbsolutePath::parse(destination_path).expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -1141,8 +1141,8 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                 loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::MovePath {
-                    from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                    to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+                    source_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    destination_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                     precondition: loonfs_api::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
@@ -1941,8 +1941,8 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         &namespace_id,
         CommitId::parse("move-no-replace").expect("valid commit id"),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -1965,8 +1965,8 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         &namespace_id,
         CommitId::parse("move-replace").expect("valid commit id"),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
@@ -2018,8 +2018,8 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         &namespace_id,
         CommitId::parse("move-onto-dir").expect("valid commit id"),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/dir").expect("path"),
+            source_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/dir").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
@@ -2041,8 +2041,8 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         &namespace_id,
         CommitId::parse("move-onto-self").expect("valid commit id"),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
@@ -2100,8 +2100,8 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         &namespace_id,
         CommitId::parse("copy-replace").expect("valid commit id"),
         FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
@@ -2180,8 +2180,8 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
         &namespace_id,
         test_commit_id(Some("move-inode-only-destination-precondition")),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/inode-source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/inode-destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/inode-source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/inode-destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(inode_destination.inode_id),
@@ -2198,8 +2198,8 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
         &namespace_id,
         test_commit_id(Some("move-revision-only-destination-precondition")),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
@@ -2217,8 +2217,8 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
         &namespace_id,
         test_commit_id(Some("move-no-replace-destination-precondition")),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: Some(destination.inode_id),
@@ -2250,8 +2250,8 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
         &namespace_id,
         test_commit_id(Some("move-stale-destination-revision")),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(destination.inode_id),
@@ -2269,8 +2269,8 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
         &namespace_id,
         test_commit_id(Some("move-correct-destination-preconditions")),
         FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(destination.inode_id),
@@ -2351,8 +2351,8 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
         &namespace_id,
         test_commit_id(Some("with_preconditions-copy-aba")),
         FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(old.inode_id),
@@ -2385,8 +2385,8 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
         &namespace_id,
         test_commit_id(Some("copy-revision-only-destination-precondition")),
         FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
@@ -2404,8 +2404,8 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
         &namespace_id,
         test_commit_id(Some("copy-no-replace-destination-precondition")),
         FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: Some(recreated.inode_id),
@@ -2430,8 +2430,8 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
         &namespace_id,
         test_commit_id(Some("copy-inode-only-destination-precondition")),
         FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(recreated.inode_id),
@@ -2447,8 +2447,8 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
         &namespace_id,
         test_commit_id(Some("copy-inode-revision-destination-precondition")),
         FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-            to_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
+            source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+            destination_path: AbsolutePath::parse("/docs/aba-destination.txt").expect("path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(recreated.inode_id),
@@ -2541,8 +2541,8 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_generation: binding_generation.clone(),
-            to_parent_inode_id: docs.inode_id,
-            to_display_name: loonfs_api::DisplayName::parse("destination.txt")
+            destination_parent_inode_id: docs.inode_id,
+            destination_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
@@ -2563,8 +2563,8 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_generation: binding_generation.clone(),
-            to_parent_inode_id: docs.inode_id,
-            to_display_name: loonfs_api::DisplayName::parse("destination.txt")
+            destination_parent_inode_id: docs.inode_id,
+            destination_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
@@ -2585,8 +2585,8 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_generation: binding_generation.clone(),
-            to_parent_inode_id: docs.inode_id,
-            to_display_name: loonfs_api::DisplayName::parse("destination.txt")
+            destination_parent_inode_id: docs.inode_id,
+            destination_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
@@ -2621,8 +2621,8 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
             expected_binding_generation: binding_generation,
-            to_parent_inode_id: docs.inode_id,
-            to_display_name: loonfs_api::DisplayName::parse("destination.txt")
+            destination_parent_inode_id: docs.inode_id,
+            destination_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
@@ -2641,8 +2641,8 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         FilesystemOperation::MoveByInode {
             inode_id: source_two.inode_id,
             expected_binding_generation: binding_generation_two,
-            to_parent_inode_id: docs.inode_id,
-            to_display_name: loonfs_api::DisplayName::parse("destination-two.txt")
+            destination_parent_inode_id: docs.inode_id,
+            destination_display_name: loonfs_api::DisplayName::parse("destination-two.txt")
                 .expect("display name"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,

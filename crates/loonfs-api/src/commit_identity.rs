@@ -21,13 +21,13 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Domain separator included in every mutation fingerprint input.
-const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v4";
+const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v1";
 
 /// Format version and hash algorithm stored with each fingerprint.
 ///
 /// Storing both values lets a later format use different encoding rules or a
 /// different hash without changing existing fingerprints.
-const FINGERPRINT_SCHEME: &str = "v4:sha256";
+const FINGERPRINT_SCHEME: &str = "v1:sha256";
 
 /// The semantic identity of one mutation request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
@@ -99,8 +99,8 @@ enum OperationFingerprintInput<'a> {
     MoveByInode {
         inode_id: InodeId,
         expected_binding_generation: &'a str,
-        to_parent_inode_id: InodeId,
-        to_display_name: &'a str,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: &'a str,
         behavior: DestinationBehavior,
         expected_destination_inode_id: Option<InodeId>,
         expected_destination_revision_no: Option<RevisionNo>,
@@ -119,15 +119,15 @@ enum OperationFingerprintInput<'a> {
         expected_inode_id: Option<InodeId>,
     },
     MovePath {
-        from_path: &'a str,
-        to_path: &'a str,
+        source_path: &'a str,
+        destination_path: &'a str,
         behavior: DestinationBehavior,
         expected_destination_inode_id: Option<InodeId>,
         expected_destination_revision_no: Option<RevisionNo>,
     },
     CopyPath {
-        from_path: &'a str,
-        to_path: &'a str,
+        source_path: &'a str,
+        destination_path: &'a str,
         behavior: DestinationBehavior,
         expected_destination_inode_id: Option<InodeId>,
         expected_destination_revision_no: Option<RevisionNo>,
@@ -139,7 +139,7 @@ enum OperationFingerprintInput<'a> {
     Undelete {
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        path: Option<&'a str>,
+        destination_path: Option<&'a str>,
     },
     // Both preconditions join the preimage for the same reason the delete precondition
     // does: a changed expectation is a different logical request. `set` is a
@@ -299,14 +299,14 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         FilesystemOperation::MoveByInode {
             inode_id,
             expected_binding_generation,
-            to_parent_inode_id,
-            to_display_name,
+            destination_parent_inode_id,
+            destination_display_name,
             precondition,
         } => OperationFingerprintInput::MoveByInode {
             inode_id: *inode_id,
             expected_binding_generation: expected_binding_generation.as_str(),
-            to_parent_inode_id: *to_parent_inode_id,
-            to_display_name: to_display_name.as_str(),
+            destination_parent_inode_id: *destination_parent_inode_id,
+            destination_display_name: destination_display_name.as_str(),
             behavior: precondition.behavior,
             expected_destination_inode_id: precondition.expected_inode_id,
             expected_destination_revision_no: precondition.expected_revision_no,
@@ -330,23 +330,23 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             expected_inode_id: *expected_inode_id,
         },
         FilesystemOperation::MovePath {
-            from_path,
-            to_path,
+            source_path,
+            destination_path,
             precondition,
         } => OperationFingerprintInput::MovePath {
-            from_path: from_path.as_str(),
-            to_path: to_path.as_str(),
+            source_path: source_path.as_str(),
+            destination_path: destination_path.as_str(),
             behavior: precondition.behavior,
             expected_destination_inode_id: precondition.expected_inode_id,
             expected_destination_revision_no: precondition.expected_revision_no,
         },
         FilesystemOperation::CopyPath {
-            from_path,
-            to_path,
+            source_path,
+            destination_path,
             precondition,
         } => OperationFingerprintInput::CopyPath {
-            from_path: from_path.as_str(),
-            to_path: to_path.as_str(),
+            source_path: source_path.as_str(),
+            destination_path: destination_path.as_str(),
             behavior: precondition.behavior,
             expected_destination_inode_id: precondition.expected_inode_id,
             expected_destination_revision_no: precondition.expected_revision_no,
@@ -361,11 +361,11 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
-            path,
+            destination_path,
         } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
             deletion_seq: *deletion_seq,
-            path: path.as_ref().map(AbsolutePath::as_str),
+            destination_path: destination_path.as_ref().map(AbsolutePath::as_str),
         },
         FilesystemOperation::UpdateAttributes {
             path,
@@ -465,7 +465,7 @@ mod tests {
             fingerprint: String,
         }
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/golden/commit_fingerprints_v4.json");
+            .join("tests/golden/commit_fingerprints_v1.json");
         let mut vectors: Vec<Vector> = serde_json::from_str(
             &std::fs::read_to_string(&fixture_path).expect("read fingerprint vectors"),
         )
@@ -664,8 +664,8 @@ mod tests {
                 expected_binding_generation,
             )
             .expect("binding generation"),
-            to_parent_inode_id: InodeId(7),
-            to_display_name: DisplayName::parse("report.txt").expect("display name"),
+            destination_parent_inode_id: InodeId(7),
+            destination_display_name: DisplayName::parse("report.txt").expect("display name"),
             precondition: crate::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -759,8 +759,8 @@ mod tests {
     fn move_and_copy_destination_preconditions_change_the_fingerprint_deterministically() {
         assert_destination_preconditions_change_fingerprint(|inode_id, revision_no| {
             FilesystemOperation::MovePath {
-                from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-                to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+                source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+                destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
                 precondition: crate::DestinationPrecondition {
                     behavior: DestinationBehavior::Replace,
                     expected_inode_id: inode_id,
@@ -770,8 +770,8 @@ mod tests {
         });
         assert_destination_preconditions_change_fingerprint(|inode_id, revision_no| {
             FilesystemOperation::CopyPath {
-                from_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
-                to_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
+                source_path: AbsolutePath::parse("/docs/source.txt").expect("path"),
+                destination_path: AbsolutePath::parse("/docs/destination.txt").expect("path"),
                 precondition: crate::DestinationPrecondition {
                     behavior: DestinationBehavior::Replace,
                     expected_inode_id: inode_id,
@@ -819,7 +819,7 @@ mod tests {
                 )
                 .expect("retry fingerprint")
                 .as_str(),
-                "v4:sha256:c2f8d5286a35207d627fb4c213ffc4431be7eab19336491187da82473f8e5155"
+                "v1:sha256:33cebac1c0e63f97f902c3ef9e133adccd4682b8acbbe39c699473d4cd88fda1"
             );
         }
     }

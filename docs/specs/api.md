@@ -490,6 +490,16 @@ and namespace deletion have preconditions for their corresponding state. Each pr
 checks the state visible to its operation, including changes made by earlier
 operations in the same request.
 
+Move and copy operations name their endpoints `source_*` and
+`destination_*`. Their preconditions and the `moved` event use the same
+words. Undelete's optional restore location is `destination_path`. A field
+that names the addressed resource keeps the resource's own name, such as
+`inode_id`, `namespace_id`, or `path`; no directional prefix is added for
+symmetry. A creation request may say `new_*` for the resource it creates.
+`target` describes an action subject, a persisted relationship, or a goal,
+and is not an endpoint name in the move and copy family. `local` and
+`remote` name coordinate systems.
+
 Commit bodies reject unknown fields so a misspelled precondition cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying a write without that precondition.
 
 Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens.
@@ -1816,8 +1826,8 @@ Representative request:
   "operations": [
     {
       "kind": "move_path",
-      "from_path": "/docs/report.txt",
-      "to_path": "/reports/report.txt",
+      "source_path": "/docs/report.txt",
+      "destination_path": "/reports/report.txt",
       "behavior": "replace"
     }
   ]
@@ -1927,8 +1937,8 @@ Five operations use inode IDs instead of paths. They let clients act on an entry
       "kind": "move_by_inode",
       "inode_id": "ino_42",
       "expected_binding_generation": "opaque-token",
-      "to_parent_inode_id": "ino_12",
-      "to_display_name": "january.pdf",
+      "destination_parent_inode_id": "ino_12",
+      "destination_display_name": "january.pdf",
       "behavior": "replace"
     }
   ]
@@ -2003,13 +2013,13 @@ deletion's committed sequence.
       "kind": "undelete",
       "inode_id": "ino_42",
       "deletion_seq": 17,
-      "path": "/docs/report.txt"
+      "destination_path": "/docs/report.txt"
     }
   ]
 }
 ```
 
-`path` is optional. When present, it is the destination: its parent must
+`destination_path` is optional. When present, it is the destination: its parent must
 exist and be visible, and its name must be free. When absent, the entry
 restores in place — it re-binds under the parent inode and name its
 deletion recorded, anchored on the parent's identity rather than a
@@ -2463,7 +2473,7 @@ Event kinds:
 | `directory_created` | A directory was created. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`. |
 | `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`, `revision_no`, `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
-| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_display_name`, `to_parent_inode_id`, `to_display_name`, `binding_generation`. |
+| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `source_parent_inode_id`, `source_display_name`, `destination_parent_inode_id`, `destination_display_name`, `binding_generation`. |
 | `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
@@ -2501,6 +2511,9 @@ Events name inodes and their parent-directory bindings rather than full
 paths; a consumer that needs paths can stat the inode or maintain its own
 binding projection from this feed. Clients must ignore unknown event kinds
 and unknown fields.
+
+In a `moved` event, the source fields describe the removed binding and the
+destination fields describe the new binding.
 
 `directory_created`, `file_created`, `moved`, and `undeleted` include the `binding_generation` they created. It matches later reads of the same binding. Other events do not create bindings and omit the field.
 

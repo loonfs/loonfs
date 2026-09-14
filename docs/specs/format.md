@@ -1297,13 +1297,13 @@ These patterns define the core object families. Segment owners can differ from t
 
 ## Appendix B. Semantic commit fingerprints
 
-A commit fingerprint is stored as `v4:sha256:<64 lowercase hex>`. The scheme identifies the canonicalization rules below, not the API's general-purpose JSON serialization.
+A commit fingerprint is stored as `v1:sha256:<64 lowercase hex>`. The scheme identifies the canonicalization rules below, not the API's general-purpose JSON serialization.
 
 The fingerprint is the SHA-256 of compact UTF-8 JSON with the following top-level fields in this exact order:
 
 ```text
 {
-  "domain": "loonfs.commit.semantic.v4",
+  "domain": "loonfs.commit.semantic.v1",
   "namespace_id": <namespace string>,
   "actor_id": <actor ID string>,
   "operations": <ordered canonical operations>,
@@ -1327,13 +1327,13 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `put_file` | `path`, `behavior`, `content_ref`, `expected_inode_id`, `expected_revision_no` |
 | `create_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref` |
 | `put_file_revision_by_inode` | `inode_id`, `content_ref`, `expected_revision_no` |
-| `move_by_inode` | `inode_id`, `expected_binding_generation`, `to_parent_inode_id`, `to_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
+| `move_by_inode` | `inode_id`, `expected_binding_generation`, `destination_parent_inode_id`, `destination_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
 | `delete_by_inode` | `inode_id`, `expected_binding_generation`, `behavior` |
 | `delete_path` | `path`, `behavior`, `expected_inode_id` |
-| `move_path` | `from_path`, `to_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
-| `copy_path` | `from_path`, `to_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
+| `move_path` | `source_path`, `destination_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
+| `copy_path` | `source_path`, `destination_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
 | `restore_revision` | `path`, `source_revision_no` |
-| `undelete` | `inode_id`, `deletion_seq`, `path` |
+| `undelete` | `inode_id`, `deletion_seq`, `destination_path` |
 | `update_attributes` | `path`, `set`, `remove`, `expected_inode_id`, `expected_attributes_revision_no` |
 
 Paths use their validated canonical absolute form. Display-name fields contain one validated component. Inode IDs in these operation shapes use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers. Binding generations retain their opaque string representation.
@@ -1348,7 +1348,7 @@ A content reference is represented by exactly these fields, in this order:
 {"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":15}
 ```
 
-The owner namespace and checksum are excluded by the current v4 scheme. Every reference a commit can admit is owned by the committing namespace: an upload records its session's namespace as the owner, and admission requires the reference to match the prepared content exactly, so the owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
+The owner namespace and checksum are excluded from the preimage. Every reference a commit can admit is owned by the committing namespace: an upload records its session's namespace as the owner, and admission requires the reference to match the prepared content exactly, so the owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
 
 Two uploads of identical bytes have different IDs and different fingerprints. A retry reuses the original reference rather than repeating the upload and substituting a new one.
 
@@ -1375,18 +1375,18 @@ Non-ASCII characters are encoded directly as UTF-8. JSON quotes, backslashes, an
 For example, the following is the complete canonical preimage for one directory-creation request. There is no trailing newline in the bytes being hashed:
 
 ```json
-{"domain":"loonfs.commit.semantic.v4","namespace_id":"demo","actor_id":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
+{"domain":"loonfs.commit.semantic.v1","namespace_id":"demo","actor_id":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
 ```
 
 Its fingerprint is:
 
 ```text
-v4:sha256:59e3509a557059396e314b35f05c564b47597fac2ba652f162598afdf91a691a
+v1:sha256:a64ec097a98f4c881c3770868ad31e77efd8ec9fedb6101672de2091311666ba
 ```
 
 A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can omit defaults that the canonical operation writes explicitly; its raw request JSON is not the fingerprint preimage.
 
-The complete shared vectors are in [commit_fingerprints_v4.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without generations, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders must preserve those exact bytes and digests within scheme v4.
+The complete shared vectors are in [commit_fingerprints_v1.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without generations, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders must preserve those exact bytes and digests.
 
 ## Appendix C. Timing and size reference
 
@@ -1592,5 +1592,5 @@ For an absent or deleted core namespace, an explicit grep collection call can re
 [api-spec]: api.md
 [provider-spec]: object-storage-providers.md
 [limits-source]: ../../crates/loonfs-core/src/limits.rs
-[fingerprint-vectors]: ../../crates/loonfs-api/tests/golden/commit_fingerprints_v4.json
+[fingerprint-vectors]: ../../crates/loonfs-api/tests/golden/commit_fingerprints_v1.json
 [name-vectors]: ../../crates/loonfs-api/tests/golden/name_folding.v1.json

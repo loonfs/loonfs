@@ -118,16 +118,16 @@ pub enum FilesystemChange {
         /// Inode whose binding changed.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Directory that held the old binding.
+        /// Directory that held the removed binding.
         #[serde(with = "crate::public_inode_id")]
-        from_parent_inode_id: InodeId,
-        /// Spelling of the old binding.
-        from_display_name: DisplayName,
+        source_parent_inode_id: InodeId,
+        /// Spelling of the removed binding.
+        source_display_name: DisplayName,
         /// Directory holding the new binding.
         #[serde(with = "crate::public_inode_id")]
-        to_parent_inode_id: InodeId,
+        destination_parent_inode_id: InodeId,
         /// Spelling of the new binding.
-        to_display_name: DisplayName,
+        destination_display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
         binding_generation: BindingGeneration,
     },
@@ -370,16 +370,30 @@ mod tests {
 
         let moved = FilesystemChange::Moved {
             inode_id: InodeId(2),
-            from_parent_inode_id: InodeId(1),
-            from_display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
-            to_parent_inode_id: InodeId(3),
-            to_display_name: crate::DisplayName::parse("b.txt").expect("valid display name"),
+            source_parent_inode_id: InodeId(1),
+            source_display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            destination_parent_inode_id: InodeId(3),
+            destination_display_name: crate::DisplayName::parse("b.txt")
+                .expect("valid display name"),
             binding_generation: generation.clone(),
         };
         assert_eq!(
+            serde_json::from_value::<FilesystemChange>(serde_json::json!({
+                "kind": "moved",
+                "inode_id": "ino_2",
+                "source_parent_inode_id": "ino_1",
+                "source_display_name": "a.txt",
+                "destination_parent_inode_id": "ino_3",
+                "destination_display_name": "b.txt",
+                "binding_generation": generation
+            }))
+            .expect("decode moved event"),
+            moved
+        );
+        assert_eq!(
             serde_json::to_string(&moved).expect("serialize moved event"),
             format!(
-                r#"{{"kind":"moved","inode_id":"ino_2","from_parent_inode_id":"ino_1","from_display_name":"a.txt","to_parent_inode_id":"ino_3","to_display_name":"b.txt","binding_generation":"{generation}"}}"#
+                r#"{{"kind":"moved","inode_id":"ino_2","source_parent_inode_id":"ino_1","source_display_name":"a.txt","destination_parent_inode_id":"ino_3","destination_display_name":"b.txt","binding_generation":"{generation}"}}"#
             )
         );
 
