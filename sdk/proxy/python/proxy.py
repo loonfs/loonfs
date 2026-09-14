@@ -2,14 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict
 from urllib.parse import quote
 
 import httpx
 
-__all__ = ["LoonFSProxy"]
+__all__ = ["LoonFSProxy", "ProxyRouteContext", "ProxyAuthorization", "ProxyRefusal"]
+
+
+@dataclass(frozen=True)
+class ProxyRouteContext:
+    method: str
+    template: str
+    namespace_alias: str | None
+    namespace_id: str | None
+
+
+@dataclass(frozen=True)
+class ProxyAuthorization:
+    actor_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ProxyRefusal:
+    status: int
+    body: bytes = b""
+    content_type: str | None = None
 
 
 # Python 3.8 requires typing aliases for runtime-evaluated generics.
@@ -68,7 +90,7 @@ def _pattern_for(template: str) -> re.Pattern[str]:
 
 
 _COMPILED_ROUTES = tuple(
-    (method, _pattern_for(template)) for method, template in _ROUTE_TEMPLATES
+    (method, template, _pattern_for(template)) for method, template in _ROUTE_TEMPLATES
 )
 
 
@@ -119,10 +141,15 @@ class LoonFSProxy:
         server_base_url: str,
         token: str,
         namespace_aliases: dict[str, str],
+        *,
+        authorize: Callable[
+            [dict[str, Any], ProxyRouteContext], Awaitable[ProxyAuthorization | ProxyRefusal]
+        ] | None = None,
     ) -> None:
         self._server_base_url = server_base_url.rstrip("/")
         self._authorization = f"Bearer {token}".encode("latin-1")
         self._namespace_aliases = dict(namespace_aliases)
+        self._authorize = authorize
         self._client = httpx.AsyncClient(timeout=None, follow_redirects=False)
 
     async def __call__(self, scope: dict[str, Any], receive: _Receive, send: _Send) -> None:
@@ -132,21 +159,61 @@ class LoonFSProxy:
         if scope["type"] != "http":
             return
 
-        rewritten_path = self._rewritten_path(scope["method"], scope["path"])
-        if rewritten_path is None:
+        resolved = self._resolve_route(scope["method"], scope["path"])
+        if resolved is None:
             await self._not_found(send)
             return
+        rewritten_path, context = resolved
+        authorization = ProxyAuthorization()
+        if self._authorize is not None:
+            authorization = await self._authorize(scope, context)
+            if isinstance(authorization, ProxyRefusal):
+                await self._refuse(send, authorization)
+                return
 
         target = httpx.URL(f"{self._server_base_url}{rewritten_path}").copy_with(
             query=scope.get("query_string", b"")
         )
         headers = _forwarded_headers(scope.get("headers", []), _REQUEST_EXCLUDED_HEADERS)
         headers.append((b"authorization", self._authorization))
+        content: bytes | AsyncIterator[bytes] = _request_body(receive)
+        if (
+            authorization.actor_id is not None
+            and context.method == "POST"
+            and context.template == "/v0/namespace-aliases/{namespace_alias}/commits"
+        ):
+            try:
+                body = json.loads(b"".join([chunk async for chunk in content]))
+            except ValueError:
+                body = None
+            if not isinstance(body, dict):
+                await self._refuse(
+                    send,
+                    ProxyRefusal(
+                        status=400,
+                        body=b'{"code":"invalid_request","message":"commit body must be a JSON object"}',
+                        content_type="application/json",
+                    ),
+                )
+                return
+            body["actor_id"] = authorization.actor_id
+            content = json.dumps(body).encode("utf-8")
+            headers = [
+                (name, value)
+                for name, value in headers
+                if name.lower() not in {b"content-type", b"content-length"}
+            ]
+            headers.extend(
+                [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(content)).encode("ascii")),
+                ]
+            )
         request = self._client.build_request(
             scope["method"],
             target,
             headers=headers,
-            content=_request_body(receive),
+            content=content,
         )
         response = await self._client.send(request, stream=True)
         try:
@@ -171,8 +238,8 @@ class LoonFSProxy:
         finally:
             await response.aclose()
 
-    def _rewritten_path(self, method: str, path: str) -> str | None:
-        for route_method, pattern in _COMPILED_ROUTES:
+    def _resolve_route(self, method: str, path: str) -> tuple[str, ProxyRouteContext] | None:
+        for route_method, template, pattern in _COMPILED_ROUTES:
             if method != route_method:
                 continue
             match = pattern.fullmatch(path)
@@ -180,12 +247,15 @@ class LoonFSProxy:
                 continue
             namespace_alias = match.groupdict().get("namespace_alias")
             if namespace_alias is None:
-                return path
+                return path, ProxyRouteContext(method, template, None, None)
             namespace_id = self._namespace_aliases.get(namespace_alias)
             if namespace_id is None:
                 return None
             namespace_alias_prefix = f"/v0/namespace-aliases/{namespace_alias}"
-            return f"/v0/namespaces/{quote(namespace_id, safe='')}{path[len(namespace_alias_prefix):]}"
+            rewritten_path = f"/v0/namespaces/{quote(namespace_id, safe='')}{path[len(namespace_alias_prefix):]}"
+            return rewritten_path, ProxyRouteContext(
+                method, template, namespace_alias, namespace_id
+            )
         return None
 
     async def _lifespan(self, receive: _Receive, send: _Send) -> None:
@@ -197,6 +267,16 @@ class LoonFSProxy:
                 await self._client.aclose()
                 await send({"type": "lifespan.shutdown.complete"})
                 return
+
+    @staticmethod
+    async def _refuse(send: _Send, refusal: ProxyRefusal) -> None:
+        headers = [(b"content-length", str(len(refusal.body)).encode("ascii"))]
+        if refusal.content_type is not None:
+            headers.append((b"content-type", refusal.content_type.encode("latin-1")))
+        await send(
+            {"type": "http.response.start", "status": refusal.status, "headers": headers}
+        )
+        await send({"type": "http.response.body", "body": refusal.body})
 
     @staticmethod
     async def _not_found(send: _Send) -> None:

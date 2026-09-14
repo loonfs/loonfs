@@ -63,6 +63,35 @@ generated API reference.
 Use the `proxy` package in your backend to forward client requests while
 keeping the LoonFS credential on the server.
 
+Set `Authorize` to check each request and replace `actor_id` in commit bodies.
+Here, `authorizedActor` checks the application's session and namespace access.
+
+```go
+import (
+	"net/http"
+	"os"
+
+	"github.com/loonfs/loonfs-sdk-go/proxy"
+)
+
+handler, err := proxy.NewHandler(proxy.Config{
+	ServerBaseURL: os.Getenv("LOONFS_URL"),
+	Token: os.Getenv("LOONFS_AUTH_TOKEN"),
+	NamespaceAliases: map[string]string{"team-files": "demo"},
+	Authorize: func(r *http.Request, route proxy.RouteContext) (proxy.Authorization, error) {
+		actorID, ok := authorizedActor(r, route.NamespaceID)
+		if !ok {
+			return proxy.Authorization{}, &proxy.Refusal{Status: http.StatusForbidden}
+		}
+		return proxy.Authorization{ActorID: actorID}, nil
+	},
+})
+if err != nil {
+	panic(err)
+}
+http.Handle("/v0/", handler)
+```
+
 ## Retries
 
 The Go SDK makes one HTTP attempt by default. You can opt into retries with

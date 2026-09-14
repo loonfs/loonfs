@@ -279,6 +279,16 @@ interface ProxyRequest {
     commit_ids: ProxyCommitIds;
     content_utf8: string;
     disallowed_path_suffix: string;
+    authorize: ProxyAuthorize;
+}
+
+interface ProxyAuthorize {
+    actor_id: LoonFS.ActorId;
+    browser_actor_id: LoonFS.ActorId;
+    commit_id: string;
+    directory: string;
+    refuse_header: string;
+    refused_status: number;
 }
 
 interface ProxyExpected {
@@ -288,6 +298,9 @@ interface ProxyExpected {
     entry_count: number;
     unknown_namespace_alias_status: number;
     disallowed_route_status: number;
+    stamped_committed_by: LoonFS.ActorId;
+    stamped_committed_seq: number;
+    refused_status: number;
 }
 
 interface Harness {
@@ -493,6 +506,7 @@ const PROXY_REQUEST_FIELDS = [
     "commit_ids",
     "content_utf8",
     "disallowed_path_suffix",
+    "authorize",
 ] as const;
 const PROXY_EXPECTED_FIELDS = [
     "mkdir_committed_seq",
@@ -501,6 +515,9 @@ const PROXY_EXPECTED_FIELDS = [
     "entry_count",
     "unknown_namespace_alias_status",
     "disallowed_route_status",
+    "stamped_committed_by",
+    "stamped_committed_seq",
+    "refused_status",
 ] as const;
 
 function decodeErrorContract(
@@ -633,6 +650,9 @@ function decodeEndToEnd(testCase: ConformanceCase): [EndToEndRequest, EndToEndEx
 
 function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
     strictObject(testCase.request, PROXY_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.request.authorize, [
+        "actor_id", "browser_actor_id", "commit_id", "directory", "refuse_header", "refused_status",
+    ], `${testCase.name} authorize`);
     strictObject(testCase.expected, PROXY_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
         testCase.request as unknown as ProxyRequest,
@@ -2031,6 +2051,57 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(disallowedRoute.status, expected.disallowed_route_status);
     assert.equal((await disallowedRoute.arrayBuffer()).byteLength, 0);
+
+    const refusalBody = { code: "unauthorized", message: "refused by the conformance hook" };
+    const authorizedProxy = await startProxyServer(createProxyHandler({
+        serverBaseUrl: activeHarness.serverBaseUrl,
+        token: activeHarness.token,
+        namespaceAliases: { [request.namespace_alias]: request.namespace_id },
+        authorize: (incoming) => incoming.headers.has(request.authorize.refuse_header)
+            ? new Response(JSON.stringify(refusalBody), {
+                status: request.authorize.refused_status,
+                headers: { "content-type": "application/json" },
+            })
+            : { actorId: request.authorize.actor_id },
+    }));
+    context.after(() => authorizedProxy.close());
+    const authorizedBase = `${authorizedProxy.baseUrl}/v0/namespace-aliases/${encodeURIComponent(request.namespace_alias)}`;
+    const stamped = await proxyJson<LoonFS.CommitResponse>(`${authorizedBase}/commits`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(namespaceAliasDirectoryCommit(
+            request.authorize.commit_id,
+            request.authorize.browser_actor_id,
+            request.authorize.directory,
+        )),
+    }, "proxy stamped commit");
+    assert.equal(stamped.committed_by, expected.stamped_committed_by);
+    assert.equal(stamped.committed_seq, expected.stamped_committed_seq);
+    const feed = await activeHarness.client.changes.list({
+        namespace_id: request.namespace_id,
+        after_seq: expected.direct_committed_seq,
+    });
+    const stampedChange = feed.changes.find((change) => change.commit_id === request.authorize.commit_id);
+    assert.ok(stampedChange, "stamped commit is absent from the change feed");
+    assert.equal(stampedChange.committed_by, expected.stamped_committed_by);
+
+    const refused = await fetchThroughProxy(`${authorizedBase}/filesystem/entry?path=/`, {
+        headers: { [request.authorize.refuse_header]: "1" },
+    });
+    assert.equal(refused.status, expected.refused_status);
+    assert.equal(refused.headers.get("content-type"), "application/json");
+    assert.deepEqual(await refused.json(), refusalBody);
+    const invalid = await fetchThroughProxy(`${authorizedBase}/commits`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify("nope"),
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.headers.get("content-type"), "application/json");
+    assert.deepEqual(await invalid.json(), {
+        code: "invalid_request",
+        message: "commit body must be a JSON object",
+    });
 
     beginModes.length = 0;
     const browserClient = new BrowserLoonFSClient({ baseUrl: proxy.baseUrl });
