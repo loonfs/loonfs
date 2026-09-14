@@ -35,7 +35,10 @@ async fn registered_observer_sees_one_hint_per_publication() {
         .expect("writer");
     let namespace_id = NamespaceId::parse("observer").expect("namespace id");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     assert!(
@@ -131,7 +134,10 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
     runner.attach_hints(receiver);
     let namespace_id = NamespaceId::parse("observer-panic").expect("namespace id");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
 

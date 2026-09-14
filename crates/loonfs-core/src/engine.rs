@@ -222,6 +222,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
+            &options.actor_id,
             options.allow_existing,
         )
         .await
@@ -234,12 +235,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn fork_namespace(
         &self,
         target: &NamespaceId,
+        actor_id: &loonfs_api::ActorId,
         snapshot_id: Option<&CheckpointId>,
     ) -> Result<Namespace> {
         fork::fork_namespace(
             &self.store,
             &self.namespace_id,
             target,
+            actor_id,
             snapshot_id,
             &self.mutation_context()?,
         )
@@ -1015,7 +1018,7 @@ mod tests {
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
         )
-        .bootstrap_namespace(BootstrapOptions::default())
+        .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
         .await
         .expect("bootstrap namespace");
 
@@ -1045,7 +1048,7 @@ mod tests {
             WriterId::parse("writer-a").expect("writer id"),
         );
         writer
-            .bootstrap_namespace(BootstrapOptions::default())
+            .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
             .await
             .expect("bootstrap namespace");
         let begun = writer.begin_upload().await.expect("begin upload");

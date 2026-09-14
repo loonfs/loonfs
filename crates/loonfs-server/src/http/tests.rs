@@ -519,7 +519,9 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
                 .uri("/v0/namespaces")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(r#"{"namespace_id":"customer-a"}"#))
+                .body(axum::body::Body::from(
+                    r#"{"namespace_id":"customer-a","actor_id":"customer-creator"}"#,
+                ))
                 .expect("create namespace request"),
         )
         .await
@@ -623,7 +625,10 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
         .await
         .expect("build handles");
         writer
-            .create_namespace(&namespace_id("metrics"), CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id("metrics"),
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
     }
@@ -662,7 +667,10 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     let namespace_id = namespace_id("diagnostics");
     state
         .writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     state
@@ -1058,7 +1066,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     })
     .expect("valid client config");
     client
-        .create_namespace(&namespace_id("demo"))
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace over http");
 
@@ -1087,7 +1095,10 @@ async fn embedded_runner_shutdown_drains_an_active_grep_step() {
     let store = blocking_store.clone() as SharedObjectStore;
     let writer = test_runtime(store.clone(), "grep-shutdown-seed").await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     grep_worker(&store, "grep-shutdown-enable")
@@ -1176,7 +1187,10 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     .expect("build app");
     state
         .writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
 
@@ -1268,7 +1282,10 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
     let namespace_id = namespace_id("grep-observer");
     state
         .writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     state
@@ -1579,9 +1596,12 @@ async fn runtime_created_state_is_readable_through_http() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let fs = test_runtime(store.clone(), "runtime-writer").await;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace through runtime");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace through runtime");
     fs.put_file_bytes(
         &namespace_id,
         "/notes/hello.txt",
@@ -1629,7 +1649,7 @@ async fn http_created_state_is_readable_through_runtime() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"))
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace through http");
     let target = NamespacePath::parse("demo", "/notes/from-http.txt").expect("target");
@@ -2385,6 +2405,19 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
                 .post(&create_url)
                 .set("authorization", "Bearer test-token")
                 .set("content-type", "application/json")
+                .send_string(r#"{"namespace_id":"bad-actor","actor_id":7}"#)
+        },
+        "malformed actor should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert_eq!(body["param"], "/actor_id");
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .post(&create_url)
+                .set("authorization", "Bearer test-token")
+                .set("content-type", "application/json")
                 .send_string("{not json")
         },
         "malformed body should answer 400",
@@ -2748,7 +2781,10 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let namespace_id = namespace_id("hidden");
     state
         .writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let commit_response = router
@@ -3427,7 +3463,10 @@ async fn seed_grep_error_namespace(
 
 async fn seed_grep_error_namespace_on(writer: &FsWriter, namespace_id: &NamespaceId) {
     writer
-        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create grep-error namespace");
     writer
@@ -3647,7 +3686,10 @@ async fn bootstrap_namespace(
 ) -> FsWriter {
     let writer = test_runtime(store.clone(), writer_id).await;
     writer
-        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap namespace");
     writer
@@ -4073,7 +4115,7 @@ mod direct_download {
 
         let namespace = namespace_id("direct-download");
         client
-            .create_namespace(&namespace)
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/big.bin").expect("target");
@@ -4152,7 +4194,7 @@ mod direct_download {
 
         let namespace = namespace_id("grant-pins");
         client
-            .create_namespace(&namespace)
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/pinned.bin").expect("target");
@@ -4204,7 +4246,7 @@ mod direct_download {
 
         let namespace = namespace_id("no-issuer");
         client
-            .create_namespace(&namespace)
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/small.txt").expect("target");
@@ -4316,7 +4358,7 @@ mod direct_download {
         let namespace_id =
             NamespaceId::parse("direct-put-completion-shape").expect("valid namespace id");
         client
-            .create_namespace(&namespace_id)
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let begin = client
@@ -4397,7 +4439,7 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-crc32c-put");
         client
-            .create_namespace(&namespace)
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
@@ -4452,7 +4494,7 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-direct-put");
         client
-            .create_namespace(&namespace)
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
@@ -4503,7 +4545,7 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-too-large");
         client
-            .create_namespace(&namespace)
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/enormous.bin").expect("target");
@@ -4642,7 +4684,7 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
         .writer
         .create_namespace(
             &NamespaceId::parse("demo").expect("namespace"),
-            CreateNamespaceOptions::default(),
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("namespace");
@@ -4695,7 +4737,7 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
         .writer
         .create_namespace(
             &NamespaceId::parse("demo").expect("namespace"),
-            CreateNamespaceOptions::default(),
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("namespace");

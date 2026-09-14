@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_namespace(
             &namespace_id,
             CreateNamespaceOptions {
+                actor_id: loonfs::ActorId::parse("embedded-example")?,
                 allow_existing: true,
             },
         )

@@ -146,13 +146,13 @@ Profile management
     Make a profile the default
 
 Namespace management
-  loonfs namespace create <namespace>
+  loonfs namespace create <namespace> [--actor-id <stable-id>]
     Create a new empty namespace
 
   loonfs namespace show [namespace]
-    Show the selected namespace's status
+    Show the selected namespace's status and creator
 
-  loonfs namespace fork <source> <new-namespace>
+  loonfs namespace fork <source> <new-namespace> [--actor-id <stable-id>]
     Fork a namespace into a new one; O(1), no bytes copied
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
@@ -219,7 +219,8 @@ Reading
     tail that is too large to scan
 
 Writing
-  Every writing command accepts --actor-id <stable-id>. The flag overrides
+  Every writing command, including namespace create and namespace fork,
+  accepts --actor-id <stable-id>. The flag overrides
   LOONFS_ACTOR_ID, then the profile actor_id. Without any of them,
   loonfs-cli identifies the tool, not the human running it.
 

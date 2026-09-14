@@ -22,9 +22,15 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
     let directory = tempfile::tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("verification").expect("namespace");
-    bootstrap_namespace(&store, &namespace_id, &context(1_000), false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(1_000),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     for _ in 0..2 {
         acquire_writer_epoch(&store, &namespace_id, &context(1_000))
             .await
@@ -72,9 +78,15 @@ async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence(
     );
     let namespace_id = NamespaceId::parse("fences").expect("namespace");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     acquire_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");
@@ -144,9 +156,15 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
         OperationClass::PutCreateIfAbsent,
     );
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     acquire_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");

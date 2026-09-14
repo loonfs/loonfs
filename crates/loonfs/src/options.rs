@@ -111,10 +111,22 @@ pub struct CreateSnapshotOptions {
 
 /// Options for creating a namespace; feeds core's
 /// [`loonfs_core::BootstrapOptions`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateNamespaceOptions {
+    /// Application-supplied actor creating the namespace.
+    pub actor_id: loonfs_api::ActorId,
     /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
+}
+
+impl CreateNamespaceOptions {
+    /// Requires an absent namespace.
+    pub fn new(actor_id: loonfs_api::ActorId) -> Self {
+        Self {
+            actor_id,
+            allow_existing: false,
+        }
+    }
 }
 
 /// Options for reading the change feed.

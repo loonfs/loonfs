@@ -985,6 +985,7 @@ fn openapi_publishes_namespace_diagnostics_in_the_maintenance_api_group() {
         required_fields(diagnostics),
         BTreeSet::from([
             "created_at_ms",
+            "created_by",
             "head_seq",
             "live_checkpoints",
             "live_snapshots",
@@ -1267,6 +1268,14 @@ fn openapi_names_tagged_one_of_alternatives() {
         ),
     ] {
         let names = one_of_schema_names(schemas, schema_name);
+        for name in &names {
+            assert!(
+                schemas[*name]["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "variant schema `{name}` must have a description"
+            );
+        }
         assert_eq!(
             names, expected_names,
             "unexpected oneOf schema names for `{schema_name}`"

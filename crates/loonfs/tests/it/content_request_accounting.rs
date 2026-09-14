@@ -146,7 +146,10 @@ async fn build_initialized_writer(
         .await
         .expect("build writer");
     writer
-        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     // The immutable content-store descriptor shares the content-key prefix. Warm it before
@@ -316,7 +319,10 @@ async fn prepared_content_for_another_store_is_rejected_without_content_io() {
     let target = NamespaceId::parse("target-store").expect("target namespace id");
     let writer = build_initialized_writer(store.clone(), &source, "cross-store-writer").await;
     writer
-        .create_namespace(&target, CreateNamespaceOptions::default())
+        .create_namespace(
+            &target,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create target namespace");
     writer
@@ -364,7 +370,10 @@ async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_cont
     let target = NamespaceId::parse("shared-target").expect("target namespace id");
     let writer = build_initialized_writer(store.clone(), &source, "shared-store-writer").await;
     writer
-        .create_namespace(&target, CreateNamespaceOptions::default())
+        .create_namespace(
+            &target,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create independent target namespace");
     let source_catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &source)
@@ -414,7 +423,11 @@ async fn fork_and_source_reject_each_others_prepared_content() {
         .await
         .expect("prepare through source namespace");
     writer
-        .fork_namespace(&source, &fork)
+        .fork_namespace(
+            &source,
+            &fork,
+            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("fork namespace");
     writer

@@ -213,6 +213,7 @@ async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         context,
+        &loonfs_test_support::test_actor(),
         allow_existing,
     )
     .await?;
@@ -894,6 +895,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     encode_namespace_manifest_json(NamespaceManifestPayload {
         content_store_id: head.content_store_id.clone(),
         created_at_ms: head.created_at_ms,
+        created_by: head.created_by.clone(),
         fork_basis: head.fork_basis.clone(),
         status: head.status,
         writer: head.writer.clone(),

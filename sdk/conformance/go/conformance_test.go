@@ -264,7 +264,7 @@ type commitReplayExpected struct {
 func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[commitReplayRequest, commitReplayExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	commit := createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitID,
@@ -395,7 +395,7 @@ type directPutExpected struct {
 func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[directPutRequest, directPutExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	payload := []byte(request.ContentUTF8)
 	sizeBytes := int64(len(payload))
 	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
@@ -497,7 +497,7 @@ type multipartExpected struct {
 func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[multipartRequest, multipartExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	payload := makeBytePattern(t, request.ContentPattern)
 	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
@@ -659,7 +659,8 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type abortRequest struct {
-	NamespaceID string `json:"namespace_id"`
+	NamespaceID string         `json:"namespace_id"`
+	ActorID     loonfs.ActorID `json:"actor_id"`
 }
 
 type abortExpected struct {
@@ -671,7 +672,7 @@ type abortExpected struct {
 func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[abortRequest, abortExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
 		Body: &loonfs.CreateUploadBody{
@@ -732,7 +733,7 @@ type downloadExpected struct {
 func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[downloadRequest, downloadExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	payload := []byte(request.ContentUTF8)
 	commitID := loonfs.CommitID(request.CommitID)
 	committed, err := h.client.Files.Upload(context.Background(), files.UploadInput{
@@ -807,7 +808,7 @@ type endToEndExpected struct {
 func runEndToEnd(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[endToEndRequest, endToEndExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	mkdir := applyCommit(t, h.client, createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitIDs.Mkdir,
@@ -985,7 +986,7 @@ type childrenByInodeExpected struct {
 func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[childrenByInodeRequest, childrenByInodeExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	applyCreateDirectory(
 		t,
 		h.client,
@@ -1170,7 +1171,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[inodeMutationsRequest, inodeMutationsExpected](t, testCase)
 	childPath := func(name string) string { return request.Directory + "/" + name }
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	applyCreateDirectory(
 		t,
 		h.client,
@@ -1506,7 +1507,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	request, expected := decodeCaseValues[snapshotsRequest, snapshotsExpected](t, testCase)
 	ctx := context.Background()
 	childPath := func(name string) string { return request.Directory + "/" + name }
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 
 	applyCommit(
 		t,
@@ -1820,7 +1821,7 @@ func equalInt64s(left, right []int64) bool {
 func runPagination(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[paginationRequest, paginationExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	applyCreateDirectory(
 		t,
 		h.client,
@@ -2032,7 +2033,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	proxyServer := httptest.NewServer(proxyHandler)
 	defer proxyServer.Close()
 
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(request.NamespaceAlias)
 	mkdir := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL, createDirectoryCommit(
 		request.NamespaceID,
@@ -2443,7 +2444,7 @@ type changesExpected struct {
 func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[changesRequest, changesExpected](t, testCase)
-	createNamespace(t, h.client, request.NamespaceID)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
 	commit := createDirectoryCommit(
 		request.NamespaceID,
 		request.CommitID,
@@ -2835,11 +2836,11 @@ func listChanges(t *testing.T, sdk *server.Client, namespaceID string) *loonfs.L
 	return changes
 }
 
-func createNamespace(t *testing.T, sdk *server.Client, namespaceID string) {
+func createNamespace(t *testing.T, sdk *server.Client, namespaceID string, actorID loonfs.ActorID) {
 	t.Helper()
 	_, err := sdk.Namespaces.Create(
 		context.Background(),
-		&loonfs.CreateNamespaceRequest{NamespaceID: loonfs.NamespaceID(namespaceID)},
+		&loonfs.CreateNamespaceRequest{NamespaceID: loonfs.NamespaceID(namespaceID), ActorID: actorID},
 	)
 	if err != nil {
 		t.Fatalf("create namespace: %v", err)

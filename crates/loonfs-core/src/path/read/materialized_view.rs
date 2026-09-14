@@ -931,9 +931,15 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let context = context();
-        bootstrap_namespace(&store, &namespace_id, &context, false)
-            .await
-            .expect("bootstrap");
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &context,
+            &loonfs_test_support::test_actor(),
+            false,
+        )
+        .await
+        .expect("bootstrap");
 
         for (commit_id, operation) in [
             (

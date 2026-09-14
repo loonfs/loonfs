@@ -31,8 +31,11 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
         })
     });
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/file.txt",
@@ -90,9 +93,12 @@ async fn reader_reuses_published_projection_after_control_cache_eviction() {
     })
     .await;
     for namespace_id in [&namespace_id, &other_namespace_id] {
-        fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
+        fs.create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
     }
     fs.writer
         .create_directory(
@@ -150,7 +156,10 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
     let measured = open_runtime(object_store, "publish-tail");
 
     setup
-        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create namespace");
     setup
         .create_directory_blocking(
@@ -206,7 +215,10 @@ fn runtime_publish_and_read_allow_multi_segment_wal_tail() {
     let measured_publish = open_runtime(object_store, "publish-tail");
 
     setup
-        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create namespace");
     setup
         .create_directory_blocking(
@@ -245,7 +257,10 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
     let writer = open_runtime(object_store, "tail-cache-writer");
 
     writer
-        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create namespace");
     writer
         .create_directory_blocking(
@@ -286,8 +301,11 @@ fn runtime_cache_can_be_disabled() {
         builder.runtime_cache(RuntimeCacheConfig::disabled())
     });
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/file.txt",
@@ -320,7 +338,10 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
     let setup = open_runtime(shared_store.clone(), "tail-count-setup");
 
     setup
-        .create_namespace_blocking(&first, CreateNamespaceOptions::default())
+        .create_namespace_blocking(
+            &first,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create first namespace");
     setup
         .put_file_bytes_blocking(
@@ -331,7 +352,10 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
         )
         .expect("put first file");
     setup
-        .create_namespace_blocking(&second, CreateNamespaceOptions::default())
+        .create_namespace_blocking(
+            &second,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create second namespace");
     setup
         .put_file_bytes_blocking(
@@ -382,8 +406,11 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
         })
     });
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/file.txt",
@@ -414,8 +441,11 @@ fn wal_publication_conflict_recovers_and_reseeds_caches() {
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "tail-cache-stale-test");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.create_directory_blocking(
         &namespace_id,
         "/docs",
@@ -459,8 +489,11 @@ fn stat_and_list_use_initial_manifest_without_checkpoint() {
     let namespace_id = namespace_id("demo");
     let fs = runtime(temp_dir.path(), "read-fallback-test");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.create_directory_blocking(
         &namespace_id,
         "/docs",
@@ -488,8 +521,11 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "read-materialized-test");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/file.txt",
@@ -517,9 +553,12 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     let namespace_id = namespace_id("demo");
     let fs = open_runtime_async(store(temp_dir.path()), "concurrent-materialized-read-test").await;
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     fs.put_file_bytes(
         &namespace_id,
         "/docs/file.txt",
@@ -554,8 +593,11 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
     let namespace_id = namespace_id("demo");
     let fs = runtime(temp_dir.path(), "metadata-segment-cache-test");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/file.txt",
@@ -587,8 +629,11 @@ fn runtime_control_cache_reuses_head_for_materialization_validation() {
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "control-cache-head-test");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.create_directory_blocking(
         &namespace_id,
         "/docs",
@@ -622,16 +667,22 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
         })
     });
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.create_directory_blocking(
         &namespace_id,
         "/docs",
         CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create docs");
-    fs.create_namespace_blocking(&other_namespace, CreateNamespaceOptions::default())
-        .expect("create other namespace");
+    fs.create_namespace_blocking(
+        &other_namespace,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create other namespace");
     fs.create_directory_blocking(
         &other_namespace,
         "/docs",
@@ -668,7 +719,10 @@ fn runtime_control_cache_probes_wal_after_external_commit() {
     let writer = open_runtime(object_store, "control-cache-writer");
 
     writer
-        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create namespace");
     writer
         .create_directory_blocking(
@@ -709,8 +763,11 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
     let fs = runtime(temp_dir.path(), "initial-manifest-read-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
 
     let root = fs
         .stat_path_blocking(&namespace_id, "/")
@@ -734,7 +791,10 @@ fn separate_runtime_instances_share_object_store_state() {
     let namespace_id = namespace_id("demo");
 
     writer
-        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .expect("create namespace");
     writer
         .put_file_bytes_blocking(
@@ -761,8 +821,11 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
         builder.stored_metadata_block_cache(stored_blocks.clone())
     });
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/file.txt",
@@ -856,8 +919,11 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
             })
     });
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
 
     // Each step folds the tail into one more delta run, and the default policy
     // admits a reorganization unit once enough of them have piled up. Reads
@@ -885,7 +951,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         );
         fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
             .expect("read folded file outside the maintenance window");
-        if upkeep(&step).reorganize == ReorganizeStepOutcome::UnitPublished {
+        if upkeep(&step).reorganize == (ReorganizeStepOutcome::UnitPublished {}) {
             reorganized = true;
             break;
         }

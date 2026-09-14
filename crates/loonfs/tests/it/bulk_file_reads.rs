@@ -133,9 +133,12 @@ async fn checkpoint_files(
 /// directories, a replaced file, a deleted subtree, an undeleted file, and a
 /// directory holding no files at all.
 async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
-    fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     for (path, bytes) in [
         ("/docs/alpha.txt", &b"alpha"[..]),
         ("/docs/deep/bravo.txt", &b"bravo"[..]),
@@ -346,9 +349,12 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-paging-test").await;
     let namespace_id = namespace_id("demo");
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     for index in 0..5 {
         fs.put_file_bytes(
             &namespace_id,
@@ -401,9 +407,12 @@ async fn an_empty_namespace_answers_one_empty_page() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-empty-test").await;
     let namespace_id = namespace_id("demo");
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     let checkpoint = fs
         .create_checkpoint(&namespace_id)
         .await
@@ -433,9 +442,12 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
     let fs = open_runtime_async(store.clone(), "checkpoint-files-fork-test").await;
     let source = namespace_id("source");
     let target = namespace_id("target");
-    fs.create_namespace(&source, CreateNamespaceOptions::default())
-        .await
-        .expect("create source namespace");
+    fs.create_namespace(
+        &source,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create source namespace");
     for (path, bytes) in [
         ("/docs/alpha.txt", &b"alpha"[..]),
         ("/docs/deep/bravo.txt", &b"bravo"[..]),
@@ -452,7 +464,11 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
     let at_fork = listed_files(&fs.reader, &source).await;
 
     fs.writer
-        .fork_namespace(&source, &target)
+        .fork_namespace(
+            &source,
+            &target,
+            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("fork namespace");
 
@@ -525,9 +541,12 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-release-test").await;
     let namespace_id = namespace_id("demo");
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     fs.put_file_bytes(
         &namespace_id,
         "/docs/alpha.txt",
@@ -581,9 +600,12 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "resolve-current-files-test").await;
     let namespace_id = namespace_id("demo");
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     for (path, bytes) in [
         ("/m/unchanged.txt", &b"unchanged"[..]),
         ("/m/replaced.txt", &b"first"[..]),
@@ -762,9 +784,12 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "resolve-current-files-cap-test").await;
     let namespace_id = namespace_id("demo");
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     fs.put_file_bytes(
         &namespace_id,
         "/docs/alpha.txt",
@@ -814,9 +839,12 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
     ));
     let fs = open_runtime_async(counting.clone(), "read-content-ref-test").await;
     let namespace_id = namespace_id("demo");
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     fs.put_file_bytes(
         &namespace_id,
         "/docs/alpha.txt",
@@ -866,9 +894,12 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
     let store = store(temp_dir.path());
     let fs = open_runtime_async(store.clone(), "read-content-ref-digest-test").await;
     let namespace_id = namespace_id("demo");
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     fs.put_file_bytes(
         &namespace_id,
         "/docs/alpha.txt",

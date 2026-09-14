@@ -373,9 +373,15 @@ mod tests {
             writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
-        bootstrap_namespace(&store, &namespace_id, &context, false)
-            .await
-            .expect("bootstrap namespace");
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &context,
+            &loonfs_test_support::test_actor(),
+            false,
+        )
+        .await
+        .expect("bootstrap namespace");
         let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");

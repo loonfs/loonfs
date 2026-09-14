@@ -42,7 +42,10 @@ fn streamed(payload: &[u8]) -> ByteStream {
 async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     runtime
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     namespace_id

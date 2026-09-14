@@ -573,9 +573,11 @@ Preconditions are admission conditions, stored only through the fingerprint in W
 
 ### Actor attribution
 
-Every commit includes a required `actor_id` as a JSON string. The application supplies
+Every commit, namespace creation, and namespace fork includes a required
+`actor_id` as a JSON string. The application supplies
 a stable opaque identifier with the identity scope it needs. LoonFS preserves
-it on the commit and the metadata created by that commit. LoonFS does not
+it on the commit and the metadata created by that commit. Namespace creation
+and forking record it as `created_by` on the namespace. LoonFS does not
 authenticate the actor or resolve profile information. The application must
 authenticate the user and authorize the operation before sending the request.
 Use a stable internal ID, not an email address or display name.
@@ -590,6 +592,7 @@ Responses expose attribution through these fields:
 | Field | Meaning |
 | --- | --- |
 | `created_by`, `created_at_ms` | Commit attribution for inode creation. |
+| `created_by`, `created_at_ms` on a namespace | Who created or forked the namespace, and when. |
 | `revision_committed_by`, `revision_committed_at_ms` | Commit attribution for the current file revision on stat and list entries; absent on directories. |
 | `commit_id` | Owning commit identity on revision-history items and committed changes. |
 | `committed_by`, `committed_at_ms` | Commit attribution on revision-history items and committed changes. |
@@ -783,7 +786,7 @@ The table below lists the retry class for every v0 operation.
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces` |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`; requires `actor_id` |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
@@ -808,7 +811,7 @@ The table below lists the retry class for every v0 operation.
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling |
 | Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin; a missing id returns `snapshot_not_found`) |
-| Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks` |
+| Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`; requires `actor_id` |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `filesystem.namespaces.delete`; the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
@@ -1416,7 +1419,8 @@ or separate display names. Representative request:
 
 ```json
 {
-  "namespace_id": "demo"
+  "namespace_id": "demo",
+  "actor_id": "usr_8f3c"
 }
 ```
 
@@ -1427,6 +1431,7 @@ starts at sequence 0 with a retention floor of 0:
 {
   "namespace_id": "demo",
   "created_at_ms": 1752623000000,
+  "created_by": "usr_8f3c",
   "head_seq": 0,
   "retention_floor_seq": 0
 }
@@ -1468,6 +1473,7 @@ namespace returns `410` with `namespace_deleted`.
 {
   "namespace_id": "demo",
   "created_at_ms": 1752623000000,
+  "created_by": "usr_8f3c",
   "head_seq": 418,
   "retention_floor_seq": 120
 }
@@ -1479,6 +1485,7 @@ The `Namespace` object has exactly these fields:
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
+| `created_by` | Actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
@@ -1507,6 +1514,7 @@ namespace state plus storage details used by maintenance:
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
+| `created_by` | Actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
@@ -1519,6 +1527,7 @@ namespace state plus storage details used by maintenance:
 {
   "namespace_id": "demo",
   "created_at_ms": 1752623000000,
+  "created_by": "usr_8f3c",
   "head_seq": 418,
   "retention_floor_seq": 120,
   "current_manifest_no": 410,
@@ -2563,7 +2572,8 @@ Representative request:
 
 ```json
 {
-  "new_namespace_id": "demo-branch"
+  "new_namespace_id": "demo-branch",
+  "actor_id": "usr_8f3c"
 }
 ```
 
@@ -2573,6 +2583,7 @@ Representative response:
 {
   "namespace_id": "demo-branch",
   "created_at_ms": 1752625000000,
+  "created_by": "usr_8f3c",
   "fork_basis": {
     "source_namespace_id": "demo",
     "source_head_seq": 418
@@ -2589,6 +2600,8 @@ snapshots and ids owned by another namespace or checkpoint kind return
 `snapshot_not_found`. Expired snapshots and snapshots deleted during fork
 verification return `snapshot_gone`.
 Forking does not extend the snapshot, and later deletion does not affect the fork.
+The fork records the request's `actor_id` as `created_by`, independently of the source's creator.
+Namespace creation and forking produce no change-feed event.
 
 The new namespace shares the source namespace's content store and starts with
 independent future namespace metadata. The fork creates a fork-owned source checkpoint so the

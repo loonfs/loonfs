@@ -216,6 +216,7 @@ interface MultipartExpected {
 
 interface AbortRequest {
     namespace_id: string;
+    actor_id: string;
 }
 
 interface AbortExpected {
@@ -472,7 +473,7 @@ const MULTIPART_EXPECTED_FIELDS = [
     "checksum_algorithm",
     "committed_seq",
 ] as const;
-const ABORT_REQUEST_FIELDS = ["namespace_id"] as const;
+const ABORT_REQUEST_FIELDS = ["namespace_id", "actor_id"] as const;
 const ABORT_EXPECTED_FIELDS = ["begin_status", "mode", "status"] as const;
 const DOWNLOAD_REQUEST_FIELDS = [
     "namespace_id",
@@ -1200,7 +1201,7 @@ conformanceTest("error_contract", async (activeHarness, testCase) => {
 
 conformanceTest("commit_replay", async (activeHarness, testCase) => {
     const [request, expected] = decodeCommitReplay(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     const commit = directoryCommit(
         request.namespace_id,
         request.commit_id,
@@ -1264,7 +1265,7 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
 
 conformanceTest("pagination", async (activeHarness, testCase) => {
     const [request, expected] = decodePagination(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     await activeHarness.client.commits.create(
         directoryCommit(
             request.namespace_id,
@@ -1339,7 +1340,7 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
 
 conformanceTest("children_by_inode", async (activeHarness, testCase) => {
     const [request, expected] = decodeChildrenByInode(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     await activeHarness.client.commits.create(
         directoryCommit(
             request.namespace_id,
@@ -1451,7 +1452,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     const client = activeHarness.client;
     const namespaceId = request.namespace_id;
     const childPath = (name: string): string => `${request.directory}/${name}`;
-    await client.namespaces.create({ namespace_id: namespaceId });
+    await client.namespaces.create({ namespace_id: namespaceId, actor_id: request.actor_id });
     await client.commits.create(
         directoryCommit(
             namespaceId,
@@ -1674,7 +1675,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     const capturedBytes = new TextEncoder().encode(request.captured_content_utf8);
     const currentBytes = new TextEncoder().encode(request.current_content_utf8);
 
-    await client.namespaces.create({ namespace_id: namespaceId });
+    await client.namespaces.create({ namespace_id: namespaceId, actor_id: request.actor_id });
     await client.commits.create(
         directoryCommit(
             namespaceId,
@@ -1911,7 +1912,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxy = await startProxyServer(handler);
     context.after(() => proxy.close());
 
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     const namespaceAliasBase =
         `${proxy.baseUrl}/v0/namespace-aliases/` +
         encodeURIComponent(request.namespace_alias);
@@ -2200,7 +2201,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
 
 conformanceTest("changes", async (activeHarness, testCase) => {
     const [request, expected] = decodeChanges(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     const committed = await activeHarness.client.commits.create(
         directoryCommit(request.namespace_id, request.commit_id, request.actor_id, request.path),
     );
@@ -2222,7 +2223,7 @@ conformanceTest("changes", async (activeHarness, testCase) => {
 
 conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     const [request, expected] = decodeDirectPut(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     const payload = new TextEncoder().encode(request.content_utf8);
     const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
@@ -2281,7 +2282,7 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
 
 conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     const [request, expected] = decodeMultipart(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     const payload = bytePattern(request.content_pattern);
     const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
@@ -2408,7 +2409,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
 
 conformanceTest("upload_abort", async (activeHarness, testCase) => {
     const [request, expected] = decodeAbort(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     const begin = await activeHarness.client.uploads.create({
         namespace_id: request.namespace_id,
         body: { mode: "service_proxied" },
@@ -2434,7 +2435,7 @@ conformanceTest("upload_abort", async (activeHarness, testCase) => {
 
 conformanceTest("download", async (activeHarness, testCase) => {
     const [request, expected] = decodeDownload(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     const payload = new TextEncoder().encode(request.content_utf8);
     const committed = await activeHarness.client.files.upload({
         namespace_id: request.namespace_id,
@@ -2467,7 +2468,7 @@ conformanceTest("download", async (activeHarness, testCase) => {
 
 conformanceTest("end_to_end", async (activeHarness, testCase) => {
     const [request, expected] = decodeEndToEnd(testCase);
-    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id });
+    await activeHarness.client.namespaces.create({ namespace_id: request.namespace_id, actor_id: request.actor_id });
     const mkdir = await activeHarness.client.commits.create(
         directoryCommit(
             request.namespace_id,

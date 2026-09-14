@@ -46,8 +46,11 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
     let fs = runtime(temp_dir.path(), "snapshot-create-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -98,9 +101,12 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
     );
     let object_store: SharedObjectStore = store.clone();
     let fs = open_runtime_async(object_store, "snapshot-ambiguous-write").await;
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     store.fail_next(1);
 
     let snapshot = fs
@@ -142,9 +148,12 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
     );
     let object_store: SharedObjectStore = store.clone();
     let fs = open_runtime_async(object_store, "snapshot-ambiguous-extension").await;
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     let snapshot = fs
         .writer
         .create_snapshot(
@@ -188,9 +197,12 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
     );
     let object_store: SharedObjectStore = store.clone();
     let fs = open_runtime_async(object_store, "snapshot-ambiguous-delete").await;
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
     let snapshot = fs
         .writer
         .create_snapshot(
@@ -261,9 +273,12 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     ));
     let object_store: SharedObjectStore = checkpoint_list_gate.clone();
     let fs = open_runtime_async(object_store, "snapshot-quota-race").await;
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-        .await
-        .expect("create namespace");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
 
     checkpoint_list_gate.arm();
     checkpoint_write_gate.arm();
@@ -331,8 +346,11 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
     let source = namespace_id("source");
     let target = namespace_id("target");
 
-    fs.create_namespace_blocking(&source, CreateNamespaceOptions::default())
-        .expect("create source namespace");
+    fs.create_namespace_blocking(
+        &source,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create source namespace");
     fs.put_file_bytes_blocking(
         &source,
         "/docs/hello.txt",

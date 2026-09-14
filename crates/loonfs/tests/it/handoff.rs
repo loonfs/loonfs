@@ -77,7 +77,10 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     let writer_a = writer(store.clone(), "paused-writer-a").await;
     let writer_b = writer(store.clone(), "takeover-writer-b").await;
     writer_a
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer_a
@@ -139,7 +142,10 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
     let writer_a = explicit_writer(store.clone(), "session-writer-a").await;
     let writer_b = explicit_writer(store, "session-writer-b").await;
     writer_a
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer_a
@@ -193,7 +199,10 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
     let namespace_id = NamespaceId::parse("cold-handoff").expect("namespace id");
     let writer = writer(store.clone(), "active-writer").await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let fold_threshold = usize::try_from(

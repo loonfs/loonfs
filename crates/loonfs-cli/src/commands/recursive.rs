@@ -622,7 +622,7 @@ mod tests {
         };
         context
             .target
-            .create_namespace(&namespace)
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         (context, watched)

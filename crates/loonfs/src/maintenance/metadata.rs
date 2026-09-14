@@ -50,7 +50,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
         {
             Ok(metadata) => {
                 let mut report = MaintenanceRunReport::concluded(metadata_conclusion(&metadata));
-                if metadata.reorganize == ReorganizeStepOutcome::CompactionRequired {
+                if metadata.reorganize == (ReorganizeStepOutcome::CompactionRequired {}) {
                     report.conclusion = MaintenanceConclusion::Blocked;
                     report.follow_up =
                         Some((MaintenanceJobId::METADATA_COMPACTION, namespace_id.clone()));
@@ -96,12 +96,12 @@ fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceConclus
         WalFlushStepOutcome::NotNeeded => None,
     };
     let reorganize = match step.reorganize {
-        ReorganizeStepOutcome::UnitPublished => Some(MaintenanceConclusion::Progressed),
-        ReorganizeStepOutcome::ManifestAdvanced | ReorganizeStepOutcome::Fenced => {
+        ReorganizeStepOutcome::UnitPublished {} => Some(MaintenanceConclusion::Progressed),
+        ReorganizeStepOutcome::ManifestAdvanced {} | ReorganizeStepOutcome::Fenced {} => {
             Some(MaintenanceConclusion::Superseded)
         }
-        ReorganizeStepOutcome::CompactionRequired => Some(MaintenanceConclusion::Blocked),
-        ReorganizeStepOutcome::NotNeeded => None,
+        ReorganizeStepOutcome::CompactionRequired {} => Some(MaintenanceConclusion::Blocked),
+        ReorganizeStepOutcome::NotNeeded {} => None,
     };
     [flush, reorganize]
         .into_iter()

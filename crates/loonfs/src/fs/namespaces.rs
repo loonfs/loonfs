@@ -34,6 +34,7 @@ impl FsWriter {
         let result = self
             .engine(namespace_id)
             .bootstrap_namespace(loonfs_core::BootstrapOptions {
+                actor_id: options.actor_id,
                 allow_existing: options.allow_existing,
             })
             .await
@@ -41,18 +42,15 @@ impl FsWriter {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Forks `source_namespace_id` into `new_namespace_id` at the current head.
+    /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or live snapshot.
     pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
+        options: ForkNamespaceOptions,
     ) -> Result<Namespace> {
-        self.fork_namespace_with(
-            source_namespace_id,
-            new_namespace_id,
-            ForkNamespaceOptions::default(),
-        )
-        .await
+        self.fork_namespace_with(source_namespace_id, new_namespace_id, options)
+            .await
     }
 
     /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or live snapshot.
@@ -79,6 +77,7 @@ impl FsWriter {
             .engine(source_namespace_id)
             .fork_namespace(
                 new_namespace_id,
+                &options.actor_id,
                 options.snapshot_id.map(Into::into).as_ref(),
             )
             .await

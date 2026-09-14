@@ -67,7 +67,10 @@ fn reads_name_their_anchor_and_the_lookup_that_came_back_empty() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         writer

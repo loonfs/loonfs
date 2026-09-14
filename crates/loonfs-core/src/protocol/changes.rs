@@ -361,6 +361,7 @@ mod tests {
                 writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
                 now_ms: 1,
             },
+            &loonfs_test_support::test_actor(),
             false,
         )
         .await

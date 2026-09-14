@@ -90,10 +90,19 @@ impl ResolvedTarget {
     pub(crate) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
+        actor_id: &loonfs_api::ActorId,
     ) -> Result<Namespace, CliError> {
         match self {
-            Self::Embedded(target) => target.backend.create_namespace(namespace_id).await,
-            Self::Remote(target) => Ok(target.client.create_namespace(namespace_id).await?),
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .create_namespace(namespace_id, actor_id)
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .create_namespace(namespace_id, actor_id)
+                .await?),
         }
     }
 

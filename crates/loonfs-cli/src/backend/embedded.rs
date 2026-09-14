@@ -139,10 +139,11 @@ impl EmbeddedBackend {
     pub(super) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
+        actor_id: &loonfs_api::ActorId,
     ) -> Result<Namespace, CliError> {
         let result = self
             .writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(namespace_id, CreateNamespaceOptions::new(actor_id.clone()))
             .await
             .map_err(map_runtime_error);
         self.drain_runner_after(result).await
@@ -1026,7 +1027,10 @@ mod tests {
             .await
             .expect("build backlog writer");
         writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         append_wal_segments(
@@ -1347,7 +1351,7 @@ mod tests {
             .expect("build embedded target");
         target
             .backend
-            .create_namespace(&namespace_id("demo"))
+            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
 
@@ -1416,7 +1420,7 @@ mod tests {
             .expect("build embedded target");
         target
             .backend
-            .create_namespace(&namespace_id("demo"))
+            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
 
@@ -1459,7 +1463,10 @@ mod tests {
             .expect("build debt writer");
         let namespace = NamespaceId::parse("demo").expect("namespace id");
         writer
-            .create_namespace(&namespace, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         append_wal_segments(
@@ -1504,7 +1511,7 @@ mod tests {
             .expect("build first embedded target");
         first
             .backend
-            .create_namespace(&namespace_id("demo"))
+            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         first

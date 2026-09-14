@@ -1106,6 +1106,7 @@ fn external_remote_profile_executes_through_http() {
             "kind": "namespace_status",
             "namespace_id": "demo",
             "created_at_ms": json_data(&create)["created_at_ms"],
+            "created_by": "loonfs-cli",
             "head_seq": 0,
             "retention_floor_seq": 0
         })
@@ -1118,6 +1119,7 @@ fn external_remote_profile_executes_through_http() {
             "kind": "namespace_status",
             "namespace_id": "clone",
             "created_at_ms": json_data(&fork)["created_at_ms"],
+            "created_by": "loonfs-cli",
             "fork_basis": {"source_namespace_id": "demo", "source_head_seq": 0},
             "head_seq": 0,
             "retention_floor_seq": 0
@@ -1147,12 +1149,22 @@ fn filesystem_requires_default_namespace_when_omitted() {
 fn namespace_show_reads_positional_and_default_namespaces() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&[
+        "namespace",
+        "create",
+        "demo",
+        "--actor-id",
+        "namespace-creator",
+    ]));
 
     let positional = harness.run(&["--json", "namespace", "show", "demo"]);
     assert_success(&positional);
     assert_eq!(json_data(&positional)["kind"], "namespace_status");
     assert_eq!(json_data(&positional)["namespace_id"], "demo");
+    assert_eq!(json_data(&positional)["created_by"], "namespace-creator");
+    let human = harness.run(&["namespace", "show", "demo"]);
+    assert_success(&human);
+    assert!(String::from_utf8_lossy(&human.stdout).contains("created_by: namespace-creator"));
 
     assert_success(&harness.run(&["use", "demo"]));
     let selected = harness.run(&["--json", "namespace", "show"]);

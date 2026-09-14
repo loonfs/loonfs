@@ -64,7 +64,10 @@ async fn batches_write_only_the_wal_until_the_threshold_raise() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create");
     // The first batch acquires the writer: a manifest with the new epoch,
@@ -104,7 +107,10 @@ async fn the_interval_raises_a_short_tail() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create");
     directory(&writer, &namespace_id, 0).await;
@@ -143,7 +149,10 @@ async fn a_failed_raise_keeps_the_batch_and_retries_at_the_next_trigger() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create");
     directory(&writer, &namespace_id, 0).await;
@@ -178,7 +187,10 @@ async fn readers_probe_commits_immediately_and_check_deletion_on_the_interval() 
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create");
     directory(&writer, &namespace_id, 0).await;

@@ -219,7 +219,10 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
     let (router, state) = app(config, AppOptions::default()).await.expect("build app");
     let writer = state.writer;
     writer
-        .create_namespace(&namespace_id("demo"), CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id("demo"),
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     capture.clear();
@@ -264,7 +267,10 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
     let writer = state.writer;
     let namespace = namespace_id("demo");
     writer
-        .create_namespace(&namespace, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let upload = writer
@@ -387,7 +393,10 @@ async fn store_fault_has_one_error_from_the_boundary() {
         .await
         .expect("build bootstrap writer");
     bootstrap
-        .create_namespace(&namespace_id("faulty"), CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id("faulty"),
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     bootstrap

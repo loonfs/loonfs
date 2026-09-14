@@ -635,7 +635,7 @@ Retirement is a deleted manifest with `reclaim_after_ms`, not a separate status 
 
 Read existing namespace state before allocating or writing a descriptor. An existing active namespace returns `namespace_exists`, or its current summary with `allow_existing`. Deleted status returns `namespace_deleted`. Corruption and read errors are not absence. These completed-namespace checks write nothing.
 
-For an absent namespace, build manifest 1 with a new content-store ID, the namespace's creation time, no fork basis, active status, the genesis commit ID, next inode ID 2, and no runs or writer block. Head sequence, base sequence, both retention floors, folded WAL number, next run number, and both epochs start at zero.
+For an absent namespace, build manifest 1 with a new content-store ID, the namespace's creation time and application-supplied `created_by`, no fork basis, active status, the genesis commit ID, next inode ID 2, and no runs or writer block. Head sequence, base sequence, both retention floors, folded WAL number, next run number, and both epochs start at zero.
 
 Write the content-store descriptor, hint naming manifest 1 and WAL 0, then manifest 1, all with put-if-absent. Descriptor and hint collisions are permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
 
@@ -646,7 +646,7 @@ A fork starts independent history in the source's content domain:
 1. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
 3. Copy its run references, head sequence, head commit ID, inode allocator, next run number, and content-store ID into target manifest 1. Preserve every segment's owner.
-4. Set target identity and creation time, immutable `fork_basis`, active status, no writer block, and both epochs zero. Local folded WAL and WAL retention floor start at zero; the sequence retention floor starts at the fork point.
+4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, no writer block, and both epochs zero. Local folded WAL and WAL retention floor start at zero; the sequence retention floor starts at the fork point.
 5. Within the fork-installation budget, write the shared descriptor, target hint naming manifest 1 and WAL 0, and target manifest 1, in that order.
 
 The target copies no file bytes or metadata segments. Its WAL starts at number 1, and its first data commit is one sequence above the fork point. It can itself be forked immediately because its manifest already lists its inherited runs.
@@ -1075,6 +1075,7 @@ A namespace manifest contains:
 | `namespace_id` | Namespace described by the manifest. |
 | `content_store_id` | Immutable content-domain identity. |
 | `created_at_ms` | Immutable namespace creation time. |
+| `created_by` | Immutable application-supplied actor that created or forked the namespace. |
 | `fork_basis?` | Immutable source reference and pin identity. |
 | `status` | Active or terminal deleted state. |
 | `writer?` | Diagnostic writer block. |

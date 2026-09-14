@@ -307,6 +307,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
     let mut manifest = NamespaceManifestPayload {
         content_store_id: content_store_id(),
         created_at_ms: 1_000,
+        created_by: loonfs_api::ActorId::parse("test").expect("actor"),
         fork_basis: None,
         status: NamespaceStatus::Active {},
         writer: Some(WriterBlock {
@@ -530,20 +531,23 @@ fn manifest_status_reading_is_fail_closed_on_unknown_statuses() {
 }
 
 #[test]
-fn manifest_without_a_status_is_rejected() {
-    let mut document = serde_json::to_value(sample_manifest_payload())
-        .expect("encode active manifest as a document");
-    document
-        .as_object_mut()
-        .expect("manifest document")
-        .remove("status");
-
-    let error = serde_json::from_value::<NamespaceManifestPayload>(document)
-        .expect_err("a manifest without its status must be rejected");
-    assert!(
-        error.to_string().contains("status"),
-        "the rejection should name the field: {error}"
-    );
+fn manifest_without_required_fields_is_rejected() {
+    for field in ["status", "created_by"] {
+        let mut document = serde_json::to_value(sample_manifest_payload())
+            .expect("encode active manifest as a document");
+        document
+            .as_object_mut()
+            .expect("manifest document")
+            .remove(field);
+        let error = serde_json::from_value::<NamespaceManifestPayload>(document)
+            .expect_err("a manifest without a required field must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("missing field `{field}`")),
+            "the rejection should name the field: {error}"
+        );
+    }
 }
 
 #[test]

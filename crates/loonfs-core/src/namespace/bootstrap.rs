@@ -68,12 +68,14 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
+    actor_id: &loonfs_api::ActorId,
     allow_existing: bool,
 ) -> Result<Namespace, BootstrapNamespaceError> {
     let manifest = NamespaceManifestPayload::initial(
         namespace_id.clone(),
         ContentStoreId::generate(),
         context.now_ms,
+        actor_id.clone(),
     );
     match install_namespace_manifest(store, &manifest, || Ok(())).await? {
         NamespaceInstall::Landed => {}

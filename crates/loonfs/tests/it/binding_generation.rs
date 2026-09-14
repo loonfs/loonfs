@@ -12,8 +12,11 @@ fn binding_generation_changes_on_move_but_not_content_update() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "binding-generation-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",

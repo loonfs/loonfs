@@ -1005,7 +1005,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
 
     let target = namespace_id("fork");
     namespace_engine(&store, &source, &context)
-        .fork_namespace(&target, None)
+        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
         .await
         .expect("fork the namespace");
 

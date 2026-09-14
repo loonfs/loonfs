@@ -293,6 +293,7 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         content_store_id: loonfs_api::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
             .expect("content store"),
         created_at_ms: 1_000,
+        created_by: loonfs_test_support::test_actor(),
         fork_basis: None,
         status: loonfs_api::wire::control::NamespaceStatus::Active {},
         writer: None,

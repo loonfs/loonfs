@@ -40,7 +40,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::Namespace, CoreError> {
     namespace_engine(store, source_namespace_id, context)
-        .fork_namespace(new_namespace_id, None)
+        .fork_namespace(new_namespace_id, &loonfs_test_support::test_actor(), None)
         .await
 }
 
@@ -128,7 +128,11 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
             .expect("collect source before fork");
     assert!(collected.deleted.metadata_segments > 0);
     let fork = engine
-        .fork_namespace(&target, Some(&snapshot.checkpoint_id))
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            Some(&snapshot.checkpoint_id),
+        )
         .await
         .expect("fork snapshot");
     assert_eq!(fork.head_seq, snapshot.captured_seq);
@@ -205,7 +209,11 @@ async fn invalid_snapshot_forks_write_nothing() {
     ] {
         store.take();
         let error = engine
-            .fork_namespace(&target, Some(&snapshot_id))
+            .fork_namespace(
+                &target,
+                &loonfs_test_support::test_actor(),
+                Some(&snapshot_id),
+            )
             .await
             .expect_err("invalid snapshot");
         assert_eq!(error.code(), expected_code);
@@ -242,7 +250,8 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     );
     let engine = namespace_engine(&store, &source, &context);
     store.block_next();
-    let forking = engine.fork_namespace(&target, Some(&snapshot.checkpoint_id));
+    let actor_id = loonfs_test_support::test_actor();
+    let forking = engine.fork_namespace(&target, &actor_id, Some(&snapshot.checkpoint_id));
     let deleting = async {
         store.wait_until_blocked().await;
         store.inner().block_next();
@@ -1163,6 +1172,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
         namespace_id.clone(),
         loonfs_api::ContentStoreId::generate(),
         1_000,
+        loonfs_test_support::test_actor(),
     );
     let foreign_bytes = loonfs_api::wire::manifest::encode_namespace_manifest_json(foreign.clone())
         .map(|encoded| encoded.into_bytes())

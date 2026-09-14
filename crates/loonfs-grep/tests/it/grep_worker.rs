@@ -148,7 +148,10 @@ async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     GrepHost::new(&base_store, "query-pin-index")
@@ -207,7 +210,10 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     for index in 0..3u32 {
@@ -343,7 +349,10 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer
@@ -476,7 +485,10 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "enable-manifest-failure-maintenance").await;
@@ -541,7 +553,10 @@ async fn enable_retains_its_checkpoint_when_the_manifest_write_result_is_ambiguo
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "ambiguous-enable-maintenance").await;
@@ -595,7 +610,10 @@ async fn restart_retains_its_checkpoint_when_the_manifest_write_result_is_ambigu
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "ambiguous-restart-maintenance").await;
@@ -665,7 +683,10 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("maintenance");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let worker = worker(&store).await;
@@ -743,7 +764,10 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .await
         .expect("maintenance");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     for index in 0..2u32 {
@@ -855,7 +879,10 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer
@@ -1003,7 +1030,10 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     for index in 0..4u32 {
@@ -1111,7 +1141,10 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer
@@ -1171,7 +1204,10 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_rebuild_restores_them(
         .expect("writer");
     let reader = writer.reader();
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     for name in ["a", "b"] {
@@ -1280,7 +1316,10 @@ async fn undeleting_a_subtree_hidden_from_backfill_restarts_the_projection() {
         .expect("writer");
     let reader = writer.reader();
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     for name in ["a", "b"] {
@@ -1377,7 +1416,10 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
         .expect("writer");
     let reader = writer.reader();
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let worker = worker(&store).await;
@@ -1424,7 +1466,10 @@ async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let worker = worker(&store).await;
@@ -1491,7 +1536,10 @@ async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let worker = worker(&store).await;
@@ -1583,7 +1631,10 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
 
@@ -1694,7 +1745,10 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let worker = worker(&store).await;
@@ -1831,7 +1885,10 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .await
         .expect("writer");
     writer
-        .create_namespace(&source, CreateNamespaceOptions::default())
+        .create_namespace(
+            &source,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create source");
     writer
@@ -1854,7 +1911,11 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .clone();
 
     writer
-        .fork_namespace(&source, &target)
+        .fork_namespace(
+            &source,
+            &target,
+            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("fork source");
 
@@ -1921,7 +1982,10 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
         .expect("writer");
     for namespace_id in [&backfill_namespace, &incremental_namespace] {
         writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
     }
@@ -1996,7 +2060,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer
@@ -2090,7 +2157,10 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("namespace");
     let host = GrepHost::new(&store, "numbered-query").await;
@@ -2194,7 +2264,10 @@ async fn gc_preserves_discovery_and_applies_successor_and_segment_age_rules() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("namespace");
     let obsolete = crate::golden_formats::segment_ref(1, 1, 0, 0);

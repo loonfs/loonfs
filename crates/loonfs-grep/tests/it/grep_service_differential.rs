@@ -204,7 +204,10 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         .await
         .expect("build maintenance");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let worker = worker(&store).await;
@@ -387,7 +390,10 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     let worker = worker(&store).await;
 
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     worker.enable(&namespace_id).await.expect("enable grep");

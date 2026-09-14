@@ -23,8 +23,11 @@ pub(super) fn human_current(profile: &str, namespace: Option<&str>) -> String {
 
 pub(super) fn human_namespace_status(namespace: &Namespace) -> String {
     format!(
-        "{} @ seq {} (retention floor {})",
-        namespace.namespace_id, namespace.head_seq.0, namespace.retention_floor_seq.0
+        "{} @ seq {} (retention floor {})\ncreated_by: {}",
+        namespace.namespace_id,
+        namespace.head_seq.0,
+        namespace.retention_floor_seq.0,
+        namespace.created_by
     )
 }
 
@@ -140,13 +143,13 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
             metadata.namespace_id,
             wal_flush_summary(&metadata.wal_flush),
             match metadata.reorganize {
-                ReorganizeStepOutcome::NotNeeded => "reorganize not needed",
-                ReorganizeStepOutcome::UnitPublished => "reorganized one family group",
-                ReorganizeStepOutcome::CompactionRequired => {
+                ReorganizeStepOutcome::NotNeeded {} => "reorganize not needed",
+                ReorganizeStepOutcome::UnitPublished {} => "reorganized one family group",
+                ReorganizeStepOutcome::CompactionRequired {} => {
                     "one family group needs the metadata_compaction job"
                 }
-                ReorganizeStepOutcome::Fenced => "reorganize fenced by a newer runtime",
-                ReorganizeStepOutcome::ManifestAdvanced => {
+                ReorganizeStepOutcome::Fenced {} => "reorganize fenced by a newer runtime",
+                ReorganizeStepOutcome::ManifestAdvanced {} => {
                     "another publisher advanced the manifest number, so reorganization published nothing"
                 }
             }

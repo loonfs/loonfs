@@ -3,7 +3,7 @@
 use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::{load_head_and_retention_floor, load_read_anchor};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::{ChangeSeq, ManifestNo, Namespace, NamespaceForkBasis, NamespaceId};
+use loonfs_api::{ActorId, ChangeSeq, ManifestNo, Namespace, NamespaceForkBasis, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 /// Whether a namespace carries visible commits its basis manifest does not
@@ -19,6 +19,7 @@ pub struct NamespaceFlushBasis {
 pub struct NamespaceStorageDiagnostics {
     pub namespace_id: NamespaceId,
     pub created_at_ms: u64,
+    pub created_by: ActorId,
     pub fork_basis: Option<NamespaceForkBasis>,
     pub head_seq: ChangeSeq,
     pub retention_floor_seq: ChangeSeq,
@@ -64,6 +65,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     super::control::ensure_namespace_live(&head)?;
     Ok(Namespace {
         created_at_ms: head.created_at_ms,
+        created_by: head.created_by,
         fork_basis: head.fork_basis.map(|basis| NamespaceForkBasis {
             source_namespace_id: basis.manifest.owner_namespace_id,
             source_head_seq: basis.manifest.manifest_head_seq,
@@ -82,6 +84,7 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     let wal_tail_segments = loaded.head.wal_no.0 - loaded.head.last_folded_wal_no.0;
     Ok(NamespaceStorageDiagnostics {
         created_at_ms: loaded.head.created_at_ms,
+        created_by: loaded.head.created_by,
         fork_basis: loaded.head.fork_basis.map(|basis| NamespaceForkBasis {
             source_namespace_id: basis.manifest.owner_namespace_id,
             source_head_seq: basis.manifest.manifest_head_seq,
@@ -124,6 +127,7 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
     }
     Ok(NamespaceStorageDiagnostics {
         created_at_ms: head.created_at_ms,
+        created_by: head.created_by,
         fork_basis: head.fork_basis.map(|basis| NamespaceForkBasis {
             source_namespace_id: basis.manifest.owner_namespace_id,
             source_head_seq: basis.manifest.manifest_head_seq,

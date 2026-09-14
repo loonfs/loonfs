@@ -187,9 +187,15 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
@@ -286,9 +292,15 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
@@ -367,10 +379,16 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         vec![current.object_key]
     );
     assert_eq!(
-        bootstrap_namespace(&store, &namespace_id, &setup, false)
-            .await
-            .expect_err("retired id")
-            .code(),
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &setup,
+            &loonfs_test_support::test_actor(),
+            false
+        )
+        .await
+        .expect_err("retired id")
+        .code(),
         loonfs_api::ErrorCode::NamespaceDeleted
     );
 }
@@ -382,13 +400,26 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &source, "/docs/shared.txt", "gc-shared", &setup).await;
-    fork_namespace(&store, &source, &clone, None, &setup)
-        .await
-        .expect("fork");
+    fork_namespace(
+        &store,
+        &source,
+        &clone,
+        &loonfs_test_support::test_actor(),
+        None,
+        &setup,
+    )
+    .await
+    .expect("fork");
     delete_namespace(&store, &source, DeleteNamespaceOptions::default(), &setup)
         .await
         .expect("delete source");
@@ -446,9 +477,15 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
@@ -520,9 +557,15 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
     );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let (upload_id, _, _) = stage_upload(&store, &namespace_id, &setup).await;
 
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
@@ -559,9 +602,15 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let (upload_id, ..) = stage_upload(&store, &namespace_id, &setup).await;
     let expires_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS;
 
@@ -598,9 +647,15 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let (upload_id, ..) = stage_upload(&store, &namespace_id, &setup).await;
     let session_key = loonfs_objectstore::keys::upload_session(&namespace_id, &upload_id);
 
@@ -659,9 +714,15 @@ async fn upload_gc_reaps_a_session_that_never_staged_anything() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let session_key = write_upload_session(&store, &namespace_id).await;
 
     let expired = context(1_000 + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
@@ -683,9 +744,15 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
@@ -734,9 +801,15 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
@@ -865,9 +938,15 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
     let content_key = loonfs_objectstore::keys::content_blob(
@@ -895,9 +974,15 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/other.txt", "gc-other", &setup).await;
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
@@ -934,9 +1019,15 @@ async fn completed_content_delete_failure_keeps_the_session_for_retry() {
     );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let (upload_id, content_ref, content_store_id, _prepared) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
     let content_key = loonfs_objectstore::keys::content_blob(
@@ -983,9 +1074,15 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let setup = context(1_000);
-        bootstrap_namespace(&store, &namespace_id, &setup, false)
-            .await
-            .expect("bootstrap");
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &setup,
+            &loonfs_test_support::test_actor(),
+            false,
+        )
+        .await
+        .expect("bootstrap");
         let (upload_id, content_ref, content_store_id, prepared) =
             complete_upload_for_gc(&store, &namespace_id, b"published\n", &setup).await;
         publish_completed_content(
@@ -1087,9 +1184,15 @@ async fn gc_retains_everything_inside_the_grace_window() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
@@ -1125,9 +1228,15 @@ async fn published_compaction_segments_are_referenced_and_kept() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     for index in 0..4 {
         write_test_file(
             &store,
@@ -1175,9 +1284,15 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
     let seed = LocalFsStore::new(temp_dir.path()).expect("store");
-    bootstrap_namespace(&seed, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &seed,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     for index in 0..4 {
         write_test_file(
             &seed,
@@ -1249,9 +1364,15 @@ async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
@@ -1275,9 +1396,15 @@ async fn gc_never_deletes_the_live_replay_tail() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     write_test_file(
         &store,
@@ -1332,9 +1459,15 @@ async fn gc_retains_unrecognized_manifest_keys() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
 
     let manifest_prefix = metadata_manifest_prefix(&namespace_id);
     let foreign_objects = [
@@ -1376,9 +1509,15 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     for round in 0..3 {
         write_test_file(
             &store,
@@ -1469,9 +1608,15 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let first = crate::checkpoint::create_checkpoint(
         &store,
@@ -1548,13 +1693,26 @@ async fn fork_owned_checkpoints_reject_user_release() {
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, None, &setup)
-        .await
-        .expect("fork");
+    fork_namespace(
+        &store,
+        &source,
+        &clone,
+        &loonfs_test_support::test_actor(),
+        None,
+        &setup,
+    )
+    .await
+    .expect("fork");
 
     let fork_record = read_fork_record(&store, &source).await;
 
@@ -1577,9 +1735,15 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let snapshot = crate::checkpoint::create_checkpoint(
         &store,
@@ -1614,9 +1778,15 @@ async fn gc_retains_active_checkpoint_bases() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let first = create_checkpoint(&store, &namespace_id, &setup)
         .await
@@ -1685,13 +1855,26 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, None, &setup)
-        .await
-        .expect("fork");
+    fork_namespace(
+        &store,
+        &source,
+        &clone,
+        &loonfs_test_support::test_actor(),
+        None,
+        &setup,
+    )
+    .await
+    .expect("fork");
     let target_pin = create_checkpoint(&store, &clone, &setup)
         .await
         .expect("materialize target manifest");
@@ -1782,13 +1965,26 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         InjectedError::Transport("target hint timed out".to_owned()),
     );
     let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, None, &setup)
-        .await
-        .expect("fork");
+    fork_namespace(
+        &store,
+        &source,
+        &clone,
+        &loonfs_test_support::test_actor(),
+        None,
+        &setup,
+    )
+    .await
+    .expect("fork");
     let fork_record = read_fork_record(store.inner(), &source).await;
 
     let aged = context(setup.now_ms + GRACE_MS);
@@ -1840,13 +2036,26 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(&store, &source, &clone, None, &setup)
-        .await
-        .expect("fork");
+    fork_namespace(
+        &store,
+        &source,
+        &clone,
+        &loonfs_test_support::test_actor(),
+        None,
+        &setup,
+    )
+    .await
+    .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
     assert!(
         fork_record.owner.expires_at_ms().is_none(),
@@ -1900,9 +2109,15 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
     let abandoned = crate::checkpoint::create_checkpoint(
         &store,
@@ -1915,9 +2130,16 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     .await
     .expect("fork pin from the abandoned attempt");
 
-    fork_namespace(&store, &source, &clone, None, &setup)
-        .await
-        .expect("fork retry after abandonment");
+    fork_namespace(
+        &store,
+        &source,
+        &clone,
+        &loonfs_test_support::test_actor(),
+        None,
+        &setup,
+    )
+    .await
+    .expect("fork retry after abandonment");
     let retry = store
         .list_prefix(&checkpoint_prefix(&source))
         .await
@@ -1973,9 +2195,15 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
         InjectedError::Transport("checkpoint record read timed out".to_owned()),
     );
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
@@ -2039,9 +2267,15 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
         InjectedError::Transport("manifest read timed out".to_owned()),
     );
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
@@ -2105,9 +2339,15 @@ async fn gc_retains_everything_without_provider_timestamps() {
     );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
@@ -2207,9 +2447,15 @@ async fn competing_collectors_preserve_the_winning_retirement_deadline() {
     let inner = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("retirement-race").expect("namespace id");
     let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &inner,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     delete_namespace(
         &inner,
         &namespace_id,
@@ -2254,9 +2500,15 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_fu
         let inner = LocalFsStore::new(directory.path()).expect("store");
         let namespace_id = NamespaceId::parse("retirement-uncertain").expect("namespace id");
         let setup = context(1_000);
-        bootstrap_namespace(&inner, &namespace_id, &setup, false)
-            .await
-            .expect("bootstrap");
+        bootstrap_namespace(
+            &inner,
+            &namespace_id,
+            &setup,
+            &loonfs_test_support::test_actor(),
+            false,
+        )
+        .await
+        .expect("bootstrap");
         delete_namespace(
             &inner,
             &namespace_id,
@@ -2298,9 +2550,15 @@ async fn retired_content_namespace<S: ObjectStore>(
     namespace_id: &NamespaceId,
 ) -> (ContentStoreId, MutationContext) {
     let setup = context(1_000);
-    bootstrap_namespace(store, namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        store,
+        namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let content_store_id =
         crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
             .await
@@ -2344,9 +2602,15 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         let store = LocalFsStore::new(directory.path()).expect("store");
         let namespace_id = NamespaceId::parse("completed-retired").expect("namespace");
         let setup = context(1_000);
-        bootstrap_namespace(&store, &namespace_id, &setup, false)
-            .await
-            .expect("bootstrap");
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &setup,
+            &loonfs_test_support::test_actor(),
+            false,
+        )
+        .await
+        .expect("bootstrap");
         let (upload_id, content, content_store_id, _) =
             complete_upload_for_gc(&store, &namespace_id, b"content", &setup).await;
         delete_namespace(&store, &namespace_id, Default::default(), &setup)
@@ -2395,9 +2659,15 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/one", "one", &setup).await;
     let pinned = create_checkpoint(&store, &namespace_id, &setup)
         .await
@@ -2483,9 +2753,15 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
     let namespace_id = NamespaceId::parse("concurrent").expect("namespace");
     let inner = LocalFsStore::new(directory.path()).expect("store");
     let setup = context(1_000);
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &inner,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     write_test_file(&inner, &namespace_id, "/one", "one", &setup).await;
     let pin = create_checkpoint(&inner, &namespace_id, &setup)
         .await
@@ -2663,9 +2939,15 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     let target = NamespaceId::parse("absent").expect("target");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let mut pins = Vec::new();
     for owner in [
         CheckpointOwner::User {
@@ -2762,9 +3044,15 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         KeyPredicate::any(),
     );
     let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let initial = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
@@ -2811,15 +3099,28 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
         KeyPredicate::prefix("namespaces/target-"),
     );
     let setup = context(1_000);
-    bootstrap_namespace(&store, &source, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &store,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let mut targets = Vec::new();
     for number in 0..6 {
         let target = NamespaceId::parse(format!("target-{number}")).expect("target");
-        fork_namespace(&store, &source, &target, None, &setup)
-            .await
-            .expect("fork");
+        fork_namespace(
+            &store,
+            &source,
+            &target,
+            &loonfs_test_support::test_actor(),
+            None,
+            &setup,
+        )
+        .await
+        .expect("fork");
         targets.push(target);
     }
     write_test_file(&store, &targets[0], "/own.txt", "target-write", &setup).await;

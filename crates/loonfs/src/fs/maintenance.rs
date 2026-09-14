@@ -177,6 +177,7 @@ impl FsMaintenance {
         NamespaceDiagnostics {
             namespace_id: diagnostics.namespace_id,
             created_at_ms: diagnostics.created_at_ms,
+            created_by: diagnostics.created_by,
             fork_basis: diagnostics.fork_basis,
             head_seq: diagnostics.head_seq,
             retention_floor_seq: diagnostics.retention_floor_seq,
@@ -378,9 +379,9 @@ impl FsMaintenance {
                 .await?
             {
                 ReorganizationStep::Concluded(outcome) => outcome,
-                ReorganizationStep::Fenced => ReorganizeStepOutcome::Fenced,
+                ReorganizationStep::Fenced => ReorganizeStepOutcome::Fenced {},
                 ReorganizationStep::CompactionPlanned(_) => {
-                    ReorganizeStepOutcome::CompactionRequired
+                    ReorganizeStepOutcome::CompactionRequired {}
                 }
             },
         )
@@ -423,7 +424,7 @@ impl FsMaintenance {
             .map_err(RuntimeError::Core)?
         {
             return Ok(ReorganizationStep::Concluded(
-                ReorganizeStepOutcome::NotNeeded,
+                ReorganizeStepOutcome::NotNeeded {},
             ));
         }
         let compactor_epoch = self.compactor_epoch(namespace_id).await?;
@@ -434,7 +435,7 @@ impl FsMaintenance {
             .map_err(RuntimeError::Core)?;
         Ok(ReorganizationStep::Concluded(match report.outcome {
             loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
-                ReorganizeStepOutcome::NotNeeded
+                ReorganizeStepOutcome::NotNeeded {}
             }
             loonfs_core::MetadataReorganizeOutcome::UnitPublished {
                 group,
@@ -455,7 +456,7 @@ impl FsMaintenance {
                     bottom_anchored_merge_blocked,
                     "metadata reorganization unit published"
                 );
-                ReorganizeStepOutcome::UnitPublished
+                ReorganizeStepOutcome::UnitPublished {}
             }
             loonfs_core::MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => {
                 return Ok(ReorganizationStep::CompactionPlanned(spec))
@@ -467,7 +468,7 @@ impl FsMaintenance {
                 tracing::info!(
                     "current manifest changed before reorganization published; a later step retries"
                 );
-                ReorganizeStepOutcome::ManifestAdvanced
+                ReorganizeStepOutcome::ManifestAdvanced {}
             }
         }))
     }
@@ -516,7 +517,7 @@ impl FsMaintenance {
                 });
             }
             ReorganizationStep::CompactionPlanned(spec) => spec,
-            ReorganizationStep::Concluded(ReorganizeStepOutcome::UnitPublished) => {
+            ReorganizationStep::Concluded(ReorganizeStepOutcome::UnitPublished {}) => {
                 return Ok(MetadataCompactionResponse {
                     namespace_id: namespace_id.clone(),
                     compaction: MetadataCompactionOutcome::BoundedMergePublished,

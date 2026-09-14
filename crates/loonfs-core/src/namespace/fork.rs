@@ -21,6 +21,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
+    actor_id: &loonfs_api::ActorId,
     snapshot_id: Option<&CheckpointId>,
     context: &MutationContext,
 ) -> Result<Namespace> {
@@ -65,6 +66,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let manifest = loonfs_api::wire::manifest::NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
         created_at_ms: context.now_ms,
+        created_by: actor_id.clone(),
         fork_basis: Some(fork_basis),
         manifest_no: loonfs_api::ManifestNo(1),
         retention_floor_seq: fork_seq,

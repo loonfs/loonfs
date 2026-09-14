@@ -61,7 +61,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("build maintenance");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     // Publish the namespace's first manifest up front, so each maintenance

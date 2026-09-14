@@ -143,7 +143,10 @@ async fn warm_phase_request_accounting() {
         .await
         .expect("build maintenance");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)

@@ -195,7 +195,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let namespace = namespace_id("demo");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
     client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     client
@@ -231,7 +231,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         .fork_namespace(
             &namespace,
             &namespace_id("fork"),
-            &loonfs_client::ForkNamespaceOptions::default(),
+            &loonfs_client::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("fork namespace");
@@ -328,7 +328,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
 
     let namespace = namespace_id("demo");
     client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
@@ -379,7 +379,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
 
     let namespace = namespace_id("demo");
     client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
@@ -415,7 +415,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     );
     assert_eq!(
         upkeep(&forced).reorganize,
-        loonfs_api::ReorganizeStepOutcome::NotNeeded
+        loonfs_api::ReorganizeStepOutcome::NotNeeded {}
     );
     let retention = client
         .run_maintenance(
@@ -451,7 +451,7 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
 
     let namespace = namespace_id("demo");
     client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -494,7 +494,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     let namespace = namespace_id("demo");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
     client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     client

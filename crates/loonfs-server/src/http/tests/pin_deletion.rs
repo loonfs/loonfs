@@ -52,7 +52,10 @@ async fn delete_routes_require_the_owner_and_delete_each_pin_once() {
     let namespace_id = namespace_id("pins");
     state
         .writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("namespace");
     let checkpoints = format!("/v0/maintenance/namespaces/{namespace_id}/checkpoints");

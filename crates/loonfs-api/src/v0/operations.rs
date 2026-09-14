@@ -3,9 +3,9 @@
 use super::ContentToken;
 use crate::SnapshotId;
 use crate::{
-    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, BindingGeneration, ChangeSeq,
-    CheckpointId, CommitId, ContentRef, DisplayName, InodeId, ManifestNo, NamespaceId, RevisionNo,
-    WriterEpoch, WriterId,
+    AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, BindingGeneration,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName, InodeId, ManifestNo, NamespaceId,
+    RevisionNo, WriterEpoch, WriterId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -162,6 +162,8 @@ pub struct ErrorDetails {
 pub struct CreateNamespaceRequest {
     /// Durable namespace id to create.
     pub namespace_id: NamespaceId,
+    /// Application-supplied actor creating the namespace.
+    pub actor_id: ActorId,
 }
 
 /// Request to fork a namespace.
@@ -171,6 +173,8 @@ pub struct CreateNamespaceRequest {
 pub struct ForkNamespaceRequest {
     /// Durable namespace id for the fork target.
     pub new_namespace_id: NamespaceId,
+    /// Application-supplied actor creating the namespace.
+    pub actor_id: ActorId,
     /// Fork from this live snapshot instead of the current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -185,6 +189,8 @@ pub struct Namespace {
     pub namespace_id: NamespaceId,
     /// Time the namespace was created, in Unix milliseconds.
     pub created_at_ms: u64,
+    /// Actor that created the namespace, as supplied by the application.
+    pub created_by: ActorId,
     /// Present only for a fork: the source it was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -213,6 +219,8 @@ pub struct NamespaceDiagnostics {
     pub namespace_id: NamespaceId,
     /// Time the namespace was created, in Unix milliseconds.
     pub created_at_ms: u64,
+    /// Actor that created the namespace, as supplied by the application.
+    pub created_by: ActorId,
     /// Present only for a fork: the source it was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -1281,15 +1289,29 @@ pub enum WalFlushStepOutcome {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ReorganizeStepOutcome {
     /// No family group had enough delta runs to merge.
-    NotNeeded,
+    #[cfg_attr(feature = "openapi", schema(title = "ReorganizeStepOutcomeNotNeeded"))]
+    NotNeeded {},
     /// One family group was merged and a manifest published.
-    UnitPublished,
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "ReorganizeStepOutcomeUnitPublished")
+    )]
+    UnitPublished {},
     /// A family group needs a streaming compaction. Run the `metadata_compaction` job.
-    CompactionRequired,
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "ReorganizeStepOutcomeCompactionRequired")
+    )]
+    CompactionRequired {},
     /// Another publisher changed the current manifest before this step could publish.
-    ManifestAdvanced,
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "ReorganizeStepOutcomeManifestAdvanced")
+    )]
+    ManifestAdvanced {},
     /// A newer runtime holds the compactor epoch.
-    Fenced,
+    #[cfg_attr(feature = "openapi", schema(title = "ReorganizeStepOutcomeFenced"))]
+    Fenced {},
 }
 
 /// The result of one maintenance job. The `kind` matches the request.
@@ -1485,6 +1507,7 @@ mod tests {
         let namespace = Namespace {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             created_at_ms: 1_000,
+            created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
@@ -1494,6 +1517,7 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "created_at_ms": 1000,
+                "created_by": "test",
                 "head_seq": 11,
                 "retention_floor_seq": 4
             })
@@ -1505,6 +1529,7 @@ mod tests {
         let diagnostics = NamespaceDiagnostics {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             created_at_ms: 1_000,
+            created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
@@ -1518,6 +1543,7 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "created_at_ms": 1000,
+                "created_by": "test",
                 "head_seq": 11,
                 "retention_floor_seq": 4,
                 "current_manifest_no": 8,
@@ -2262,7 +2288,7 @@ mod tests {
             serde_json::json!({"outcome": "flushed", "manifest_head_seq": 9})
         );
         assert_eq!(
-            serde_json::to_value(ReorganizeStepOutcome::UnitPublished)
+            serde_json::to_value(ReorganizeStepOutcome::UnitPublished {})
                 .expect("serialize reorganize outcome"),
             serde_json::json!({"outcome": "unit_published"})
         );
@@ -2386,12 +2412,14 @@ mod tests {
         );
 
         serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
-            "namespace_id": "demo"
+            "namespace_id": "demo",
+            "actor_id": "test"
         }))
         .expect("the same create body without a typo decodes");
         assert!(
             serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
                 "namespace_id": "demo",
+                "actor_id": "test",
                 "fork_of": "other"
             }))
             .is_err()
@@ -2399,6 +2427,7 @@ mod tests {
         assert!(
             serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
                 "new_namespace_id": "demo",
+                "actor_id": "test",
                 "source_namespace_id": "other"
             }))
             .is_err()

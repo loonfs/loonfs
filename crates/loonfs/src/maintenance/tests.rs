@@ -910,10 +910,20 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
     let source = namespace_id("source");
     let target = namespace_id("target");
     writer
-        .create_namespace(&source, Default::default())
+        .create_namespace(
+            &source,
+            crate::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("source");
-    writer.fork_namespace(&source, &target).await.expect("fork");
+    writer
+        .fork_namespace(
+            &source,
+            &target,
+            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("fork");
     writer
         .delete_namespace(&target, Default::default())
         .await

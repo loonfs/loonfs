@@ -29,7 +29,10 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
         .await
         .expect("build maintenance");
     writer
-        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     for index in 0..4 {

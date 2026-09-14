@@ -172,6 +172,7 @@ class MultipartExpected:
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class AbortRequest:
     namespace_id: str
+    actor_id: str
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -724,7 +725,7 @@ def test_commit_replay(cases: dict[str, ConformanceCase], harness: Harness) -> N
     request, expected = _decode(
         cases["commit_replay"], CommitReplayRequest, CommitReplayExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     first = _apply(
         harness.client,
         request.namespace_id,
@@ -780,7 +781,7 @@ def test_pagination(cases: dict[str, ConformanceCase], harness: Harness) -> None
     request, expected = _decode(
         cases["pagination"], PaginationRequest, PaginationExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     _apply(
         harness.client,
         request.namespace_id,
@@ -845,7 +846,7 @@ def test_children_by_inode(
     request, expected = _decode(
         cases["children_by_inode"], ChildrenByInodeRequest, ChildrenByInodeExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     _apply(
         harness.client,
         request.namespace_id,
@@ -946,7 +947,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
     def child_path(name: str) -> str:
         return f"{request.directory}/{name}"
 
-    client.namespaces.create(namespace_id=namespace_id)
+    client.namespaces.create(namespace_id=namespace_id, actor_id=request.actor_id)
     _apply(
         client,
         namespace_id,
@@ -1126,7 +1127,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     def child_path(name: str) -> str:
         return f"{request.directory}/{name}"
 
-    client.namespaces.create(namespace_id=namespace_id)
+    client.namespaces.create(namespace_id=namespace_id, actor_id=request.actor_id)
     _apply(
         client,
         namespace_id,
@@ -1322,7 +1323,7 @@ def test_proxy(
     proxy_harness: str,
 ) -> None:
     request, expected = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     payload = request.content_utf8.encode()
     namespace_alias_base = f"/v0/namespace-aliases/{request.namespace_alias}"
 
@@ -1546,7 +1547,7 @@ def test_proxy(
 
 def test_changes(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(cases["changes"], ChangesRequest, ChangesExpected)
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     committed = _apply(
         harness.client,
         request.namespace_id,
@@ -1574,7 +1575,7 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     request, expected = _decode(
         cases["upload_direct_put"], DirectPutRequest, DirectPutExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     payload = request.content_utf8.encode()
     begin = harness.client.uploads.create(
         request.namespace_id,
@@ -1626,7 +1627,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     request, expected = _decode(
         cases["upload_multipart"], MultipartRequest, MultipartExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     payload = _byte_pattern(request.content_pattern)
     begin = harness.client.uploads.create(
         request.namespace_id,
@@ -1771,7 +1772,7 @@ def test_async_upload_download(cases: dict[str, ConformanceCase]) -> None:
                 actor_id=request.actor_id,
                 httpx_client=http,
             )
-            await client.namespaces.create(namespace_id=namespace_id)
+            await client.namespaces.create(namespace_id=namespace_id, actor_id=request.actor_id)
             committed = await client.files.upload(
                 namespace_id, path=request.path, content=payload
             )
@@ -1797,7 +1798,7 @@ def test_async_upload_download(cases: dict[str, ConformanceCase]) -> None:
 
 def test_upload_abort(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(cases["upload_abort"], AbortRequest, AbortExpected)
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     begin = harness.client.uploads.create(
         request.namespace_id,
         request=CreateUploadBody_ServiceProxied(),
@@ -1821,7 +1822,7 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     request, expected = _decode(
         cases["download"], DownloadRequest, DownloadExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     payload = request.content_utf8.encode()
     committed = harness.client.files.upload(
         request.namespace_id,
@@ -1855,7 +1856,7 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
 
     client = harness.client
     namespace_id = "conf-python-prepared"
-    client.namespaces.create(namespace_id=namespace_id)
+    client.namespaces.create(namespace_id=namespace_id, actor_id="conformance")
     prepared = client.files.prepare_stream(namespace_id, content=io.BytesIO(b"original bytes"))
     assert isinstance(prepared, PreparedContent)
     inputs = dict(path="/original", prepared=prepared,
@@ -1888,7 +1889,7 @@ def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None
     request, expected = _decode(
         cases["end_to_end"], EndToEndRequest, EndToEndExpected
     )
-    harness.client.namespaces.create(namespace_id=request.namespace_id)
+    harness.client.namespaces.create(namespace_id=request.namespace_id, actor_id=request.actor_id)
     mkdir = _apply(
         harness.client,
         request.namespace_id,
