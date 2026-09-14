@@ -271,7 +271,24 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
             matches
         },
     ));
-    let object_store: SharedObjectStore = checkpoint_list_gate.clone();
+    // Neither create may delete its tentative record until both have listed;
+    // otherwise the later listing sees one live snapshot and that create
+    // succeeds.
+    let checkpoint_delete_prefix = checkpoint_prefix(&namespace_id);
+    let checkpoint_deletes = Arc::new(AtomicUsize::new(0));
+    let checkpoint_deletes_seen = checkpoint_deletes.clone();
+    let checkpoint_delete_gate = Arc::new(BlockingStore::matching(
+        checkpoint_list_gate.clone(),
+        move |operation| {
+            let matches = operation.key().starts_with(&checkpoint_delete_prefix)
+                && matches!(operation.kind(), OperationKind::Delete);
+            if matches {
+                checkpoint_deletes_seen.fetch_add(1, Ordering::SeqCst);
+            }
+            matches
+        },
+    ));
+    let object_store: SharedObjectStore = checkpoint_delete_gate.clone();
     let fs = open_runtime_async(object_store, "snapshot-quota-race").await;
     fs.create_namespace(
         &namespace_id,
@@ -282,6 +299,7 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
 
     checkpoint_list_gate.arm();
     checkpoint_write_gate.arm();
+    checkpoint_delete_gate.arm();
     let first_writer = fs.writer.clone();
     let first_namespace = namespace_id.clone();
     let first = tokio::spawn(async move {
@@ -317,6 +335,8 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     checkpoint_write_gate.release();
     wait_for_operations(&checkpoint_lists, 2).await;
     checkpoint_list_gate.release();
+    wait_for_operations(&checkpoint_deletes, 2).await;
+    checkpoint_delete_gate.release();
 
     let first = first.await.expect("first create task");
     let second = second.await.expect("second create task");
