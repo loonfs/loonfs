@@ -24,7 +24,10 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
     let namespace_id = namespace_id("demo");
     let actor = loonfs_test_support::test_actor();
     fs.writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     fs.writer
@@ -142,7 +145,10 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
     let namespace_id = namespace_id("demo");
     let actor = loonfs_test_support::test_actor();
     fs.writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
 
@@ -208,7 +214,10 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
     let fs = open_runtime_async(shared.clone(), "inode-accounting-writer").await;
     let namespace_id = namespace_id("demo");
     fs.writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     fs.writer

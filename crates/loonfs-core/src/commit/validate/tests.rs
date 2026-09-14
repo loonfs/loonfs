@@ -192,6 +192,7 @@ fn validation_context(
     let head = NamespaceReadState {
         content_store_id: loonfs_api::ContentStoreId::generate(),
         created_at_ms: 1_000,
+        created_by: loonfs_test_support::test_actor(),
         fork_basis: None,
         namespace_id: namespace_id.clone(),
         seq,

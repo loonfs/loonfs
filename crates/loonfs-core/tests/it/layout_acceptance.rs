@@ -74,7 +74,7 @@ async fn reads_commits_and_change_feed_never_list() {
     let context = mutation_context("acceptance", 1_000);
     let engine = namespace_engine(&store, &namespace_id, &context);
     engine
-        .bootstrap_namespace(BootstrapOptions::default())
+        .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
         .await
         .expect("bootstrap");
 
@@ -161,7 +161,7 @@ async fn maintenance_preserves_namespace_identity_and_writer() {
     let context = mutation_context("acceptance", 1_000);
     let engine = namespace_engine(&store, &namespace_id, &context);
     engine
-        .bootstrap_namespace(BootstrapOptions::default())
+        .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
         .await
         .expect("bootstrap");
     put_file(

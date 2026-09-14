@@ -61,9 +61,15 @@ async fn creation_installs_descriptor_hint_and_manifest_then_reads_genesis() {
         KeyPredicate::any(),
     );
     let namespace_id = NamespaceId::parse("created").expect("namespace");
-    bootstrap_namespace(&store, &namespace_id, &context(), false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     let manifest = load_current_manifest(&store, &namespace_id)
         .await
         .expect("manifest");
@@ -111,11 +117,19 @@ async fn two_creations_race_at_manifest_one() {
     );
     store.block_next();
     let context = context();
+    let actor_id = loonfs_test_support::test_actor();
     let (loser, winner) = futures::join!(
-        bootstrap_namespace(&store, &namespace_id, &context, false),
+        bootstrap_namespace(&store, &namespace_id, &context, &actor_id, false),
         async {
             store.wait_until_blocked().await;
-            let result = bootstrap_namespace(store.inner(), &namespace_id, &context, false).await;
+            let result = bootstrap_namespace(
+                store.inner(),
+                &namespace_id,
+                &context,
+                &loonfs_test_support::test_actor(),
+                false,
+            )
+            .await;
             store.release();
             result
         }
@@ -132,9 +146,15 @@ async fn a_number_collision_replans_and_commits_the_next_number_without_a_swap()
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    bootstrap_namespace(&store, &namespace_id, &context(), false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     let mut first = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut first, &store, "seed").await.expect("seed");
     let mut second = first.clone();
@@ -173,9 +193,15 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    bootstrap_namespace(&store, &namespace_id, &context(), false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     let mut stale = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut stale, &store, "old")
         .await
@@ -219,9 +245,15 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    bootstrap_namespace(&store, &namespace_id, &context(), false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut engine, &store, "one").await.expect("one");
     publish(&mut engine, &store, "two").await.expect("two");
@@ -272,9 +304,15 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     let source = NamespaceId::parse("source").expect("source");
     let target = NamespaceId::parse("target").expect("target");
     let nested = NamespaceId::parse("nested").expect("nested");
-    bootstrap_namespace(&store, &source, &context(), false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &source,
+        &context(),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     publish(
         &mut NamespaceCommitEngine::new(source.clone()),
         &store,
@@ -282,9 +320,16 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     )
     .await
     .expect("source data");
-    fork_namespace(&store, &source, &target, None, &context())
-        .await
-        .expect("fork");
+    fork_namespace(
+        &store,
+        &source,
+        &target,
+        &loonfs_test_support::test_actor(),
+        None,
+        &context(),
+    )
+    .await
+    .expect("fork");
     let target_manifest = load_current_manifest(&store, &target)
         .await
         .expect("target manifest");
@@ -303,9 +348,16 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     )
     .await
     .expect("unflushed child data");
-    fork_namespace(&store, &target, &nested, None, &context())
-        .await
-        .expect("nested fork");
+    fork_namespace(
+        &store,
+        &target,
+        &nested,
+        &loonfs_test_support::test_actor(),
+        None,
+        &context(),
+    )
+    .await
+    .expect("nested fork");
     let manifest = load_current_manifest(&store, &nested)
         .await
         .expect("nested manifest");
@@ -375,9 +427,15 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         KeyPredicate::hint(&namespace_id),
         OperationClass::CompareAndSwap,
     );
-    bootstrap_namespace(&store, &namespace_id, &context(), false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
@@ -461,9 +519,15 @@ async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number()
         KeyPredicate::exact(wal_segment(&namespace_id, &WalNo(1))),
         OperationClass::Read,
     );
-    bootstrap_namespace(&store, &namespace_id, &context(), false)
-        .await
-        .expect("create");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut engine, &store, "seed").await.expect("seed");
     engine.invalidate_projection();

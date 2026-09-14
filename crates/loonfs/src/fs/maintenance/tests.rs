@@ -93,7 +93,10 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
     let (writer, maintenance, _scheduled, recorder) = manual_deployment(temp_dir.path()).await;
     let namespace = namespace_id("maintenance-gc-metrics");
     writer
-        .create_namespace(&namespace, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer
@@ -192,7 +195,10 @@ async fn namespace_with_a_frozen_base(
     namespace_id: &NamespaceId,
 ) {
     writer
-        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create the namespace");
     for index in 0..24 {
@@ -229,7 +235,7 @@ async fn namespace_with_a_frozen_base(
             .flush_wal(namespace_id)
             .await
             .expect("fold a unit");
-        if response.reorganize == ReorganizeStepOutcome::NotNeeded {
+        if response.reorganize == (ReorganizeStepOutcome::NotNeeded {}) {
             break;
         }
     }
@@ -388,7 +394,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     .expect("metadata response");
     assert_eq!(
         metadata.reorganize,
-        ReorganizeStepOutcome::CompactionRequired
+        ReorganizeStepOutcome::CompactionRequired {}
     );
 
     writer.shutdown().await.expect("shut down the first writer");
@@ -414,7 +420,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     .expect("metadata response");
     assert_eq!(
         metadata.reorganize,
-        ReorganizeStepOutcome::CompactionRequired,
+        ReorganizeStepOutcome::CompactionRequired {},
         "the same durable run sizes produce the same plan after restart"
     );
     fresh_writer
@@ -505,7 +511,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
         .expect("run an immediate step");
     assert_eq!(
         response.reorganize,
-        ReorganizeStepOutcome::CompactionRequired,
+        ReorganizeStepOutcome::CompactionRequired {},
         "an immediate step says the namespace needs a compaction job"
     );
 
@@ -540,7 +546,10 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("namespace");
     let maintenance = FsMaintenance::builder_with_store(shared.clone())
@@ -565,7 +574,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
             .reorganize_once(&namespace, MetadataCompactionPolicy::SizeTiered)
             .await
             .expect("no work"),
-        super::ReorganizationStep::Concluded(ReorganizeStepOutcome::NotNeeded)
+        super::ReorganizationStep::Concluded(ReorganizeStepOutcome::NotNeeded {})
     ));
     assert_eq!(store.counts().puts, 0);
     let cloned = maintenance.clone();
@@ -605,7 +614,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
             .run_reorganization(&namespace, MetadataCompactionPolicy::SizeTiered)
             .await
             .expect("fenced reorganization"),
-        ReorganizeStepOutcome::Fenced
+        ReorganizeStepOutcome::Fenced {}
     );
     assert_eq!(store.counts().puts, 0);
 }

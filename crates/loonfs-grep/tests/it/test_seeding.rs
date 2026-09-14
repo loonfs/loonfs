@@ -18,7 +18,10 @@ pub(crate) async fn writer(
         .await
         .expect("build seeding writer");
     writer
-        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer

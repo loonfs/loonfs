@@ -212,7 +212,10 @@ pub(super) async fn create_namespace(
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
     let namespace = state
         .writer
-        .create_namespace(&request.namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &request.namespace_id,
+            CreateNamespaceOptions::new(request.actor_id),
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(namespace))
@@ -376,6 +379,7 @@ pub(super) async fn fork_namespace(
             &source_namespace_id,
             &request.new_namespace_id,
             loonfs::ForkNamespaceOptions {
+                actor_id: request.actor_id,
                 snapshot_id: request.snapshot_id,
             },
         )

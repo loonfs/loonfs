@@ -18,8 +18,11 @@ fn delete_options_select_recursive_behavior() {
     let fs = runtime(temp_dir.path(), "delete-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -69,8 +72,11 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -207,8 +213,11 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-subtree-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/notes/a.txt",
@@ -279,8 +288,11 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-nested-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/notes/secret.txt",
@@ -358,8 +370,11 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
     // then reopen cold from object storage.
     let deletion = {
         let fs = open_runtime(object_store.clone(), "undelete-persist-a");
-        fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-            .expect("create namespace");
+        fs.create_namespace_blocking(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .expect("create namespace");
         fs.put_file_bytes_blocking(
             &namespace_id,
             "/docs/report.txt",
@@ -468,8 +483,11 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-feed-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -536,8 +554,11 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "feed-identity-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/Quarterly Report.PDF",
@@ -579,8 +600,11 @@ fn undelete_rejects_deletions_from_the_same_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-same-commit-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -640,8 +664,11 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "delete-expectation-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",

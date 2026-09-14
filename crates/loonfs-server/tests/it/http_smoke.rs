@@ -36,7 +36,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
     let namespace = namespace_id("doomed");
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("doomed", "/note.txt").expect("parse path");
@@ -123,7 +123,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
     }
     let recreate = harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect_err("the id is retired");
     match recreate {
@@ -262,10 +262,11 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 
     let created = harness
         .client
-        .create_namespace(&namespace_id("demo"))
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     assert_eq!(created.namespace_id.as_str(), "demo");
+    assert_eq!(created.created_by, loonfs_test_support::test_actor());
     assert_eq!(created.head_seq, ChangeSeq(0));
     assert_eq!(created.retention_floor_seq, ChangeSeq(0));
     assert!(created.created_at_ms > 0);
@@ -360,7 +361,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"))
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let source_path = NamespacePath::parse("demo", "/docs/shared.txt").expect("source path");
@@ -376,11 +377,14 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .fork_namespace(
             &namespace_id("demo"),
             &namespace_id("clone"),
-            &loonfs_client::ForkNamespaceOptions::default(),
+            &loonfs_client::ForkNamespaceOptions::new(
+                loonfs_api::ActorId::parse("forker").expect("actor"),
+            ),
         )
         .await
         .expect("fork namespace");
     assert_eq!(forked.namespace_id.as_str(), "clone");
+    assert_eq!(forked.created_by.as_str(), "forker");
     assert_eq!(forked.head_seq, ChangeSeq(1));
     assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
     assert!(forked.created_at_ms > 0);
@@ -486,7 +490,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
     let target = namespace_id("target");
     harness
         .client
-        .create_namespace(&source)
+        .create_namespace(&source, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let path = NamespacePath::parse("source", "/file.txt").expect("path");
@@ -511,6 +515,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
             &source,
             &target,
             &loonfs_client::ForkNamespaceOptions {
+                actor_id: loonfs_test_support::test_actor(),
                 snapshot_id: Some(snapshot.snapshot_id),
             },
         )

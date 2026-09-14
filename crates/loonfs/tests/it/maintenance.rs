@@ -31,8 +31,11 @@ fn namespace_diagnostics_reports_wal_tail_segments() {
     let fs = open_runtime(store.clone(), "status-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status for new namespace");
@@ -68,8 +71,11 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
     let source = namespace_id("source");
     let target = namespace_id("target");
 
-    fs.create_namespace_blocking(&source, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &source,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     block_on(fs.maintenance.create_checkpoint(
         &source,
         CreateCheckpointOptions {
@@ -143,8 +149,11 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
     let fs = open_runtime(object_store, "partial-status-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     block_on(raw_store.delete(&hint(&namespace_id))).expect("delete head");
 
     assert_core_error_kind(
@@ -164,8 +173,11 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
     );
 
     let deleted_namespace = NamespaceId::parse("deleted").expect("namespace id");
-    fs.create_namespace_blocking(&deleted_namespace, CreateNamespaceOptions::default())
-        .expect("create namespace for deletion");
+    fs.create_namespace_blocking(
+        &deleted_namespace,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace for deletion");
     block_on(
         fs.writer
             .delete_namespace(&deleted_namespace, DeleteNamespaceOptions::default()),
@@ -186,8 +198,11 @@ fn maintenance_step_below_threshold_is_not_needed() {
     let fs = runtime(temp_dir.path(), "step-not-needed-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -208,8 +223,11 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     let fs = runtime(temp_dir.path(), "step-publish-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -253,8 +271,11 @@ fn metadata_run_does_not_advance_retention() {
     let fs = runtime(temp_dir.path(), "step-retention-opt-in-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -318,8 +339,11 @@ fn the_typed_wrappers_are_single_action_steps() {
     let fs = runtime(temp_dir.path(), "typed-wrapper-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     assert_eq!(
         fs.flush_wal_blocking(&namespace_id)
             .expect("flush an empty tail")
@@ -346,7 +370,7 @@ fn the_typed_wrappers_are_single_action_steps() {
     );
     assert_eq!(
         flushed.reorganize,
-        ReorganizeStepOutcome::NotNeeded,
+        ReorganizeStepOutcome::NotNeeded {},
         "the upkeep pass reports its reorganization half rather than hiding it"
     );
 
@@ -418,8 +442,11 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     let fs = runtime(temp_dir.path(), "step-delta-run-publish-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -483,8 +510,11 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
     let fs = runtime(temp_dir.path(), "manual-compaction-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     assert_eq!(
         block_on(fs.maintenance.compact_metadata(&namespace_id))
             .expect("compact an empty namespace")
@@ -546,8 +576,11 @@ fn maintenance_step_counts_segments_not_commits() {
     let fs = runtime(temp_dir.path(), "step-segment-count-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     let first_batch = fs.mutate_batch_blocking(
         &namespace_id,
         vec![
@@ -590,8 +623,11 @@ fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "step-race-test");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -630,7 +666,10 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace = namespace_id("probe-options");
     runtime
-        .create_namespace(&namespace, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("namespace");
     runtime

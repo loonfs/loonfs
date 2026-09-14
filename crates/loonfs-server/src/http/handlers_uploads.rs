@@ -743,7 +743,10 @@ mod completion_body_tests {
             .expect("writer");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         writer
-            .create_namespace(&namespace_id, Default::default())
+            .create_namespace(
+                &namespace_id,
+                loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("namespace");
         let upload = writer.create_upload(&namespace_id).await.expect("upload");

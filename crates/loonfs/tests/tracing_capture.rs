@@ -102,7 +102,10 @@ fn background_step_conclusions_emit_debug_events() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         fill_wal_tail_past_threshold(temp_dir.path(), &namespace_id).await;

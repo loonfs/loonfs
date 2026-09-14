@@ -35,8 +35,11 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
         KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(&namespace_id)),
     ));
     let fs = open_runtime(counted.clone(), "large-attributes-writer");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/file",
@@ -115,8 +118,11 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-parity");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -203,8 +209,11 @@ fn a_write_is_visible_to_the_next_stat() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-round-trip");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -268,8 +277,11 @@ fn read_options_project_grouped_attributes_or_none() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-projection");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/report.txt", "/docs/notes.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,

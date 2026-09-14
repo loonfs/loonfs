@@ -86,7 +86,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
     let namespace = NamespaceId::parse("demo").expect("namespace id");
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -135,7 +135,7 @@ async fn snapshot_file_read_returns_the_captured_state() {
     let path = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     harness

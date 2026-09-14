@@ -279,6 +279,7 @@ mod tests {
             namespace_id,
             ContentStoreId::parse(content_store).expect("content store id"),
             1_000,
+            loonfs_test_support::test_actor(),
         ))
     }
 

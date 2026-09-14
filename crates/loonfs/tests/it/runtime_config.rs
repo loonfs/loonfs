@@ -23,8 +23,11 @@ fn builder_object_store_metrics_recorder_instruments_object_store() {
             .object_store_metrics_recorder(recorder.clone())
     });
 
-    fs.create_namespace_blocking(&namespace_id("demo"), CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id("demo"),
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
 
     let samples = recorder.samples();
     assert!(!samples.is_empty());
@@ -42,8 +45,11 @@ fn filesystem_operations_match_core_semantics() {
     let fs = runtime(temp_dir.path(), "filesystem-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -120,8 +126,11 @@ fn forked_namespace_shares_content_then_diverges() {
     let source = namespace_id("demo");
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
 
-    fs.create_namespace_blocking(&source, CreateNamespaceOptions::default())
-        .expect("create source namespace");
+    fs.create_namespace_blocking(
+        &source,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create source namespace");
     fs.put_file_bytes_blocking(
         &source,
         "/docs/shared.txt",

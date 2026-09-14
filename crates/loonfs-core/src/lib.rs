@@ -26,7 +26,8 @@
 //!
 //! let writer_id = WriterId::parse("example-writer").expect("valid writer id");
 //! let engine = NamespaceEngine::writer(store, namespace.clone(), writer_id.clone());
-//! let _ = engine.bootstrap_namespace(BootstrapOptions::default());
+//! let actor_id = ActorId::parse("example-actor").expect("valid actor id");
+//! let _ = engine.bootstrap_namespace(BootstrapOptions::new(actor_id));
 //!
 //! let publish_store = LocalFsStore::new(std::env::temp_dir())
 //!     .expect("a temporary-directory-backed store should initialize");

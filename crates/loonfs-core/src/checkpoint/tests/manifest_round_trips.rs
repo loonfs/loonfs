@@ -248,9 +248,15 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    crate::namespace::bootstrap::bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
+    crate::namespace::bootstrap::bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
 
     let genesis = super::super::load::load_basis_metadata_segments(
         &store,
@@ -806,6 +812,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         content_store_id: loonfs_api::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
             .expect("content store"),
         created_at_ms: 1_000,
+        created_by: loonfs_test_support::test_actor(),
         fork_basis: None,
         status: loonfs_api::wire::control::NamespaceStatus::Active {},
         writer: None,

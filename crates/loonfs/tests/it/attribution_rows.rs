@@ -21,8 +21,11 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attribution-rows");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
 
     let creator = actor("creator");
     let create = fs
@@ -152,8 +155,11 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     let object_store = store(temp_dir.path());
     let fs = open_runtime(object_store.clone(), "attribution-projections");
     let source_id = namespace_id("source");
-    fs.create_namespace_blocking(&source_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &source_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     let root = fs.stat_path_blocking(&source_id, "/").expect("stat root");
     assert_eq!(root.created_by, ActorId::loonfs());
     let root_attributes = root.attributes.expect("root attributes projection");

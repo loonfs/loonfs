@@ -471,7 +471,11 @@ impl RuntimeTestExt for TestRuntime {
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> loonfs::Result<loonfs::Namespace> {
-        block_on(self.writer.fork_namespace(source, target))
+        block_on(self.writer.fork_namespace(
+            source,
+            target,
+            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+        ))
     }
 
     fn namespace_diagnostics_blocking(

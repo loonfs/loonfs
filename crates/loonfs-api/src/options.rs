@@ -279,8 +279,20 @@ pub struct DirectMultipartUploadOptions {
 }
 
 /// Selects the source state for a namespace fork.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkNamespaceOptions {
+    /// Application-supplied actor creating the namespace.
+    pub actor_id: ActorId,
     /// Fork from this live snapshot instead of the current head.
     pub snapshot_id: Option<crate::SnapshotId>,
+}
+
+impl ForkNamespaceOptions {
+    /// Selects the current head.
+    pub fn new(actor_id: ActorId) -> Self {
+        Self {
+            actor_id,
+            snapshot_id: None,
+        }
+    }
 }

@@ -29,8 +29,11 @@ fn collect_up_to_keeps_unused_entries_for_the_next_call() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "path-pager-collect-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -69,8 +72,11 @@ fn path_entries_pager_preserves_each_page_head() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "path-pager-drift-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -113,8 +119,11 @@ fn directory_pages_use_canonical_name_key_order() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-order-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in [
         "/docs/Zebra.txt",
         "/docs/apple.txt",
@@ -169,8 +178,11 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "file-revision-page-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
 
     let replace = PutFileOptions {
         behavior: DestinationBehavior::Replace,
@@ -245,8 +257,11 @@ fn directory_cursor_resumes_after_later_writes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-snapshot-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -299,8 +314,11 @@ fn directory_cursor_from_the_future_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-future-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -342,8 +360,11 @@ fn directory_cursor_resumes_across_a_wal_flush() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-floor-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -395,8 +416,11 @@ fn revisions_cursor_resumes_after_later_writes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "revisions-page-drift-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for body in ["one", "two", "three"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -469,8 +493,11 @@ fn directory_cursor_rejects_path_inode_mismatch() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-mismatch-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -510,8 +537,11 @@ fn inode_children_pages_stay_on_the_renamed_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-rename-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -569,8 +599,11 @@ fn inode_children_pages_follow_the_directory_to_a_new_ancestor() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-move-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in [
         "/left/docs/a.txt",
         "/left/docs/b.txt",
@@ -632,8 +665,11 @@ fn inode_children_rejects_files_and_missing_inodes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-target-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/a.txt",
@@ -674,8 +710,11 @@ fn inode_children_of_an_empty_directory_is_an_empty_page() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-empty-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.create_directory_blocking(
         &namespace_id,
         "/empty",
@@ -705,8 +744,11 @@ fn inode_children_rejects_a_recursively_deleted_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-deleted-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/child.txt",
@@ -745,8 +787,11 @@ fn inode_children_cursor_rejects_a_different_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-cursor-mismatch-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in [
         "/first/a.txt",
         "/first/b.txt",
@@ -797,8 +842,11 @@ fn inode_children_cursor_from_the_future_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-future-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -842,8 +890,11 @@ fn inode_children_of_the_root_list_by_the_root_inode() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-root-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/a.txt", "/b.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -876,8 +927,11 @@ fn inode_children_empty_resumed_page_reports_the_drifted_head() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-drift-head-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,

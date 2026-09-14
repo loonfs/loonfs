@@ -95,7 +95,10 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
 
     let writer_a = writer(&store, "writer-a").await;
     writer_a
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer_a
@@ -174,7 +177,10 @@ async fn fenced_session_cannot_delete_namespace() {
 
     let writer_a = writer(&store, "writer-a").await;
     writer_a
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer_a
@@ -267,11 +273,17 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     )
     .await;
     writer_a
-        .create_namespace(&ns_fence, CreateNamespaceOptions::default())
+        .create_namespace(
+            &ns_fence,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create fence namespace");
     writer_a
-        .create_namespace(&ns_other, CreateNamespaceOptions::default())
+        .create_namespace(
+            &ns_other,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create other namespace");
     writer_a
@@ -389,7 +401,10 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
 
     let writer_a = writer_with_cache(&store, "writer-a", RuntimeCacheConfig::disabled()).await;
     writer_a
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer_a
@@ -465,7 +480,10 @@ async fn read_after_write_is_served_from_seeded_caches() {
 
     let writer = writer(&store, "seed-writer").await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let reader = writer.reader();

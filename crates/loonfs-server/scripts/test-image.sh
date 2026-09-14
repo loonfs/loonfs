@@ -189,7 +189,7 @@ pass "GET /metrics answered 200 with the token and 401 without it"
 CREATE_STATUS="$(status_code --request POST \
   --header "Authorization: Bearer $AUTH_TOKEN" \
   --header 'Content-Type: application/json' \
-  --data "{\"namespace_id\":\"$NAMESPACE\"}" \
+  --data "{\"namespace_id\":\"$NAMESPACE\",\"actor_id\":\"loonfs-image-test\"}" \
   "$BASE_URL/v0/namespaces")"
 [[ "$CREATE_STATUS" == "200" ]] \
   || fail "POST /v0/namespaces answered $CREATE_STATUS, expected 200"

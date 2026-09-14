@@ -26,9 +26,15 @@ async fn retirement_includes_listing_time_in_its_budget_and_retries_with_a_fresh
         );
         let clock = ManualClock::new(1_000);
         let call = context(clock.now_ms());
-        bootstrap_namespace(&store, &namespace_id, &call, false)
-            .await
-            .expect("bootstrap");
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &call,
+            &loonfs_test_support::test_actor(),
+            false,
+        )
+        .await
+        .expect("bootstrap");
         delete_namespace(&store, &namespace_id, Default::default(), &call)
             .await
             .expect("delete");
@@ -83,9 +89,15 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let inner = FakeMultipartStore::new(LocalFsStore::new(directory.path()).expect("store"));
     let clock = ManualClock::new(1_000);
     let setup = context(clock.now_ms());
-    bootstrap_namespace(&inner, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
+    bootstrap_namespace(
+        &inner,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
     let upload = crate::protocol::begin_direct_multipart_upload_target(
         &inner,
         &namespace_id,

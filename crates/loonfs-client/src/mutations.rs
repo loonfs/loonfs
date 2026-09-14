@@ -615,13 +615,22 @@ mod tests {
         let fork_id = NamespaceId::parse("fork").expect("valid id");
 
         let (transport, client) = single_attempt_probe();
-        assert_single_attempt(client.create_namespace(&namespace_id).await, &transport);
+        assert_single_attempt(
+            client
+                .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+                .await,
+            &transport,
+        );
         drop(transport);
 
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .fork_namespace(&namespace_id, &fork_id, &ForkNamespaceOptions::default())
+                .fork_namespace(
+                    &namespace_id,
+                    &fork_id,
+                    &ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+                )
                 .await,
             &transport,
         );
@@ -666,6 +675,7 @@ mod tests {
 
         let response = NamespaceDiagnostics {
             created_at_ms: 1_000,
+            created_by: loonfs_test_support::test_actor(),
             fork_basis: None,
             namespace_id: namespace_id.clone(),
             head_seq: ChangeSeq(3),
@@ -725,6 +735,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let response = Namespace {
             created_at_ms: 1_000,
+            created_by: loonfs_test_support::test_actor(),
             fork_basis: None,
             namespace_id: namespace_id.clone(),
             head_seq: ChangeSeq(0),

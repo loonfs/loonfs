@@ -835,13 +835,18 @@
         "additionalProperties": false,
         "description": "Request to create a namespace.",
         "properties": {
+          "actor_id": {
+            "$ref": "#/components/schemas/ActorId",
+            "description": "Application-supplied actor creating the namespace."
+          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id to create."
           }
         },
         "required": [
-          "namespace_id"
+          "namespace_id",
+          "actor_id"
         ],
         "type": "object"
       },
@@ -2104,6 +2109,10 @@
         "additionalProperties": false,
         "description": "Request to fork a namespace.",
         "properties": {
+          "actor_id": {
+            "$ref": "#/components/schemas/ActorId",
+            "description": "Application-supplied actor creating the namespace."
+          },
           "new_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id for the fork target."
@@ -2114,7 +2123,8 @@
           }
         },
         "required": [
-          "new_namespace_id"
+          "new_namespace_id",
+          "actor_id"
         ],
         "type": "object"
       },
@@ -2805,6 +2815,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "created_by": {
+            "$ref": "#/components/schemas/ActorId",
+            "description": "Actor that created the namespace, as supplied by the application."
+          },
           "fork_basis": {
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "Present only for a fork: the source it was forked from."
@@ -2825,6 +2839,7 @@
         "required": [
           "namespace_id",
           "created_at_ms",
+          "created_by",
           "head_seq",
           "retention_floor_seq"
         ],
@@ -2838,6 +2853,10 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/ActorId",
+            "description": "Actor that created the namespace, as supplied by the application."
           },
           "current_manifest_no": {
             "$ref": "#/components/schemas/ManifestNo",
@@ -2881,6 +2900,7 @@
         "required": [
           "namespace_id",
           "created_at_ms",
+          "created_by",
           "head_seq",
           "retention_floor_seq",
           "wal_tail_segments",
@@ -3203,6 +3223,7 @@
         ]
       },
       "ReorganizeStepOutcomeCompactionRequired": {
+        "description": "A family group needs a streaming compaction. Run the `metadata_compaction` job.",
         "properties": {
           "outcome": {
             "enum": [
@@ -3217,6 +3238,7 @@
         "type": "object"
       },
       "ReorganizeStepOutcomeFenced": {
+        "description": "A newer runtime holds the compactor epoch.",
         "properties": {
           "outcome": {
             "enum": [
@@ -3231,6 +3253,7 @@
         "type": "object"
       },
       "ReorganizeStepOutcomeManifestAdvanced": {
+        "description": "Another publisher changed the current manifest before this step could publish.",
         "properties": {
           "outcome": {
             "enum": [
@@ -3245,6 +3268,7 @@
         "type": "object"
       },
       "ReorganizeStepOutcomeNotNeeded": {
+        "description": "No family group had enough delta runs to merge.",
         "properties": {
           "outcome": {
             "enum": [
@@ -3259,6 +3283,7 @@
         "type": "object"
       },
       "ReorganizeStepOutcomeUnitPublished": {
+        "description": "One family group was merged and a manifest published.",
         "properties": {
           "outcome": {
             "enum": [

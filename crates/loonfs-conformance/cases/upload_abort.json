@@ -2,7 +2,8 @@
   "name": "upload_abort",
   "intent": "Checks that repeating abort_upload returns the stored result.",
   "request": {
-    "namespace_id": "conf-upload-abort"
+    "namespace_id": "conf-upload-abort",
+    "actor_id": "conformance"
   },
   "expected": {
     "mode": "service_proxied",

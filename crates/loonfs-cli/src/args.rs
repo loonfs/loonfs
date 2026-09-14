@@ -726,6 +726,8 @@ pub(crate) struct NamespaceShowArgs {
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
+    pub actor: ActorSelectorArgs,
+    #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
@@ -751,6 +753,8 @@ pub(crate) struct NamespaceDeleteArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceForkArgs {
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]

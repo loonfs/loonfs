@@ -13,7 +13,10 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-cursor-test").await;
     let namespace_id = NamespaceId::parse("snapshot-cursor").expect("namespace id");
     runtime
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     for name in ["a", "c", "e", "g"] {
@@ -197,7 +200,10 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-reader-test").await;
     let namespace_id = NamespaceId::parse("snapshot-reads").expect("namespace id");
     runtime
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     let created = runtime
@@ -310,7 +316,10 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-test").await;
     let namespace_id = NamespaceId::parse("snapshot-checkpoint-reads").expect("namespace id");
     runtime
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     runtime
@@ -390,7 +399,10 @@ async fn a_deleted_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
         open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-release-test").await;
     let namespace_id = NamespaceId::parse("snapshot-deleted-checkpoint").expect("namespace id");
     runtime
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     runtime
@@ -427,7 +439,10 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-lease-read-test").await;
     let namespace_id = NamespaceId::parse("snapshot-lease-reads").expect("namespace id");
     runtime
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     runtime

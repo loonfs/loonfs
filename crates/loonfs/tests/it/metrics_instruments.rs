@@ -89,7 +89,10 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
             .expect("runner");
         runner.attach_hints(receiver);
         fs.writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         for file in 0..writes {
@@ -201,7 +204,10 @@ fn a_collection_step_reports_what_the_pass_retained() {
         })
         .await;
         fs.writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         let registry = MaintenanceRegistry::new();
@@ -241,7 +247,10 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
         })
         .await;
         fs.writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         let checkpoint = fs

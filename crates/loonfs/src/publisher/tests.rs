@@ -311,7 +311,10 @@ async fn publish_once_into_each(writer: &crate::FsWriter, namespaces: &[Namespac
     let registry = writer.publisher();
     for namespace_id in namespaces {
         writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("bootstrap");
         registry
@@ -338,6 +341,7 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
         .core
         .writer_engine(&runtime.bits.identity, namespace_id)
         .bootstrap_namespace(loonfs_core::BootstrapOptions {
+            actor_id: loonfs_test_support::test_actor(),
             allow_existing: false,
         })
         .await
@@ -704,7 +708,10 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer(store).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -747,7 +754,10 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer(store).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -1148,7 +1158,10 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
     let timer = Arc::new(ManualMonotonicTimer::default());
     writer.publisher.timer = timer.clone();
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -1647,7 +1660,10 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -1772,7 +1788,10 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let upload = writer
@@ -1904,7 +1923,10 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -1975,7 +1997,10 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -2064,7 +2089,10 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         .await
         .expect("build writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     append_wal_segments(
@@ -2139,7 +2167,10 @@ async fn a_failed_fold_notifies_maintenance_when_the_attempt_finishes() {
         .await
         .expect("build writer");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     append_wal_segments(
@@ -2204,7 +2235,10 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         .expect("build writer");
     for namespace_id in &namespaces {
         writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("bootstrap");
         append_wal_segments(
@@ -2293,7 +2327,10 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .expect("build writer");
     for namespace_id in [&namespace_a, &namespace_b] {
         writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("bootstrap");
         append_wal_segments(
@@ -2371,7 +2408,10 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer(store.clone()).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -2481,7 +2521,10 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -2549,7 +2592,10 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
@@ -2724,7 +2770,10 @@ async fn maintenance_invalidation_leaves_publisher_projection() {
     let writer = test_writer_with_interval(store.clone(), 0).await;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     writer
@@ -2897,7 +2946,10 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
     let held_engine = busy_publisher.engine.lock().await;
 
     writer
-        .create_namespace(&other, CreateNamespaceOptions::default())
+        .create_namespace(
+            &other,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("bootstrap");
     registry
@@ -2961,7 +3013,10 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         .expect("writer");
     for namespace in [&a, &b] {
         writer
-            .create_namespace(namespace, CreateNamespaceOptions::default())
+            .create_namespace(
+                namespace,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("bootstrap");
     }

@@ -121,7 +121,10 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         writer
@@ -186,7 +189,10 @@ fn standalone_reader_builds_without_writer_identity() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         writer
@@ -238,7 +244,10 @@ fn a_writer_maintenance_handle_invalidates_shared_read_caches() {
         let (writer, maintenance, runner) =
             writer_with_runner(temp_dir.path(), RuntimeCacheConfig::default()).await;
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         let reader = writer.reader();
@@ -310,7 +319,10 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
             NamespaceId::parse("prepared-put").expect("valid prepared namespace id");
         for namespace_id in [&simple_namespace, &prepared_namespace] {
             writer
-                .create_namespace(namespace_id, CreateNamespaceOptions::default())
+                .create_namespace(
+                    namespace_id,
+                    CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+                )
                 .await
                 .expect("create namespace");
         }
@@ -384,7 +396,10 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         for round in 0..=(wal_tail_segment_threshold() * 2) {
@@ -436,7 +451,10 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
             let (writer, maintenance, runner) =
                 writer_with_runner(temp_dir.path(), runtime_cache).await;
             writer
-                .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+                .create_namespace(
+                    &namespace_id,
+                    CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+                )
                 .await
                 .expect("create namespace");
 
@@ -534,7 +552,10 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
         runner.attach_hints(receiver);
 
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         append_wal_segments(
@@ -604,7 +625,10 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .await
             .expect("build the writer that leaves the debt");
         stalled
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         let mut replay_options = CreateDirectoryOptions::new(loonfs_test_support::test_actor());
@@ -696,7 +720,10 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .await
             .expect("build writer");
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         let seed_segments = wal_tail_segment_threshold() - 1;
@@ -777,7 +804,10 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             .await
             .expect("build writer");
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         append_wal_segments(
@@ -847,7 +877,10 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         writer
@@ -957,7 +990,10 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         writer

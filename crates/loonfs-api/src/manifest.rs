@@ -6,8 +6,9 @@ use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::{
-    AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName,
-    InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo,
+    ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentId, ContentRef,
+    DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId,
+    RevisionNo, RunNo,
 };
 use crate::{ContentStoreId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
@@ -970,6 +971,8 @@ pub struct NamespaceManifestPayload {
     pub content_store_id: ContentStoreId,
     /// Namespace creation stamp in Unix milliseconds.
     pub created_at_ms: u64,
+    /// Actor that created the namespace, as supplied by the application.
+    pub created_by: ActorId,
     /// Permanent fork provenance and source checkpoint identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
@@ -1033,11 +1036,13 @@ impl NamespaceManifestPayload {
         namespace_id: NamespaceId,
         content_store_id: ContentStoreId,
         created_at_ms: u64,
+        created_by: ActorId,
     ) -> Self {
         Self {
             namespace_id,
             content_store_id,
             created_at_ms,
+            created_by,
             fork_basis: None,
             status: NamespaceStatus::Active {},
             writer: None,
@@ -1074,6 +1079,9 @@ impl NamespaceManifestPayload {
         }
         if successor.created_at_ms != self.created_at_ms {
             return drift("created_at_ms");
+        }
+        if successor.created_by != self.created_by {
+            return drift("created_by");
         }
         if successor.fork_basis != self.fork_basis {
             return drift("fork_basis");
@@ -1151,6 +1159,7 @@ mod tests {
             crate::ContentStoreId::parse("cs_00000000000000000000000000000001")
                 .expect("content store"),
             1_000,
+            crate::ActorId::parse("test").expect("actor"),
         );
         for (field, change) in [
             ("namespace_id", 0),
@@ -1264,6 +1273,7 @@ mod tests {
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("content store"),
             created_at_ms: 1_000,
+            created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
@@ -1310,6 +1320,7 @@ mod tests {
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("content store"),
             created_at_ms: 1_000,
+            created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,

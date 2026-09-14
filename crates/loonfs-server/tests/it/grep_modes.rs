@@ -344,7 +344,10 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let backfill = NamespaceId::parse("restart-backfill").expect("namespace id");
     for namespace_id in [&stale, &backfill] {
         writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
     }
@@ -690,7 +693,10 @@ async fn seed_namespace(root: &Path, name: &str) -> (SharedObjectStore, FsWriter
         .expect("writer");
     let namespace_id = NamespaceId::parse(name).expect("namespace id");
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     (store, writer, namespace_id)

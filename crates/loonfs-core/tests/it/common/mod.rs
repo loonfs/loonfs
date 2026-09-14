@@ -89,7 +89,10 @@ pub(crate) mod commit_split_support {
         allow_existing: bool,
     ) -> Result<loonfs_api::Namespace, loonfs_core::BootstrapNamespaceError> {
         namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(BootstrapOptions { allow_existing })
+            .bootstrap_namespace(BootstrapOptions {
+                actor_id: loonfs_test_support::test_actor(),
+                allow_existing,
+            })
             .await
     }
 

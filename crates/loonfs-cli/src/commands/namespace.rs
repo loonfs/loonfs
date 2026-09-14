@@ -13,7 +13,7 @@ use crate::config::mutate_config;
 use crate::error::CliError;
 use crate::profiles::set_default_namespace;
 use crate::prompt::prompt_line;
-use crate::resolve::{load_cli_config, parse_namespace_id, resolve_namespace};
+use crate::resolve::{load_cli_config, parse_namespace_id, resolve_actor, resolve_namespace};
 use std::path::Path;
 
 // --- namespace ---
@@ -72,14 +72,23 @@ async fn run_namespace_create(
     args: NamespaceCreateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let context =
-        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let loaded = load_cli_config(config_path)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let (context, profile) = resolve_profile_context_from_config(
+        kind,
+        &loaded.config,
+        explicit_profile,
+        args.request.no_retry,
+    )
+    .await?;
+    let actor_id = resolve_actor(profile, args.actor.actor_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| error.with_param("namespace_id"))
         .map_err(|error| context.fail(kind, error))?;
     let namespace = context
         .target
-        .create_namespace(&namespace_id)
+        .create_namespace(&namespace_id, &actor_id)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -152,8 +161,17 @@ async fn run_namespace_fork(
     args: NamespaceForkArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let context =
-        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let loaded = load_cli_config(config_path)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let (context, profile) = resolve_profile_context_from_config(
+        kind,
+        &loaded.config,
+        explicit_profile,
+        args.request.no_retry,
+    )
+    .await?;
+    let actor_id = resolve_actor(profile, args.actor.actor_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let source_namespace_id = parse_namespace_id(&args.source_namespace_id)
         .map_err(|error| error.with_param("source_namespace_id"))
         .map_err(|error| context.fail(kind, error))?;
@@ -171,7 +189,10 @@ async fn run_namespace_fork(
         .fork_namespace(
             &source_namespace_id,
             &new_namespace_id,
-            loonfs::ForkNamespaceOptions { snapshot_id },
+            loonfs::ForkNamespaceOptions {
+                actor_id,
+                snapshot_id,
+            },
         )
         .await
         .map_err(|error| context.fail(kind, error))?;

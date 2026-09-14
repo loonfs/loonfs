@@ -255,7 +255,7 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create replay namespace");
     let commit = CommitRequest::single(
@@ -310,7 +310,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create direct-put namespace");
     let payload = request.content_utf8.as_bytes();
@@ -427,7 +427,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create multipart namespace");
     let payload = byte_pattern(
@@ -560,6 +560,7 @@ fn completed_at_ms(status: &UploadSessionStatus) -> u64 {
 #[serde(deny_unknown_fields)]
 struct AbortRequest {
     namespace_id: String,
+    actor_id: ActorId,
 }
 
 #[derive(Debug, Deserialize)]
@@ -575,7 +576,7 @@ async fn run_abort(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create abort namespace");
     let begin = harness
@@ -650,7 +651,7 @@ async fn run_download(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create download namespace");
     let spec = namespace_path(&request.namespace_id, &request.path);
@@ -746,7 +747,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create children-by-inode namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
@@ -909,7 +910,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
     };
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create inode-mutations namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
@@ -1266,7 +1267,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     };
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create snapshots namespace");
 
@@ -1704,7 +1705,7 @@ async fn run_pagination(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create pagination namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
@@ -1822,7 +1823,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create changes namespace");
     let commit = CommitRequest::single(
@@ -1897,7 +1898,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
     let namespace = namespace_id(&request.namespace_id);
     harness
         .client
-        .create_namespace(&namespace)
+        .create_namespace(&namespace, &request.actor_id)
         .await
         .expect("create end-to-end namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);

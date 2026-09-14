@@ -42,7 +42,12 @@ fn full_attributes() -> Attributes {
 async fn maximum_requests_encode_within_the_admitted_estimate() {
     let namespace_id = NamespaceId::parse("n".repeat(MAX_ID_BYTES)).expect("namespace");
     let actor = ActorId::parse("a".repeat(256)).expect("actor");
-    let mut head = NamespaceReadState::initial(namespace_id.clone(), ContentStoreId::generate(), 0);
+    let mut head = NamespaceReadState::initial(
+        namespace_id.clone(),
+        ContentStoreId::generate(),
+        0,
+        loonfs_test_support::test_actor(),
+    );
     head.seq = ChangeSeq(MAX_PUBLIC_INTEGER - 1);
     head.next_inode_id = InodeId(MAX_PUBLIC_INTEGER - 1_000_000);
     head.writer_epoch = WriterEpoch(MAX_PUBLIC_INTEGER);

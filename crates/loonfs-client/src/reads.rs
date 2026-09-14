@@ -126,13 +126,18 @@ impl Client {
     }
 
     /// Creates an empty namespace with the given ID and returns its genesis state.
-    pub async fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
+    pub async fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        actor_id: &loonfs_api::ActorId,
+    ) -> Result<Namespace> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
         self.request_json::<_, Namespace>(
             self.post(&url),
             Some(&CreateNamespaceRequest {
                 namespace_id: namespace_id.clone(),
+                actor_id: actor_id.clone(),
             }),
             SendPolicy::Once,
         )
@@ -186,6 +191,7 @@ impl Client {
             self.post(&url),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),
+                actor_id: options.actor_id.clone(),
                 snapshot_id: options.snapshot_id.clone(),
             }),
             SendPolicy::Once,

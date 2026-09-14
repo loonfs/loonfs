@@ -66,7 +66,10 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .await
             .expect("build writer");
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
 
@@ -130,7 +133,10 @@ fn delegated_writer_calls_close_one_operation_span() {
             .await
             .expect("build writer");
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
             .await
             .expect("create namespace");
         let _setup_log = take_captured_log(&captured);

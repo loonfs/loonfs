@@ -67,7 +67,10 @@ async fn feed_message(
 async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     runtime
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
         .expect("create namespace");
     namespace_id
@@ -120,7 +123,7 @@ async fn compact_receipt_past_horizon(
             .maintain_metadata(namespace_id, MetadataMaintenanceOptions::default())
             .await
             .expect("upkeep step");
-        if matches!(step.reorganize, ReorganizeStepOutcome::NotNeeded) {
+        if matches!(step.reorganize, ReorganizeStepOutcome::NotNeeded {}) {
             break;
         }
         folded = true;

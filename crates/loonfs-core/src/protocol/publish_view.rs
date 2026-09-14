@@ -283,6 +283,7 @@ mod tests {
             ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("valid content store id"),
             1_000,
+            loonfs_test_support::test_actor(),
         );
         head.seq = key.head_seq;
         PublishTailProjection {
