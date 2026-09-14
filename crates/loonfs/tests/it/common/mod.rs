@@ -7,13 +7,13 @@
 use loonfs::publish::{CommitCandidate, CommitRequest};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    AdvanceRetentionResponse, BeginUploadResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm,
-    Commit, ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes,
-    FsMaintenance, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, ListChangesResponse,
-    MetadataMaintenanceResponse, MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest,
-    PaginationPolicy, PathEntry, PutFileOptions, RunMaintenanceRequest, RunMaintenanceResponse,
-    RuntimeError, SharedObjectStore, UploadContentResponse, UploadId, UploadSession,
+    AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, Commit, ContentRef,
+    CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
+    DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, FsMaintenance, FsReader, FsWriter,
+    FsWriterBuilder, ListChangesOptions, ListChangesResponse, MetadataMaintenanceResponse,
+    MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry,
+    PutFileOptions, RunMaintenanceRequest, RunMaintenanceResponse, RuntimeError, SharedObjectStore,
+    UploadId, UploadSession,
 };
 use loonfs_api::MetadataMaintenanceRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -423,16 +423,13 @@ pub(crate) trait RuntimeTestExt {
         destination_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<Commit>;
-    fn begin_upload_blocking(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> loonfs::Result<BeginUploadResponse>;
+    fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<UploadSession>;
     fn upload_content_blocking(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         bytes: &[u8],
-    ) -> loonfs::Result<UploadContentResponse>;
+    ) -> loonfs::Result<UploadSession>;
     fn complete_upload_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -594,10 +591,7 @@ impl RuntimeTestExt for TestRuntime {
         )
     }
 
-    fn begin_upload_blocking(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> loonfs::Result<BeginUploadResponse> {
+    fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<UploadSession> {
         block_on(self.writer.create_upload(namespace_id))
     }
 
@@ -606,7 +600,7 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         bytes: &[u8],
-    ) -> loonfs::Result<UploadContentResponse> {
+    ) -> loonfs::Result<UploadSession> {
         block_on(
             self.writer
                 .put_upload_content(namespace_id, upload_id, bytes),

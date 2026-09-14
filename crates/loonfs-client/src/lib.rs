@@ -27,14 +27,13 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_api::{
     v0::{
-        BeginUploadRequest, BeginUploadResponse, Commit, CompleteUploadRequest,
-        CompletedUploadPart, ContentToken, CreateDownloadByInodeResponse, CreateDownloadRequest,
-        CreateDownloadResponse, CreateSnapshotRequest, DeleteSnapshotResponse,
-        ExtendSnapshotRequest, GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse,
-        ListSnapshotsResponse, ObjectTransferAccess, SignUploadPartsRequest,
-        SignUploadPartsResponse, SignedUploadPart, SnapshotSummary, StoreProbeRequest,
-        StoreProbeResponse, UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim,
-        UploadSession, UploadSessionStatus,
+        Commit, CompleteUploadBody, CompletedUploadPart, ContentToken,
+        CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
+        CreateSnapshotRequest, CreateUploadBody, DeleteSnapshotResponse, ExtendSnapshotRequest,
+        GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
+        ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart,
+        SnapshotSummary, StoreProbeRequest, StoreProbeResponse, UploadContentClaim,
+        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
     },
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, CreateCheckpointRequest,

@@ -78,6 +78,8 @@ def test_streaming_uploads(fixture):
             assert json.loads(request.content)["mode"] == mode
             value = {
                 **session,
+                "status": "open",
+                "expires_at_ms": 2000000000000,
                 "checksum_algorithm": fixture["algorithm"],
                 "part_size_bytes": 4,
                 "access": access,
@@ -103,7 +105,12 @@ def test_streaming_uploads(fixture):
             return httpx.Response(
                 200,
                 headers={"ETag": "test-etag"},
-                json={**session, "content_ref": claim},
+                json={
+                    **session,
+                    "status": "open",
+                    "expires_at_ms": 2000000000000,
+                    "content_ref": claim,
+                },
             )
         elif path.endswith("/abort"):
             counts["abort"] += 1

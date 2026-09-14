@@ -48,9 +48,9 @@ mod trace;
 use thiserror::Error;
 
 pub use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, Commit, CompleteMultipartUploadRequest,
-    CompleteUploadRequest, FilesystemChange, ListChangesResponse, ObjectTransferAccess,
-    UploadContentClaim, UploadContentResponse, UploadMode, UploadSession, UploadSessionStatus,
+    Commit, CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, FilesystemChange,
+    ListChangesResponse, ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession,
+    UploadSessionStatus,
 };
 pub use loonfs_api::{
     ActorId, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo, AttributeValue,
@@ -144,7 +144,7 @@ pub mod uploads {
     pub use loonfs_core::{
         BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
         DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
-        ResolvedUploadCompletion,
+        ResolvedUploadCompletion, UploadSessionView,
     };
 }
 

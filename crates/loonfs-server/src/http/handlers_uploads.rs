@@ -21,9 +21,8 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     options::DirectMultipartUploadOptions,
     v0::{
-        BeginUploadRequest, BeginUploadResponse, CompleteMultipartUploadRequest,
-        CompleteUploadRequest, ObjectTransferAccess, SignUploadPartsRequest,
-        SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadMode,
+        CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, ObjectTransferAccess,
+        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadMode,
         UploadSession, UploadSessionStatus,
     },
     ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
@@ -110,9 +109,9 @@ pub(super) struct UploadPathParams {
         summary = "Begin upload",
         description = "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
-        request_body = BeginUploadRequest,
+        request_body = CreateUploadBody,
         responses(
-            (status = 200, description = "Upload session started", body = BeginUploadResponse),
+            (status = 200, description = "Upload session started", body = UploadSession),
             (status = 400, description = "Invalid upload request", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -127,22 +126,19 @@ pub(super) async fn create_upload(
     State(state): State<AppState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    UploadControlJson(request): UploadControlJson<
-        BeginUploadRequest,
-        MAX_UPLOAD_CONTROL_BODY_BYTES,
-    >,
-) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
+    UploadControlJson(request): UploadControlJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
+) -> Result<Json<UploadSession>, ApiResponseError> {
     // Decoding the body settled which transport this is and that it carries
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
     match request {
-        BeginUploadRequest::DirectPut { size_bytes } => {
+        CreateUploadBody::DirectPut { size_bytes } => {
             begin_direct_put_upload(state, namespace_id, size_bytes).await
         }
-        BeginUploadRequest::DirectMultipart { part_size_bytes } => {
+        CreateUploadBody::DirectMultipart { part_size_bytes } => {
             begin_direct_multipart_upload(state, namespace_id, part_size_bytes).await
         }
-        BeginUploadRequest::ServiceProxied {} => {
+        CreateUploadBody::ServiceProxied {} => {
             let response = state
                 .writer
                 .create_upload(&namespace_id)
@@ -157,7 +153,7 @@ async fn begin_direct_put_upload(
     state: AppState,
     namespace_id: NamespaceId,
     size_bytes: Option<u64>,
-) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
+) -> Result<Json<UploadSession>, ApiResponseError> {
     let Some(issuer) = state
         .direct_transfers
         .as_ref()
@@ -186,40 +182,46 @@ async fn begin_direct_put_upload(
     }
 
     let checksum_algorithm = issuer.stored_checksum_algorithm();
-    let prepared = state
+    let mut prepared = state
         .writer
         .create_direct_put_upload_target(&namespace_id, checksum_algorithm)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let signed = issuer
-        .presign_put(
-            PresignedPutRequest {
-                object_key: &prepared.object_key,
-                expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
-            },
-            presign_time(),
-        )
-        .await
-        .map_err(presign_issuer_error)?;
+    fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
+    Ok(Json(prepared.session))
+}
 
-    Ok(Json(BeginUploadResponse::DirectPut {
-        namespace_id: prepared.namespace_id,
-        upload_id: prepared.upload_id,
-        checksum_algorithm,
-        access: ObjectTransferAccess::PresignedUrl {
+async fn fill_direct_put_access(
+    issuer: &dyn loonfs_objectstore::presign::DirectPutIssuer,
+    object_key: &str,
+    session: &mut UploadSession,
+) -> Result<(), ApiResponseError> {
+    if let UploadSessionStatus::Open { access, .. } = &mut session.status {
+        let signed = issuer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key,
+                    expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
+                },
+                presign_time(),
+            )
+            .await
+            .map_err(presign_issuer_error)?;
+        *access = Some(ObjectTransferAccess::PresignedUrl {
             method: signed.method,
             url: signed.url,
             headers: signed.headers,
             expires_at_ms: signed.expires_at_ms,
-        },
-    }))
+        });
+    }
+    Ok(())
 }
 
 async fn begin_direct_multipart_upload(
     state: AppState,
     namespace_id: NamespaceId,
     part_size_bytes: Option<u64>,
-) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
+) -> Result<Json<UploadSession>, ApiResponseError> {
     if state
         .direct_transfers
         .as_ref()
@@ -245,12 +247,7 @@ async fn begin_direct_multipart_upload(
                 .with_invalid_request_param("/part_size_bytes")
         })?;
 
-    Ok(Json(BeginUploadResponse::DirectMultipart {
-        namespace_id: prepared.namespace_id,
-        upload_id: prepared.upload_id,
-        part_size_bytes: prepared.target.part_size_bytes,
-        checksum_algorithm: prepared.target.checksum_algorithm,
-    }))
+    Ok(Json(prepared.session))
 }
 
 #[cfg_attr(
@@ -508,14 +505,14 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
         tag = "uploads",
         summary = "Upload content",
-        description = "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
+        description = "Uploads bytes into a service-proxied upload session and returns the open session with the staged content reference.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         request_body(content = Vec<u8>, content_type = "application/octet-stream"),
         responses(
-            (status = 200, description = "Upload content accepted", body = UploadContentResponse),
+            (status = 200, description = "Open session with the staged content reference", body = UploadSession),
             (status = 400, description = "Invalid upload content", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
@@ -532,7 +529,7 @@ pub(super) async fn put_upload_content(
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyStream,
-) -> Result<Json<UploadContentResponse>, ApiResponseError> {
+) -> Result<Json<UploadSession>, ApiResponseError> {
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let (stream, outcome) = body.into_stream();
     match state
@@ -562,7 +559,7 @@ pub(super) async fn put_upload_content(
             ("upload_id" = String, Path, description = "Upload session id")
         ),
         request_body(
-            content = CompleteUploadRequest,
+            content = CompleteUploadBody,
             description = "The request mode must match the upload session."
         ),
         responses(
@@ -605,7 +602,7 @@ fn decode_completion_body(
     mode: UploadMode,
     body: &[u8],
 ) -> std::result::Result<ResolvedUploadCompletion, String> {
-    let request = super::extractors::decode_json::<CompleteUploadRequest>(body)
+    let request = super::extractors::decode_json::<CompleteUploadBody>(body)
         .map_err(|error| error.message().to_owned())?;
     if request.mode() != mode {
         return Err(format!(
@@ -616,11 +613,11 @@ fn decode_completion_body(
     }
 
     match request {
-        CompleteUploadRequest::ServiceProxied {} => Ok(ResolvedUploadCompletion::KnownContent),
-        CompleteUploadRequest::DirectPut { content } => {
+        CompleteUploadBody::ServiceProxied {} => Ok(ResolvedUploadCompletion::KnownContent),
+        CompleteUploadBody::DirectPut { content } => {
             Ok(ResolvedUploadCompletion::DirectPut { content })
         }
-        CompleteUploadRequest::DirectMultipart { content, parts } => Ok(
+        CompleteUploadBody::DirectMultipart { content, parts } => Ok(
             ResolvedUploadCompletion::Multipart(CompleteMultipartUploadRequest { content, parts }),
         ),
     }
@@ -635,7 +632,7 @@ fn decode_completion_body(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Get upload session",
-        description = "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
+        description = "Returns an upload session. An open direct_put session includes freshly signed access. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -657,15 +654,28 @@ pub(super) async fn get_upload(
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let (response, receipt) = state
+    let mut view = state
         .writer
         .get_upload(&namespace_id, &upload_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    if let Some(object_key) = &view.direct_put_object_key {
+        let issuer = state
+            .direct_transfers
+            .as_ref()
+            .and_then(|transfers| transfers.put.as_ref())
+            .ok_or_else(|| {
+                ApiResponseError::not_supported(
+                    FEATURE_UPLOADS_DIRECT_PUT,
+                    "this deployment cannot presign direct_put uploads",
+                )
+            })?;
+        fill_direct_put_access(issuer.as_ref(), object_key, &mut view.session).await?;
+    }
     Ok(Json(with_content_token(
-        response,
+        view.session,
         ContentTokenVerifier::new(state.config.content_token_secret()),
-        receipt.as_ref(),
+        view.receipt.as_ref(),
         current_unix_ms()?,
     )?))
 }
@@ -738,19 +748,23 @@ mod completion_body_tests {
             .expect("namespace");
         let upload = writer.create_upload(&namespace_id).await.expect("upload");
         writer
-            .put_upload_content(&namespace_id, upload.upload_id(), b"content")
+            .put_upload_content(&namespace_id, &upload.upload_id, b"content")
             .await
             .expect("content");
         let completed = writer
             .complete_upload(
                 &namespace_id,
-                upload.upload_id(),
+                &upload.upload_id,
                 ResolvedUploadCompletion::KnownContent,
             )
             .await
             .expect("complete");
-        let (status, receipt) = writer
-            .get_upload(&namespace_id, upload.upload_id())
+        let loonfs::uploads::UploadSessionView {
+            session: status,
+            receipt,
+            ..
+        } = writer
+            .get_upload(&namespace_id, &upload.upload_id)
             .await
             .expect("eligible status");
         let receipt = receipt.expect("receipt eligible at status read");
@@ -838,7 +852,7 @@ mod completion_body_tests {
         };
         let quoted_etag = format!("\"{}\"", "e".repeat(254));
         assert_eq!(quoted_etag.len(), 256);
-        let request = CompleteUploadRequest::DirectMultipart {
+        let request = CompleteUploadBody::DirectMultipart {
             content: UploadContentClaim {
                 size_bytes: u64::MAX,
                 checksum: checksum.clone(),
@@ -859,7 +873,7 @@ mod completion_body_tests {
             encoded.len(),
             MAX_COMPLETION_BODY_BYTES
         );
-        let decoded = serde_json::from_slice::<CompleteUploadRequest>(&encoded)
+        let decoded = serde_json::from_slice::<CompleteUploadBody>(&encoded)
             .expect("maximal completion decodes");
         assert_eq!(decoded, request);
     }

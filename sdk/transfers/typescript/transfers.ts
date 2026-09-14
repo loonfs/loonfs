@@ -335,7 +335,7 @@ async function stageStream(
     const size = source.expected ?? ((await source.empty()) ? 0 : undefined);
     const features = capabilities.features ?? {},
         limits = capabilities.limits ?? {};
-    let request: LoonFS.BeginUploadRequest;
+    let request: LoonFS.CreateUploadBody;
     if ((size === undefined || size >= MULTIPART_MIN_BYTES) && features[DIRECT_MULTIPART_FEATURE]) {
         request = { mode: "direct_multipart" };
     } else {
@@ -352,8 +352,9 @@ async function stageStream(
         else throw new Error("source fits no advertised upload transport");
     }
     const begin = await client.uploads.create({ namespace_id: namespace, body: request }, options);
-    let completion: LoonFS.UploadCompletion;
+    let completion: LoonFS.CompleteUploadBody;
     try {
+        if (begin.status !== "open") throw new Error("created upload session is not open");
         if (begin.mode === "service_proxied") {
             source.limit = limits[PROXY_UPLOAD_MAX_BYTES];
             const response = await client.fetch(
@@ -375,6 +376,8 @@ async function stageStream(
             await response.body?.cancel();
             completion = { mode: "service_proxied" };
         } else if (begin.mode === "direct_put") {
+            if (!begin.access || !begin.checksum_algorithm)
+                throw new Error("direct_put session lacks access or checksum_algorithm");
             source.digest = new IncrementalChecksum(begin.checksum_algorithm);
             await putStream(send, begin.access, await uploadBody(source), scope);
             completion = {
@@ -382,6 +385,8 @@ async function stageStream(
                 content: { size_bytes: source.count, checksum: source.digest.finish() },
             };
         } else {
+            if (begin.part_size_bytes === undefined || !begin.checksum_algorithm)
+                throw new Error("direct_multipart session lacks part_size_bytes or checksum_algorithm");
             const partSize = begin.part_size_bytes;
             if (!Number.isSafeInteger(partSize) || partSize <= 0)
                 throw new Error("invalid multipart part size");

@@ -792,8 +792,8 @@ The table below lists the retry class for every v0 operation.
 | Start a download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits` |
-| Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads` |
-| Upload content through the server | `put_upload_content` | `idempotent` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
+| Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads`; returns the open session |
+| Upload content through the server | `put_upload_content` | `idempotent` | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content`; returns the open session with the staged `content_ref` |
 | Create multipart upload URLs | `sign_upload_parts` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/parts` |
 | Complete an upload | `complete_upload` | `replayable` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Read an upload session | `get_upload` | `idempotent` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
@@ -2123,7 +2123,7 @@ The semantic rule is:
   remote create/replace mutations carry back as their content-preparation
   proof.
 
-Begin requests use `mode` to select the upload transport. A request may include
+Begin requests (`CreateUploadBody`) use `mode` to select the upload transport. A request may include
 only the fields for that mode:
 
 ```json
@@ -2134,7 +2134,7 @@ only the fields for that mode:
 
 Mode-specific fields are placed beside `mode`. `service_proxied` has no additional fields. `direct_put` accepts an optional size hint. `direct_multipart` accepts an optional `part_size_bytes` and uses the default when omitted.
 
-Completion requests use the same `mode` values as begin requests:
+Completion requests (`CompleteUploadBody`) use the same `mode` values as begin requests:
 
 ```json
 { "mode": "service_proxied" }
@@ -2147,7 +2147,16 @@ Multipart requires `content` and `parts`. Service-proxied completion has no
 additional fields. Unknown fields, missing fields, and mode mismatches return
 `invalid_request`.
 
-The begin-upload response uses the same `mode` tag. `service_proxied` adds no fields beyond `namespace_id` and `upload_id`. `direct_put` adds `checksum_algorithm` and `access`. `direct_multipart` adds `part_size_bytes` and `checksum_algorithm`. Response readers accept unknown fields so newer servers can add fields without breaking older clients.
+Every upload step (`create_upload`, `put_upload_content`, `get_upload`,
+`complete_upload`, and `abort_upload`) returns the session object. An open
+session carries its mode's fields beside `mode`, `status`, and `expires_at_ms`.
+Both `direct_put` and `direct_multipart` carry `checksum_algorithm`.
+`direct_multipart` also carries `part_size_bytes`. `direct_put` carries `access`,
+a write capability minted fresh at creation and on every read of the open
+session. A `service_proxied` session carries `content_ref` after bytes have
+been staged. `PUT .../content` returns that open session with the staged
+`content_ref`. Fields that do not apply are omitted. Response readers accept
+unknown fields.
 
 An upload session allocates its content object when it begins, so repeating
 `PUT /content` with the same bytes for the same upload id writes the same
@@ -2168,7 +2177,7 @@ final ([format: upload sessions](format.md#51-upload-sessions)). What that means
   of that tag rather than a nested object:
 
   ```json
-  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_multipart", "status": "open", "expires_at_ms": 1730000000000 }
+  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_multipart", "status": "open", "expires_at_ms": 1730000000000, "checksum_algorithm": "crc64nvme", "part_size_bytes": 8388608 }
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "service_proxied", "status": "aborted", "aborted_at_ms": 1730000002000 }
   ```
@@ -2270,7 +2279,9 @@ Representative begin-upload response:
 {
   "namespace_id": "demo",
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
-  "mode": "service_proxied"
+  "mode": "service_proxied",
+  "status": "open",
+  "expires_at_ms": 1730000000000
 }
 ```
 
@@ -2280,6 +2291,9 @@ Representative content-upload response:
 {
   "namespace_id": "demo",
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
+  "mode": "service_proxied",
+  "status": "open",
+  "expires_at_ms": 1730000000000,
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",

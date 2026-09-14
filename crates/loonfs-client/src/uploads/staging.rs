@@ -2,6 +2,7 @@
 
 use super::super::*;
 use futures::StreamExt as _;
+use loonfs_api::v0::UploadMode;
 use std::sync::{Arc, Mutex};
 
 /// Minimum payload size for streaming and multipart uploads.
@@ -448,15 +449,21 @@ impl Client {
         let begin = self
             .create_direct_put_upload(namespace_id, body.size_hint())
             .await?;
-        let BeginUploadResponse::DirectPut {
-            upload_id,
-            checksum_algorithm,
-            access,
-            ..
-        } = begin
-        else {
+        if begin.mode != UploadMode::DirectPut {
             return Err(negotiated_a_different_upload_mode());
+        }
+        let UploadSessionStatus::Open {
+            checksum_algorithm: Some(checksum_algorithm),
+            access: Some(access),
+            ..
+        } = begin.status
+        else {
+            return Err(ClientError::Protocol(
+                "direct_put session is not open or lacks `checksum_algorithm` or `access`"
+                    .to_owned(),
+            ));
         };
+        let upload_id = begin.upload_id;
         let (written, content) = match body {
             DirectPutBody::Held(bytes) => {
                 let content = UploadContentClaim {
@@ -485,7 +492,7 @@ impl Client {
             .complete_upload(
                 namespace_id,
                 &upload_id,
-                &CompleteUploadRequest::DirectPut { content },
+                &CompleteUploadBody::DirectPut { content },
             )
             .await?;
         Self::staged_from_completion(response)
@@ -519,15 +526,18 @@ impl Client {
                         DirectMultipartUploadOptions::default(),
                     )
                     .await?;
-                let BeginUploadResponse::DirectMultipart {
-                    upload_id,
-                    part_size_bytes,
-                    checksum_algorithm,
-                    ..
-                } = begin
-                else {
+                if begin.mode != UploadMode::DirectMultipart {
                     return Err(negotiated_a_different_upload_mode());
+                }
+                let UploadSessionStatus::Open {
+                    part_size_bytes: Some(part_size_bytes),
+                    checksum_algorithm: Some(checksum_algorithm),
+                    ..
+                } = begin.status
+                else {
+                    return Err(ClientError::Protocol("direct_multipart session is not open or lacks `part_size_bytes` or `checksum_algorithm`".to_owned()));
                 };
+                let upload_id = begin.upload_id;
                 if let Some(journal) = continuity.journal {
                     journal
                         .began(&upload_id, part_size_bytes, checksum_algorithm)
@@ -559,7 +569,7 @@ impl Client {
             .complete_upload(
                 namespace_id,
                 &upload_id,
-                &CompleteUploadRequest::DirectMultipart {
+                &CompleteUploadBody::DirectMultipart {
                     content: UploadContentClaim {
                         size_bytes: uploaded.size_bytes,
                         checksum: uploaded.checksum,
@@ -739,11 +749,11 @@ impl Client {
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         let upload = self
-            .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
+            .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
             .await?;
-        self.put_upload_content(namespace_id, upload.upload_id(), bytes)
+        self.put_upload_content(namespace_id, &upload.upload_id, bytes)
             .await?;
-        self.complete_staged(namespace_id, upload.upload_id()).await
+        self.complete_staged(namespace_id, &upload.upload_id).await
     }
 
     /// Stages a streamed payload through the server, which hashes it as it
@@ -757,16 +767,16 @@ impl Client {
         source: PayloadSource,
     ) -> Result<PreparedContent> {
         let upload = self
-            .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
+            .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
             .await?;
         let staged = self
-            .put_upload_content_stream(namespace_id, upload.upload_id(), source)
+            .put_upload_content_stream(namespace_id, &upload.upload_id, source)
             .await;
         if let Err(error) = staged {
-            let _ = self.abort_upload(namespace_id, upload.upload_id()).await;
+            let _ = self.abort_upload(namespace_id, &upload.upload_id).await;
             return Err(error);
         }
-        self.complete_staged(namespace_id, upload.upload_id()).await
+        self.complete_staged(namespace_id, &upload.upload_id).await
     }
 
     pub(crate) async fn complete_staged(
@@ -778,7 +788,7 @@ impl Client {
             .complete_upload(
                 namespace_id,
                 upload_id,
-                &CompleteUploadRequest::ServiceProxied {},
+                &CompleteUploadBody::ServiceProxied {},
             )
             .await?;
         Self::staged_from_completion(response)

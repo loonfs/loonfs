@@ -42,19 +42,14 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     let upload = begin_upload(
         store,
         namespace_id,
-        loonfs_api::v0::BeginUploadRequest::ServiceProxied {},
+        loonfs_api::v0::CreateUploadBody::ServiceProxied {},
         context,
     )
     .await
     .expect("begin upload");
-    upload_content(
-        store,
-        namespace_id,
-        upload.upload_id(),
-        b"completed content",
-    )
-    .await
-    .expect("stage upload");
+    upload_content(store, namespace_id, &upload.upload_id, b"completed content")
+        .await
+        .expect("stage upload");
     let content_store_id = load_namespace_content_store_id(store, namespace_id)
         .await
         .expect("content store");
@@ -62,7 +57,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         &content_store_id,
-        upload.upload_id(),
+        &upload.upload_id,
         ResolvedUploadCompletion::KnownContent,
         context,
     )

@@ -6,7 +6,7 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::ContentId;
 use loonfs_api::{
-    v0::{BeginUploadRequest, ContentToken},
+    v0::{ContentToken, CreateUploadBody},
     AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation,
 };
@@ -467,10 +467,10 @@ async fn every_upload_session_route_requires_the_bearer_token() {
         .expect("create namespace");
     let begin = harness
         .client
-        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
-    let upload_id = begin.upload_id().clone();
+    let upload_id = begin.upload_id.clone();
     let base = format!(
         "{}/v0/namespaces/{namespace}/uploads/{upload_id}",
         harness.server_url

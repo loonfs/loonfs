@@ -5,9 +5,9 @@
 use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, ContentToken,
-    CreateSnapshotRequest, DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange,
-    ListChangesResponse, ListSnapshotsResponse, SnapshotSummary, UploadContentClaim, UploadMode,
+    CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
+    DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
+    ListSnapshotsResponse, SnapshotSummary, UploadContentClaim, UploadMode,
     UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
@@ -298,6 +298,7 @@ struct DirectPutRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DirectPutExpected {
+    begin_status: String,
     mode: String,
     size_bytes: u64,
     checksum_algorithm: String,
@@ -318,14 +319,18 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .create_direct_put_upload(&namespace, Some(payload.len() as u64))
         .await
         .expect("begin direct PUT");
-    assert_eq!(upload_mode_name(begin.mode()), expected.mode);
-    let (upload_id, checksum_algorithm, access) = match begin {
-        BeginUploadResponse::DirectPut {
-            upload_id,
-            checksum_algorithm,
-            access,
+    assert_eq!(upload_mode_name(begin.mode), expected.mode);
+    assert_eq!(
+        serde_json::to_value(&begin).expect("session JSON")["status"],
+        expected.begin_status
+    );
+    let upload_id = begin.upload_id;
+    let (checksum_algorithm, access) = match begin.status {
+        UploadSessionStatus::Open {
+            checksum_algorithm: Some(checksum_algorithm),
+            access: Some(access),
             ..
-        } => (upload_id, checksum_algorithm, access),
+        } => (checksum_algorithm, access),
         other => panic!("expected direct_put, found {other:?}"),
     };
     assert_eq!(checksum_algorithm.as_str(), expected.checksum_algorithm);
@@ -340,7 +345,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .complete_upload(
             &namespace,
             &upload_id,
-            &CompleteUploadRequest::DirectPut {
+            &CompleteUploadBody::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: payload.len() as u64,
                     checksum: Checksum::compute(checksum_algorithm, payload),
@@ -409,6 +414,7 @@ struct BytePattern {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MultipartExpected {
+    begin_status: String,
     mode: String,
     part_count: usize,
     size_bytes: u64,
@@ -439,14 +445,18 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         )
         .await
         .expect("begin multipart upload");
-    assert_eq!(upload_mode_name(begin.mode()), expected.mode);
-    let (upload_id, part_size_bytes, checksum_algorithm) = match begin {
-        BeginUploadResponse::DirectMultipart {
-            upload_id,
-            part_size_bytes,
-            checksum_algorithm,
+    assert_eq!(upload_mode_name(begin.mode), expected.mode);
+    assert_eq!(
+        serde_json::to_value(&begin).expect("session JSON")["status"],
+        expected.begin_status
+    );
+    let upload_id = begin.upload_id;
+    let (part_size_bytes, checksum_algorithm) = match begin.status {
+        UploadSessionStatus::Open {
+            part_size_bytes: Some(part_size_bytes),
+            checksum_algorithm: Some(checksum_algorithm),
             ..
-        } => (upload_id, part_size_bytes, checksum_algorithm),
+        } => (part_size_bytes, checksum_algorithm),
         other => panic!("expected direct_multipart, found {other:?}"),
     };
     assert_eq!(part_size_bytes, request.part_size_bytes);
@@ -488,7 +498,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     }
     completed_parts.sort_by_key(|part| part.part_number);
     let whole_checksum = Checksum::compute(checksum_algorithm, &payload);
-    let completion_request = CompleteUploadRequest::DirectMultipart {
+    let completion_request = CompleteUploadBody::DirectMultipart {
         content: UploadContentClaim {
             size_bytes: payload.len() as u64,
             checksum: whole_checksum.clone(),
@@ -555,6 +565,7 @@ struct AbortRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AbortExpected {
+    begin_status: String,
     mode: String,
     status: String,
 }
@@ -569,18 +580,22 @@ async fn run_abort(harness: &Harness, case: &Case) {
         .expect("create abort namespace");
     let begin = harness
         .client
-        .create_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin abortable upload");
-    assert_eq!(upload_mode_name(begin.mode()), expected.mode);
+    assert_eq!(upload_mode_name(begin.mode), expected.mode);
+    assert_eq!(
+        serde_json::to_value(&begin).expect("session JSON")["status"],
+        expected.begin_status
+    );
     let first = harness
         .client
-        .abort_upload(&namespace, begin.upload_id())
+        .abort_upload(&namespace, &begin.upload_id)
         .await
         .expect("abort upload");
     let replayed = harness
         .client
-        .abort_upload(&namespace, begin.upload_id())
+        .abort_upload(&namespace, &begin.upload_id)
         .await
         .expect("replay abort");
     assert_eq!(upload_status_name(&first.status), expected.status);
@@ -1655,12 +1670,12 @@ async fn stage_content(
 ) -> (ContentRef, Vec<ContentToken>) {
     let begin = harness
         .client
-        .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
+        .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin service-proxied upload");
-    let BeginUploadResponse::ServiceProxied { upload_id, .. } = begin else {
-        panic!("expected service_proxied, found {begin:?}");
-    };
+    assert_eq!(begin.mode, UploadMode::ServiceProxied);
+    assert!(matches!(begin.status, UploadSessionStatus::Open { .. }));
+    let upload_id = begin.upload_id;
     harness
         .client
         .put_upload_content(namespace_id, &upload_id, bytes)
@@ -1671,7 +1686,7 @@ async fn stage_content(
         .complete_upload(
             namespace_id,
             &upload_id,
-            &CompleteUploadRequest::ServiceProxied {},
+            &CompleteUploadBody::ServiceProxied {},
         )
         .await
         .expect("complete service-proxied upload");

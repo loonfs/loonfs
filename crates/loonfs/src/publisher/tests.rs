@@ -1780,16 +1780,19 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         .await
         .expect("begin upload");
     let staged = writer
-        .put_upload_content(&namespace_id, upload.upload_id(), b"hello")
+        .put_upload_content(&namespace_id, &upload.upload_id, b"hello")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&shared, &namespace_id)
         .await
         .expect("load namespace catalog");
-    let prepared_content =
-        loonfs_core::content::prepare_existing_content_ref(&shared, &catalog, staged.content_ref)
-            .await
-            .expect("prepare existing content");
+    let prepared_content = loonfs_core::content::prepare_existing_content_ref(
+        &shared,
+        &catalog,
+        staged.content_ref().expect("staged content").clone(),
+    )
+    .await
+    .expect("prepare existing content");
     let registry = writer.publisher();
 
     // Hold the cold publication in flight so both concurrent submissions are

@@ -9,16 +9,12 @@ impl Client {
     pub async fn create_upload(
         &self,
         namespace_id: &NamespaceId,
-        request: &BeginUploadRequest,
-    ) -> Result<BeginUploadResponse> {
+        request: &CreateUploadBody,
+    ) -> Result<UploadSession> {
         let url = format!("{}/v0/namespaces/{namespace_id}/uploads", self.base_url);
         // Do not retry automatically because each request creates a session.
-        self.request_json::<_, BeginUploadResponse>(
-            self.post(&url),
-            Some(request),
-            SendPolicy::Once,
-        )
-        .await
+        self.request_json::<_, UploadSession>(self.post(&url), Some(request), SendPolicy::Once)
+            .await
     }
 
     /// Starts a direct upload of bytes the caller already has.
@@ -28,8 +24,8 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         size_bytes: Option<u64>,
-    ) -> Result<BeginUploadResponse> {
-        self.create_upload(namespace_id, &BeginUploadRequest::DirectPut { size_bytes })
+    ) -> Result<UploadSession> {
+        self.create_upload(namespace_id, &CreateUploadBody::DirectPut { size_bytes })
             .await
     }
 
@@ -42,10 +38,10 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         options: DirectMultipartUploadOptions,
-    ) -> Result<BeginUploadResponse> {
+    ) -> Result<UploadSession> {
         self.create_upload(
             namespace_id,
-            &BeginUploadRequest::DirectMultipart {
+            &CreateUploadBody::DirectMultipart {
                 part_size_bytes: options.part_size_bytes,
             },
         )
@@ -163,7 +159,7 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         bytes: &[u8],
-    ) -> Result<UploadContentResponse> {
+    ) -> Result<UploadSession> {
         let request = self.put_upload_content_request(namespace_id, upload_id);
         // Proxied uploads are the request most likely to hit the server's
         // concurrency cap; staging the same bytes again is idempotent.
@@ -194,7 +190,7 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         source: PayloadSource,
-    ) -> Result<UploadContentResponse> {
+    ) -> Result<UploadSession> {
         let request = self.put_upload_content_request(namespace_id, upload_id);
         let (stream, size_bytes) = source.into_stream();
         let response = self
@@ -260,7 +256,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-        request: &CompleteUploadRequest,
+        request: &CompleteUploadBody,
     ) -> Result<UploadSession> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",

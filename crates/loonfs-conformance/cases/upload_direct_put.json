@@ -12,6 +12,7 @@
     "mode": "direct_put",
     "size_bytes": 26,
     "checksum_algorithm": "sha256",
-    "committed_seq": 1
+    "committed_seq": 1,
+    "begin_status": "open"
   }
 }

@@ -746,7 +746,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .create_upload(&namespace_id, &BeginUploadRequest::ServiceProxied {})
+                .create_upload(&namespace_id, &CreateUploadBody::ServiceProxied {})
                 .await,
             &transport,
         );
@@ -783,10 +783,17 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
             .expect("valid upload id");
-        let response = UploadContentResponse {
+        let response = UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
-            content_ref: test_content_ref(b"content"),
+            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Open {
+                expires_at_ms: 1000,
+                checksum_algorithm: None,
+                part_size_bytes: None,
+                access: None,
+                content_ref: Some(test_content_ref(b"content")),
+            },
         };
         let transport = crate::transport::test_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),
@@ -826,7 +833,7 @@ mod tests {
             .complete_upload(
                 &namespace_id,
                 &upload_id,
-                &CompleteUploadRequest::ServiceProxied {},
+                &CompleteUploadBody::ServiceProxied {},
             )
             .await
             .expect("completed-session replay should retry");
@@ -844,6 +851,10 @@ mod tests {
                 "open",
                 UploadSessionStatus::Open {
                     expires_at_ms: 1_000,
+                    checksum_algorithm: None,
+                    part_size_bytes: None,
+                    access: None,
+                    content_ref: None,
                 },
             ),
             (

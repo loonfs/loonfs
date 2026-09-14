@@ -193,32 +193,52 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
 }
 
 fn create_direct_put_upload(checksum_algorithm: ChecksumAlgorithm) -> Outcome {
-    json(&BeginUploadResponse::DirectPut {
+    json(&UploadSession {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
-        checksum_algorithm,
-        access: ObjectTransferAccess::PresignedUrl {
-            method: "PUT".to_owned(),
-            url: "http://object.invalid/content".to_owned(),
-            headers: std::collections::BTreeMap::new(),
-            expires_at_ms: u64::MAX,
+        mode: UploadMode::DirectPut,
+        status: UploadSessionStatus::Open {
+            expires_at_ms: 1000,
+            checksum_algorithm: Some(checksum_algorithm),
+            part_size_bytes: None,
+            content_ref: None,
+            access: Some(ObjectTransferAccess::PresignedUrl {
+                method: "PUT".to_owned(),
+                url: "http://object.invalid/content".to_owned(),
+                headers: std::collections::BTreeMap::new(),
+                expires_at_ms: u64::MAX,
+            }),
         },
     })
 }
 
 fn begin_multipart() -> Outcome {
-    json(&BeginUploadResponse::DirectMultipart {
+    json(&UploadSession {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
-        part_size_bytes: TEST_PART_BYTES,
-        checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
+        mode: UploadMode::DirectMultipart,
+        status: UploadSessionStatus::Open {
+            expires_at_ms: 1000,
+            checksum_algorithm: Some(ChecksumAlgorithm::Crc64nvme),
+            part_size_bytes: Some(TEST_PART_BYTES),
+            access: None,
+            content_ref: None,
+        },
     })
 }
 
 fn begin_proxied() -> Outcome {
-    json(&BeginUploadResponse::ServiceProxied {
+    json(&UploadSession {
         namespace_id: namespace_id(),
         upload_id: upload_id(),
+        mode: UploadMode::ServiceProxied,
+        status: UploadSessionStatus::Open {
+            expires_at_ms: 1000,
+            checksum_algorithm: None,
+            part_size_bytes: None,
+            access: None,
+            content_ref: None,
+        },
     })
 }
 
@@ -560,10 +580,17 @@ async fn a_proxied_put_streams_its_body() {
     let _transport = test_transport::script(vec![
         capabilities(false),
         begin_proxied(),
-        json(&UploadContentResponse {
+        json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            content_ref: uploaded.clone(),
+            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Open {
+                expires_at_ms: 1000,
+                checksum_algorithm: None,
+                part_size_bytes: None,
+                access: None,
+                content_ref: Some(uploaded.clone()),
+            },
         }),
         completed(uploaded),
         commit_landed(),
@@ -601,10 +628,17 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
             ..Advertised::default()
         }),
         begin_proxied(),
-        json(&UploadContentResponse {
+        json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            content_ref: uploaded.clone(),
+            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Open {
+                expires_at_ms: 1000,
+                checksum_algorithm: None,
+                part_size_bytes: None,
+                access: None,
+                content_ref: Some(uploaded.clone()),
+            },
         }),
         completed(uploaded),
         commit_landed(),
@@ -985,10 +1019,17 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
     let transport = test_transport::script(vec![
         capabilities(false),
         begin_proxied(),
-        json(&UploadContentResponse {
+        json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            content_ref: uploaded.clone(),
+            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Open {
+                expires_at_ms: 1000,
+                checksum_algorithm: None,
+                part_size_bytes: None,
+                access: None,
+                content_ref: Some(uploaded.clone()),
+            },
         }),
         json(&UploadSession {
             namespace_id: namespace_id(),
