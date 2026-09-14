@@ -76,8 +76,8 @@ async fn a_capability_failure_is_not_reported_as_no_direct_download() {
     assert_eq!(transport.attempts(), 1);
 }
 
-fn grant(content_ref: ContentRef, url: &str) -> BeginDownloadResponse {
-    BeginDownloadResponse {
+fn grant(content_ref: ContentRef, url: &str) -> CreateDownloadResponse {
+    CreateDownloadResponse {
         namespace_id: NamespaceId::parse("demo").expect("namespace id"),
         path: AbsolutePath::parse("/big.bin").expect("absolute path"),
         revision_no: RevisionNo(1),

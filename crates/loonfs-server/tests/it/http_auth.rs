@@ -7,7 +7,7 @@ use crate::common::start_server;
 use loonfs_api::ContentId;
 use loonfs_api::{
     v0::{BeginUploadRequest, ContentToken},
-    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
+    AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation,
 };
 use loonfs_client::NamespacePath;
@@ -192,7 +192,7 @@ async fn path_put_with_valid_content_token_succeeds() {
         }],
     };
     let response = send_commit(&harness.server_url, &namespace, &request).expect("valid token put");
-    let response: CommitResponse =
+    let response: Commit =
         serde_json::from_reader(response.into_reader()).expect("decode operation response");
     assert_eq!(response.committed_seq, ChangeSeq(1));
 
@@ -250,7 +250,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
         )
     };
     let original = send(&request);
-    serde_json::from_slice::<CommitResponse>(&original).expect("decode operation response");
+    serde_json::from_slice::<Commit>(&original).expect("decode operation response");
 
     request.content_tokens.clear();
     assert_eq!(send(&request), original);
@@ -367,7 +367,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     };
     let response =
         send_commit(&harness.server_url, &namespace, &request).expect("covered ref is prepared");
-    let response: CommitResponse =
+    let response: Commit =
         serde_json::from_reader(response.into_reader()).expect("decode operation response");
     assert_eq!(response.committed_seq, ChangeSeq(1));
 
@@ -434,7 +434,7 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
 
     let response =
         send_commit_json(&harness.server_url, &namespace, &body).expect("bare operation body");
-    let response: CommitResponse =
+    let response: Commit =
         serde_json::from_reader(response.into_reader()).expect("decode response");
     assert_eq!(response.committed_seq, ChangeSeq(1));
     harness

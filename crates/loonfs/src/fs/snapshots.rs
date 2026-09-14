@@ -1,10 +1,11 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    Checkpoint, CheckpointId, CreateSnapshotOptions, DeleteSnapshotResponse, FsReader, FsWriter,
+    Checkpoint, CreateSnapshotOptions, DeleteSnapshotResponse, FsReader, FsWriter,
     ListSnapshotsResponse, NamespaceId, Result, RuntimeError, SnapshotSummary,
 };
 use loonfs_api::PageRequest;
+use loonfs_api::SnapshotId;
 use loonfs_core::CheckpointPageCursor;
 use std::num::NonZeroU32;
 
@@ -143,7 +144,7 @@ impl FsWriter {
             .ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 0)
             .await
         {
-            self.delete_snapshot(namespace_id, &checkpoint.checkpoint_id)
+            self.delete_snapshot(namespace_id, &checkpoint.checkpoint_id.clone().into())
                 .await?;
             return Err(error);
         }
@@ -212,7 +213,7 @@ impl FsWriter {
     pub async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
         requested_expires_at_ms: u64,
         max_lifetime_ms: u64,
     ) -> Result<SnapshotSummary> {
@@ -220,7 +221,11 @@ impl FsWriter {
         let result = self
             .core
             .writer_engine(&self.bits.identity, namespace_id)
-            .extend_snapshot(snapshot_id, requested_expires_at_ms, max_lifetime_ms)
+            .extend_snapshot(
+                &snapshot_id.clone().into(),
+                requested_expires_at_ms,
+                max_lifetime_ms,
+            )
             .await
             .map_err(RuntimeError::from)
             .and_then(|checkpoint| {
@@ -250,13 +255,13 @@ impl FsWriter {
     pub async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
             .writer_engine(&self.bits.identity, namespace_id)
-            .delete_snapshot(snapshot_id)
+            .delete_snapshot(&snapshot_id.clone().into())
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)

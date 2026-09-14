@@ -19,10 +19,10 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &CommitRequest,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         // The request's commit id resolves an ambiguous resend through a durable receipt.
-        self.request_json::<_, ApiCommitResponse>(self.post(&url), Some(request), SendPolicy::Retry)
+        self.request_json::<_, Commit>(self.post(&url), Some(request), SendPolicy::Retry)
             .await
     }
 
@@ -36,7 +36,7 @@ impl Client {
         spec: &NamespacePath,
         bytes: &[u8],
         options: &PutFileOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         let staged = self
             .stage_bytes_as_content_ref(spec.namespace(), bytes)
             .await?;
@@ -58,7 +58,7 @@ impl Client {
         spec: &NamespacePath,
         source: PayloadSource,
         options: &PutFileOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         self.put_file_stream_continuing(spec, source, options, UploadContinuity::default())
             .await
     }
@@ -79,7 +79,7 @@ impl Client {
         options: &PutFileOptions,
         journal: &dyn PutFileJournal,
         resume: Option<&MultipartUploadResume>,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         self.put_file_stream_continuing(
             spec,
             source,
@@ -98,7 +98,7 @@ impl Client {
         source: PayloadSource,
         options: &PutFileOptions,
         continuity: UploadContinuity<'_>,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         let staged = self
             .stage_source_as_content_ref(spec.namespace(), source, continuity)
             .await?;
@@ -143,7 +143,7 @@ impl Client {
         spec: &NamespacePath,
         prepared_content: PreparedContent,
         options: &PutFileOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         self.commit_staged_file(spec, prepared_content, options, None)
             .await
     }
@@ -160,7 +160,7 @@ impl Client {
         content_token: Option<ContentToken>,
         options: &PutFileOptions,
         journal: Option<&dyn PutFileJournal>,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         let staged = PreparedContent {
             content_token,
             content_ref,
@@ -176,7 +176,7 @@ impl Client {
         staged: PreparedContent,
         options: &PutFileOptions,
         journal: Option<&dyn PutFileJournal>,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         let commit_id = commit_id_or_generated(&options.commit);
         let request = CommitRequest {
             preconditions: options.commit.preconditions.clone(),
@@ -207,7 +207,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         self.create_commit(
             spec.namespace(),
             &CommitRequest::single(
@@ -229,7 +229,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         options: &DeleteOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         self.create_commit(
             spec.namespace(),
             &CommitRequest::single(
@@ -253,7 +253,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         self.create_commit(
             spec.namespace(),
             &CommitRequest::single(
@@ -279,7 +279,7 @@ impl Client {
         source_path: &NamespacePath,
         destination_path: &NamespacePath,
         options: &MoveOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         if source_path.namespace() != destination_path.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot move across namespaces: {} -> {}",
@@ -314,7 +314,7 @@ impl Client {
         source_path: &NamespacePath,
         destination_path: &NamespacePath,
         options: &CopyOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         if source_path.namespace() != destination_path.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot copy across namespaces: {} -> {}",
@@ -351,7 +351,7 @@ impl Client {
         deletion_seq: ChangeSeq,
         destination_path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         // An absent destination restores in place: the entry re-binds under
         // the parent and name its deletion recorded.
         self.create_commit(
@@ -377,7 +377,7 @@ impl Client {
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
-    ) -> Result<ApiCommitResponse> {
+    ) -> Result<Commit> {
         self.create_commit(
             spec.namespace(),
             &CommitRequest::single(
@@ -691,7 +691,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let commit_id =
             CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id");
-        let response = ApiCommitResponse {
+        let response = Commit {
             namespace_id: namespace_id.clone(),
             commit_id: commit_id.clone(),
             committed_seq: ChangeSeq(1),

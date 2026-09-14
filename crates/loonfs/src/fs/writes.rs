@@ -6,9 +6,9 @@ use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
-    ChangeSeq, CommitId, CommitOptions, CommitResponse, ContentRef, CopyOptions,
-    CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId, NamespacePublication,
-    PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAttributesOptions,
+    ChangeSeq, Commit, CommitId, CommitOptions, ContentRef, CopyOptions, CreateDirectoryOptions,
+    DeleteOptions, InodeId, MoveOptions, NamespaceId, NamespacePublication, PutFileOptions,
+    RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAttributesOptions,
 };
 use crate::{Result, RuntimeError};
 use loonfs_core::NamespaceWriterEngine;
@@ -79,7 +79,7 @@ impl FsWriter {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
@@ -114,7 +114,7 @@ impl FsWriter {
         absolute_path: &str,
         body: ByteStream,
         options: PutFileOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         let prepared_content = self.prepare_file_stream_inner(namespace_id, body).await?;
         self.put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
@@ -242,7 +242,7 @@ impl FsWriter {
         absolute_path: &str,
         prepared_content: PreparedContent,
         options: PutFileOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record(
@@ -261,7 +261,7 @@ impl FsWriter {
         absolute_path: &str,
         prepared_content: PreparedContent,
         options: PutFileOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         let content_ref = prepared_content.content_ref().clone();
         self.commit_candidate_inner(
             namespace_id,
@@ -309,7 +309,7 @@ impl FsWriter {
         absolute_path: &str,
         content_ref: ContentRef,
         options: PutFileOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record(
@@ -436,7 +436,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
             namespace_id,
@@ -473,7 +473,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
             namespace_id,
@@ -507,7 +507,7 @@ impl FsWriter {
         source_path: &str,
         destination_path: &str,
         options: MoveOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
             namespace_id,
@@ -546,7 +546,7 @@ impl FsWriter {
         source_path: &str,
         destination_path: &str,
         options: CopyOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
             namespace_id,
@@ -584,7 +584,7 @@ impl FsWriter {
         absolute_path: &str,
         source_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
             namespace_id,
@@ -621,7 +621,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: UpdateAttributesOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
             namespace_id,
@@ -658,7 +658,7 @@ impl FsWriter {
         deletion_seq: ChangeSeq,
         destination_path: Option<&str>,
         options: UndeleteOptions,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         // An absent destination restores in place: the entry re-binds under
         // the parent and name its deletion recorded.
@@ -703,7 +703,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(namespace_id, CommitCandidate::new(request))
             .await
@@ -731,7 +731,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         request: CommitRequest,
         prepared_content: Vec<PreparedContent>,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(
             namespace_id,
@@ -762,7 +762,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         candidate: CommitCandidate,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(namespace_id, candidate).await
     }
@@ -771,7 +771,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         candidate: CommitCandidate,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.publisher
             .submit_candidate(namespace_id.clone(), candidate)
             .await
@@ -782,7 +782,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         commit: &CommitOptions,
         operation: FilesystemOperation,
-    ) -> Result<CommitResponse> {
+    ) -> Result<Commit> {
         self.commit_candidate_inner(
             namespace_id,
             CommitCandidate::new(single_operation(commit, operation)),
@@ -792,7 +792,7 @@ impl FsWriter {
 }
 
 pub(crate) struct EnginePublishResult {
-    pub(crate) results: Vec<Result<CommitResponse>>,
+    pub(crate) results: Vec<Result<Commit>>,
     pub(crate) wal_tail_segments: u64,
 }
 
@@ -879,7 +879,7 @@ pub(crate) async fn publish_batch_with_engine(
 }
 
 /// Returns the highest sequence committed by the batch.
-fn highest_committed_seq(results: &[Result<CommitResponse>]) -> Option<ChangeSeq> {
+fn highest_committed_seq(results: &[Result<Commit>]) -> Option<ChangeSeq> {
     results
         .iter()
         .filter_map(|result| result.as_ref().ok())

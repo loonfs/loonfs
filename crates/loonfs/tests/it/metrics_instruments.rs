@@ -273,7 +273,7 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             .expect("create snapshot");
         let _snapshot_view = fs
             .reader
-            .pin_namespace_at_snapshot(&namespace_id, &read_snapshot.checkpoint_id)
+            .pin_namespace_at_snapshot(&namespace_id, &read_snapshot.checkpoint_id.clone().into())
             .await
             .expect("pin snapshot");
         (fs.reader.runtime_cache_stats(), recorder.snapshot())

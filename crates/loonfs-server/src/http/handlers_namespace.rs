@@ -502,7 +502,7 @@ pub(super) async fn list_snapshots(
         description = "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = String, Path, description = "Snapshot id")
+            ("snapshot_id" = loonfs_api::SnapshotId, Path, description = "Snapshot id")
         ),
         request_body = ExtendSnapshotRequest,
         responses(
@@ -522,7 +522,7 @@ pub(super) async fn extend_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
-    let snapshot_id = parse_path_id::<CheckpointId>("snapshot_id", &snapshot_id)?;
+    let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
     let now_ms = super::handlers_uploads::current_unix_ms()?;
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let response = state
@@ -550,7 +550,7 @@ pub(super) async fn extend_snapshot(
         description = "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = String, Path, description = "Snapshot id")
+            ("snapshot_id" = loonfs_api::SnapshotId, Path, description = "Snapshot id")
         ),
         responses(
             (status = 200, description = "Snapshot record deleted", body = DeleteSnapshotResponse),
@@ -567,7 +567,7 @@ pub(super) async fn delete_snapshot(
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<DeleteSnapshotResponse>, ApiResponseError> {
-    let snapshot_id = parse_path_id::<CheckpointId>("snapshot_id", &snapshot_id)?;
+    let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
     let response = state
         .writer
         .delete_snapshot(&namespace_id, &snapshot_id)

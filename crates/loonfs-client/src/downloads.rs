@@ -1,7 +1,7 @@
 //! Direct-download negotiation, grants, and verified response streams.
 
 use super::*;
-use crate::transport::{QueryBuilder, SendPolicy};
+use crate::transport::SendPolicy;
 
 /// Selects a retained revision or snapshot for a download. Set at most one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -9,7 +9,7 @@ pub struct DownloadOptions {
     /// Download one retained revision instead of the current file.
     pub revision_no: Option<RevisionNo>,
     /// Download the file revision captured by this snapshot.
-    pub snapshot_id: Option<CheckpointId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// A direct download returned in verified, bounded chunks.
@@ -127,25 +127,20 @@ impl Client {
         &self,
         spec: &NamespacePath,
         options: &DownloadOptions,
-    ) -> Result<BeginDownloadResponse> {
-        let mut query = QueryBuilder::new(format!(
+    ) -> Result<CreateDownloadResponse> {
+        let url = format!(
             "{}/v0/namespaces/{}/filesystem/downloads",
             self.base_url,
             spec.namespace().as_str()
-        ));
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        let url = query.finish();
-        let request = match options.revision_no {
-            Some(revision_no) => {
-                BeginDownloadRequest::for_revision(spec.absolute_path().clone(), revision_no)
-            }
-            None => BeginDownloadRequest::for_path(spec.absolute_path().clone()),
+        );
+        let request = CreateDownloadRequest {
+            path: spec.absolute_path().clone(),
+            revision_no: options.revision_no,
+            snapshot_id: options.snapshot_id.clone(),
         };
         // A grant creates nothing and names nothing new, so asking twice
         // costs two URLs and changes no state: this one may be resent.
-        self.request_json::<_, BeginDownloadResponse>(
+        self.request_json::<_, CreateDownloadResponse>(
             self.post(&url),
             Some(&request),
             SendPolicy::Retry,
@@ -159,15 +154,15 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
-    ) -> Result<BeginDownloadByInodeResponse> {
+    ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
             self.base_url
         );
-        self.request_json::<_, BeginDownloadByInodeResponse>(
+        self.request_json::<(), CreateDownloadByInodeResponse>(
             self.post(&url),
-            Some(&BeginDownloadByInodeRequest {}),
+            None,
             SendPolicy::Retry,
         )
         .await
@@ -176,7 +171,7 @@ impl Client {
     /// Opens a download grant from the start of the object.
     pub async fn open_direct_download(
         &self,
-        download: &BeginDownloadResponse,
+        download: &CreateDownloadResponse,
     ) -> Result<DirectDownloadStream> {
         self.open_direct_download_at(download, 0).await
     }
@@ -189,7 +184,7 @@ impl Client {
     /// final checksum covers the complete object.
     pub async fn open_direct_download_at(
         &self,
-        download: &BeginDownloadResponse,
+        download: &CreateDownloadResponse,
         start_offset: u64,
     ) -> Result<DirectDownloadStream> {
         self.open_direct_download_target(
@@ -204,7 +199,7 @@ impl Client {
     /// Opens an inode download from the start of the object.
     pub async fn open_direct_download_by_inode(
         &self,
-        download: &BeginDownloadByInodeResponse,
+        download: &CreateDownloadByInodeResponse,
     ) -> Result<DirectDownloadStream> {
         self.open_direct_download_by_inode_at(download, 0).await
     }
@@ -212,7 +207,7 @@ impl Client {
     /// Opens an inode download from `start_offset`.
     pub async fn open_direct_download_by_inode_at(
         &self,
-        download: &BeginDownloadByInodeResponse,
+        download: &CreateDownloadByInodeResponse,
         start_offset: u64,
     ) -> Result<DirectDownloadStream> {
         self.open_direct_download_target(
@@ -292,7 +287,7 @@ impl Client {
     /// temporary and install it on success.
     pub async fn download_via_presigned_url<W>(
         &self,
-        download: &BeginDownloadResponse,
+        download: &CreateDownloadResponse,
         sink: &mut W,
     ) -> Result<u64>
     where

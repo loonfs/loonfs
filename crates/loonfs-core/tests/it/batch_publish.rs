@@ -33,7 +33,7 @@ async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
     expected_inode_id: Option<InodeId>,
     context: &MutationContext,
     commit_id: &str,
-) -> Result<loonfs_api::CommitResponse, CoreError> {
+) -> Result<loonfs_api::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
@@ -279,6 +279,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         .await
         .expect("changes");
     assert_eq!(changes.changes.len(), 2);
+    assert_eq!(changes.changes[0].namespace_id, namespace_id);
     assert_eq!(
         changes.changes[0].commit_id,
         CommitId::parse("req-batch-a").expect("valid commit id")
@@ -287,9 +288,16 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         changes.changes[1].commit_id,
         CommitId::parse("req-batch-b").expect("valid commit id")
     );
-    assert_eq!(changes.changes[0].events.len(), 1);
+    assert_eq!(
+        changes.changes[0]
+            .events
+            .as_ref()
+            .expect("change feed events")
+            .len(),
+        1
+    );
     assert!(matches!(
-        &changes.changes[0].events[0],
+        &changes.changes[0].events.as_ref().expect("change feed events")[0],
         FilesystemChange::DirectoryCreated {
             parent_inode_id: InodeId(1),
             display_name,
@@ -1466,7 +1474,7 @@ fn scoped_directory(
 }
 
 fn precondition_details(
-    result: &Result<loonfs_api::CommitResponse, CoreError>,
+    result: &Result<loonfs_api::Commit, CoreError>,
     code: ErrorCode,
     index: u32,
 ) -> loonfs_api::ErrorDetails {

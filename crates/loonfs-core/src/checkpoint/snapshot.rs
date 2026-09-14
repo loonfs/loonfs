@@ -114,7 +114,7 @@ pub(crate) async fn delete_snapshot<S: ObjectStore + ?Sized>(
     .await?;
     Ok(DeleteSnapshotResponse {
         namespace_id: namespace_id.clone(),
-        snapshot_id: checkpoint_id.clone(),
+        snapshot_id: checkpoint_id.clone().into(),
     })
 }
 

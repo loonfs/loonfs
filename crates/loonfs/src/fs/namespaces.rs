@@ -77,7 +77,10 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(source_namespace_id)
-            .fork_namespace(new_namespace_id, options.snapshot_id.as_ref())
+            .fork_namespace(
+                new_namespace_id,
+                options.snapshot_id.map(Into::into).as_ref(),
+            )
             .await
             .map_err(RuntimeError::from);
         if should_invalidate_after_result(&result) {

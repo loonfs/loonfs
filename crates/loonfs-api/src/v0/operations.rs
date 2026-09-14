@@ -1,6 +1,7 @@
 //! Operation requests and responses for the v0 HTTP API.
 
 use super::ContentToken;
+use crate::SnapshotId;
 use crate::{
     AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, BindingGeneration, ChangeSeq,
     CheckpointId, CommitId, ContentRef, DisplayName, InodeId, ManifestNo, NamespaceId, RevisionNo,
@@ -173,7 +174,7 @@ pub struct ForkNamespaceRequest {
     /// Fork from this live snapshot instead of the current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub snapshot_id: Option<CheckpointId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// Current state for one namespace.
@@ -842,7 +843,7 @@ pub struct Checkpoint {
 #[cfg_attr(feature = "openapi", schema(as = Snapshot))]
 pub struct SnapshotSummary {
     /// Snapshot id.
-    pub snapshot_id: CheckpointId,
+    pub snapshot_id: SnapshotId,
     /// Namespace whose state the snapshot captured.
     pub namespace_id: NamespaceId,
     /// Snapshot label.
@@ -865,7 +866,7 @@ impl SnapshotSummary {
             return None;
         };
         Some(Self {
-            snapshot_id: checkpoint.checkpoint_id,
+            snapshot_id: checkpoint.checkpoint_id.into(),
             namespace_id: checkpoint.namespace_id,
             name,
             head_seq: checkpoint.checkpoint_seq,
@@ -910,7 +911,7 @@ pub struct DeleteSnapshotResponse {
     /// Namespace the snapshot belonged to.
     pub namespace_id: NamespaceId,
     /// Deleted snapshot record.
-    pub snapshot_id: CheckpointId,
+    pub snapshot_id: SnapshotId,
 }
 
 /// How one WAL flush satisfied its goal.

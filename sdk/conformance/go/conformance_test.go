@@ -723,7 +723,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	stat := statPath(t, h.client, request.NamespaceID, request.Path)
 	file := requireFileProjection(t, stat)
-	grant, err := h.client.Files.CreateDownload(context.Background(), &loonfs.BeginDownloadRequest{
+	grant, err := h.client.Files.CreateDownload(context.Background(), &loonfs.CreateDownloadRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        loonfs.AbsolutePath(request.Path),
 	})
@@ -1708,7 +1708,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	})
 	assertNotFoundError(t, err, expected.SnapshotNotFound)
 
-	unknownSnapshotID := loonfs.CheckpointID(request.UnknownSnapshotID)
+	unknownSnapshotID := loonfs.SnapshotID(request.UnknownSnapshotID)
 	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
@@ -2273,7 +2273,7 @@ func proxyCommitCompletedFile(
 	actor loonfs.ActorID,
 	contentRef *loonfs.ContentRef,
 	contentToken *loonfs.ContentToken,
-) *loonfs.CommitResponse {
+) *loonfs.Commit {
 	t.Helper()
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	contentTokens := []*loonfs.ContentToken(nil)
@@ -2302,9 +2302,9 @@ func proxyCreateCommit(
 	httpClient *http.Client,
 	namespaceAliasBaseURL string,
 	request *loonfs.CommitRequest,
-) *loonfs.CommitResponse {
+) *loonfs.Commit {
 	t.Helper()
-	return proxyJSONRequest[loonfs.CommitResponse](
+	return proxyJSONRequest[loonfs.Commit](
 		t,
 		httpClient,
 		http.MethodPost,
@@ -2714,7 +2714,7 @@ func commitCompletedFile(
 	actor loonfs.ActorID,
 	contentRef *loonfs.ContentRef,
 	contentToken *loonfs.ContentToken,
-) *loonfs.CommitResponse {
+) *loonfs.Commit {
 	t.Helper()
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	return applyCommit(t, sdk, &loonfs.CommitRequest{
@@ -2734,7 +2734,7 @@ func commitCompletedFile(
 	})
 }
 
-func applyCommit(t *testing.T, sdk *server.Client, request *loonfs.CommitRequest) *loonfs.CommitResponse {
+func applyCommit(t *testing.T, sdk *server.Client, request *loonfs.CommitRequest) *loonfs.Commit {
 	t.Helper()
 	response, err := sdk.Commits.Create(context.Background(), request)
 	if err != nil {

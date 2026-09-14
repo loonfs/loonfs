@@ -42,7 +42,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .expect("create first snapshot");
     let first_view = runtime
         .reader
-        .pin_namespace_at_snapshot(&namespace_id, &first_snapshot.checkpoint_id)
+        .pin_namespace_at_snapshot(&namespace_id, &first_snapshot.checkpoint_id.clone().into())
         .await
         .expect("pin first snapshot");
     let limit = PaginationPolicy::default()
@@ -65,7 +65,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     .expect("decode cursor");
     assert_eq!(
         cursor.snapshot_id.as_ref(),
-        Some(&first_snapshot.checkpoint_id)
+        Some(&first_snapshot.checkpoint_id.clone().into())
     );
 
     runtime
@@ -90,7 +90,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .expect("create second snapshot");
     let second_view = runtime
         .reader
-        .pin_namespace_at_snapshot(&namespace_id, &second_snapshot.checkpoint_id)
+        .pin_namespace_at_snapshot(&namespace_id, &second_snapshot.checkpoint_id.clone().into())
         .await
         .expect("pin second snapshot");
 
@@ -457,7 +457,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .await
         .expect("create snapshot");
     let snapshot_options = loonfs::StatPathOptions {
-        snapshot_id: Some(snapshot.checkpoint_id.clone()),
+        snapshot_id: Some(snapshot.checkpoint_id.clone().into()),
         ..Default::default()
     };
     assert_core_error_kind(
@@ -482,7 +482,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .expect("replace captured file");
     let pinned = runtime
         .reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id.clone().into())
         .await
         .expect("pin live snapshot");
     assert_core_error_kind(
@@ -513,13 +513,13 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
 
     runtime
         .writer
-        .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .delete_snapshot(&namespace_id, &snapshot.checkpoint_id.clone().into())
         .await
         .expect("release snapshot");
     assert_core_error_kind(
         runtime
             .reader
-            .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+            .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id.clone().into())
             .await,
         ErrorCode::SnapshotNotFound,
     );

@@ -556,7 +556,7 @@ fn try_admit_prepared_candidate(
     Ok(receiver)
 }
 
-async fn recv_commit(receiver: oneshot::Receiver<CommitResult>, label: &str) -> ApiCommitResponse {
+async fn recv_commit(receiver: oneshot::Receiver<CommitResult>, label: &str) -> Commit {
     receiver
         .await
         .unwrap_or_else(|err| panic!("{label} receiver dropped: {err}"))

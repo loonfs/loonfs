@@ -279,7 +279,7 @@ async fn a_direct_put_uses_the_checksum_algorithm_returned_at_begin() {
 }
 
 fn commit_landed() -> Outcome {
-    json(&ApiCommitResponse {
+    json(&Commit {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id"),
         committed_seq: ChangeSeq(1),

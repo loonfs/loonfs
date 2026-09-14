@@ -8,8 +8,8 @@ use super::handlers_uploads::{
     content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
 };
 use super::query_params::{
-    decode_optional_cursor, parse_include_attributes, parse_path_id, parse_public_ordinal,
-    parse_revision_no, required_query_param, resolve_page_limit,
+    decode_optional_cursor, parse_include_attributes, parse_public_ordinal, parse_revision_no,
+    required_query_param, resolve_page_limit,
 };
 #[cfg(feature = "openapi")]
 pub(super) use super::query_params::{
@@ -21,8 +21,8 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
-    payload_class, CheckpointId, ErrorCode, FsReadSnapshot, FsReader, ListChangesOptions,
-    ListPathEntriesOptions, NamespaceId, StatPathOptions, TraceMode, TraceStoreKind,
+    payload_class, ErrorCode, FsReadSnapshot, FsReader, ListChangesOptions, ListPathEntriesOptions,
+    NamespaceId, SnapshotId, StatPathOptions, TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -30,7 +30,7 @@ use loonfs_api::ApiError;
 // tokens, which this handler resolves and strips; the operations inside them
 // are one type. The alias keeps the two request names readable side by side.
 use loonfs_api::{
-    v0::{CommitResponse as ApiCommitResponse, ListChangesResponse},
+    v0::{Commit, ListChangesResponse},
     CommitRequest as ApiCommitRequest, FilesystemOperation, ListFileRevisionsResponse,
     ListTrashResponse, PageRequest, RevisionNo,
 };
@@ -86,12 +86,6 @@ pub(super) struct ChangesQuery {
     after_seq: Option<String>,
     limit: Option<String>,
     snapshot_id: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct SnapshotQuery {
-    pub(super) snapshot_id: Option<String>,
 }
 
 pub(super) enum ReadTarget {
@@ -200,7 +194,7 @@ impl ReadTarget {
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor"),
             ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Use the directory state captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the directory state captured by this snapshot")
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_api::ListPathEntriesResponse),
@@ -254,7 +248,7 @@ pub(super) async fn list_path_entries(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
             ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Use the path state captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the path state captured by this snapshot")
         ),
         responses(
             (status = 200, description = "Authoritative path entry", body = loonfs_api::PathEntry),
@@ -302,7 +296,7 @@ pub(super) async fn get_path_entry(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
             ("revision_no" = Option<RevisionNo>, Query, description = "Optional prior revision number; cannot be combined with snapshot_id"),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "Use the file revision captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the file revision captured by this snapshot")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
@@ -467,7 +461,7 @@ pub(super) async fn list_file_revisions(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = ApiCommitRequest,
         responses(
-            (status = 200, description = "Commit applied", body = ApiCommitResponse),
+            (status = 200, description = "Commit applied", body = Commit),
             (status = 400, description = "Invalid commit", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
@@ -482,7 +476,7 @@ pub(super) async fn create_commit(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ApiCommitRequest>,
-) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
+) -> Result<Json<Commit>, ApiResponseError> {
     let ApiCommitRequest {
         preconditions,
         commit_id,
@@ -579,7 +573,7 @@ pub(super) async fn create_commit(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("after_seq" = loonfs_api::ChangeSeq, Query, description = "Return committed changes after this sequence"),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("snapshot_id" = Option<loonfs_api::CheckpointId>, Query, description = "End the feed at this snapshot's captured sequence")
+            ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "End the feed at this snapshot's captured sequence")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
@@ -658,7 +652,7 @@ pub(super) async fn list_changes(
 pub(super) async fn pin_requested_snapshot(
     state: &AppState,
     namespace_id: &loonfs_api::NamespaceId,
-    snapshot_id: Option<CheckpointId>,
+    snapshot_id: Option<SnapshotId>,
 ) -> Result<ReadTarget, ApiResponseError> {
     let Some(snapshot_id) = snapshot_id else {
         return Ok(ReadTarget::Live {
@@ -678,7 +672,7 @@ pub(super) async fn pin_requested_snapshot(
 }
 
 pub(super) fn reject_snapshot_with_revision(
-    snapshot_id: Option<&CheckpointId>,
+    snapshot_id: Option<&SnapshotId>,
     revision_no: Option<RevisionNo>,
 ) -> Result<(), ApiResponseError> {
     if snapshot_id.is_some() && revision_no.is_some() {
@@ -693,10 +687,10 @@ pub(super) fn reject_snapshot_with_revision(
 
 pub(super) fn parse_optional_snapshot_id(
     snapshot_id: Option<String>,
-) -> Result<Option<CheckpointId>, ApiResponseError> {
+) -> Result<Option<SnapshotId>, ApiResponseError> {
     snapshot_id
         .as_deref()
-        .map(|value| parse_path_id("snapshot_id", value))
+        .map(super::query_params::parse_snapshot_id)
         .transpose()
 }
 

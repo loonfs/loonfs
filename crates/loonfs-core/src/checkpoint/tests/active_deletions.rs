@@ -208,7 +208,7 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
     commit_id: &str,
     operation: FilesystemOperation,
     context: &MutationContext,
-) -> loonfs_api::CommitResponse {
+) -> loonfs_api::Commit {
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
@@ -239,7 +239,7 @@ async fn undelete<S: ObjectStore + ?Sized>(
     deletion_seq: ChangeSeq,
     absolute_path: &str,
     context: &MutationContext,
-) -> loonfs_api::CommitResponse {
+) -> loonfs_api::Commit {
     submit_operation_for_test(
         store,
         namespace_id,

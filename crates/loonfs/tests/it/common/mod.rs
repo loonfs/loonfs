@@ -8,7 +8,7 @@ use loonfs::publish::{CommitCandidate, CommitRequest};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     AdvanceRetentionResponse, BeginUploadResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm,
-    CommitResponse, ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    Commit, ContentRef, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes,
     FsMaintenance, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, ListChangesResponse,
     MetadataMaintenanceResponse, MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest,
@@ -218,7 +218,7 @@ impl TestRuntime {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> loonfs::Result<CommitResponse> {
+    ) -> loonfs::Result<Commit> {
         self.writer
             .put_file_bytes(namespace_id, absolute_path, bytes, options)
             .await
@@ -230,7 +230,7 @@ impl TestRuntime {
         absolute_path: &str,
         content_ref: ContentRef,
         options: PutFileOptions,
-    ) -> loonfs::Result<CommitResponse> {
+    ) -> loonfs::Result<Commit> {
         self.writer
             .put_file_content_ref(namespace_id, absolute_path, content_ref, options)
             .await
@@ -396,33 +396,33 @@ pub(crate) trait RuntimeTestExt {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> loonfs::Result<CommitResponse>;
+    ) -> loonfs::Result<Commit>;
     fn create_directory_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
-    ) -> loonfs::Result<CommitResponse>;
+    ) -> loonfs::Result<Commit>;
     fn delete_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
-    ) -> loonfs::Result<CommitResponse>;
+    ) -> loonfs::Result<Commit>;
     fn move_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         source_path: &str,
         destination_path: &str,
         options: MoveOptions,
-    ) -> loonfs::Result<CommitResponse>;
+    ) -> loonfs::Result<Commit>;
     fn copy_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         source_path: &str,
         destination_path: &str,
         options: CopyOptions,
-    ) -> loonfs::Result<CommitResponse>;
+    ) -> loonfs::Result<Commit>;
     fn begin_upload_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -442,12 +442,12 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
-    ) -> loonfs::Result<CommitResponse>;
+    ) -> loonfs::Result<Commit>;
     fn mutate_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
-    ) -> Vec<loonfs::Result<CommitResponse>>;
+    ) -> Vec<loonfs::Result<Commit>>;
     fn list_changes_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -537,7 +537,7 @@ impl RuntimeTestExt for TestRuntime {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> loonfs::Result<CommitResponse> {
+    ) -> loonfs::Result<Commit> {
         block_on(
             self.writer
                 .put_file_bytes(namespace_id, absolute_path, bytes, options),
@@ -549,7 +549,7 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
-    ) -> loonfs::Result<CommitResponse> {
+    ) -> loonfs::Result<Commit> {
         block_on(
             self.writer
                 .create_directory(namespace_id, absolute_path, options),
@@ -561,7 +561,7 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
-    ) -> loonfs::Result<CommitResponse> {
+    ) -> loonfs::Result<Commit> {
         block_on(
             self.writer
                 .delete_path(namespace_id, absolute_path, options),
@@ -574,7 +574,7 @@ impl RuntimeTestExt for TestRuntime {
         source_path: &str,
         destination_path: &str,
         options: MoveOptions,
-    ) -> loonfs::Result<CommitResponse> {
+    ) -> loonfs::Result<Commit> {
         block_on(
             self.writer
                 .move_path(namespace_id, source_path, destination_path, options),
@@ -587,7 +587,7 @@ impl RuntimeTestExt for TestRuntime {
         source_path: &str,
         destination_path: &str,
         options: CopyOptions,
-    ) -> loonfs::Result<CommitResponse> {
+    ) -> loonfs::Result<Commit> {
         block_on(
             self.writer
                 .copy_path(namespace_id, source_path, destination_path, options),
@@ -630,7 +630,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
-    ) -> loonfs::Result<CommitResponse> {
+    ) -> loonfs::Result<Commit> {
         block_on(self.writer.create_commit(namespace_id, request))
     }
 
@@ -638,7 +638,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
-    ) -> Vec<loonfs::Result<CommitResponse>> {
+    ) -> Vec<loonfs::Result<Commit>> {
         let publisher = self.writer.publisher();
         block_on(async move {
             // Admitted in one pass, before the publisher's worker can take

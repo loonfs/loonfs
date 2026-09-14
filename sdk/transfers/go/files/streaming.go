@@ -61,7 +61,7 @@ func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*FileDow
 	}
 	var result *FileDownloadStream
 	if capabilities != nil && capabilities.Features[featureDirectGet] {
-		grant, err := c.CreateDownload(ctx, &loonfs.BeginDownloadRequest{NamespaceID: string(in.NamespaceID), Path: in.Path, RevisionNo: in.RevisionNo})
+		grant, err := c.CreateDownload(ctx, &loonfs.CreateDownloadRequest{NamespaceID: string(in.NamespaceID), Path: in.Path, RevisionNo: in.RevisionNo})
 		if err != nil {
 			return nil, err
 		}

@@ -15,11 +15,11 @@ use loonfs_api::{
         ListSnapshotsResponse, SnapshotSummary, StoreProbeRequest, StoreProbeResponse,
         UploadSession,
     },
-    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, CommitResponse,
-    ContentRef, CreateCheckpointRequest, DeleteCheckpointResponse, DeleteNamespaceResponse,
-    GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Commit, ContentRef,
+    CreateCheckpointRequest, DeleteCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
+    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceId, PathEntry, RevisionNo,
-    RunMaintenanceRequest, RunMaintenanceResponse, UploadId,
+    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotId, UploadId,
 };
 use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, DownloadOptions,
@@ -161,7 +161,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
-        snapshot_id: Option<&CheckpointId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<ListPathEntriesResponse, CliError> {
         match self {
             Self::Embedded(target) => {
@@ -189,7 +189,7 @@ impl ResolvedTarget {
     pub(crate) async fn get_path_entry_at_snapshot(
         &self,
         spec: &NamespacePath,
-        snapshot_id: Option<&CheckpointId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<PathEntry, CliError> {
         self.get_path_entry_projected(
             spec,
@@ -233,7 +233,7 @@ impl ResolvedTarget {
     pub(crate) async fn get_path_entry_without_attributes_at_snapshot(
         &self,
         spec: &NamespacePath,
-        snapshot_id: Option<&CheckpointId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<PathEntry, CliError> {
         self.get_path_entry_projected(
             spec,
@@ -262,7 +262,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
-        snapshot_id: Option<&CheckpointId>,
+        snapshot_id: Option<&SnapshotId>,
         start_offset: u64,
     ) -> Result<FileDownload, CliError> {
         match self {
@@ -476,7 +476,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         bytes: &[u8],
         options: &PutFileOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => target.backend.put_file_bytes(spec, bytes, options).await,
             Self::Remote(target) => Ok(target.client.put_file_bytes(spec, bytes, options).await?),
@@ -495,7 +495,7 @@ impl ResolvedTarget {
         options: &PutFileOptions,
         progress: &Arc<ProgressReporter>,
         journal: Option<&UploadJournal>,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => {
                 let body = payload.open_byte_stream(progress).await?;
@@ -532,7 +532,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         request: &loonfs_api::v0::CommitRequest,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target.client.create_commit(namespace_id, request).await?),
@@ -547,7 +547,7 @@ impl ResolvedTarget {
         content_token: Option<loonfs_api::v0::ContentToken>,
         options: &PutFileOptions,
         journal: &UploadJournal,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
             Self::Remote(target) => Ok(target
@@ -562,7 +562,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => target.backend.create_directory(spec, options).await,
             Self::Remote(target) => Ok(target.client.create_directory(spec, options).await?),
@@ -576,7 +576,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &DeleteOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => target.backend.delete_path(spec, options).await,
             Self::Remote(target) => Ok(target.client.delete_path(spec, options).await?),
@@ -588,7 +588,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => target.backend.update_attributes(spec, options).await,
             Self::Remote(target) => Ok(target.client.update_attributes(spec, options).await?),
@@ -601,7 +601,7 @@ impl ResolvedTarget {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &MoveOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => target.backend.move_path(from, to, options).await,
             Self::Remote(target) => Ok(target.client.move_path(from, to, options).await?),
@@ -614,7 +614,7 @@ impl ResolvedTarget {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &CopyOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => target.backend.copy_path(from, to, options).await,
             Self::Remote(target) => Ok(target.client.copy_path(from, to, options).await?),
@@ -627,7 +627,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -651,7 +651,7 @@ impl ResolvedTarget {
         deletion_seq: ChangeSeq,
         destination_path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
@@ -724,7 +724,7 @@ impl ResolvedTarget {
     pub(crate) async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
         ttl_ms: u64,
     ) -> Result<SnapshotSummary, CliError> {
         match self {
@@ -745,7 +745,7 @@ impl ResolvedTarget {
     pub(crate) async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse, CliError> {
         match self {
             Self::Embedded(target) => target
@@ -901,7 +901,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
-        snapshot_id: Option<&CheckpointId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<ListChangesResponse, CliError> {
         match self {
             Self::Embedded(target) => {

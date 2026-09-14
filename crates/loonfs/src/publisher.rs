@@ -20,7 +20,7 @@ use crate::{
 };
 use admission::{AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
-use loonfs_api::v0::CommitResponse as ApiCommitResponse;
+use loonfs_api::v0::Commit;
 use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::cache::Recency;
@@ -42,7 +42,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::Instrument;
 
-type CommitResult = Result<ApiCommitResponse, RuntimeError>;
+type CommitResult = Result<Commit, RuntimeError>;
 type DeleteResult = Result<DeleteNamespaceResponse, RuntimeError>;
 type CloseCompletion = watch::Receiver<Option<CloseNamespaceReport>>;
 

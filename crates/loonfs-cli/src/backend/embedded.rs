@@ -15,13 +15,14 @@ use loonfs::{
     PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions,
     UndeleteOptions, UpdateAttributesOptions,
 };
+use loonfs_api::SnapshotId;
 use loonfs_api::{
     v0::{
         GrepGcRequest, GrepGcResponse, GrepIndex, GrepIndexLifecycle, ListSnapshotsResponse,
         SnapshotSummary, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
     },
-    AbsolutePath, ChangeSeq, Checkpoint, CheckpointId, CommitResponse, CreateCheckpointRequest,
-    EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
+    AbsolutePath, ChangeSeq, Checkpoint, Commit, CreateCheckpointRequest, EffectiveLimit,
+    ErrorCode, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
     ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceId,
     PaginationPolicy, PathEntry, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse,
 };
@@ -180,7 +181,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
-        snapshot_id: Option<&CheckpointId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<ListPathEntriesResponse, CliError> {
         let request = cli_page_request(limit, cursor)?;
         if let Some(snapshot_id) = snapshot_id {
@@ -494,7 +495,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         bytes: &[u8],
         options: &PutFileOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.put_file_bytes(
                 spec.namespace(),
@@ -520,7 +521,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         body: ByteStream,
         options: &PutFileOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         let result = self
             .writer
             .put_file_stream(
@@ -538,7 +539,7 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         options: &DeleteOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.delete_path(
                 spec.namespace(),
@@ -553,7 +554,7 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.create_directory(
                 spec.namespace(),
@@ -568,7 +569,7 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.update_attributes(
                 spec.namespace(),
@@ -584,7 +585,7 @@ impl EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &MoveOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.move_path(
                 from.namespace(),
@@ -601,7 +602,7 @@ impl EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &CopyOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.copy_path(
                 from.namespace(),
@@ -618,7 +619,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.restore_file_revision(
                 spec.namespace(),
@@ -637,7 +638,7 @@ impl EmbeddedBackend {
         deletion_seq: ChangeSeq,
         destination_path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
-    ) -> Result<CommitResponse, CliError> {
+    ) -> Result<Commit, CliError> {
         self.publish_with_maintenance_recovery(namespace_id, || {
             self.writer.undelete(
                 namespace_id,
@@ -706,7 +707,7 @@ impl EmbeddedBackend {
     pub(super) async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
         ttl_ms: u64,
     ) -> Result<SnapshotSummary, CliError> {
         let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
@@ -796,7 +797,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
-        snapshot_id: Option<&CheckpointId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<ListChangesResponse, CliError> {
         let limit = resolve_cli_page_limit(limit)?;
         let captured_seq = match snapshot_id {

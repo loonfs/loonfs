@@ -188,12 +188,8 @@ fn changes_url(
     query_url(server_url, &route, &params)
 }
 
-fn download_url(server_url: &str, namespace: &str, snapshot_id: Option<&str>) -> String {
-    let route = format!("/v0/namespaces/{namespace}/filesystem/downloads");
-    match snapshot_id {
-        Some(snapshot_id) => query_url(server_url, &route, &[("snapshot_id", snapshot_id)]),
-        None => format!("{server_url}{route}"),
-    }
+fn download_url(server_url: &str, namespace: &str) -> String {
+    format!("{server_url}/v0/namespaces/{namespace}/filesystem/downloads")
 }
 
 fn entry_paths(listing: &ListPathEntriesResponse) -> BTreeSet<String> {
@@ -446,8 +442,8 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         ),
         (
             "download",
-            download_url(&harness.server_url, namespace.as_str(), Some(deleted_id)),
-            Some(serde_json::json!({"path": "/keep.txt"})),
+            download_url(&harness.server_url, namespace.as_str()),
+            Some(serde_json::json!({"path": "/keep.txt", "snapshot_id": deleted_id})),
         ),
         (
             "changes",
@@ -527,12 +523,8 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         ))
         .map(|_| serde_json::Value::Null),
         post_json::<serde_json::Value>(
-            &download_url(
-                &harness.server_url,
-                namespace.as_str(),
-                Some(live.snapshot_id.as_str()),
-            ),
-            serde_json::json!({"path": "/keep.txt", "revision_no": 1}),
+            &download_url(&harness.server_url, namespace.as_str()),
+            serde_json::json!({"path": "/keep.txt", "revision_no": 1, "snapshot_id": live.snapshot_id}),
         ),
     ] {
         let (status, error) = result.expect_err("revision and snapshot must conflict");

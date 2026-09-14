@@ -10,13 +10,8 @@ mod reads;
 mod search;
 mod uploads;
 
-pub use commits::{
-    CommitResponse, CommittedChange, DirectoryBinding, FilesystemChange, ListChangesResponse,
-};
-pub use downloads::{
-    BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
-    BeginDownloadResponse,
-};
+pub use commits::{Commit, DirectoryBinding, FilesystemChange, ListChangesResponse};
+pub use downloads::{CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse};
 pub use operations::{
     validate_attributes_precondition, AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError,
     Checkpoint, CheckpointOwnerSummary, CommitPrecondition, CommitRequest, CreateCheckpointRequest,

@@ -11,8 +11,8 @@ use loonfs_api::{
         BeginUploadResponse, CompleteUploadRequest, ObjectTransferAccess, UploadContentClaim,
         UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
     },
-    ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitRequest, CommitResponse,
-    DestinationBehavior, FilesystemOperation, NamespaceId,
+    ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, DestinationBehavior,
+    FilesystemOperation, NamespaceId,
 };
 use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
 use loonfs_objectstore::{
@@ -494,7 +494,7 @@ fn expect_client_rejection<T>(result: Result<T, ClientError>, context: &str) {
     }
 }
 
-fn post_commit(server_url: &str, namespace: &str, request: &CommitRequest) -> CommitResponse {
+fn post_commit(server_url: &str, namespace: &str, request: &CommitRequest) -> Commit {
     let response = raw_agent()
         .post(&format!("{server_url}/v0/namespaces/{namespace}/commits"))
         .set("authorization", &format!("Bearer {AUTH_TOKEN}"))

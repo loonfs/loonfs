@@ -48,10 +48,9 @@ mod trace;
 use thiserror::Error;
 
 pub use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, CommitResponse, CommittedChange,
-    CompleteMultipartUploadRequest, CompleteUploadRequest, FilesystemChange, ListChangesResponse,
-    ObjectTransferAccess, UploadContentClaim, UploadContentResponse, UploadMode, UploadSession,
-    UploadSessionStatus,
+    BeginUploadRequest, BeginUploadResponse, Commit, CompleteMultipartUploadRequest,
+    CompleteUploadRequest, FilesystemChange, ListChangesResponse, ObjectTransferAccess,
+    UploadContentClaim, UploadContentResponse, UploadMode, UploadSession, UploadSessionStatus,
 };
 pub use loonfs_api::{
     ActorId, AdvanceRetentionResponse, AttributeKey, AttributeRevisionNo, AttributeValue,
@@ -66,11 +65,12 @@ pub use loonfs_api::{
     MetadataCompactionResponse, MetadataMaintenanceResponse, NameKey, Namespace,
     NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry,
     PathEntryKind, ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo,
-    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId,
-    WalFlushStepOutcome, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_ATTRIBUTES,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotId, SnapshotSummary, TrashEntry,
+    UploadId, WalFlushStepOutcome, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_ATTRIBUTES, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_INODES_LIST_CHILDREN,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,

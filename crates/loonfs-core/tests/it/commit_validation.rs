@@ -830,6 +830,8 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
     assert_eq!(change.message.as_deref(), Some("import reports"));
     let names = change
         .events
+        .as_ref()
+        .expect("change feed events")
         .iter()
         .map(|event| match event {
             FilesystemChange::DirectoryCreated { display_name, .. }

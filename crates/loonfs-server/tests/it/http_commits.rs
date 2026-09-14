@@ -12,7 +12,7 @@ use loonfs_api::v0::{
     AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
 use loonfs_api::{
-    v0::{CommittedChange, FilesystemChange},
+    v0::{Commit, FilesystemChange},
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, ContentRef,
     DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, FilesystemOperation, RevisionNo,
     ROOT_INODE_ID,
@@ -38,7 +38,7 @@ fn commit_id(value: &str) -> CommitId {
 
 /// Returns the fields that must match across transports. It omits timestamps
 /// and normalizes namespace-specific identifiers while preserving content checksums and sizes.
-fn change_identity(change: &CommittedChange) -> (ChangeSeq, String, Option<String>, String) {
+fn change_identity(change: &Commit) -> (ChangeSeq, String, Option<String>, String) {
     let mut events = serde_json::to_value(&change.events).expect("serialize events");
     for event in events.as_array_mut().expect("events array") {
         if let Some(content_ref) = event.get_mut("content_ref") {
@@ -134,7 +134,14 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     assert_eq!(remote_changes.changes.len(), 1, "{remote_changes:?}");
     // One event per operation, in request order: the directory, then the
     // two files created under it.
-    assert_eq!(remote_changes.changes[0].events.len(), 3);
+    assert_eq!(
+        remote_changes.changes[0]
+            .events
+            .as_ref()
+            .expect("change feed events")
+            .len(),
+        3
+    );
 
     // Every path the batch named is visible, and only because the whole
     // batch committed.
@@ -299,7 +306,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     assert_eq!(row.committed_by, committed.committed_by);
     assert_eq!(row.committed_at_ms, committed.committed_at_ms);
     assert_eq!(row.message, committed.message);
-    assert_eq!(row.events, events);
+    assert_eq!(row.events, Some(events));
 
     // The replay answers with the same row, events included, and commits
     // nothing new.

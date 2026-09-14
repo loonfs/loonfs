@@ -6,7 +6,7 @@ use crate::config::{CliConfig, ConfigLocation, ConfigSource};
 use crate::error::CliError;
 use crate::resolve::{load_cli_config, resolve_actor, resolve_namespace, ResolvedTarget};
 use loonfs_api::{
-    AbsolutePath, ActorId, ChangeSeq, CommitResponse, ErrorCode, InodeId, InodeKind, NamespaceId,
+    AbsolutePath, ActorId, ChangeSeq, Commit, ErrorCode, InodeId, InodeKind, NamespaceId,
     PublicOrdinalRangeError,
 };
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
@@ -21,7 +21,7 @@ pub(crate) struct CommandContext {
 }
 
 pub(crate) enum RemoteDirectoryOutcome {
-    Created(CommitResponse),
+    Created(Commit),
     AlreadyExists {
         inode_id: InodeId,
         head_seq: ChangeSeq,

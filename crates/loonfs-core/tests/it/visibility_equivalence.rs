@@ -6,7 +6,7 @@
 
 use crate::common::read_context;
 use loonfs_api::options::StatPathOptions;
-use loonfs_api::v0::CommitResponse;
+use loonfs_api::v0::Commit;
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     NamespaceId, PageRequest, RevisionNo,
@@ -69,7 +69,7 @@ impl VisibilityHarness {
         self.engine.namespace_id()
     }
 
-    async fn publish(&self, candidate: CommitCandidate) -> Result<CommitResponse, CoreError> {
+    async fn publish(&self, candidate: CommitCandidate) -> Result<Commit, CoreError> {
         let mut results = self
             .engine
             .publish_namespace_commits_batch(vec![candidate])
@@ -80,10 +80,7 @@ impl VisibilityHarness {
 
     /// Publishes one operation as its own single-operation request, the shape
     /// every scenario below drives except where it deliberately batches.
-    async fn publish_operation(
-        &self,
-        operation: FilesystemOperation,
-    ) -> Result<CommitResponse, CoreError> {
+    async fn publish_operation(&self, operation: FilesystemOperation) -> Result<Commit, CoreError> {
         self.publish(CommitCandidate::new(CommitRequest::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
@@ -93,7 +90,7 @@ impl VisibilityHarness {
         .await
     }
 
-    async fn create_directory(&self, path: &str) -> Result<CommitResponse, CoreError> {
+    async fn create_directory(&self, path: &str) -> Result<Commit, CoreError> {
         self.publish_operation(FilesystemOperation::CreateDirectory {
             path: AbsolutePath::parse(path).expect("valid path"),
             parents: false,
@@ -106,7 +103,7 @@ impl VisibilityHarness {
         path: &str,
         bytes: &[u8],
         behavior: DestinationBehavior,
-    ) -> Result<CommitResponse, CoreError> {
+    ) -> Result<Commit, CoreError> {
         let stored = store_bytes_as_content(&self.store, self.namespace_id(), bytes)
             .await
             .expect("stage content");
@@ -138,7 +135,7 @@ impl VisibilityHarness {
         &self,
         path: &str,
         behavior: DeleteDirectoryBehavior,
-    ) -> Result<CommitResponse, CoreError> {
+    ) -> Result<Commit, CoreError> {
         self.publish_operation(FilesystemOperation::DeletePath {
             path: AbsolutePath::parse(path).expect("valid path"),
             behavior,
@@ -151,7 +148,7 @@ impl VisibilityHarness {
         &self,
         source_path: &str,
         destination_path: &str,
-    ) -> Result<CommitResponse, CoreError> {
+    ) -> Result<Commit, CoreError> {
         self.publish_operation(FilesystemOperation::MovePath {
             source_path: AbsolutePath::parse(source_path).expect("valid source path"),
             destination_path: AbsolutePath::parse(destination_path)
@@ -169,7 +166,7 @@ impl VisibilityHarness {
         &self,
         source_path: &str,
         destination_path: &str,
-    ) -> Result<CommitResponse, CoreError> {
+    ) -> Result<Commit, CoreError> {
         self.publish_operation(FilesystemOperation::CopyPath {
             source_path: AbsolutePath::parse(source_path).expect("valid source path"),
             destination_path: AbsolutePath::parse(destination_path)
@@ -187,7 +184,7 @@ impl VisibilityHarness {
         &self,
         path: &str,
         source_revision_no: RevisionNo,
-    ) -> Result<CommitResponse, CoreError> {
+    ) -> Result<Commit, CoreError> {
         self.publish_operation(FilesystemOperation::RestoreRevision {
             path: AbsolutePath::parse(path).expect("valid path"),
             source_revision_no,
@@ -200,7 +197,7 @@ impl VisibilityHarness {
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
         path: &str,
-    ) -> Result<CommitResponse, CoreError> {
+    ) -> Result<Commit, CoreError> {
         self.publish_operation(FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
@@ -214,7 +211,7 @@ impl VisibilityHarness {
     async fn batched_commit(
         &self,
         operations: Vec<FilesystemOperation>,
-    ) -> Result<CommitResponse, CoreError> {
+    ) -> Result<Commit, CoreError> {
         self.publish(CommitCandidate::new(CommitRequest {
             preconditions: Vec::new(),
             commit_id: CommitId::generate(),

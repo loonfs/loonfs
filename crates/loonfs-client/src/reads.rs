@@ -9,7 +9,7 @@ pub struct ReadFileOptions {
     /// Read one retained revision instead of the current file.
     pub revision_no: Option<RevisionNo>,
     /// Read the file revision captured by this snapshot.
-    pub snapshot_id: Option<CheckpointId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// Optional selectors for one change-feed page.
@@ -18,7 +18,7 @@ pub struct ListChangesOptions {
     /// Maximum number of changes in the page.
     pub limit: Option<u32>,
     /// End the feed at this snapshot's captured sequence.
-    pub snapshot_id: Option<CheckpointId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// A pager over directory entries.
@@ -96,7 +96,7 @@ impl Client {
     pub async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
         ttl_ms: u64,
     ) -> Result<SnapshotSummary> {
         let url = format!(
@@ -115,7 +115,7 @@ impl Client {
     pub async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
@@ -391,7 +391,7 @@ impl Client {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         page_size: Option<u32>,
-        snapshot_id: &CheckpointId,
+        snapshot_id: &SnapshotId,
     ) -> ChangesPager {
         self.changes_pager(
             namespace_id,
@@ -406,7 +406,7 @@ impl Client {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         page_size: Option<u32>,
-        snapshot_id: Option<CheckpointId>,
+        snapshot_id: Option<SnapshotId>,
     ) -> ChangesPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();

@@ -40,7 +40,7 @@ async fn publish<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine,
     store: &S,
     name: &str,
-) -> crate::error::Result<loonfs_api::CommitResponse> {
+) -> crate::error::Result<loonfs_api::Commit> {
     engine
         .publish_batch(
             store,

@@ -6,7 +6,7 @@
 use futures::future::BoxFuture;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
-    CommitId, CommitResponse, CreateNamespaceOptions, DestinationBehavior, FsWriter, NamespaceId,
+    Commit, CommitId, CreateNamespaceOptions, DestinationBehavior, FsWriter, NamespaceId,
     PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -20,11 +20,11 @@ struct ParkedPuts {
     store: Arc<BlockingStore<LocalFsStore>>,
     writer: Arc<FsWriter>,
     namespace_id: NamespaceId,
-    first: tokio::task::JoinHandle<loonfs::Result<CommitResponse>>,
+    first: tokio::task::JoinHandle<loonfs::Result<Commit>>,
     /// A caller future whose publication is already admitted, batched
     /// behind the parked one. Awaiting it yields the publication's result;
     /// dropping it is the caller walking away from admitted work.
-    second: BoxFuture<'static, loonfs::Result<CommitResponse>>,
+    second: BoxFuture<'static, loonfs::Result<Commit>>,
 }
 
 /// Parks one put at the blocked WAL put-if-absent with a second put admitted behind
@@ -100,7 +100,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     // already taken, so this submission deterministically opens the next
     // batch behind it.
     let registry = writer.publisher();
-    let mut second: BoxFuture<'static, loonfs::Result<CommitResponse>> = {
+    let mut second: BoxFuture<'static, loonfs::Result<Commit>> = {
         let namespace_id = namespace_id.clone();
         let request = CommitRequest::single(
             CommitId::parse("parked-second").expect("valid commit id"),

@@ -81,57 +81,6 @@
         },
         "type": "object"
       },
-      "BeginDownloadRequest": {
-        "additionalProperties": false,
-        "description": "The path to download and, optionally, the revision to download.",
-        "properties": {
-          "path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute path of the file to read."
-          },
-          "revision_no": {
-            "$ref": "#/components/schemas/RevisionNo",
-            "description": "Revision to read, or `None` for the path's current revision."
-          }
-        },
-        "required": [
-          "path"
-        ],
-        "type": "object"
-      },
-      "BeginDownloadResponse": {
-        "description": "A presigned URL for one content object.\n\nThe URL expires at `access.expires_at_ms`; later path changes do not change the object.",
-        "properties": {
-          "access": {
-            "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "Short-lived read capability the client uses without learning the raw object key."
-          },
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "The identity, byte length, and checksum of the object to download."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that was read."
-          },
-          "path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute path as rendered from stored display names."
-          },
-          "revision_no": {
-            "$ref": "#/components/schemas/RevisionNo",
-            "description": "Revision the capability reads, resolved from the request."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "path",
-          "revision_no",
-          "content_ref",
-          "access"
-        ],
-        "type": "object"
-      },
       "BeginUploadDirectMultipart": {
         "description": "Write the object in parts through presigned part uploads.",
         "properties": {
@@ -385,12 +334,6 @@
         "minimum": 0,
         "type": "integer"
       },
-      "CheckpointId": {
-        "description": "Durable checkpoint identifier.\n\nThe manifest number determines which namespace manifest it pins.",
-        "example": "pin_00000000000000000001-0000000000000002",
-        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
-        "type": "string"
-      },
       "Checksum": {
         "additionalProperties": false,
         "description": "A checksum algorithm and its canonical lowercase hexadecimal value.",
@@ -418,6 +361,52 @@
           "crc32c"
         ],
         "type": "string"
+      },
+      "Commit": {
+        "description": "One committed logical commit: its identity and the events it applied.",
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "The idempotency key for the commit."
+          },
+          "committed_at_ms": {
+            "description": "The commit time in Unix milliseconds; `committed_seq` defines commit order.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "committed_by": {
+            "$ref": "#/components/schemas/ActorId",
+            "description": "Actor responsible for the commit, as supplied by the application."
+          },
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence number where the commit became visible."
+          },
+          "events": {
+            "description": "Always present on the change feed. Absent only from a replayed\n`POST /commits` response whose WAL record has been retired.",
+            "items": {
+              "$ref": "#/components/schemas/FilesystemChange"
+            },
+            "type": "array"
+          },
+          "message": {
+            "description": "The optional caller annotation for the commit.",
+            "type": "string"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that changed."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "commit_id",
+          "committed_seq",
+          "committed_by",
+          "committed_at_ms"
+        ],
+        "type": "object"
       },
       "CommitId": {
         "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] returns\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
@@ -622,94 +611,6 @@
         ],
         "type": "object"
       },
-      "CommitResponse": {
-        "description": "The result of one commit, including its attribution and filesystem events.",
-        "properties": {
-          "commit_id": {
-            "$ref": "#/components/schemas/CommitId",
-            "description": "The idempotency key for the commit."
-          },
-          "committed_at_ms": {
-            "description": "The commit time in Unix milliseconds; `committed_seq` defines commit order.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "committed_by": {
-            "$ref": "#/components/schemas/ActorId",
-            "description": "Actor responsible for the commit, as supplied by the application."
-          },
-          "committed_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence number where the commit became visible."
-          },
-          "events": {
-            "description": "The filesystem events in commit order, or `None` when replaying a commit\nwithout retained WAL history.",
-            "items": {
-              "$ref": "#/components/schemas/FilesystemChange"
-            },
-            "type": "array"
-          },
-          "message": {
-            "description": "The optional caller annotation for the commit.",
-            "type": "string"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that changed."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "commit_id",
-          "committed_seq",
-          "committed_by",
-          "committed_at_ms"
-        ],
-        "type": "object"
-      },
-      "CommittedChange": {
-        "description": "One committed change in namespace order.",
-        "properties": {
-          "commit_id": {
-            "$ref": "#/components/schemas/CommitId",
-            "description": "Client idempotency key for this logical commit."
-          },
-          "committed_at_ms": {
-            "description": "The commit time in Unix milliseconds; `committed_seq` defines commit order.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "committed_by": {
-            "$ref": "#/components/schemas/ActorId",
-            "description": "Actor responsible for the commit, as supplied by the application."
-          },
-          "committed_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace sequence for this logical commit."
-          },
-          "events": {
-            "description": "The filesystem events for this commit in commit order.",
-            "items": {
-              "$ref": "#/components/schemas/FilesystemChange"
-            },
-            "type": "array"
-          },
-          "message": {
-            "description": "Caller annotation, omitted when absent and carrying no filesystem semantics.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "committed_seq",
-          "commit_id",
-          "committed_by",
-          "committed_at_ms",
-          "events"
-        ],
-        "type": "object"
-      },
       "CompleteUploadDirectMultipart": {
         "description": "Complete a direct multipart upload.",
         "properties": {
@@ -867,6 +768,61 @@
         ],
         "type": "object"
       },
+      "CreateDownloadRequest": {
+        "additionalProperties": false,
+        "description": "The path to download and, optionally, the revision to download.",
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path of the file to read."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision to read, or `None` for the path's current revision.\nCannot be combined with `snapshot_id`."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "Read the file revision captured by this snapshot.\nCannot be combined with `revision_no`."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "CreateDownloadResponse": {
+        "description": "A presigned URL for one content object.\n\nThe URL expires at `access.expires_at_ms`; later path changes do not change the object.",
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Short-lived read capability the client uses without learning the raw object key."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "The identity, byte length, and checksum of the object to download."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path as rendered from stored display names."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision the capability reads, resolved from the request."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "path",
+          "revision_no",
+          "content_ref",
+          "access"
+        ],
+        "type": "object"
+      },
       "CreateSnapshotRequest": {
         "additionalProperties": false,
         "description": "Request to create a snapshot.",
@@ -904,7 +860,7 @@
             "description": "Namespace the snapshot belonged to."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/CheckpointId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "Deleted snapshot record."
           }
         },
@@ -2031,7 +1987,7 @@
           "changes": {
             "description": "Logical commits after `after_seq`, ordered by ascending namespace sequence.",
             "items": {
-              "$ref": "#/components/schemas/CommittedChange"
+              "$ref": "#/components/schemas/Commit"
             },
             "type": "array"
           },
@@ -2547,7 +2503,7 @@
             "description": "Namespace whose state the snapshot captured."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/CheckpointId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "Snapshot id."
           }
         },
@@ -2560,6 +2516,12 @@
           "expires_at_ms"
         ],
         "type": "object"
+      },
+      "SnapshotId": {
+        "description": "Id of a snapshot.\n\nA snapshot is backed by a checkpoint record and uses that record's\nid, `pin_{manifest_no:020}-{16 lowercase hex}`.",
+        "example": "pin_00000000000000000001-0000000000000002",
+        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
+        "type": "string"
       },
       "TrashEntry": {
         "description": "One recoverable deletion and its removed directory binding.",
@@ -2956,7 +2918,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/CheckpointId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -3067,7 +3029,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CommitResponse"
+                  "$ref": "#/components/schemas/Commit"
                 }
               }
             },
@@ -3176,7 +3138,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/CheckpointId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -3275,22 +3237,13 @@
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "description": "Use the file revision captured by this snapshot",
-            "in": "query",
-            "name": "snapshot_id",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/CheckpointId"
-            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BeginDownloadRequest"
+                "$ref": "#/components/schemas/CreateDownloadRequest"
               }
             }
           },
@@ -3301,7 +3254,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BeginDownloadResponse"
+                  "$ref": "#/components/schemas/CreateDownloadResponse"
                 }
               }
             },
@@ -3433,7 +3386,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/CheckpointId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -3548,7 +3501,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/CheckpointId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -4244,7 +4197,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -4325,7 +4278,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],

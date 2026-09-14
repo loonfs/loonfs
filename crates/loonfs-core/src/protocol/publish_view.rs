@@ -14,7 +14,7 @@ use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::{
     ensure_replayed_head_matches, load_wal_tail, project_validated_wal_tail, WalTailLoadRequest,
 };
-use loonfs_api::v0::CommittedChange;
+use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -57,7 +57,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     pub(super) async fn find_committed_change_at(
         &self,
         committed_seq: ChangeSeq,
-    ) -> Result<Option<CommittedChange>> {
+    ) -> Result<Option<Commit>> {
         super::changes::find_committed_change_at(
             self.manifest_segments.store(),
             &self.head.namespace_id,

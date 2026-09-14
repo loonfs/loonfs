@@ -86,6 +86,11 @@ where
     })
 }
 
+pub(super) fn parse_snapshot_id(value: &str) -> Result<loonfs_api::SnapshotId, ApiResponseError> {
+    loonfs_api::SnapshotId::parse(value)
+        .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
+}
+
 pub(super) fn resolve_page_limit(
     limit: Option<String>,
 ) -> Result<loonfs_api::EffectiveLimit, ApiResponseError> {

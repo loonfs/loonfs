@@ -27,14 +27,14 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_api::{
     v0::{
-        BeginDownloadByInodeRequest, BeginDownloadByInodeResponse, BeginDownloadRequest,
-        BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
-        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompletedUploadPart,
-        ContentToken, CreateSnapshotRequest, DeleteSnapshotResponse, ExtendSnapshotRequest,
-        GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
-        ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart,
-        SnapshotSummary, StoreProbeRequest, StoreProbeResponse, UploadContentClaim,
-        UploadContentResponse, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
+        BeginUploadRequest, BeginUploadResponse, Commit, CompleteUploadRequest,
+        CompletedUploadPart, ContentToken, CreateDownloadByInodeResponse, CreateDownloadRequest,
+        CreateDownloadResponse, CreateSnapshotRequest, DeleteSnapshotResponse,
+        ExtendSnapshotRequest, GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse,
+        ListSnapshotsResponse, ObjectTransferAccess, SignUploadPartsRequest,
+        SignUploadPartsResponse, SignedUploadPart, SnapshotSummary, StoreProbeRequest,
+        StoreProbeResponse, UploadContentClaim, UploadContentResponse, UploadPartChecksumClaim,
+        UploadSession, UploadSessionStatus,
     },
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Checksum,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, CreateCheckpointRequest,
@@ -42,9 +42,10 @@ use loonfs_api::{
     ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
     ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
     ListTrashResponse, Namespace, NamespaceDiagnostics, NamespaceId, PathEntry, RevisionNo,
-    RunMaintenanceRequest, RunMaintenanceResponse, SecretString, StreamingChecksum, UploadId,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    RunMaintenanceRequest, RunMaintenanceResponse, SecretString, SnapshotId, StreamingChecksum,
+    UploadId, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};

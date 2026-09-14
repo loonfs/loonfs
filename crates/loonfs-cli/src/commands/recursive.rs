@@ -17,7 +17,8 @@ use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
-use loonfs_api::{CheckpointId, DestinationBehavior};
+use loonfs_api::DestinationBehavior;
+use loonfs_api::SnapshotId;
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -375,7 +376,7 @@ pub(crate) async fn run_get_tree(
     local_root: &Path,
     force: bool,
     runtime: RuntimeBehavior,
-    snapshot_id: Option<&CheckpointId>,
+    snapshot_id: Option<&SnapshotId>,
 ) -> Result<CommandOutput, CommandFailure> {
     let root_outcome = create_local_directory(local_root)
         .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;

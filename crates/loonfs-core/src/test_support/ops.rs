@@ -9,7 +9,7 @@ use crate::path::mutation_path::parse_mutation_path;
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use crate::storage::content_admission::PreparedContent;
 use loonfs_api::{
-    CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
+    Commit, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -24,7 +24,7 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
     operation: FilesystemOperation,
     prepared_content: Vec<PreparedContent>,
     context: &MutationContext,
-) -> Result<CommitResponse> {
+) -> Result<Commit> {
     let request = CommitRequest::single(
         commit_id,
         loonfs_test_support::test_actor(),
@@ -62,7 +62,7 @@ pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
     behavior: DestinationBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<CommitResponse> {
+) -> Result<Commit> {
     let prepared_content =
         store_file_bytes_before_metadata_publish(store, namespace_id, absolute_path, bytes).await?;
     put_prepared_file_content(
@@ -84,7 +84,7 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<CommitResponse> {
+) -> Result<Commit> {
     put_file_bytes(
         store,
         namespace_id,
@@ -105,7 +105,7 @@ async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
     behavior: DestinationBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<CommitResponse> {
+) -> Result<Commit> {
     let content_ref = prepared_content.content_ref().clone();
     submit_operation(
         store,
@@ -130,7 +130,7 @@ pub(crate) async fn delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<CommitResponse> {
+) -> Result<Commit> {
     delete_path_with_behavior(
         store,
         namespace_id,
@@ -149,7 +149,7 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
     behavior: DeleteDirectoryBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<CommitResponse> {
+) -> Result<Commit> {
     submit_operation(
         store,
         namespace_id,
@@ -172,7 +172,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
     destination_path: &str,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<CommitResponse> {
+) -> Result<Commit> {
     submit_operation(
         store,
         namespace_id,
@@ -199,7 +199,7 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
     source_revision_no: RevisionNo,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<CommitResponse> {
+) -> Result<Commit> {
     submit_operation(
         store,
         namespace_id,
