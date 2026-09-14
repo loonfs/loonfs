@@ -76,6 +76,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "committed_seq",
     "compaction_required",
     "complete_upload_prepared",
+    "upload_prepared",
     "completed_at_ms",
     "content_changed",
     "content_objects",

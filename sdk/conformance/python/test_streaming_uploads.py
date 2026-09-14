@@ -147,7 +147,7 @@ def test_streaming_uploads(fixture):
         )
 
         def prepare():
-            return client.files.prepare_file_stream(
+            return client.files.prepare_stream(
                 "demo",
                 content=source,
                 size_bytes=fixture["size"],

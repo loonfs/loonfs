@@ -179,7 +179,7 @@ func TestStreamingUploads(t *testing.T) {
 				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
 				defer cancel()
 			}
-			prepared, err := client.Files.PrepareFileStream(ctx, "demo", source, fixture.Size)
+			prepared, err := client.Files.PrepareStream(ctx, "demo", source, fixture.Size)
 			if fixture.Error {
 				if err == nil {
 					t.Fatal("invalid upload succeeded")

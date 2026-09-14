@@ -21,10 +21,16 @@ from loonfs.server import LoonFS
 client = LoonFS(
     base_url=os.environ["LOONFS_URL"],
     token=os.environ["LOONFS_AUTH_TOKEN"],
+    actor_id="example-user",
 )
 
 capabilities = client.capabilities.retrieve()
+commit = client.files.upload("demo", path="/hello.txt", content=b"hello")
+print(commit.commit_id, commit.events)
 ```
+
+Publishing helpers return the commit, including its events. Pass `commit_id`
+explicitly if you may retry. A call's `actor_id` overrides the client default.
 
 Use `client.files.download_stream` in a `with` block for bounded download memory:
 
@@ -45,12 +51,13 @@ the synchronous cancellation mechanism.
 
 `client.files.download` collects the same verified stream into memory.
 `client.files.upload` accepts in-memory bytes through the same transfer path.
-Use `prepare_file_stream` to retain prepared content for publication retries:
+Use `prepare_stream` to retain prepared content for publication retries:
 
 ```python
 with open("large.bin", "rb") as source:
-    prepared = client.files.prepare_file_stream("demo", content=source,
-                                                request_options={"timeout": 60})
+    prepared = client.files.prepare_stream(
+        "demo", content=source, request_options={"timeout": 60}
+    )
 ```
 
 Pass `size_bytes` when known to validate the source and choose the usual transport.
@@ -96,10 +103,10 @@ and does not retry on status alone. It never retries operations that LoonFS
 marks `not_idempotent`. Use the `max_retries` client or request option to
 tune the retry count.
 
-For publication retries, call `client.files.prepare_file_bytes(namespace_id,
-content=payload)` once and retain its `PreparedFileContent`. Pass it to
-`client.files.put_file_prepared(namespace_id, path=path, prepared=prepared,
-actor=actor, commit_id=commit_id)` on each attempt, keeping all publication
+For publication retries, call `client.files.prepare(namespace_id,
+content=payload)` once and retain its `PreparedContent`. Pass it to
+`client.files.upload_prepared(namespace_id, path=path, prepared=prepared,
+actor_id=actor_id, commit_id=commit_id)` on each attempt, keeping all publication
 inputs identical. Preparation does not create a visible file or extend the
 upload lifetime. Calling `upload` again starts a fresh upload and cannot replay
 a previously committed ID.

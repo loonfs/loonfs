@@ -28,30 +28,32 @@ type StreamUploadInput struct {
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
-	ExpectedInodeID    *string
+	ExpectedInodeID    *loonfs.InodeID
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
 
-func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput) (*UploadResult, error) {
-	if in.ActorID == "" || in.CommitID == "" {
-		return nil, fmt.Errorf("transfers: actor_id and commit_id are required")
-	}
-	ctx, cancel := transferContext(ctx)
-	defer cancel()
-	prepared, err := c.PrepareFileStream(ctx, in.NamespaceID, in.Content, in.SizeBytes)
+// Pass CommitID explicitly if you may retry. The caller owns Content.
+func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput) (*loonfs.Commit, error) {
+	actorID, commitID, err := c.publicationIDs(in.ActorID, in.CommitID)
 	if err != nil {
 		return nil, err
 	}
-	return c.PutFilePrepared(ctx, PreparedUploadInput{
+	ctx, cancel := transferContext(ctx)
+	defer cancel()
+	prepared, err := c.PrepareStream(ctx, in.NamespaceID, in.Content, in.SizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	return c.UploadPrepared(ctx, PreparedUploadInput{
 		NamespaceID: in.NamespaceID, Path: in.Path, Prepared: prepared,
-		ActorID: in.ActorID, CommitID: in.CommitID, Message: in.Message, Behavior: in.Behavior,
+		ActorID: actorID, CommitID: commitID, Message: in.Message, Behavior: in.Behavior,
 		ExpectedInodeID: in.ExpectedInodeID, ExpectedRevisionNo: in.ExpectedRevisionNo,
 	})
 }
 
-// PrepareFileStream stages a source once with bounded memory and no payload
-// retries. Retain its result for PutFilePrepared publication retries.
-func (c *Client) PrepareFileStream(ctx context.Context, namespaceID loonfs.NamespaceID, source io.Reader, sizeBytes *int64) (*PreparedFileContent, error) {
+// PrepareStream stages a source once with bounded memory and no payload
+// retries. Retain its result for UploadPrepared publication retries.
+func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.NamespaceID, source io.Reader, sizeBytes *int64) (*PreparedContent, error) {
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
@@ -172,7 +174,7 @@ func (c *Client) PrepareFileStream(ctx context.Context, namespaceID loonfs.Names
 	if status.ContentRef.SizeBytes != reader.count {
 		return nil, fmt.Errorf("transfers: completed upload size mismatch")
 	}
-	return &PreparedFileContent{ContentRef: status.ContentRef, ContentToken: status.ContentToken}, nil
+	return &PreparedContent{ContentRef: status.ContentRef, ContentToken: status.ContentToken}, nil
 }
 
 func (c *Client) putStream(ctx context.Context, access *loonfs.ObjectTransferAccess, source io.Reader, length int64) (string, error) {

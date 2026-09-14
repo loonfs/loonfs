@@ -1729,13 +1729,20 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     # The same content through the high-level helper: the payload exceeds the
     # part size, so this exercises files.upload's multipart branch.
     helper_path = request.path + "-helper"
-    helper_commit = harness.client.files.upload(
-        request.namespace_id,
-        path=helper_path,
-        content=payload,
-        actor_id=request.actor_id,
-        commit_id=request.commit_id + "-helper",
-    )
+    with httpx.Client() as http:
+        client = LoonFS(
+            base_url=_required_environment("LOONFS_CONFORMANCE_URL"),
+            token=_required_environment("LOONFS_CONFORMANCE_TOKEN"),
+            actor_id=request.actor_id,
+            httpx_client=http,
+        )
+        helper_commit = client.files.upload(
+            request.namespace_id,
+            path=helper_path,
+            content=payload,
+        )
+    assert helper_commit.commit_id.startswith("c_") and len(helper_commit.commit_id) == 34
+    assert helper_commit.committed_by == request.actor_id
     assert helper_commit.committed_seq > 0
     helper_read = harness.client.files.download(
         request.namespace_id,
@@ -1803,33 +1810,37 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
 
 
 def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
-    from loonfs.server import PreparedFileContent
+    from loonfs.server import PreparedContent
 
     client = harness.client
     namespace_id = "conf-python-prepared"
     client.namespaces.create(namespace_id=namespace_id)
-    prepared = client.files.prepare_file_stream(namespace_id, content=io.BytesIO(b"original bytes"))
-    assert isinstance(prepared, PreparedFileContent)
+    prepared = client.files.prepare_stream(namespace_id, content=io.BytesIO(b"original bytes"))
+    assert isinstance(prepared, PreparedContent)
     inputs = dict(path="/original", prepared=prepared,
                   actor_id="prepared-user", commit_id="prepared-put")
     with pytest.raises(NotFoundError):
         client.files.retrieve(namespace_id, path="/original")
-    first = client.files.put_file_prepared(namespace_id, **inputs)
+    first = client.files.upload_prepared(namespace_id, **inputs)
     _apply(client, namespace_id, "prepared-rename", inputs["actor_id"],
            FilesystemOperation_MovePath(source_path="/original", destination_path="/renamed"))
-    assert client.files.put_file_prepared(namespace_id, **inputs) == first
+    replayed = client.files.upload_prepared(namespace_id, **inputs)
+    assert replayed.commit_id == first.commit_id
+    assert replayed.committed_seq == first.committed_seq
     for changed in [dict(message="changed"), dict(path="/renamed"), dict(behavior="replace")]:
         with pytest.raises(ConflictError) as conflict:
-            client.files.put_file_prepared(namespace_id, **(inputs | changed))
+            client.files.upload_prepared(namespace_id, **(inputs | changed))
         assert conflict.value.body.code == "commit_id_reuse_conflict"
-    fresh = client.files.prepare_file_bytes(namespace_id, content=b"original bytes")
+    fresh = client.files.prepare(namespace_id, content=b"original bytes")
     with pytest.raises(ConflictError):
-        client.files.put_file_prepared(namespace_id, **(inputs | dict(prepared=fresh)))
+        client.files.upload_prepared(namespace_id, **(inputs | dict(prepared=fresh)))
     entry = client.files.retrieve(namespace_id, path="/renamed")
     with_preconditions = inputs | dict(path="/renamed", commit_id="prepared-replace", behavior="replace",
                            expected_inode_id=entry.inode_id, expected_revision_no=entry.revision_no)
-    replaced = client.files.put_file_prepared(namespace_id, **with_preconditions)
-    assert client.files.put_file_prepared(namespace_id, **with_preconditions) == replaced
+    replaced = client.files.upload_prepared(namespace_id, **with_preconditions)
+    replayed = client.files.upload_prepared(namespace_id, **with_preconditions)
+    assert replayed.commit_id == replaced.commit_id
+    assert replayed.committed_seq == replaced.committed_seq
 
 
 def test_end_to_end(cases: dict[str, ConformanceCase], harness: Harness) -> None:

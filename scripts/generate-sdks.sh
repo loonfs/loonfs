@@ -122,6 +122,15 @@ source = remove_exact(
     1,
     "WithoutStreamReconnection option",
 )
+source = replace_once(
+    source,
+    "// WithToken sets the 'Authorization: Bearer <token>' request header.\n",
+    "// Default actor_id for the transfer helpers that publish.\n"
+    "func WithActorID(actorID string) *core.ActorIDOption {\n"
+    "\treturn &core.ActorIDOption{ActorID: actorID}\n"
+    "}\n\n"
+    "// WithToken sets the 'Authorization: Bearer <token>' request header.\n",
+)
 option_path.write_text(source)
 
 core_option_path = module_root / "core/request_option.go"
@@ -167,6 +176,22 @@ source = remove_exact(
     "}\n\n",
     1,
     "WithoutStreamReconnectionOption type",
+)
+source = replace_once(
+    source,
+    "type RequestOptions struct {\n",
+    "type RequestOptions struct {\n\tActorID string\n",
+)
+source = replace_once(
+    source,
+    "// TokenOption implements the RequestOption interface.\n",
+    "type ActorIDOption struct {\n"
+    "\tActorID string\n"
+    "}\n\n"
+    "func (a *ActorIDOption) applyRequestOptions(opts *RequestOptions) {\n"
+    "\topts.ActorID = a.ActorID\n"
+    "}\n\n"
+    "// TokenOption implements the RequestOption interface.\n",
 )
 core_option_path.write_text(source)
 
@@ -450,24 +475,22 @@ source = source.replace(
     generated_import,
     "    from .client import AsyncLoonFS\n"
     "    from .core.api_error import ApiError\n"
-    "    from .transfers import FileDownloadResult, FileDownloadStream, FileUploadResult, PreparedFileContent, LoonFS\n",
+    "    from .transfers import DownloadResult, DownloadStream, PreparedContent, LoonFS\n",
 )
 generated_mapping = '    "LoonFS": ".client",\n'
 assert source.count(generated_mapping) == 1, "generated server.py client mapping not found"
 source = source.replace(generated_mapping, '    "LoonFS": ".transfers",\n')
 for anchor, insertion, label in (
     ('    "AsyncLoonFS": ".client",\n', '    "ApiError": ".core.api_error",\n', "ApiError mapping"),
-    ('    "FileRevision": ".types",\n', '    "FileDownloadResult": ".transfers",\n    "FileDownloadStream": ".transfers",\n', "FileDownloadResult mapping"),
-    ('    "FileRevision": ".types",\n', '    "PreparedFileContent": ".transfers",\n', "PreparedFileContent mapping"),
-    ('    "FilesystemChange": ".types",\n', '    "FileUploadResult": ".transfers",\n', "FileUploadResult mapping"),
+    ('    "FileRevision": ".types",\n', '    "DownloadResult": ".transfers",\n    "DownloadStream": ".transfers",\n', "DownloadResult mapping"),
+    ('    "FileRevision": ".types",\n', '    "PreparedContent": ".transfers",\n', "PreparedContent mapping"),
 ):
     assert source.count(anchor) == 1, f"generated server.py anchor for {label} not found exactly once"
     source = source.replace(anchor, insertion + anchor)
 for anchor, insertion, label in (
     ('    "AsyncLoonFS",\n', '    "ApiError",\n', "ApiError __all__ entry"),
-    ('    "FileRevision",\n', '    "FileDownloadResult",\n    "FileDownloadStream",\n', "FileDownloadResult __all__ entry"),
-    ('    "FileRevision",\n', '    "PreparedFileContent",\n', "PreparedFileContent __all__ entry"),
-    ('    "FilesystemChange",\n', '    "FileUploadResult",\n', "FileUploadResult __all__ entry"),
+    ('    "FileRevision",\n', '    "DownloadResult",\n    "DownloadStream",\n', "DownloadResult __all__ entry"),
+    ('    "FileRevision",\n', '    "PreparedContent",\n', "PreparedContent __all__ entry"),
 ):
     assert source.count(anchor) == 1, f"generated server.py anchor for {label} not found exactly once"
     source = source.replace(anchor, insertion + anchor)
@@ -580,15 +603,14 @@ source = replace_once(
     generated_export,
     'export { LoonFSClient } from "./transfers.js";\n'
     'export type {\n'
-    '    FileDownloadInput,\n'
-    '    FileDownloadResult,\n'
-    '    FileDownloadStream,\n'
-    '    FileUploadInput,\n'
-    '    FileStreamUploadInput,\n'
-    '    PrepareFileStreamInput,\n'
-    '    FileUploadResult,\n'
-    '    PreparedFileContent,\n'
-    '    PreparedFileUploadInput,\n'
+    '    DownloadInput,\n'
+    '    DownloadResult,\n'
+    '    DownloadStream,\n'
+    '    UploadInput,\n'
+    '    StreamUploadInput,\n'
+    '    PrepareStreamInput,\n'
+    '    PreparedContent,\n'
+    '    PreparedUploadInput,\n'
     '} from "./transfers.js";\n',
 )
 index_path.write_text(source)

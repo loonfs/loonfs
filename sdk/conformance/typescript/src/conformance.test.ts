@@ -10,7 +10,7 @@ import { test } from "node:test";
 import {
     LoonFS,
     LoonFSClient,
-    type PreparedFileContent,
+    type PreparedContent,
 } from "../../../generated/typescript/index.js";
 import {
     LoonFS as BrowserLoonFS,
@@ -1230,31 +1230,35 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         activeHarness.client.commits.create({...commit, preconditions: []}),
         (error: unknown) => error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict",
     );
-    const prepared: PreparedFileContent = await activeHarness.client.files.prepareFileStream({
+    const prepared: PreparedContent = await activeHarness.client.files.prepareStream({
         namespace_id: request.namespace_id, content: new Blob(["original bytes"]),
     });
     const input = { namespace_id: request.namespace_id, path: "/prepared", prepared,
         actor_id: request.actor_id, commit_id: "prepared-put" };
-    const published = await activeHarness.client.files.putFilePrepared(input);
+    const published = await activeHarness.client.files.uploadPrepared(input);
     await activeHarness.client.commits.create({namespace_id: request.namespace_id,
         actor_id: request.actor_id, commit_id: "prepared-rename",
         operations: [{kind: "move_path", source_path: input.path, destination_path: "/renamed"}],
     });
-    assert.deepEqual(await activeHarness.client.files.putFilePrepared(input), published);
+    const publishedReplay = await activeHarness.client.files.uploadPrepared(input);
+    assert.equal(publishedReplay.commit_id, published.commit_id);
+    assert.equal(publishedReplay.committed_seq, published.committed_seq);
     for (const changed of [{message: "changed"}, {path: "/renamed"}, {behavior: "replace" as const}]) {
-        await assert.rejects(activeHarness.client.files.putFilePrepared({...input, ...changed}),
+        await assert.rejects(activeHarness.client.files.uploadPrepared({...input, ...changed}),
             (error: unknown) => error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict");
     }
-    const fresh = await activeHarness.client.files.prepareFileBytes({namespace_id: request.namespace_id,
+    const fresh = await activeHarness.client.files.prepare({namespace_id: request.namespace_id,
         content: new TextEncoder().encode("original bytes")});
-    await assert.rejects(activeHarness.client.files.putFilePrepared({...input, prepared: fresh}),
+    await assert.rejects(activeHarness.client.files.uploadPrepared({...input, prepared: fresh}),
         (error: unknown) => error instanceof LoonFS.ConflictError);
     const entry = await activeHarness.client.files.retrieve({namespace_id: request.namespace_id, path: "/renamed"});
     if (entry.inode_kind !== "file") throw new Error("expected file");
     const withPreconditions = {...input, path: "/renamed", commit_id: "prepared-replace", behavior: "replace" as const,
         expected_inode_id: entry.inode_id, expected_revision_no: entry.revision_no};
-    const replaced = await activeHarness.client.files.putFilePrepared(withPreconditions);
-    assert.deepEqual(await activeHarness.client.files.putFilePrepared(withPreconditions), replaced);
+    const replaced = await activeHarness.client.files.uploadPrepared(withPreconditions);
+    const replacedReplay = await activeHarness.client.files.uploadPrepared(withPreconditions);
+    assert.equal(replacedReplay.commit_id, replaced.commit_id);
+    assert.equal(replacedReplay.committed_seq, replaced.committed_seq);
 
 });
 
@@ -2159,19 +2163,23 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.deepEqual(beginModes, ["service_proxied", "direct_put", "direct_multipart"]);
 
-    const prepared = await browserClient.files.prepareFileStream({namespace_alias: request.namespace_alias, content: new Blob([arrayBuffer(payload)])});
+    const prepared = await browserClient.files.prepareStream({namespace_alias: request.namespace_alias, content: new Blob([arrayBuffer(payload)])});
     const input = {namespace_alias: request.namespace_alias, path: "/browser-prepared", prepared,
         actor_id: request.actor_id, commit_id: "browser-prepared-put"};
-    const published = await browserClient.files.putFilePrepared(input);
-    assert.deepEqual(await browserClient.files.putFilePrepared(input), published);
-    await assert.rejects(browserClient.files.putFilePrepared({...input, message: "changed"}),
+    const published = await browserClient.files.uploadPrepared(input);
+    const publishedReplay = await browserClient.files.uploadPrepared(input);
+    assert.equal(publishedReplay.commit_id, published.commit_id);
+    assert.equal(publishedReplay.committed_seq, published.committed_seq);
+    await assert.rejects(browserClient.files.uploadPrepared({...input, message: "changed"}),
         (error: unknown) => error instanceof BrowserLoonFS.ConflictError);
     const entry = await browserClient.files.retrieve({namespace_alias: request.namespace_alias, path: input.path});
     if (entry.inode_kind !== "file") throw new Error("expected file");
     const withPreconditions = {...input, commit_id: "browser-prepared-replace", behavior: "replace" as const,
         expected_inode_id: entry.inode_id, expected_revision_no: entry.revision_no};
-    const replaced = await browserClient.files.putFilePrepared(withPreconditions);
-    assert.deepEqual(await browserClient.files.putFilePrepared(withPreconditions), replaced);
+    const replaced = await browserClient.files.uploadPrepared(withPreconditions);
+    const replacedReplay = await browserClient.files.uploadPrepared(withPreconditions);
+    assert.equal(replacedReplay.commit_id, replaced.commit_id);
+    assert.equal(replacedReplay.committed_seq, replaced.committed_seq);
 
     // The rig fails only at begin. No session exists then, so mid-flow cleanup is not covered.
     await assert.rejects(
@@ -2375,13 +2383,18 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     // The same content through the high-level helper: the payload exceeds the
     // part size, so this exercises files.upload's multipart branch.
     const helperPath = `${request.path}-helper`;
-    const helperCommit = await activeHarness.client.files.upload({
+    const client = new LoonFSClient({
+        baseUrl: activeHarness.serverBaseUrl,
+        token: activeHarness.token,
+        actorId: request.actor_id,
+    });
+    const helperCommit = await client.files.upload({
         namespace_id: request.namespace_id,
         path: helperPath,
         content: payload,
-        actor_id: request.actor_id,
-        commit_id: `${request.commit_id}-helper`,
     });
+    assert.ok(helperCommit.commit_id.startsWith("c_") && helperCommit.commit_id.length === 34);
+    assert.equal(helperCommit.committed_by, request.actor_id);
     assert.ok(helperCommit.committed_seq > 0, "helper multipart put reported no committed_seq");
     const helperRead = await activeHarness.client.files.download({
         namespace_id: request.namespace_id,
