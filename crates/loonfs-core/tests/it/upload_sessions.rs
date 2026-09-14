@@ -30,7 +30,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::v0::BeginUploadResponse, CoreError> {
+) -> Result<loonfs_api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .begin_upload()
         .await
@@ -53,7 +53,7 @@ async fn upload_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     bytes: &[u8],
     context: &MutationContext,
-) -> Result<loonfs_api::v0::UploadContentResponse, CoreError> {
+) -> Result<loonfs_api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .upload_content(upload_id, bytes)
         .await
@@ -187,7 +187,7 @@ async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
     let begin = begin_upload(&guarded_store, &namespace_id, &context)
         .await
         .expect("begin upload");
-    assert_eq!(begin.namespace_id(), &namespace_id);
+    assert_eq!(&begin.namespace_id, &namespace_id);
     assert_eq!(guarded_store.attempts(), 0);
 }
 
@@ -204,19 +204,19 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let begin = begin_upload(&store, &namespace_id, &context)
         .await
         .expect("begin upload");
-    let uploaded = upload_content(&store, &namespace_id, begin.upload_id(), b"hello", &context)
+    let uploaded = upload_content(&store, &namespace_id, &begin.upload_id, b"hello", &context)
         .await
         .expect("upload content");
 
     store.reset();
-    let completed = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
+    let completed = complete_upload(&store, &namespace_id, &begin.upload_id, &context)
         .await
         .expect("complete upload");
-    assert_eq!(completed.content_ref(), Some(&uploaded.content_ref));
+    assert_eq!(completed.content_ref(), uploaded.content_ref());
     assert_eq!(store.count(OperationClass::Read), 0);
 
     store.reset();
-    let completed_again = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
+    let completed_again = complete_upload(&store, &namespace_id, &begin.upload_id, &context)
         .await
         .expect("complete upload idempotently");
     assert_eq!(completed_again, completed);
@@ -249,7 +249,7 @@ mod streamed_content {
         upload_id: &UploadId,
         bytes: &[u8],
         context: &MutationContext,
-    ) -> Result<loonfs_api::v0::UploadContentResponse, CoreError> {
+    ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
         namespace_engine(store, namespace_id, context)
             .upload_streamed_content(upload_id, body(bytes))
             .await
@@ -269,22 +269,29 @@ mod streamed_content {
         let begin = begin_upload(&store, &namespace_id, &context)
             .await
             .expect("begin upload");
-        let staged = upload_streamed(&store, &namespace_id, begin.upload_id(), &bytes, &context)
+        let staged = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
             .await
             .expect("stream a multi-part payload into the session");
 
-        assert_eq!(staged.content_ref.size_bytes, bytes.len() as u64);
         assert_eq!(
-            staged.content_ref.checksum,
+            staged.content_ref().expect("staged content").size_bytes,
+            bytes.len() as u64
+        );
+        assert_eq!(
+            staged
+                .content_ref()
+                .expect("staged content")
+                .clone()
+                .checksum,
             Checksum::sha256(&bytes),
             "the server hashed the whole stream itself"
         );
 
         // Completion is unchanged: it trusts what the server already checked.
-        let completed = complete_upload(&store, &namespace_id, begin.upload_id(), &context)
+        let completed = complete_upload(&store, &namespace_id, &begin.upload_id, &context)
             .await
             .expect("complete a streamed upload");
-        assert_eq!(completed.content_ref(), Some(&staged.content_ref));
+        assert_eq!(completed.content_ref(), staged.content_ref());
     }
 
     #[tokio::test]
@@ -301,10 +308,10 @@ mod streamed_content {
         let begin = begin_upload(&store, &namespace_id, &context)
             .await
             .expect("begin upload");
-        let first = upload_streamed(&store, &namespace_id, begin.upload_id(), &bytes, &context)
+        let first = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
             .await
             .expect("first streamed upload");
-        let repeated = upload_streamed(&store, &namespace_id, begin.upload_id(), &bytes, &context)
+        let repeated = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
             .await
             .expect("the same bytes again is the same upload");
         assert_eq!(first, repeated);
@@ -314,7 +321,7 @@ mod streamed_content {
         let error = upload_streamed(
             &store,
             &namespace_id,
-            begin.upload_id(),
+            &begin.upload_id,
             &different,
             &context,
         )
@@ -327,8 +334,11 @@ mod streamed_content {
             .expect("catalog");
         let object_key = content_blob(
             catalog.content_store_id(),
-            &first.content_ref.owner_namespace_id,
-            &first.content_ref.content_id,
+            &first
+                .content_ref()
+                .expect("staged content")
+                .owner_namespace_id,
+            &first.content_ref().expect("staged content").content_id,
         );
         assert_eq!(
             store
@@ -370,7 +380,7 @@ mod streamed_content {
         let first = tokio::spawn({
             let blocking = Arc::clone(&blocking);
             let namespace_id = namespace_id.clone();
-            let upload_id = begin.upload_id().clone();
+            let upload_id = begin.upload_id.clone();
             let context = context.clone();
             let bytes = first_bytes.clone();
             async move {
@@ -390,7 +400,7 @@ mod streamed_content {
         let second = upload_streamed(
             blocking.as_ref(),
             &namespace_id,
-            begin.upload_id(),
+            &begin.upload_id,
             &second_bytes,
             &context,
         )
@@ -425,8 +435,11 @@ mod streamed_content {
                 .expect("catalog");
         let object_key = content_blob(
             catalog.content_store_id(),
-            &staged.content_ref.owner_namespace_id,
-            &staged.content_ref.content_id,
+            &staged
+                .content_ref()
+                .expect("staged content")
+                .owner_namespace_id,
+            &staged.content_ref().expect("staged content").content_id,
         );
         let stored = blocking
             .get(&object_key, None)
@@ -434,10 +447,20 @@ mod streamed_content {
             .expect("read staged object")
             .expect("staged object exists");
         assert_eq!(
-            staged.content_ref,
+            staged.content_ref().expect("staged content").clone(),
             ContentRef::blob_v1(
-                staged.content_ref.owner_namespace_id.clone(),
-                staged.content_ref.content_id.clone(),
+                staged
+                    .content_ref()
+                    .expect("staged content")
+                    .clone()
+                    .owner_namespace_id
+                    .clone(),
+                staged
+                    .content_ref()
+                    .expect("staged content")
+                    .clone()
+                    .content_id
+                    .clone(),
                 &stored
             ),
             "the recorded reference must describe the object byte for byte"
@@ -487,7 +510,7 @@ mod direct_multipart {
             .begin_direct_multipart_upload_target(DirectMultipartUploadOptions::default())
             .await
             .expect("begin direct multipart");
-        let state = session_state(store, &namespace_id, &begin.upload_id).await;
+        let state = session_state(store, &namespace_id, &begin.session.upload_id).await;
         // Multipart sessions do not know the completed content reference yet.
         let UploadSessionMode::DirectMultipart {
             provider_upload_id,
@@ -514,7 +537,7 @@ mod direct_multipart {
 
         Session {
             namespace_id,
-            upload_id: begin.upload_id,
+            upload_id: begin.session.upload_id,
             claim: UploadContentClaim {
                 size_bytes: payload.len() as u64,
                 checksum: Checksum::crc64nvme(&payload),

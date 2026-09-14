@@ -33,8 +33,8 @@ use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent}
 use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
-    BeginUploadResponse, CompleteMultipartUploadRequest, CompletedUploadPart, UploadContentClaim,
-    UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
+    CompleteMultipartUploadRequest, CompletedUploadPart, UploadContentClaim, UploadMode,
+    UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
@@ -54,8 +54,7 @@ use std::num::NonZeroU64;
 /// Internal response for preparing a direct_put session before URL signing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeginDirectPutUploadTargetResponse {
-    pub namespace_id: NamespaceId,
-    pub upload_id: UploadId,
+    pub session: UploadSession,
     pub object_key: String,
 }
 
@@ -75,8 +74,7 @@ const DIRECT_MULTIPART_CHECKSUM_ALGORITHM: ChecksumAlgorithm = ChecksumAlgorithm
 /// Internal response for preparing a direct_multipart session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeginDirectMultipartUploadTargetResponse {
-    pub namespace_id: NamespaceId,
-    pub upload_id: UploadId,
+    pub session: UploadSession,
     pub target: DirectMultipartUploadTarget,
 }
 
@@ -122,19 +120,15 @@ pub(crate) async fn begin_service_proxied_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<BeginUploadResponse> {
+) -> Result<UploadSession> {
     ensure_upload_namespace_available(store, namespace_id).await?;
-    let upload_id = create_upload_session(
+    create_upload_session(
         store,
         namespace_id,
         NewUploadSession::service_proxied(),
         context,
     )
-    .await?;
-    Ok(BeginUploadResponse::ServiceProxied {
-        namespace_id: namespace_id.clone(),
-        upload_id,
-    })
+    .await
 }
 
 /// Starts a direct PUT session and assigns its content identity.
@@ -148,7 +142,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
     let object_key = content_key_for_id(&content_store_id, namespace_id, &content_id);
-    let upload_id = create_upload_session(
+    let session = create_upload_session(
         store,
         namespace_id,
         NewUploadSession::direct_put(content_id, checksum_algorithm),
@@ -156,8 +150,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     )
     .await?;
     Ok(BeginDirectPutUploadTargetResponse {
-        namespace_id: namespace_id.clone(),
-        upload_id,
+        session,
         object_key,
     })
 }
@@ -189,8 +182,8 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
         part_size_bytes,
         DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
     );
-    let upload_id = match create_upload_session(store, namespace_id, session, context).await {
-        Ok(upload_id) => upload_id,
+    let session = match create_upload_session(store, namespace_id, session, context).await {
+        Ok(session) => session,
         Err(error) => {
             let _ = abort_unpublished_multipart_upload(
                 store,
@@ -205,8 +198,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     };
 
     Ok(BeginDirectMultipartUploadTargetResponse {
-        namespace_id: namespace_id.clone(),
-        upload_id,
+        session,
         target: DirectMultipartUploadTarget {
             object_key,
             part_size_bytes: part_size_bytes.get(),
@@ -426,10 +418,10 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     session: NewUploadSession,
     context: &MutationContext,
-) -> Result<UploadId> {
+) -> Result<UploadSession> {
     let (state, _) =
         create_upload_session_with_state(store, namespace_id, session, context).await?;
-    Ok(state.upload_id)
+    Ok(session_response(&state))
 }
 
 async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
@@ -617,7 +609,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     bytes: &[u8],
-) -> Result<UploadContentResponse> {
+) -> Result<UploadSession> {
     upload_proxied_content(store, namespace_id, upload_id, ProxiedPayload::Bytes(bytes)).await
 }
 
@@ -626,7 +618,7 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     body: ByteStream,
-) -> Result<UploadContentResponse> {
+) -> Result<UploadSession> {
     upload_proxied_content(store, namespace_id, upload_id, ProxiedPayload::Stream(body)).await
 }
 
@@ -635,9 +627,9 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     payload: ProxiedPayload<'_>,
-) -> Result<UploadContentResponse> {
+) -> Result<UploadSession> {
     ensure_upload_namespace_available(store, namespace_id).await?;
-    let (content_store_id, loaded) =
+    let (content_store_id, mut loaded) =
         read_open_proxied_session(store, namespace_id, upload_id).await?;
 
     // The claim is what makes the write exclusive, so it is taken before any
@@ -664,11 +656,10 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
                     upload_id: upload_id.clone(),
                 });
             }
-            return Ok(UploadContentResponse {
-                namespace_id: namespace_id.clone(),
-                upload_id: upload_id.clone(),
-                content_ref,
-            });
+            loaded.mode = UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Staged(content_ref),
+            };
+            return Ok(session_response(&loaded));
         }
         StagingSlot::Claimed => {}
     }
@@ -718,9 +709,8 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     content_ref: ContentRef,
     already_present: bool,
-) -> Result<UploadContentResponse> {
+) -> Result<UploadSession> {
     update_upload_session(store, namespace_id, upload_id, |mut state| {
-        let namespace_id = namespace_id.clone();
         let upload_id = upload_id.to_owned();
         let content_ref = content_ref.clone();
         async move {
@@ -732,24 +722,20 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                     "staged content recorded for a direct upload session".to_owned(),
                 ));
             };
-            let response = UploadContentResponse {
-                namespace_id,
-                upload_id: upload_id.clone(),
-                content_ref: content_ref.clone(),
-            };
             if already_present && !matches!(staging, ProxiedStaging::Staged(_)) {
                 return Err(CoreError::UploadContentConflict { upload_id });
             }
             match staging {
                 ProxiedStaging::Staged(existing) => {
                     if existing == &content_ref {
-                        Ok(UploadSessionUpdate::Noop(response))
+                        Ok(UploadSessionUpdate::Noop(session_response(&state)))
                     } else {
                         Err(CoreError::UploadContentConflict { upload_id })
                     }
                 }
                 ProxiedStaging::Idle | ProxiedStaging::Claimed => {
                     *staging = ProxiedStaging::Staged(content_ref);
+                    let response = session_response(&state);
                     Ok(UploadSessionUpdate::Replace {
                         next: Box::new(state),
                         outcome: response,
@@ -1209,50 +1195,89 @@ impl AbandonedUpload {
     }
 }
 
-/// Returns an upload session and a new receipt when the upload is complete.
-///
-/// A caller that lost the original completion response can recover the
-/// receipt without uploading the content again.
+/// A session with the server-side details needed for fresh capabilities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadSessionView {
+    pub session: UploadSession,
+    /// Fresh receipt for a completed session inside its minting window.
+    pub receipt: Option<CompletedUploadReceipt>,
+    /// Object key of an open `direct_put` session, for the server to presign.
+    pub direct_put_object_key: Option<String>,
+}
+
 pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     now_ms: u64,
-) -> Result<(UploadSession, Option<CompletedUploadReceipt>)> {
+) -> Result<UploadSessionView> {
     ensure_upload_namespace_available(store, namespace_id).await?;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    let mode = upload_mode(&loaded.mode);
-    let (status, receipt) = match loaded.status {
-        UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
-            (UploadSessionStatus::Open { expires_at_ms }, None)
-        }
-        UploadSessionRecordStatus::Aborted { aborted_at_ms } => {
-            (UploadSessionStatus::Aborted { aborted_at_ms }, None)
-        }
+    let receipt = match &loaded.status {
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
-        } => (
-            completed_status(&content_ref, completed_at_ms),
-            receipt_within_window(
-                namespace_id,
-                content_store_id,
-                &content_ref,
-                completed_at_ms,
-                now_ms,
-            ),
+        } => receipt_within_window(
+            namespace_id,
+            content_store_id,
+            content_ref,
+            *completed_at_ms,
+            now_ms,
         ),
+        UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. } => None,
     };
-    Ok((
-        UploadSession {
-            namespace_id: namespace_id.clone(),
-            upload_id: upload_id.clone(),
-            mode,
-            status,
-        },
+    let direct_put_object_key = if matches!(loaded.status, UploadSessionRecordStatus::Open { .. })
+        && matches!(loaded.mode, UploadSessionMode::DirectPut { .. })
+    {
+        Some(content_key_for_id(
+            content_store_id,
+            namespace_id,
+            &loaded.content_id,
+        ))
+    } else {
+        None
+    };
+    Ok(UploadSessionView {
+        session: session_response(&loaded),
         receipt,
-    ))
+        direct_put_object_key,
+    })
+}
+
+fn session_response(state: &UploadSessionState) -> UploadSession {
+    let status = match &state.status {
+        UploadSessionRecordStatus::Open { expires_at_ms } => UploadSessionStatus::Open {
+            expires_at_ms: *expires_at_ms,
+            checksum_algorithm: state.mode.checksum_algorithm(),
+            part_size_bytes: match &state.mode {
+                UploadSessionMode::DirectMultipart {
+                    part_size_bytes, ..
+                } => Some(part_size_bytes.get()),
+                _ => None,
+            },
+            access: None,
+            content_ref: match &state.mode {
+                UploadSessionMode::ServiceProxied {
+                    staging: ProxiedStaging::Staged(content_ref),
+                } => Some(content_ref.clone()),
+                _ => None,
+            },
+        },
+        UploadSessionRecordStatus::Completed {
+            completed_at_ms,
+            content_ref,
+        } => completed_status(content_ref, *completed_at_ms),
+        UploadSessionRecordStatus::Aborted { aborted_at_ms } => UploadSessionStatus::Aborted {
+            aborted_at_ms: *aborted_at_ms,
+        },
+    };
+    UploadSession {
+        namespace_id: state.namespace_id.clone(),
+        upload_id: state.upload_id.clone(),
+        mode: upload_mode(&state.mode),
+        status,
+    }
 }
 
 /// What a completed upload hands back: the wire response, the in-process
@@ -1612,7 +1637,7 @@ mod tests {
         let begin = begin_service_proxied_upload(store, &namespace_id, context)
             .await
             .expect("begin upload");
-        let staged = upload_content(store, &namespace_id, begin.upload_id(), BYTES)
+        let staged = upload_content(store, &namespace_id, &begin.upload_id, BYTES)
             .await
             .expect("stage upload");
         let content_store_id = load_namespace_content_store_id(store, &namespace_id)
@@ -1620,14 +1645,17 @@ mod tests {
             .expect("content store id");
         let content_key = content_blob(
             &content_store_id,
-            &staged.content_ref.owner_namespace_id,
-            &staged.content_ref.content_id,
+            &staged
+                .content_ref()
+                .expect("staged content")
+                .owner_namespace_id,
+            &staged.content_ref().expect("staged content").content_id,
         );
         (
             namespace_id,
             content_store_id,
-            begin.upload_id().clone(),
-            staged.content_ref,
+            begin.upload_id.clone(),
+            staged.content_ref().expect("staged content").clone(),
             content_key,
         )
     }
@@ -1897,7 +1925,7 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            &begin.upload_id,
+            &begin.session.upload_id,
             ResolvedUploadCompletion::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: BYTES.len() as u64,
@@ -1912,7 +1940,7 @@ mod tests {
             wrong_algorithm,
             CoreError::InvalidUploadContent(_)
         ));
-        let open = load_upload_session_state(&store, &namespace_id, &begin.upload_id)
+        let open = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
             .await
             .expect("session remains readable");
         assert!(matches!(
@@ -1938,7 +1966,7 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            &begin.upload_id,
+            &begin.session.upload_id,
             completion.clone(),
             &context(3_000),
         )
@@ -1948,7 +1976,7 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            &begin.upload_id,
+            &begin.session.upload_id,
             completion,
             &context(3_000),
         )
@@ -2073,7 +2101,7 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            &begin.upload_id,
+            &begin.session.upload_id,
             ResolvedUploadCompletion::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: BYTES.len() as u64,
@@ -2085,7 +2113,7 @@ mod tests {
         .await
         .expect_err("mismatched bytes cannot complete");
         assert!(matches!(error, CoreError::InvalidUploadContent(_)));
-        let state = load_upload_session_state(&store, &namespace_id, &begin.upload_id)
+        let state = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
             .await
             .expect("session remains readable");
         assert!(matches!(
@@ -2104,7 +2132,7 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            &begin.upload_id,
+            &begin.session.upload_id,
             ResolvedUploadCompletion::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: BYTES.len() as u64,
@@ -2216,12 +2244,12 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            aborted.upload_id(),
+            &aborted.upload_id,
             &context(3_000),
         )
         .await
         .expect("abort");
-        let error = upload_content(&store, &namespace_id, aborted.upload_id(), BYTES)
+        let error = upload_content(&store, &namespace_id, &aborted.upload_id, BYTES)
             .await
             .expect_err("an aborted session takes no more bytes");
         assert!(matches!(error, CoreError::UploadNotFound { .. }));
@@ -2235,10 +2263,13 @@ mod tests {
         let (namespace_id, content_store_id, upload_id, content_ref, _content_key) =
             staged_session(&store, &setup).await;
 
-        let (open, receipt) =
-            get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 1_500)
-                .await
-                .expect("status of an open session");
+        let crate::UploadSessionView {
+            session: open,
+            receipt,
+            ..
+        } = get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 1_500)
+            .await
+            .expect("status of an open session");
         assert!(matches!(open.status, UploadSessionStatus::Open { .. }));
         assert!(receipt.is_none(), "an open session attests nothing");
 
@@ -2251,10 +2282,13 @@ mod tests {
         )
         .await
         .expect("complete");
-        let (completed, receipt) =
-            get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 2_500)
-                .await
-                .expect("status of a completed session");
+        let crate::UploadSessionView {
+            session: completed,
+            receipt,
+            ..
+        } = get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 2_500)
+            .await
+            .expect("status of a completed session");
         assert!(matches!(
             completed.status,
             UploadSessionStatus::Completed { .. }
@@ -2272,16 +2306,20 @@ mod tests {
             &store,
             &namespace_id,
             &content_store_id,
-            begin.upload_id(),
+            &begin.upload_id,
             &context(3_000),
         )
         .await
         .expect("abort");
-        let (aborted, receipt) = get_upload_status(
+        let crate::UploadSessionView {
+            session: aborted,
+            receipt,
+            ..
+        } = get_upload_status(
             &store,
             &namespace_id,
             &content_store_id,
-            begin.upload_id(),
+            &begin.upload_id,
             3_500,
         )
         .await
@@ -2314,7 +2352,11 @@ mod tests {
         // Long after the first receipt would have expired, the durable
         // session still answers with a usable one.
         let much_later = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS - 1;
-        let (_, receipt) = get_upload_status(
+        let crate::UploadSessionView {
+            session: _,
+            receipt,
+            ..
+        } = get_upload_status(
             &store,
             &namespace_id,
             &content_store_id,
@@ -2326,10 +2368,13 @@ mod tests {
         assert_eq!(receipt.expect("still minting").content_ref(), &content_ref);
 
         let past = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
-        let (status, receipt) =
-            get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, past)
-                .await
-                .expect("status past the receipt window");
+        let crate::UploadSessionView {
+            session: status,
+            receipt,
+            ..
+        } = get_upload_status(&store, &namespace_id, &content_store_id, &upload_id, past)
+            .await
+            .expect("status past the receipt window");
         let completed = match status.status {
             UploadSessionStatus::Completed {
                 content_ref,
@@ -2386,7 +2431,8 @@ mod tests {
             &context(1_000),
         )
         .await
-        .expect("multipart session");
+        .expect("multipart session")
+        .upload_id;
         delete_upload_namespace(&inner, &namespace_id).await;
         let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
         let error = direct_multipart_part_targets(

@@ -17,6 +17,7 @@
     "part_count": 2,
     "size_bytes": 5243904,
     "checksum_algorithm": "crc64nvme",
-    "committed_seq": 1
+    "committed_seq": 1,
+    "begin_status": "open"
   }
 }

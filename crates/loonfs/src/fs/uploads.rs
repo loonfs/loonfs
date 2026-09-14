@@ -7,18 +7,17 @@
 //! the session is admitted by the clock rather than by the next unrelated
 //! write to the namespace. An attached runner may admit the hinted deadline.
 
-use crate::content_tokens::{CompletedUpload, CompletedUploadReceipt};
+use crate::content_tokens::CompletedUpload;
 use crate::maintenance::{completed_upload_reclaim_at_ms, upload_session_reclaim_at_ms};
 use crate::uploads::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
-    MultipartPartTargets, ResolvedUploadCompletion,
+    MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::Result;
 use crate::{
-    BeginUploadResponse, ChecksumAlgorithm, MaintenanceHint, MaintenanceJobId, NamespaceId,
-    UploadContentResponse, UploadMode, UploadSession,
+    ChecksumAlgorithm, MaintenanceHint, MaintenanceJobId, NamespaceId, UploadMode, UploadSession,
 };
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::UploadPartChecksumClaim;
@@ -83,7 +82,7 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
+    pub async fn create_upload(&self, namespace_id: &NamespaceId) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self.engine(namespace_id).begin_upload().await?;
         self.schedule_upload_session_reclamation(namespace_id);
@@ -195,7 +194,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         bytes: &[u8],
-    ) -> Result<UploadContentResponse> {
+    ) -> Result<UploadSession> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
@@ -232,7 +231,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         body: ByteStream,
-    ) -> Result<UploadContentResponse> {
+    ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
@@ -348,7 +347,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> Result<(UploadSession, Option<CompletedUploadReceipt>)> {
+    ) -> Result<UploadSessionView> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)

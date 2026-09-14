@@ -81,204 +81,6 @@
         },
         "type": "object"
       },
-      "BeginUploadDirectMultipart": {
-        "description": "Write the object in parts through presigned part uploads.",
-        "properties": {
-          "mode": {
-            "enum": [
-              "direct_multipart"
-            ],
-            "type": "string"
-          },
-          "part_size_bytes": {
-            "description": "The byte length of every part except the last, or `None` for the server default.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "mode"
-        ],
-        "type": "object"
-      },
-      "BeginUploadDirectPut": {
-        "description": "Write the whole object through one presigned request.",
-        "properties": {
-          "mode": {
-            "enum": [
-              "direct_put"
-            ],
-            "type": "string"
-          },
-          "size_bytes": {
-            "description": "Advisory byte length for an early provider-limit check.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "mode"
-        ],
-        "type": "object"
-      },
-      "BeginUploadRequest": {
-        "description": "A request to start an upload session for one required transport mode.",
-        "discriminator": {
-          "mapping": {
-            "direct_multipart": "#/components/schemas/BeginUploadDirectMultipart",
-            "direct_put": "#/components/schemas/BeginUploadDirectPut",
-            "service_proxied": "#/components/schemas/BeginUploadServiceProxied"
-          },
-          "propertyName": "mode"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/BeginUploadServiceProxied"
-          },
-          {
-            "$ref": "#/components/schemas/BeginUploadDirectPut"
-          },
-          {
-            "$ref": "#/components/schemas/BeginUploadDirectMultipart"
-          }
-        ]
-      },
-      "BeginUploadResponse": {
-        "description": "The response from starting an upload session for one transport mode.",
-        "discriminator": {
-          "mapping": {
-            "direct_multipart": "#/components/schemas/BeginUploadResponseDirectMultipart",
-            "direct_put": "#/components/schemas/BeginUploadResponseDirectPut",
-            "service_proxied": "#/components/schemas/BeginUploadResponseServiceProxied"
-          },
-          "propertyName": "mode"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/BeginUploadResponseServiceProxied"
-          },
-          {
-            "$ref": "#/components/schemas/BeginUploadResponseDirectPut"
-          },
-          {
-            "$ref": "#/components/schemas/BeginUploadResponseDirectMultipart"
-          }
-        ]
-      },
-      "BeginUploadResponseDirectMultipart": {
-        "description": "Presigned part uploads assemble the object.",
-        "properties": {
-          "checksum_algorithm": {
-            "$ref": "#/components/schemas/ChecksumAlgorithm",
-            "description": "Checksum algorithm for every part and for the complete payload."
-          },
-          "mode": {
-            "enum": [
-              "direct_multipart"
-            ],
-            "type": "string"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace authorized to consume the eventual staged content."
-          },
-          "part_size_bytes": {
-            "description": "The byte length of every part except the last, with at most 10,000 parts allowed.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "upload_id": {
-            "$ref": "#/components/schemas/UploadId",
-            "description": "The session identity used by later part-signing and completion calls."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "upload_id",
-          "part_size_bytes",
-          "checksum_algorithm",
-          "mode"
-        ],
-        "type": "object"
-      },
-      "BeginUploadResponseDirectPut": {
-        "description": "One presigned request writes the whole object.",
-        "properties": {
-          "access": {
-            "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "Short-lived permission to write the object."
-          },
-          "checksum_algorithm": {
-            "$ref": "#/components/schemas/ChecksumAlgorithm",
-            "description": "Checksum algorithm the client must use for its completion claim."
-          },
-          "mode": {
-            "enum": [
-              "direct_put"
-            ],
-            "type": "string"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace authorized to consume the eventual staged content."
-          },
-          "upload_id": {
-            "$ref": "#/components/schemas/UploadId",
-            "description": "Durable session identity used by subsequent completion calls."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "upload_id",
-          "checksum_algorithm",
-          "access",
-          "mode"
-        ],
-        "type": "object"
-      },
-      "BeginUploadResponseServiceProxied": {
-        "description": "The service will receive the bytes and write the content object.",
-        "properties": {
-          "mode": {
-            "enum": [
-              "service_proxied"
-            ],
-            "type": "string"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace authorized to consume the eventual staged content."
-          },
-          "upload_id": {
-            "$ref": "#/components/schemas/UploadId",
-            "description": "The session identity used by later append and completion calls."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "upload_id",
-          "mode"
-        ],
-        "type": "object"
-      },
-      "BeginUploadServiceProxied": {
-        "description": "Send the bytes to the service, which writes the content object.",
-        "properties": {
-          "mode": {
-            "enum": [
-              "service_proxied"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "mode"
-        ],
-        "type": "object"
-      },
       "BindingGeneration": {
         "description": "Opaque token identifying one parent and name binding generation.",
         "pattern": "^[0-9a-f]+$",
@@ -611,7 +413,29 @@
         ],
         "type": "object"
       },
-      "CompleteUploadDirectMultipart": {
+      "CompleteUploadBody": {
+        "description": "Completes an upload using the mode that started it.",
+        "discriminator": {
+          "mapping": {
+            "direct_multipart": "#/components/schemas/CompleteUploadBodyDirectMultipart",
+            "direct_put": "#/components/schemas/CompleteUploadBodyDirectPut",
+            "service_proxied": "#/components/schemas/CompleteUploadBodyServiceProxied"
+          },
+          "propertyName": "mode"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CompleteUploadBodyServiceProxied"
+          },
+          {
+            "$ref": "#/components/schemas/CompleteUploadBodyDirectPut"
+          },
+          {
+            "$ref": "#/components/schemas/CompleteUploadBodyDirectMultipart"
+          }
+        ]
+      },
+      "CompleteUploadBodyDirectMultipart": {
         "description": "Complete a direct multipart upload.",
         "properties": {
           "content": {
@@ -639,7 +463,7 @@
         ],
         "type": "object"
       },
-      "CompleteUploadDirectPut": {
+      "CompleteUploadBodyDirectPut": {
         "description": "Complete a direct-PUT upload.",
         "properties": {
           "content": {
@@ -659,7 +483,7 @@
         ],
         "type": "object"
       },
-      "CompleteUploadServiceProxied": {
+      "CompleteUploadBodyServiceProxied": {
         "description": "Complete a service-proxied upload.",
         "properties": {
           "mode": {
@@ -841,6 +665,85 @@
         "required": [
           "name",
           "ttl_ms"
+        ],
+        "type": "object"
+      },
+      "CreateUploadBody": {
+        "description": "Selects the transport for a new upload session.",
+        "discriminator": {
+          "mapping": {
+            "direct_multipart": "#/components/schemas/CreateUploadBodyDirectMultipart",
+            "direct_put": "#/components/schemas/CreateUploadBodyDirectPut",
+            "service_proxied": "#/components/schemas/CreateUploadBodyServiceProxied"
+          },
+          "propertyName": "mode"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CreateUploadBodyServiceProxied"
+          },
+          {
+            "$ref": "#/components/schemas/CreateUploadBodyDirectPut"
+          },
+          {
+            "$ref": "#/components/schemas/CreateUploadBodyDirectMultipart"
+          }
+        ]
+      },
+      "CreateUploadBodyDirectMultipart": {
+        "description": "Write the object in parts through presigned part uploads.",
+        "properties": {
+          "mode": {
+            "enum": [
+              "direct_multipart"
+            ],
+            "type": "string"
+          },
+          "part_size_bytes": {
+            "description": "The byte length of every part except the last, or `None` for the server default.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      "CreateUploadBodyDirectPut": {
+        "description": "Write the whole object through one presigned request.",
+        "properties": {
+          "mode": {
+            "enum": [
+              "direct_put"
+            ],
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Advisory byte length for an early provider-limit check.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      "CreateUploadBodyServiceProxied": {
+        "description": "Send the bytes to the service, which writes the content object.",
+        "properties": {
+          "mode": {
+            "enum": [
+              "service_proxied"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
         ],
         "type": "object"
       },
@@ -2558,28 +2461,6 @@
         ],
         "type": "object"
       },
-      "UploadCompletion": {
-        "description": "A request to complete an upload session using the mode that started it.",
-        "discriminator": {
-          "mapping": {
-            "direct_multipart": "#/components/schemas/CompleteUploadDirectMultipart",
-            "direct_put": "#/components/schemas/CompleteUploadDirectPut",
-            "service_proxied": "#/components/schemas/CompleteUploadServiceProxied"
-          },
-          "propertyName": "mode"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/CompleteUploadServiceProxied"
-          },
-          {
-            "$ref": "#/components/schemas/CompleteUploadDirectPut"
-          },
-          {
-            "$ref": "#/components/schemas/CompleteUploadDirectMultipart"
-          }
-        ]
-      },
       "UploadContentClaim": {
         "additionalProperties": false,
         "description": "The size and checksum reported for a complete direct-upload payload.",
@@ -2598,29 +2479,6 @@
         "required": [
           "size_bytes",
           "checksum"
-        ],
-        "type": "object"
-      },
-      "UploadContentResponse": {
-        "description": "Response after uploading bytes into a session.",
-        "properties": {
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Digest and byte length computed from the accepted body."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that owns the upload session."
-          },
-          "upload_id": {
-            "$ref": "#/components/schemas/UploadId",
-            "description": "Session into which the service staged these bytes."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "upload_id",
-          "content_ref"
         ],
         "type": "object"
       },
@@ -2768,6 +2626,18 @@
       "UploadSessionStatusOpen": {
         "description": "Accepting content until its lease passes.",
         "properties": {
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Present for `direct_put` sessions; minted fresh on every read."
+          },
+          "checksum_algorithm": {
+            "$ref": "#/components/schemas/ChecksumAlgorithm",
+            "description": "Present for `direct_put` and `direct_multipart` sessions."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Present after content is staged in a `service_proxied` session."
+          },
           "expires_at_ms": {
             "description": "The Unix-millisecond time after which cleanup may abort the session.",
             "format": "int64",
@@ -2781,6 +2651,12 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace that owns the session."
+          },
+          "part_size_bytes": {
+            "description": "Present for `direct_multipart` sessions.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "status": {
             "enum": [
@@ -4377,7 +4253,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BeginUploadRequest"
+                "$ref": "#/components/schemas/CreateUploadBody"
               }
             }
           },
@@ -4388,7 +4264,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BeginUploadResponse"
+                  "$ref": "#/components/schemas/UploadSession"
                 }
               }
             },
@@ -4475,7 +4351,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}": {
       "get": {
-        "description": "Returns an upload session. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
+        "description": "Returns an upload session. An open direct_put session includes freshly signed access. A completed session includes a new content token so the client can retry the commit without uploading the content again.",
         "operationId": "get_upload",
         "parameters": [
           {
@@ -4693,7 +4569,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UploadCompletion"
+                "$ref": "#/components/schemas/CompleteUploadBody"
               }
             }
           },
@@ -4789,7 +4665,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/uploads/{upload_id}/content": {
       "put": {
-        "description": "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
+        "description": "Uploads bytes into a service-proxied upload session and returns the open session with the staged content reference.",
         "operationId": "put_upload_content",
         "parameters": [
           {
@@ -4831,11 +4707,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UploadContentResponse"
+                  "$ref": "#/components/schemas/UploadSession"
                 }
               }
             },
-            "description": "Upload content accepted"
+            "description": "Open session with the staged content reference"
           },
           "400": {
             "content": {

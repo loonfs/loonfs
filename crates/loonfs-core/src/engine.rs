@@ -17,17 +17,16 @@ use crate::path::read::{
 };
 use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
-    MultipartPartTargets, ResolvedUploadCompletion,
+    MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::storage::content::{open_content_import_reader, FileContentStream, StreamedPayloadKind};
-use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
+use crate::storage::content_admission::PreparedContent;
 use crate::time::current_time_ms;
 use loonfs_api::options::{
     DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, StatPathOptions,
 };
 use loonfs_api::v0::{
-    BeginUploadResponse, Commit, ListChangesResponse, UploadContentResponse, UploadMode,
-    UploadPartChecksumClaim, UploadSession,
+    Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::EffectiveLimit;
@@ -567,7 +566,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Starts a durable upload session with explicit transport options.
-    pub async fn begin_upload(&self) -> Result<BeginUploadResponse> {
+    pub async fn begin_upload(&self) -> Result<UploadSession> {
         crate::protocol::begin_service_proxied_upload(
             &self.store,
             &self.namespace_id,
@@ -631,7 +630,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         upload_id: &UploadId,
         bytes: &[u8],
-    ) -> Result<UploadContentResponse> {
+    ) -> Result<UploadSession> {
         crate::protocol::upload_content(&self.store, &self.namespace_id, upload_id, bytes).await
     }
 
@@ -641,7 +640,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         upload_id: &UploadId,
         body: ByteStream,
-    ) -> Result<UploadContentResponse> {
+    ) -> Result<UploadSession> {
         crate::protocol::upload_streamed_content(&self.store, &self.namespace_id, upload_id, body)
             .await
     }
@@ -805,10 +804,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns an upload session. Completed uploads include a new receipt so
     /// the caller can retry publication without uploading the content again.
-    pub async fn get_upload_status(
-        &self,
-        upload_id: &UploadId,
-    ) -> Result<(UploadSession, Option<CompletedUploadReceipt>)> {
+    pub async fn get_upload_status(&self, upload_id: &UploadId) -> Result<UploadSessionView> {
         let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
             &self.store,
             &self.namespace_id,
@@ -1058,12 +1054,16 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("reader store"),
             namespace_id,
         );
-        let (status, receipt) = reader
-            .get_upload_status(begun.upload_id())
+        let crate::UploadSessionView {
+            session: status,
+            receipt,
+            ..
+        } = reader
+            .get_upload_status(&begun.upload_id)
             .await
             .expect("reader engine reads upload status");
 
-        assert_eq!(status.upload_id, *begun.upload_id());
+        assert_eq!(status.upload_id, begun.upload_id);
         assert!(receipt.is_none());
     }
 }

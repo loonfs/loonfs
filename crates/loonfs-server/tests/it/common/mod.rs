@@ -335,10 +335,7 @@ pub(crate) mod http_split_support {
     #![allow(dead_code)]
 
     use loonfs_api::{
-        v0::{
-            BeginUploadRequest, CompleteUploadRequest, ContentToken, UploadMode,
-            UploadSessionStatus,
-        },
+        v0::{CompleteUploadBody, ContentToken, CreateUploadBody, UploadMode, UploadSessionStatus},
         CommitRequest, ContentRef, DestinationBehavior, NamespaceId,
     };
     use loonfs_client::{Client, PutFileOptions};
@@ -405,26 +402,26 @@ pub(crate) mod http_split_support {
         file_bytes: &[u8],
     ) -> StagedUpload {
         let begin = client
-            .create_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
+            .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
             .await
             .expect("begin upload");
         client
-            .put_upload_content(namespace_id, begin.upload_id(), file_bytes)
+            .put_upload_content(namespace_id, &begin.upload_id, file_bytes)
             .await
             .expect("upload content");
         let complete = client
             .complete_upload(
                 namespace_id,
-                begin.upload_id(),
-                &CompleteUploadRequest::ServiceProxied {},
+                &begin.upload_id,
+                &CompleteUploadBody::ServiceProxied {},
             )
             .await
             .expect("complete upload");
         let repeated = client
             .complete_upload(
                 namespace_id,
-                begin.upload_id(),
-                &CompleteUploadRequest::ServiceProxied {},
+                &begin.upload_id,
+                &CompleteUploadBody::ServiceProxied {},
             )
             .await
             .expect("repeat complete upload");

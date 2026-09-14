@@ -6,6 +6,7 @@
   },
   "expected": {
     "mode": "service_proxied",
-    "status": "aborted"
+    "status": "aborted",
+    "begin_status": "open"
   }
 }

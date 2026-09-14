@@ -244,13 +244,13 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     let begin = crate::protocol::begin_upload(
         store,
         namespace_id,
-        loonfs_api::v0::BeginUploadRequest::ServiceProxied {},
+        loonfs_api::v0::CreateUploadBody::ServiceProxied {},
         context,
     )
     .await
     .expect("begin upload");
     let staged =
-        crate::protocol::upload_content(store, namespace_id, begin.upload_id(), b"racing upload\n")
+        crate::protocol::upload_content(store, namespace_id, &begin.upload_id, b"racing upload\n")
             .await
             .expect("stage upload");
     let content_store_id =
@@ -258,8 +258,8 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
             .await
             .expect("content store id");
     (
-        begin.upload_id().clone(),
-        staged.content_ref,
+        begin.upload_id.clone(),
+        staged.content_ref().expect("staged content").clone(),
         content_store_id,
     )
 }
@@ -793,12 +793,12 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     let begin = crate::protocol::begin_upload(
         store,
         namespace_id,
-        loonfs_api::v0::BeginUploadRequest::ServiceProxied {},
+        loonfs_api::v0::CreateUploadBody::ServiceProxied {},
         context,
     )
     .await
     .expect("begin upload");
-    let staged = crate::protocol::upload_content(store, namespace_id, begin.upload_id(), bytes)
+    let staged = crate::protocol::upload_content(store, namespace_id, &begin.upload_id, bytes)
         .await
         .expect("stage upload");
     let content_store_id =
@@ -809,15 +809,15 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         &content_store_id,
-        begin.upload_id(),
+        &begin.upload_id,
         crate::protocol::ResolvedUploadCompletion::KnownContent,
         context,
     )
     .await
     .expect("complete upload");
     (
-        begin.upload_id().clone(),
-        staged.content_ref,
+        begin.upload_id.clone(),
+        staged.content_ref().expect("staged content").clone(),
         content_store_id,
         completed.prepared,
     )

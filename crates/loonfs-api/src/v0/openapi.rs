@@ -16,8 +16,7 @@ use utoipa::ToSchema;
 /// when building the static specification, not when serving an HTTP request.
 pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     let mut named = NamedSchemas::default();
-    named.tagged::<BeginUploadRequest>("mode");
-    named.tagged::<BeginUploadResponse>("mode");
+    named.tagged::<CreateUploadBody>("mode");
     named.tagged::<CheckpointOwnerSummary>("kind");
     named.tagged::<CommitPrecondition>("kind");
     named.tagged::<FilesystemChange>("kind");
@@ -27,7 +26,7 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<ReorganizeStepOutcome>("outcome");
     named.tagged::<RunMaintenanceRequest>("kind");
     named.tagged::<RunMaintenanceResponse>("kind");
-    named.tagged::<CompleteUploadRequest>("mode");
+    named.tagged::<CompleteUploadBody>("mode");
     named.tagged::<WalFlushStepOutcome>("outcome");
     named.composite::<PathEntry, PathEntryKind>("inode_kind");
     named.composite::<UploadSession, UploadSessionStatus>("status");

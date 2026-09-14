@@ -385,6 +385,7 @@ type directPutRequest struct {
 }
 
 type directPutExpected struct {
+	BeginStatus       string `json:"begin_status"`
 	Mode              string `json:"mode"`
 	SizeBytes         int64  `json:"size_bytes"`
 	ChecksumAlgorithm string `json:"checksum_algorithm"`
@@ -399,34 +400,40 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	sizeBytes := int64(len(payload))
 	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
-		Body: &loonfs.BeginUploadRequest{
-			DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
+		Body: &loonfs.CreateUploadBody{
+			DirectPut: &loonfs.CreateUploadBodyDirectPut{SizeBytes: &sizeBytes},
 		},
 	})
 	if err != nil {
 		t.Fatalf("begin direct PUT: %v", err)
 	}
-	if begin.DirectPut == nil {
-		t.Fatalf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
+	if begin.Open == nil {
+		t.Fatal("created upload session is not open")
 	}
-	directPut := begin.DirectPut
-	if begin.Mode != expected.Mode {
-		t.Errorf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
+	directPut := begin.Open
+	if directPut.Access == nil || directPut.ChecksumAlgorithm == nil {
+		t.Fatal("direct_put session lacks access or checksum_algorithm")
 	}
-	if string(directPut.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
-		t.Errorf("direct PUT checksum_algorithm = %q, want %q", directPut.ChecksumAlgorithm, expected.ChecksumAlgorithm)
+	if begin.Status != expected.BeginStatus {
+		t.Errorf("begin status = %q, want %q", begin.Status, expected.BeginStatus)
+	}
+	if string(begin.Open.Mode) != expected.Mode {
+		t.Errorf("begin upload mode = %q, want %q", begin.Open.Mode, expected.Mode)
+	}
+	if string(*directPut.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("direct PUT checksum_algorithm = %q, want %q", *directPut.ChecksumAlgorithm, expected.ChecksumAlgorithm)
 	}
 
 	putPresigned(t, directPut.Access, payload, false)
 	claim := &loonfs.UploadContentClaim{
-		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
+		Checksum:  mustChecksum(t, *directPut.ChecksumAlgorithm, payload),
 		SizeBytes: int64(len(payload)),
 	}
 	completed, err := h.client.Uploads.Complete(context.Background(), &loonfs.CompleteUploadRequest{
 		NamespaceID: request.NamespaceID,
-		UploadID:    string(begin.DirectPut.UploadID),
-		Body: &loonfs.UploadCompletion{
-			DirectPut: &loonfs.CompleteUploadDirectPut{Content: claim},
+		UploadID:    string(begin.Open.UploadID),
+		Body: &loonfs.CompleteUploadBody{
+			DirectPut: &loonfs.CompleteUploadBodyDirectPut{Content: claim},
 		},
 	})
 	if err != nil {
@@ -479,6 +486,7 @@ type bytePattern struct {
 }
 
 type multipartExpected struct {
+	BeginStatus       string `json:"begin_status"`
 	Mode              string `json:"mode"`
 	PartCount         int    `json:"part_count"`
 	SizeBytes         int64  `json:"size_bytes"`
@@ -493,8 +501,8 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	payload := makeBytePattern(t, request.ContentPattern)
 	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
-		Body: &loonfs.BeginUploadRequest{
-			DirectMultipart: &loonfs.BeginUploadDirectMultipart{
+		Body: &loonfs.CreateUploadBody{
+			DirectMultipart: &loonfs.CreateUploadBodyDirectMultipart{
 				PartSizeBytes: &request.PartSizeBytes,
 			},
 		},
@@ -502,33 +510,39 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("begin multipart upload: %v", err)
 	}
-	if begin.DirectMultipart == nil {
-		t.Fatalf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
+	if begin.Open == nil {
+		t.Fatal("created upload session is not open")
 	}
-	multipart := begin.DirectMultipart
-	if begin.Mode != expected.Mode {
-		t.Errorf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
+	multipart := begin.Open
+	if multipart.PartSizeBytes == nil || multipart.ChecksumAlgorithm == nil {
+		t.Fatal("direct_multipart session lacks part_size_bytes or checksum_algorithm")
 	}
-	if multipart.PartSizeBytes != request.PartSizeBytes {
-		t.Errorf("part_size_bytes = %d, want %d", multipart.PartSizeBytes, request.PartSizeBytes)
+	if begin.Status != expected.BeginStatus {
+		t.Errorf("begin status = %q, want %q", begin.Status, expected.BeginStatus)
 	}
-	if string(multipart.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
-		t.Errorf("checksum_algorithm = %q, want %q", multipart.ChecksumAlgorithm, expected.ChecksumAlgorithm)
+	if string(begin.Open.Mode) != expected.Mode {
+		t.Errorf("begin upload mode = %q, want %q", begin.Open.Mode, expected.Mode)
 	}
-	parts := splitPayload(t, payload, multipart.PartSizeBytes)
+	if *multipart.PartSizeBytes != request.PartSizeBytes {
+		t.Errorf("part_size_bytes = %d, want %d", *multipart.PartSizeBytes, request.PartSizeBytes)
+	}
+	if string(*multipart.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("checksum_algorithm = %q, want %q", *multipart.ChecksumAlgorithm, expected.ChecksumAlgorithm)
+	}
+	parts := splitPayload(t, payload, *multipart.PartSizeBytes)
 	if len(parts) != expected.PartCount {
 		t.Fatalf("part count = %d, want %d", len(parts), expected.PartCount)
 	}
 	claims := make([]*loonfs.UploadPartChecksumClaim, len(parts))
 	for index, part := range parts {
 		claims[index] = &loonfs.UploadPartChecksumClaim{
-			Checksum:   mustChecksum(t, multipart.ChecksumAlgorithm, part),
+			Checksum:   mustChecksum(t, *multipart.ChecksumAlgorithm, part),
 			PartNumber: index + 1,
 		}
 	}
 	signed, err := h.client.Uploads.SignParts(context.Background(), &loonfs.SignUploadPartsRequest{
 		NamespaceID: request.NamespaceID,
-		UploadID:    string(begin.DirectMultipart.UploadID),
+		UploadID:    string(begin.Open.UploadID),
 		Parts:       claims,
 	})
 	if err != nil {
@@ -553,12 +567,12 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	sort.Slice(completedParts, func(left, right int) bool {
 		return completedParts[left].PartNumber < completedParts[right].PartNumber
 	})
-	wholeChecksum := mustChecksum(t, multipart.ChecksumAlgorithm, payload)
+	wholeChecksum := mustChecksum(t, *multipart.ChecksumAlgorithm, payload)
 	completionRequest := &loonfs.CompleteUploadRequest{
 		NamespaceID: request.NamespaceID,
-		UploadID:    string(begin.DirectMultipart.UploadID),
-		Body: &loonfs.UploadCompletion{
-			DirectMultipart: &loonfs.CompleteUploadDirectMultipart{
+		UploadID:    string(begin.Open.UploadID),
+		Body: &loonfs.CompleteUploadBody{
+			DirectMultipart: &loonfs.CompleteUploadBodyDirectMultipart{
 				Content: &loonfs.UploadContentClaim{
 					Checksum:  wholeChecksum,
 					SizeBytes: int64(len(payload)),
@@ -640,8 +654,9 @@ type abortRequest struct {
 }
 
 type abortExpected struct {
-	Mode   string `json:"mode"`
-	Status string `json:"status"`
+	BeginStatus string `json:"begin_status"`
+	Mode        string `json:"mode"`
+	Status      string `json:"status"`
 }
 
 func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
@@ -650,22 +665,25 @@ func runAbort(t *testing.T, h *harness, testCase conformanceCase) {
 	createNamespace(t, h.client, request.NamespaceID)
 	begin, err := h.client.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: request.NamespaceID,
-		Body: &loonfs.BeginUploadRequest{
-			ServiceProxied: &loonfs.BeginUploadServiceProxied{},
+		Body: &loonfs.CreateUploadBody{
+			ServiceProxied: &loonfs.CreateUploadBodyServiceProxied{},
 		},
 	})
 	if err != nil {
 		t.Fatalf("begin abortable upload: %v", err)
 	}
-	if begin.ServiceProxied == nil {
-		t.Fatalf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
+	if begin.Open == nil {
+		t.Fatal("created upload session is not open")
 	}
-	if begin.Mode != expected.Mode {
-		t.Errorf("begin upload mode = %q, want %q", begin.Mode, expected.Mode)
+	if begin.Status != expected.BeginStatus {
+		t.Errorf("begin status = %q, want %q", begin.Status, expected.BeginStatus)
+	}
+	if string(begin.Open.Mode) != expected.Mode {
+		t.Errorf("begin upload mode = %q, want %q", begin.Open.Mode, expected.Mode)
 	}
 	abort := &loonfs.AbortUploadRequest{
 		NamespaceID: request.NamespaceID,
-		UploadID:    string(begin.ServiceProxied.UploadID),
+		UploadID:    string(begin.Open.UploadID),
 	}
 	first, err := h.client.Uploads.Abort(context.Background(), abort)
 	if err != nil {
@@ -1405,17 +1423,17 @@ func stageContent(
 	t.Helper()
 	begin, err := sdk.Uploads.Create(context.Background(), &loonfs.CreateUploadRequest{
 		NamespaceID: namespaceID,
-		Body: &loonfs.BeginUploadRequest{
-			ServiceProxied: &loonfs.BeginUploadServiceProxied{},
+		Body: &loonfs.CreateUploadBody{
+			ServiceProxied: &loonfs.CreateUploadBodyServiceProxied{},
 		},
 	})
 	if err != nil {
 		t.Fatalf("begin service-proxied upload: %v", err)
 	}
-	if begin.ServiceProxied == nil {
-		t.Fatalf("begin upload mode = %q, want service_proxied", begin.Mode)
+	if begin.Open == nil {
+		t.Fatal("created upload session is not open")
 	}
-	uploadID := string(begin.ServiceProxied.UploadID)
+	uploadID := string(begin.Open.UploadID)
 	if _, err := sdk.Uploads.PutContent(
 		context.Background(),
 		namespaceID,
@@ -1427,8 +1445,8 @@ func stageContent(
 	completed, err := sdk.Uploads.Complete(context.Background(), &loonfs.CompleteUploadRequest{
 		NamespaceID: namespaceID,
 		UploadID:    uploadID,
-		Body: &loonfs.UploadCompletion{
-			ServiceProxied: &loonfs.CompleteUploadServiceProxied{},
+		Body: &loonfs.CompleteUploadBody{
+			ServiceProxied: &loonfs.CompleteUploadBodyServiceProxied{},
 		},
 	})
 	if err != nil {
@@ -2006,13 +2024,13 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	payload := []byte(request.ContentUTF8)
-	proxiedBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
-		ServiceProxied: &loonfs.BeginUploadServiceProxied{},
+	proxiedBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.CreateUploadBody{
+		ServiceProxied: &loonfs.CreateUploadBodyServiceProxied{},
 	})
-	if proxiedBegin.ServiceProxied == nil {
-		t.Fatalf("proxy begin upload mode = %q, want service_proxied", proxiedBegin.Mode)
+	if proxiedBegin.Open == nil {
+		t.Fatal("created upload session is not open")
 	}
-	proxiedUploadID := string(proxiedBegin.ServiceProxied.UploadID)
+	proxiedUploadID := string(proxiedBegin.Open.UploadID)
 	proxiedContentResponse := sendProxyRequest(
 		t,
 		proxyServer.Client(),
@@ -2021,8 +2039,8 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		bytes.NewReader(payload),
 		"application/octet-stream",
 	)
-	proxiedContent := decodeProxyJSONResponse[loonfs.UploadContentResponse](t, proxiedContentResponse)
-	if proxiedContent.ContentRef == nil {
+	proxiedContent := decodeProxyJSONResponse[loonfs.UploadSession](t, proxiedContentResponse)
+	if proxiedContent.Open == nil || proxiedContent.Open.ContentRef == nil {
 		t.Fatal("proxy upload content response has no content_ref")
 	}
 	proxiedCompletion := proxyCompleteUpload(
@@ -2030,12 +2048,12 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		proxyServer.Client(),
 		namespaceAliasBaseURL,
 		proxiedUploadID,
-		&loonfs.UploadCompletion{
-			ServiceProxied: &loonfs.CompleteUploadServiceProxied{},
+		&loonfs.CompleteUploadBody{
+			ServiceProxied: &loonfs.CompleteUploadBodyServiceProxied{},
 		},
 	)
 	proxiedStatus := requireCompletedStatus(t, proxiedCompletion)
-	assertContentRefEqual(t, proxiedStatus.ContentRef, proxiedContent.ContentRef)
+	assertContentRefEqual(t, proxiedStatus.ContentRef, proxiedContent.Open.ContentRef)
 	proxiedCommit := proxyCommitCompletedFile(
 		t,
 		proxyServer.Client(),
@@ -2052,17 +2070,20 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	sizeBytes := int64(len(payload))
-	directBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.BeginUploadRequest{
-		DirectPut: &loonfs.BeginUploadDirectPut{SizeBytes: &sizeBytes},
+	directBegin := proxyCreateUpload(t, proxyServer.Client(), namespaceAliasBaseURL, &loonfs.CreateUploadBody{
+		DirectPut: &loonfs.CreateUploadBodyDirectPut{SizeBytes: &sizeBytes},
 	})
-	if directBegin.DirectPut == nil {
-		t.Fatalf("proxy begin upload mode = %q, want direct_put", directBegin.Mode)
+	if directBegin.Open == nil {
+		t.Fatal("created upload session is not open")
 	}
-	directUploadID := string(directBegin.DirectPut.UploadID)
-	directPut := directBegin.DirectPut
+	directUploadID := string(directBegin.Open.UploadID)
+	directPut := directBegin.Open
+	if directPut.Access == nil || directPut.ChecksumAlgorithm == nil {
+		t.Fatal("direct_put session lacks access or checksum_algorithm")
+	}
 	putPresigned(t, directPut.Access, payload, false)
 	directClaim := &loonfs.UploadContentClaim{
-		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
+		Checksum:  mustChecksum(t, *directPut.ChecksumAlgorithm, payload),
 		SizeBytes: sizeBytes,
 	}
 	directCompletion := proxyCompleteUpload(
@@ -2070,8 +2091,8 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		proxyServer.Client(),
 		namespaceAliasBaseURL,
 		directUploadID,
-		&loonfs.UploadCompletion{
-			DirectPut: &loonfs.CompleteUploadDirectPut{Content: directClaim},
+		&loonfs.CompleteUploadBody{
+			DirectPut: &loonfs.CompleteUploadBodyDirectPut{Content: directClaim},
 		},
 	)
 	directStatus := requireCompletedStatus(t, directCompletion)
@@ -2143,10 +2164,10 @@ func proxyCreateUpload(
 	t *testing.T,
 	httpClient *http.Client,
 	namespaceAliasBaseURL string,
-	request *loonfs.BeginUploadRequest,
-) *loonfs.BeginUploadResponse {
+	request *loonfs.CreateUploadBody,
+) *loonfs.UploadSession {
 	t.Helper()
-	return proxyJSONRequest[loonfs.BeginUploadResponse](
+	return proxyJSONRequest[loonfs.UploadSession](
 		t,
 		httpClient,
 		http.MethodPost,
@@ -2160,7 +2181,7 @@ func proxyCompleteUpload(
 	httpClient *http.Client,
 	namespaceAliasBaseURL string,
 	uploadID string,
-	request *loonfs.UploadCompletion,
+	request *loonfs.CompleteUploadBody,
 ) *loonfs.UploadSession {
 	t.Helper()
 	return proxyJSONRequest[loonfs.UploadSession](

@@ -2537,13 +2537,13 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let session = client
         .create_upload(
             &namespace,
-            &loonfs_api::v0::BeginUploadRequest::ServiceProxied {},
+            &loonfs_api::v0::CreateUploadBody::ServiceProxied {},
         )
         .await
         .expect("begin a proxied upload session");
     assert_api_error(
         client
-            .put_upload_content(&namespace, session.upload_id(), &[0u8; 4096])
+            .put_upload_content(&namespace, &session.upload_id, &[0u8; 4096])
             .await,
         413,
         "content_too_large",
@@ -4321,11 +4321,27 @@ mod direct_download {
             .await
             .expect("begin direct put");
 
+        for _ in 0..2 {
+            let session = client
+                .get_upload(&namespace_id, &begin.upload_id)
+                .await
+                .expect("read open direct_put session");
+            assert_eq!(session.mode, loonfs_api::v0::UploadMode::DirectPut);
+            let loonfs_api::v0::UploadSessionStatus::Open {
+                access: Some(loonfs_api::v0::ObjectTransferAccess::PresignedUrl { method, .. }),
+                ..
+            } = session.status
+            else {
+                panic!("open direct_put session carries access");
+            };
+            assert_eq!(method, "PUT");
+        }
+
         let error = client
             .complete_upload(
                 &namespace_id,
-                begin.upload_id(),
-                &loonfs_api::v0::CompleteUploadRequest::DirectMultipart {
+                &begin.upload_id,
+                &loonfs_api::v0::CompleteUploadBody::DirectMultipart {
                     content: UploadContentClaim {
                         size_bytes: 5,
                         checksum: Checksum::sha256(b"hello"),

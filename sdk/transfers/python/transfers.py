@@ -14,9 +14,9 @@ from .files.client import FilesClient as _GeneratedFilesClient
 from .core.request_options import RequestOptions
 from .types import (
     ActorId,
-    BeginUploadRequest_DirectMultipart,
-    BeginUploadRequest_DirectPut,
-    BeginUploadRequest_ServiceProxied,
+    CreateUploadBody_DirectMultipart,
+    CreateUploadBody_DirectPut,
+    CreateUploadBody_ServiceProxied,
     Checksum,
     CompletedUploadPart,
     ContentRef,
@@ -25,10 +25,11 @@ from .types import (
     FilesystemOperation_PutFile,
     ObjectTransferAccess,
     RevisionNo,
-    UploadCompletion_DirectMultipart,
-    UploadCompletion_DirectPut,
-    UploadCompletion_ServiceProxied,
+    CompleteUploadBody_DirectMultipart,
+    CompleteUploadBody_DirectPut,
+    CompleteUploadBody_ServiceProxied,
     UploadContentClaim,
+    UploadSession_Open,
     UploadPartChecksumClaim,
     UploadSession,
 )
@@ -325,6 +326,8 @@ class FilesClient(_GeneratedFilesClient):
         )
         options = {**(request_options or {}), "max_retries": 0}
         try:
+            if not isinstance(begin, UploadSession_Open):
+                raise RuntimeError("created upload session is not open")
             if begin.mode == "service_proxied":
                 source.limit = (capabilities.limits or {}).get(_PROXY_UPLOAD_LIMIT)
                 self._root.uploads.put_content(
@@ -333,13 +336,15 @@ class FilesClient(_GeneratedFilesClient):
                     request=source.chunks(),
                     request_options=options,
                 )
-                completion = UploadCompletion_ServiceProxied()
+                completion = CompleteUploadBody_ServiceProxied()
             elif begin.mode == "direct_put":
+                if begin.access is None or begin.checksum_algorithm is None:
+                    raise RuntimeError("direct_put session lacks access or checksum_algorithm")
                 source.digest = _IncrementalChecksum(begin.checksum_algorithm)
                 _send_stream_presigned(
                     client, begin.access, source.chunks(), timeout, size_bytes
                 )
-                completion = UploadCompletion_DirectPut(
+                completion = CompleteUploadBody_DirectPut(
                     content=UploadContentClaim(
                         size_bytes=source.count, checksum=source.digest.finish()
                     )
@@ -591,7 +596,7 @@ def _create_upload(client, namespace_id, capabilities, size_bytes, request_optio
     if (size_bytes is None or size_bytes >= _MULTIPART_MIN_BYTES) and features.get(
         _DIRECT_MULTIPART_FEATURE, False
     ):
-        request = BeginUploadRequest_DirectMultipart()
+        request = CreateUploadBody_DirectMultipart()
     else:
         proxy_limit = limits.get(_PROXY_UPLOAD_LIMIT)
         fits_proxy = (
@@ -606,9 +611,9 @@ def _create_upload(client, namespace_id, capabilities, size_bytes, request_optio
             and fits_direct
             and (size_bytes >= _MULTIPART_MIN_BYTES or not fits_proxy)
         ):
-            request = BeginUploadRequest_DirectPut(size_bytes=size_bytes)
+            request = CreateUploadBody_DirectPut(size_bytes=size_bytes)
         elif fits_proxy:
-            request = BeginUploadRequest_ServiceProxied()
+            request = CreateUploadBody_ServiceProxied()
         else:
             raise ValueError("source fits no advertised upload transport")
     return client.uploads.create(
@@ -641,6 +646,8 @@ def _stream_multipart(
     client, http, namespace_id, begin, source, timeout, request_options
 ):
     part_size = begin.part_size_bytes
+    if part_size is None or begin.checksum_algorithm is None:
+        raise RuntimeError("direct_multipart session lacks part_size_bytes or checksum_algorithm")
     if part_size <= 0:
         raise RuntimeError("multipart part size must be positive")
     source.digest = _IncrementalChecksum(begin.checksum_algorithm)
@@ -674,7 +681,7 @@ def _stream_multipart(
         completed_parts.append(
             CompletedUploadPart(part_number=number, etag=etag, checksum=checksum)
         )
-    return UploadCompletion_DirectMultipart(
+    return CompleteUploadBody_DirectMultipart(
         content=UploadContentClaim(
             size_bytes=source.count, checksum=source.digest.finish()
         ),

@@ -91,7 +91,7 @@ async fn reads_commits_and_change_feed_never_list() {
     let baseline = store.count(OperationClass::List);
     let staged = engine.begin_upload().await.expect("begin upload");
     engine
-        .upload_content(staged.upload_id(), b"uploaded\n")
+        .upload_content(&staged.upload_id, b"uploaded\n")
         .await
         .expect("upload content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -100,7 +100,7 @@ async fn reads_commits_and_change_feed_never_list() {
     engine
         .complete_upload(
             &catalog,
-            staged.upload_id(),
+            &staged.upload_id,
             ResolvedUploadCompletion::KnownContent,
         )
         .await
@@ -190,7 +190,7 @@ async fn maintenance_preserves_namespace_identity_and_writer() {
         .expect("gc pass");
     let staged = engine.begin_upload().await.expect("second upload");
     engine
-        .upload_content(staged.upload_id(), b"more\n")
+        .upload_content(&staged.upload_id, b"more\n")
         .await
         .expect("second upload content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -199,7 +199,7 @@ async fn maintenance_preserves_namespace_identity_and_writer() {
     engine
         .complete_upload(
             &catalog,
-            staged.upload_id(),
+            &staged.upload_id,
             ResolvedUploadCompletion::KnownContent,
         )
         .await

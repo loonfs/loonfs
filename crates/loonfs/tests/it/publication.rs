@@ -67,16 +67,19 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         .await
         .expect("begin upload");
     let staged = writer
-        .put_upload_content(&namespace_id, upload.upload_id(), b"b")
+        .put_upload_content(&namespace_id, &upload.upload_id, b"b")
         .await
         .expect("stage second put content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("load namespace catalog");
-    let prepared =
-        loonfs_core::content::prepare_existing_content_ref(&store, &catalog, staged.content_ref)
-            .await
-            .expect("prepare second put content");
+    let prepared = loonfs_core::content::prepare_existing_content_ref(
+        &store,
+        &catalog,
+        staged.content_ref().expect("staged content").clone(),
+    )
+    .await
+    .expect("prepare second put content");
     let prepared_content_ref = prepared.content_ref().clone();
 
     store_impl.arm();

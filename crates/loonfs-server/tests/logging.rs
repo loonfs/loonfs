@@ -321,7 +321,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         let _ = body_polled_tx.send(());
         std::future::pending::<Result<Bytes, Infallible>>().await
     }));
-    let upload_uri = format!("/v0/namespaces/demo/uploads/{}/content", upload.upload_id());
+    let upload_uri = format!("/v0/namespaces/demo/uploads/{}/content", upload.upload_id);
     let stalled_request = Request::builder()
         .method(Method::PUT)
         .uri(&upload_uri)
