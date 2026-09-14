@@ -97,7 +97,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
         .expect("create snapshot");
     assert_eq!(created.namespace_id, namespace);
     assert_eq!(created.name, "first");
-    assert_eq!(created.head_seq, ChangeSeq(0));
+    assert_eq!(created.captured_seq, ChangeSeq(0));
 
     let mut pager = harness
         .client
@@ -172,7 +172,7 @@ async fn snapshot_file_read_returns_the_captured_state() {
         )
         .await
         .expect("snapshot stat");
-    assert_eq!(entry.head_seq, snapshot.head_seq);
+    assert_eq!(entry.head_seq, snapshot.captured_seq);
     let bytes = harness
         .client
         .get_file_bytes(

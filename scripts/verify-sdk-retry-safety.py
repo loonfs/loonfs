@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify generated SDKs never retry non-idempotent operations by default."""
+"""Generated SDKs follow the LoonFS response and operation retry rules."""
 
 import json
 import re
@@ -40,6 +40,16 @@ def count_token(root: Path, suffix: str, token: str) -> int:
     )
 
 
+def verify_retry_predicate(path: Path, predicate: str, status_checks: tuple[str, ...]) -> None:
+    source = path.read_text()
+    actual = source.count(predicate)
+    if actual != 1:
+        raise SystemExit(f"{path} has {actual} Retry-After predicates; expected 1")
+    for status_check in status_checks:
+        if status_check in source:
+            raise SystemExit(f"{path} still retries on status alone: {status_check}")
+
+
 def verify_group(group: str) -> None:
     if group not in SUPPORTED_GROUPS:
         choices = "|".join(sorted(SUPPORTED_GROUPS))
@@ -51,6 +61,11 @@ def verify_group(group: str) -> None:
     generated = GENERATED_ROOT / group
 
     if group in {"typescript", "typescript-client"}:
+        verify_retry_predicate(
+            generated / "core" / "fetcher" / "requestWithRetries.ts",
+            'response.headers.has("retry-after")',
+            ("statusCode >= 500", "[408, 429]"),
+        )
         # Only generated endpoint clients correspond to operations in the spec.
         # Handwritten transfer helpers independently disable payload retries.
         actual = count_token(generated / "api" / "resources", ".ts", "maxRetries: 0,")
@@ -59,6 +74,11 @@ def verify_group(group: str) -> None:
                 f"{group} disables retries at {actual} call sites; expected {expected}"
             )
     elif group == "python":
+        verify_retry_predicate(
+            generated / "core" / "http_client.py",
+            'return "retry-after" in response.headers',
+            ("status_code >= 500",),
+        )
         actual = count_token(generated, ".py", "_request_options_with_retries_disabled:")
         expected_call_sites = expected * 2  # Synchronous and asynchronous clients.
         if actual != expected_call_sites:
@@ -66,9 +86,22 @@ def verify_group(group: str) -> None:
                 f"python disables retries at {actual} call sites; expected {expected_call_sites}"
             )
     else:
-        retrier = (generated / "internal" / "retrier.go").read_text()
-        if not re.search(r"defaultRetryAttempts\s*=\s*1\b", retrier):
-            raise SystemExit("go does not default to exactly one HTTP attempt")
+        retrier_path = generated / "internal" / "retrier.go"
+        verify_retry_predicate(
+            retrier_path,
+            'response.Header.Get("Retry-After") != ""',
+            ("http.StatusInternalServerError",),
+        )
+        actual = sum(
+            len(re.findall(r"\bDisableRetries:[ \t]+true,", path.read_text()))
+            for path in generated.rglob("*.go")
+            if path.is_file()
+        )
+        if actual != expected:
+            raise SystemExit(f"go disables retries at {actual} call sites; expected {expected}")
+        retrier = retrier_path.read_text()
+        if not re.search(r"^\s*defaultRetryAttempts\s*=\s*3\s*$", retrier, re.MULTILINE):
+            raise SystemExit("go does not default to exactly three HTTP attempts")
 
     print(f"Verified generated retry safety for {group}")
 

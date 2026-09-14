@@ -450,6 +450,7 @@ mod tests {
             root_inode_id: InodeId(9),
             deletion_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Listed {
+                inode_kind: loonfs_api::InodeKind::Directory,
                 deleted_at_ms: 1_000,
                 deleted_by: loonfs_api::ActorId::loonfs(),
                 deleted_direntry: loonfs_api::wire::manifest::DeletedDirentry {

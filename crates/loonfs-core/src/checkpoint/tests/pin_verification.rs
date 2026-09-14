@@ -69,7 +69,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
         .expect("acknowledged checkpoint remains readable");
         assert_eq!(page.files.len(), if advance_head { 3 } else { 2 });
         assert_eq!(checkpoint.manifest_no, current.manifest_no);
-        assert_eq!(checkpoint.checkpoint_seq, current.manifest_head_seq);
+        assert_eq!(checkpoint.captured_seq, current.manifest_head_seq);
         assert_eq!(
             store
                 .list_prefix(&checkpoint_prefix(&namespace_id))

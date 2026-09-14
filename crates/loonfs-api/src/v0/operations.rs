@@ -183,10 +183,26 @@ pub struct ForkNamespaceRequest {
 pub struct Namespace {
     /// Namespace ID.
     pub namespace_id: NamespaceId,
+    /// Time the namespace was created, in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Present only for a fork: the source it was forked from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub fork_basis: Option<NamespaceForkBasis>,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
     /// Oldest sequence still promised for incremental replay.
     pub retention_floor_seq: ChangeSeq,
+}
+
+/// The source a forked namespace started from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NamespaceForkBasis {
+    /// Namespace the fork was taken from.
+    pub source_namespace_id: NamespaceId,
+    /// Source sequence the fork captured.
+    pub source_head_seq: ChangeSeq,
 }
 
 /// Namespace state and storage details used by maintenance.
@@ -195,6 +211,12 @@ pub struct Namespace {
 pub struct NamespaceDiagnostics {
     /// Namespace ID.
     pub namespace_id: NamespaceId,
+    /// Time the namespace was created, in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Present only for a fork: the source it was forked from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub fork_basis: Option<NamespaceForkBasis>,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
     /// Oldest sequence still promised for incremental replay.
@@ -672,6 +694,7 @@ pub struct CommitRequest {
     pub actor_id: crate::ActorId,
     /// The caller annotation that forms part of the commit identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
     /// The proofs for new external content references in this request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -757,6 +780,7 @@ pub struct CreateCheckpointRequest {
     pub name: String,
     /// The checkpoint lifetime in milliseconds, or `None` for an explicit deletion only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub ttl_ms: Option<u64>,
 }
 
@@ -831,8 +855,8 @@ pub struct Checkpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expires_at_ms: Option<u64>,
-    /// Sequence covered by the checkpoint's pinned basis.
-    pub checkpoint_seq: ChangeSeq,
+    /// Namespace sequence captured by the checkpoint.
+    pub captured_seq: ChangeSeq,
     /// Manifest pinned by the checkpoint.
     pub manifest_no: ManifestNo,
 }
@@ -849,7 +873,7 @@ pub struct SnapshotSummary {
     /// Snapshot label.
     pub name: String,
     /// Namespace sequence captured by the snapshot.
-    pub head_seq: ChangeSeq,
+    pub captured_seq: ChangeSeq,
     /// Time the snapshot record was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// When the snapshot expires, in Unix milliseconds.
@@ -869,7 +893,7 @@ impl SnapshotSummary {
             snapshot_id: checkpoint.checkpoint_id.into(),
             namespace_id: checkpoint.namespace_id,
             name,
-            head_seq: checkpoint.checkpoint_seq,
+            captured_seq: checkpoint.captured_seq,
             created_at_ms: checkpoint.created_at_ms,
             expires_at_ms: checkpoint.expires_at_ms?,
         })
@@ -953,12 +977,11 @@ pub struct GcRequest {
     /// The minimum object age for deletion in milliseconds, which must meet the
     /// server's advertised safety floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub grace_window_ms: Option<u64>,
 }
 
 /// The candidates inspected but not deleted by one garbage-collection pass.
-///
-/// Every field is present and contributes to [`GcResponse::retained_candidates`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RetainedCandidates {
@@ -1052,9 +1075,7 @@ pub struct GcResponse {
     pub deleted: DeletedObjectCounts,
     /// The checkpoint records deleted by the pass, grouped by owner.
     pub deleted_checkpoints_by_owner: DeletedCheckpointsByOwner,
-    /// The number of candidates retained at deletion time.
-    pub retained_candidates: u64,
-    /// `retained_candidates` grouped by reason.
+    /// Candidates retained at deletion time, grouped by reason.
     pub retained: RetainedCandidates,
     /// The earliest known future reclamation time observed by this pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1073,7 +1094,6 @@ impl GcResponse {
             namespace_id,
             deleted: DeletedObjectCounts::default(),
             deleted_checkpoints_by_owner: DeletedCheckpointsByOwner::default(),
-            retained_candidates: 0,
             retained: RetainedCandidates::default(),
             next_reclamation_at_ms: None,
             reclaim_after_ms: None,
@@ -1081,12 +1101,7 @@ impl GcResponse {
     }
 
     /// Records one retained candidate under the reason that spared it.
-    ///
-    /// The total and the breakdown move together here so they cannot drift:
-    /// every sweep site names a reason, and no site can count a retention
-    /// without naming one.
     pub fn retain(&mut self, reason: RetainedReason) {
-        self.retained_candidates += 1;
         *reason.counter(&mut self.retained) += 1;
     }
 }
@@ -1125,6 +1140,11 @@ impl RetainedReason {
 }
 
 impl RetainedCandidates {
+    /// Counts all candidates retained by the pass.
+    pub fn total(&self) -> u64 {
+        self.by_reason().into_iter().map(|(_, count)| count).sum()
+    }
+
     /// Returns every reason and count in a fixed order.
     pub fn by_reason(&self) -> [(&'static str, u64); 7] {
         let Self {
@@ -1219,6 +1239,7 @@ pub enum RunMaintenanceRequest {
 pub struct MetadataMaintenanceRequest {
     /// The WAL-tail threshold for flushing, or `None` for the server default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_wal_tail_segments: Option<u64>,
 }
 
@@ -1463,6 +1484,8 @@ mod tests {
     fn namespace_wire_shape_has_only_core_state() {
         let namespace = Namespace {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            created_at_ms: 1_000,
+            fork_basis: None,
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
         };
@@ -1470,6 +1493,7 @@ mod tests {
             serde_json::to_value(namespace).expect("serialize namespace"),
             serde_json::json!({
                 "namespace_id": "demo",
+                "created_at_ms": 1000,
                 "head_seq": 11,
                 "retention_floor_seq": 4
             })
@@ -1480,6 +1504,8 @@ mod tests {
     fn namespace_diagnostics_wire_shape_keeps_storage_fields() {
         let diagnostics = NamespaceDiagnostics {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            created_at_ms: 1_000,
+            fork_basis: None,
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
             current_manifest_no: Some(ManifestNo(8)),
@@ -1491,6 +1517,7 @@ mod tests {
             serde_json::to_value(diagnostics).expect("serialize namespace diagnostics"),
             serde_json::json!({
                 "namespace_id": "demo",
+                "created_at_ms": 1000,
                 "head_seq": 11,
                 "retention_floor_seq": 4,
                 "current_manifest_no": 8,
@@ -2144,7 +2171,7 @@ mod tests {
             },
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: Some(1_752_626_600_000),
-            checkpoint_seq: ChangeSeq(12),
+            captured_seq: ChangeSeq(12),
             manifest_no: ManifestNo(9),
         };
         let checkpoint_json = serde_json::json!({
@@ -2153,7 +2180,7 @@ mod tests {
             "owner": {"kind": "user", "name": "release"},
             "created_at_ms": 1_752_623_000_000_u64,
             "expires_at_ms": 1_752_626_600_000_u64,
-            "checkpoint_seq": 12,
+            "captured_seq": 12,
             "manifest_no": 9,
         });
         assert_eq!(
@@ -2196,7 +2223,7 @@ mod tests {
             },
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: None,
-            checkpoint_seq: ChangeSeq(3),
+            captured_seq: ChangeSeq(3),
             manifest_no: ManifestNo(3),
         })
         .expect("serialize checkpoint");

@@ -146,8 +146,8 @@ pub use v0::{
     ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse, MetadataCompactionOutcome,
     MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, PathEntry, PathEntryKind,
-    PreconditionFields, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, NamespaceForkBasis, PathEntry,
+    PathEntryKind, PreconditionFields, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
     RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, TrashEntry,
     WalFlushStepOutcome,
 };

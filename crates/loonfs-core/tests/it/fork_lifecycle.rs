@@ -106,7 +106,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .advance_retention_floor()
         .await
         .expect("advance floor");
-    assert!(floor.retention_floor_seq > snapshot.checkpoint_seq);
+    assert!(floor.retention_floor_seq > snapshot.captured_seq);
     let mut compacted = false;
     for _ in 0..16 {
         let report = engine
@@ -131,7 +131,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .fork_namespace(&target, Some(&snapshot.checkpoint_id))
         .await
         .expect("fork snapshot");
-    assert_eq!(fork.head_seq, snapshot.checkpoint_seq);
+    assert_eq!(fork.head_seq, snapshot.captured_seq);
     let head = head_state(&store, &target).await;
     assert_eq!(head.head_commit_id, snapshot_record.head_commit_id);
     assert_eq!(

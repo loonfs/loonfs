@@ -211,7 +211,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
             name: "nightly".to_owned()
         }
     );
-    assert_eq!(first.checkpoint_seq, ChangeSeq(1));
+    assert_eq!(first.captured_seq, ChangeSeq(1));
     assert_eq!(first.manifest_no, ManifestNo(3));
     let listed = collect_checkpoints(&client, &namespace)
         .await
@@ -223,7 +223,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
     assert_eq!(repeated.namespace_id, first.namespace_id);
     assert_eq!(repeated.owner, first.owner);
-    assert_eq!(repeated.checkpoint_seq, first.checkpoint_seq);
+    assert_eq!(repeated.captured_seq, first.captured_seq);
     assert_eq!(repeated.manifest_no, first.manifest_no);
     assert_eq!(repeated.expires_at_ms, first.expires_at_ms);
     assert!(repeated.created_at_ms >= first.created_at_ms);

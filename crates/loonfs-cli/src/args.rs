@@ -842,12 +842,7 @@ pub(crate) struct FilesystemStatArgs {
     #[arg(long, value_name = "INODE_ID", value_parser = parse_public_inode_id)]
     pub inode: Option<InodeId>,
     /// Read from this snapshot instead of the current state.
-    #[arg(
-        long,
-        value_hint = ValueHint::Other,
-        requires = "path",
-        conflicts_with = "inode"
-    )]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub snapshot_id: Option<String>,
 }
 

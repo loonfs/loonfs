@@ -80,7 +80,7 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
         .expect("the snapshot is in the snapshot listing");
     assert_eq!(listed_snapshot.name, "report-run");
     assert_eq!(listed_snapshot.expires_at_ms, expires_at_ms);
-    assert_eq!(listed_snapshot.head_seq, snapshot.checkpoint_seq);
+    assert_eq!(listed_snapshot.captured_seq, snapshot.captured_seq);
 }
 
 #[tokio::test]

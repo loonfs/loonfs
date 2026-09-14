@@ -1459,7 +1459,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
 
     assert_eq!(
         compacted_materialized.manifest.payload().base_seq,
-        compacted.checkpoint_seq
+        compacted.captured_seq
     );
     assert!(delta_runs(&compacted_materialized.manifest).is_empty());
     // Every family group rebuilds on its own and takes a run number of its
@@ -2424,7 +2424,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     let floor = advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("advance floor");
-    assert!(floor.retention_floor_seq > pin.checkpoint_seq);
+    assert!(floor.retention_floor_seq > pin.captured_seq);
     let aged = mutation_context("gc", u64::MAX / 2);
     crate::gc::gc_namespace(
         &store,

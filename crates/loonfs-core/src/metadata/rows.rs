@@ -8,7 +8,7 @@ use loonfs_api::wire::manifest::{
     ContentPublicationRecord, DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord,
     InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
-use loonfs_api::{ActorId, ChangeSeq, CommitId, InodeId};
+use loonfs_api::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataState {
@@ -74,12 +74,14 @@ pub(crate) fn active_tombstone_from_records(
 /// whole history.
 pub(crate) fn active_deletion_from_tombstone(
     tombstone: &SubtreeTombstoneRecord,
+    inode_kind: InodeKind,
 ) -> ActiveDeletionRecord {
     match &tombstone.action {
         TombstoneRowAction::Set { deleted_direntry } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
             deletion_seq: tombstone.generation.seq,
             action: ActiveDeletionRowAction::Listed {
+                inode_kind,
                 deleted_at_ms: tombstone.deleted_at_ms,
                 deleted_by: tombstone.deleted_by.clone(),
                 deleted_direntry: deleted_direntry.clone(),
@@ -100,11 +102,13 @@ pub(crate) fn recoverable_deletion_from_active_record(
 ) -> Option<RecoverableDeletion> {
     match record.action {
         ActiveDeletionRowAction::Listed {
+            inode_kind,
             deleted_at_ms,
             deleted_by,
             deleted_direntry,
         } => Some(RecoverableDeletion {
             root_inode_id: record.root_inode_id,
+            inode_kind,
             deletion_seq: record.deletion_seq,
             deleted_at_ms,
             deleted_by,
@@ -118,6 +122,7 @@ pub(crate) fn recoverable_deletion_from_active_record(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecoverableDeletion {
     pub(crate) root_inode_id: InodeId,
+    pub(crate) inode_kind: InodeKind,
     pub(crate) deletion_seq: ChangeSeq,
     pub(crate) deleted_at_ms: u64,
     pub(crate) deleted_by: ActorId,

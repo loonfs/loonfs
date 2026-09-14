@@ -1149,7 +1149,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 
 For a tombstone, `generation` is `{seq, delta_index}`. A set action is `{"kind":"set","deleted_direntry":...}`. A revoke action is `{"kind":"revoke","target":...}`. The event actor and timestamp describe that event, including when the action is a revoke, despite the field names `deleted_by` and `deleted_at_ms`.
 
-An active-deletion `listed` action contains `deleted_at_ms`, `deleted_by`, and `deleted_direntry`. A `removed` action contains `revocation_seq`. These are nested action fields, not additional top-level fields on every active-deletion row.
+An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_direntry`. A `removed` action contains `revocation_seq`. These are nested action fields, not additional top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode. A `listed` action without it fails decoding.
 
 The fixed row-key prefixes are followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits and unsigned 32-bit components use 10, with leading zeroes. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes. Content-publication keys use the content ID directly. This avoids interpreting a name's own punctuation as a component delimiter.
 

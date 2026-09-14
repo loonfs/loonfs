@@ -870,7 +870,7 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
     assert_success(&human);
     let table = stdout_string(&human);
     assert!(
-        table.contains("DELETED\tDELETED_BY\tNAME\tINODE\tSEQ\tRECOVER"),
+        table.contains("DELETED\tDELETED_BY\tKIND\tNAME\tINODE\tSEQ\tRECOVER"),
         "{table}"
     );
     assert!(table.contains("Quarterly Report.PDF"), "{table}");
@@ -1009,6 +1009,8 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
         serde_json::json!({
             "kind": "namespace_status",
             "namespace_id": "clone",
+            "created_at_ms": json_data(&fork)["created_at_ms"],
+            "fork_basis": {"source_namespace_id": "demo", "source_head_seq": 1},
             "head_seq": 1,
             "retention_floor_seq": 1
         })
@@ -1066,7 +1068,7 @@ fn embedded_namespace_fork_uses_the_selected_snapshot() {
         snapshot["snapshot_id"].as_str().expect("snapshot id"),
     ]);
     assert_success(&fork);
-    assert_eq!(json_data(&fork)["head_seq"], snapshot["head_seq"]);
+    assert_eq!(json_data(&fork)["head_seq"], snapshot["captured_seq"]);
     assert_success(&harness.run(&["stat", "--namespace", "clone", "/first.txt"]));
     let missing = harness.run(&["--json", "stat", "--namespace", "clone", "/second.txt"]);
     assert_failure(&missing);

@@ -1723,6 +1723,7 @@ fn sample_active_deletion_listed_row() -> MetadataRow {
         root_inode_id: InodeId(5),
         deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Listed {
+            inode_kind: loonfs_api::InodeKind::Directory,
             deleted_at_ms: 4_000,
             deleted_by: actor(),
             deleted_direntry: DeletedDirentry {
@@ -2226,7 +2227,16 @@ fn tombstone_rows_reject_flat_binding_fields() {
 }
 
 #[test]
-fn active_deletion_rows_reject_a_partial_or_absent_deleted_direntry() {
+fn active_deletion_rows_reject_missing_kind_or_binding() {
+    let mut row = row_cbor(&sample_active_deletion_listed_row());
+    cbor_map_of(cbor_entry(&mut row, "action"))
+        .retain(|(key, _)| key.as_text() != Some("inode_kind"));
+    let refusal = assert_row_is_corrupt(&row, "a listed action requires its inode kind");
+    assert!(
+        refusal.contains("missing field `inode_kind`"),
+        "unexpected refusal: {refusal}"
+    );
+
     for missing in ["parent_inode_id", "name_key", "display_name"] {
         let mut row = row_cbor(&sample_active_deletion_listed_row());
         let direntry = cbor_entry(cbor_entry(&mut row, "action"), "deleted_direntry");

@@ -206,17 +206,35 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<PathEntry, CliError> {
         match self {
-            Self::Embedded(target) => target
-                .backend
-                .reader
-                .get_inode(namespace_id, inode_id, StatPathOptions::default())
-                .await
-                .scoped(namespace_id),
+            Self::Embedded(target) => {
+                let reader = &target.backend.reader;
+                match snapshot_id {
+                    Some(snapshot_id) => reader
+                        .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                        .await
+                        .scoped(namespace_id)?
+                        .get_inode(inode_id, StatPathOptions::default())
+                        .await
+                        .scoped(namespace_id),
+                    None => reader
+                        .get_inode(namespace_id, inode_id, StatPathOptions::default())
+                        .await
+                        .scoped(namespace_id),
+                }
+            }
             Self::Remote(target) => Ok(target
                 .client
-                .get_inode(namespace_id, inode_id, &StatPathOptions::default())
+                .get_inode(
+                    namespace_id,
+                    inode_id,
+                    &StatPathOptions {
+                        snapshot_id: snapshot_id.cloned(),
+                        ..StatPathOptions::default()
+                    },
+                )
                 .await?),
         }
     }

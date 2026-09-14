@@ -58,7 +58,7 @@ impl CommitOptions {
 pub struct StatPathOptions {
     /// Whether to include the inode's attribute map and revision, enabled by default.
     pub include_attributes: AttributeInclusion,
-    /// The snapshot for the path read; inode lookups do not support snapshots.
+    /// Read the entry from this snapshot.
     pub snapshot_id: Option<SnapshotId>,
 }
 
@@ -85,6 +85,8 @@ pub struct ListPathEntriesOptions {
 pub struct ListInodeChildrenOptions {
     /// Whether to include each entry's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
+    /// Read the directory from this snapshot.
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// Options for writing and removing an inode's attributes.

@@ -11,8 +11,10 @@ use crate::metadata::{
 };
 use crate::path::read::load_current_metadata_view;
 use loonfs_api::v0::DirectoryBinding;
-use loonfs_api::wire::manifest::{ActiveDeletionRowAction, DeletedDirentry, TombstoneGeneration};
-use loonfs_api::AttributeInclusion;
+use loonfs_api::wire::manifest::{
+    ActiveDeletionRowAction, DeletedDirentry, InodeRecord, TombstoneGeneration,
+};
+use loonfs_api::{AttributeInclusion, InodeKind};
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 
 fn generation(seq: u64) -> TombstoneGeneration {
@@ -54,6 +56,20 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
 
 fn state_from_tombstones(tombstones: Vec<SubtreeTombstoneRecord>) -> MetadataState {
     let mut builder = MetadataStateBuilder::default();
+    let roots = tombstones
+        .iter()
+        .map(|row| row.root_inode_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    for inode_id in roots {
+        builder.push_inode(InodeRecord {
+            inode_id,
+            inode_kind: InodeKind::File,
+            created_seq: ChangeSeq(0),
+            commit_id: CommitId::parse("c_initial").expect("commit id"),
+            created_by: loonfs_api::ActorId::loonfs(),
+            created_at_ms: 1_000,
+        });
+    }
     for tombstone in tombstones {
         builder.push_subtree_tombstone(tombstone);
     }
@@ -332,6 +348,10 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
             };
             Some(TrashEntry {
                 inode_id: root_inode_id,
+                inode_kind: state
+                    .inode_at_seq(root_inode_id, head_seq)
+                    .expect("deletion root")
+                    .inode_kind,
                 deletion_seq: active.generation.seq,
                 deleted_at_ms: active.deleted_at_ms,
                 deleted_by: active.deleted_by,
@@ -496,9 +516,20 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
         )
         .await;
     }
+    submit_operation_for_test(
+        &store,
+        &namespace_id,
+        "c_create_docs",
+        FilesystemOperation::CreateDirectory {
+            path: loonfs_api::AbsolutePath::parse("/docs").expect("directory path"),
+            parents: false,
+        },
+        &context,
+    )
+    .await;
     // Delete newest-inode first so root-inode order and deletion order
     // disagree.
-    for name in ["/c.txt", "/a.txt", "/b.txt"] {
+    for name in ["/c.txt", "/a.txt", "/b.txt", "/docs"] {
         delete_path(&store, &namespace_id, name, &context, None)
             .await
             .expect("delete path");
@@ -511,9 +542,30 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        vec!["c.txt".to_owned(), "a.txt".to_owned(), "b.txt".to_owned()],
+        vec![
+            "c.txt".to_owned(),
+            "a.txt".to_owned(),
+            "b.txt".to_owned(),
+            "docs".to_owned()
+        ],
         "the trash lists deletions oldest first, not by root inode"
     );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.inode_kind)
+            .collect::<Vec<_>>(),
+        vec![
+            InodeKind::File,
+            InodeKind::File,
+            InodeKind::File,
+            InodeKind::Directory
+        ]
+    );
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("flush deletions");
+    assert_eq!(trash_entries(&store, &namespace_id, 10).await, entries);
     assert!(
         entries
             .windows(2)
