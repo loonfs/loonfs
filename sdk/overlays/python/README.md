@@ -67,7 +67,7 @@ The HTTP I/O timeout applies to both transports. Source and payload failures abo
 without replaying bytes. The caller owns the source and must interrupt any
 blocking source read; an HTTP timeout cannot interrupt arbitrary Python code.
 
- `AsyncLoonFS` provides the same generated API for async applications; it does not have the transfer methods yet.
+`AsyncLoonFS` provides the same generated API and `files` helpers for async applications.
 
 ## Proxy
 
