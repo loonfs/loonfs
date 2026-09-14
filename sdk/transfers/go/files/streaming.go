@@ -24,9 +24,9 @@ import (
 const defaultTransferTimeout = 60 * time.Second
 const transferChunkBytes = 64 * 1024
 
-// FileDownloadStream holds a live response. Read Content to successful EOF to
+// DownloadStream holds a live response. Read Content to successful EOF to
 // verify the size and checksum; Close releases it without asserting verification.
-type FileDownloadStream struct {
+type DownloadStream struct {
 	Content     io.ReadCloser
 	NamespaceID loonfs.NamespaceID
 	Path        loonfs.AbsolutePath
@@ -44,7 +44,7 @@ func transferContext(ctx context.Context) (context.Context, context.CancelFunc) 
 // DownloadStream opens a verified stream with backpressure. The caller's context
 // covers discovery and the body; without a deadline the operation has 60 seconds.
 // Closing Content also cancels the operation. No failed body is replayed.
-func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*FileDownloadStream, error) {
+func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*DownloadStream, error) {
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
@@ -59,7 +59,7 @@ func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*FileDow
 	if err != nil {
 		return nil, err
 	}
-	var result *FileDownloadStream
+	var result *DownloadStream
 	if capabilities != nil && capabilities.Features[featureDirectGet] {
 		grant, err := c.CreateDownload(ctx, &loonfs.CreateDownloadRequest{NamespaceID: string(in.NamespaceID), Path: in.Path, RevisionNo: in.RevisionNo})
 		if err != nil {
@@ -76,7 +76,7 @@ func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*FileDow
 			defer response.Body.Close()
 			return nil, responseStatusError(response)
 		}
-		result = &FileDownloadStream{Content: response.Body, NamespaceID: grant.NamespaceID, Path: grant.Path, RevisionNo: grant.RevisionNo, ContentRef: grant.ContentRef}
+		result = &DownloadStream{Content: response.Body, NamespaceID: grant.NamespaceID, Path: grant.Path, RevisionNo: grant.RevisionNo, ContentRef: grant.ContentRef}
 	} else {
 		result, err = c.downloadProxiedStream(ctx, in)
 		if err != nil {
@@ -105,7 +105,7 @@ func (c *Client) transferHTTPClient() core.HTTPClient {
 	return presignedHTTPClient
 }
 
-func (c *Client) downloadProxiedStream(ctx context.Context, in DownloadInput) (*FileDownloadStream, error) {
+func (c *Client) downloadProxiedStream(ctx context.Context, in DownloadInput) (*DownloadStream, error) {
 	revisionNo := in.RevisionNo
 	var claim *loonfs.ContentRef
 	if revisionNo == nil {
@@ -154,7 +154,7 @@ func (c *Client) downloadProxiedStream(ctx context.Context, in DownloadInput) (*
 		defer response.Body.Close()
 		return nil, internal.NewErrorDecoder(loonfs.ErrorCodes)(response.StatusCode, response.Header, io.LimitReader(response.Body, 64*1024))
 	}
-	return &FileDownloadStream{Content: response.Body, NamespaceID: in.NamespaceID, Path: in.Path, RevisionNo: *revisionNo, ContentRef: claim}, nil
+	return &DownloadStream{Content: response.Body, NamespaceID: in.NamespaceID, Path: in.Path, RevisionNo: *revisionNo, ContentRef: claim}, nil
 }
 
 func newChecksum(algorithm loonfs.ChecksumAlgorithm) (hash.Hash, error) {

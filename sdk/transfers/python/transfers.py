@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import typing
+import uuid
 from dataclasses import dataclass
 
 import httpx
@@ -14,6 +15,9 @@ from .files.client import FilesClient as _GeneratedFilesClient
 from .core.request_options import RequestOptions
 from .types import (
     ActorId,
+    Commit,
+    CommitId,
+    InodeId,
     CreateUploadBody_DirectMultipart,
     CreateUploadBody_DirectPut,
     CreateUploadBody_ServiceProxied,
@@ -59,16 +63,7 @@ _CRC32C_TABLE = _crc_table(0x82F63B78, _CRC32C_MASK)
 
 
 @dataclass(frozen=True)
-class FileUploadResult:
-    """The identity and sequence of the commit that stored the file."""
-
-    namespace_id: str
-    commit_id: str
-    committed_seq: int
-
-
-@dataclass(frozen=True)
-class FileDownloadResult:
+class DownloadResult:
     """Downloaded bytes and the immutable revision facts from its grant."""
 
     content: bytes
@@ -79,7 +74,7 @@ class FileDownloadResult:
 
 
 @dataclass(frozen=True)
-class PreparedFileContent:
+class PreparedContent:
     """Completed content retained for repeated publication of the same request.
 
     Preparation does not publish a file or extend the upload lifetime.
@@ -130,7 +125,7 @@ class _IncrementalChecksum:
         return Checksum(algorithm=self.algorithm, value=value)
 
 
-class FileDownloadStream(typing.Iterator[bytes]):
+class DownloadStream(typing.Iterator[bytes]):
     """A single-use verified iterator. Close or leave its with block to cancel.
 
     A caller that stops early has not verified the complete file. Bytes already
@@ -215,16 +210,16 @@ class FilesClient(_GeneratedFilesClient):
         *,
         path: str,
         content: bytes,
-        actor_id: ActorId,
-        commit_id: str,
+        actor_id: ActorId | None = None,
+        commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
-        expected_inode_id: str | None = None,
+        expected_inode_id: InodeId | None = None,
         expected_revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
-    ) -> FileUploadResult:
-        """Upload fresh bytes through upload_stream."""
+    ) -> Commit:
+        """Pass commit_id explicitly if you may retry."""
         return self.upload_stream(
             namespace_id,
             path=path,
@@ -247,24 +242,25 @@ class FilesClient(_GeneratedFilesClient):
         path: str,
         content: typing.BinaryIO,
         size_bytes: int | None = None,
-        actor_id: ActorId,
-        commit_id: str,
+        actor_id: ActorId | None = None,
+        commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
-        expected_inode_id: str | None = None,
+        expected_inode_id: InodeId | None = None,
         expected_revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
-    ) -> FileUploadResult:
-        """Consume a source once and publish it; the caller owns the source."""
-        prepared = self.prepare_file_stream(
+    ) -> Commit:
+        """Pass commit_id explicitly if you may retry. The caller owns the source."""
+        actor_id, commit_id = self._publication_ids(actor_id, commit_id)
+        prepared = self.prepare_stream(
             namespace_id,
             content=content,
             size_bytes=size_bytes,
             http_client=http_client,
             request_options=request_options,
         )
-        return self.put_file_prepared(
+        return self.upload_prepared(
             namespace_id,
             path=path,
             prepared=prepared,
@@ -277,16 +273,16 @@ class FilesClient(_GeneratedFilesClient):
             request_options=request_options,
         )
 
-    def prepare_file_bytes(
+    def prepare(
         self,
         namespace_id: str,
         *,
         content: bytes,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
-    ) -> PreparedFileContent:
+    ) -> PreparedContent:
         """Stage the streaming path for an existing byte buffer."""
-        return self.prepare_file_stream(
+        return self.prepare_stream(
             namespace_id,
             content=io.BytesIO(content),
             size_bytes=len(content),
@@ -294,7 +290,7 @@ class FilesClient(_GeneratedFilesClient):
             request_options=request_options,
         )
 
-    def prepare_file_stream(
+    def prepare_stream(
         self,
         namespace_id: str,
         *,
@@ -302,7 +298,7 @@ class FilesClient(_GeneratedFilesClient):
         size_bytes: int | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
-    ) -> PreparedFileContent:
+    ) -> PreparedContent:
         """Stage once with bounded memory; retain the result for publication retries.
 
         The caller owns content. Payload requests are never retried. A known
@@ -368,21 +364,22 @@ class FilesClient(_GeneratedFilesClient):
             raise RuntimeError("completed upload size mismatch")
         return result
 
-    def put_file_prepared(
+    def upload_prepared(
         self,
         namespace_id: str,
         *,
         path: str,
-        prepared: PreparedFileContent,
-        actor_id: ActorId,
-        commit_id: str,
+        prepared: PreparedContent,
+        actor_id: ActorId | None = None,
+        commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
-        expected_inode_id: str | None = None,
+        expected_inode_id: InodeId | None = None,
         expected_revision_no: RevisionNo | None = None,
         request_options: RequestOptions | None = None,
-    ) -> FileUploadResult:
-        """Publish retained content; reuse it with identical inputs to retry safely."""
+    ) -> Commit:
+        """Pass commit_id explicitly if you may retry. Reuse identical inputs."""
+        actor_id, commit_id = self._publication_ids(actor_id, commit_id)
         operation_arguments = {"path": path, "content_ref": prepared.content_ref}
         if behavior is not None:
             operation_arguments["behavior"] = behavior
@@ -401,14 +398,19 @@ class FilesClient(_GeneratedFilesClient):
         }
         if message is not None:
             commit_arguments["message"] = message
-        committed = self._root.commits.create(
+        return self._root.commits.create(
             namespace_id, request_options=request_options, **commit_arguments
         )
-        return FileUploadResult(
-            namespace_id=committed.namespace_id,
-            commit_id=committed.commit_id,
-            committed_seq=committed.committed_seq,
-        )
+
+    def _publication_ids(
+        self, actor_id: ActorId | None, commit_id: CommitId | None
+    ) -> tuple[ActorId, CommitId]:
+        actor_id = actor_id if actor_id is not None else self._root._actor_id
+        if not actor_id:
+            raise ValueError("actor_id is required: pass it or set the client default")
+        if commit_id is None:
+            commit_id = "c_" + uuid.uuid4().hex
+        return actor_id, commit_id
 
     def download_stream(
         self,
@@ -418,7 +420,7 @@ class FilesClient(_GeneratedFilesClient):
         revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
-    ) -> FileDownloadStream:
+    ) -> DownloadStream:
         """Open a verified stream; use a with block to close on early exit.
 
         Size and checksum verification complete only at successful exhaustion.
@@ -438,7 +440,7 @@ class FilesClient(_GeneratedFilesClient):
                     "chunk_size": _TRANSFER_CHUNK_BYTES,
                 },
             )
-            return FileDownloadStream(
+            return DownloadStream(
                 chunks, chunks.close, namespace_id, path, revision_no, claim
             )
         grant = self.create_download(
@@ -464,7 +466,7 @@ class FilesClient(_GeneratedFilesClient):
         response = client.send(request, stream=True, auth=None, follow_redirects=False)
         try:
             response.raise_for_status()
-            return FileDownloadStream(
+            return DownloadStream(
                 response.iter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES),
                 response.close,
                 grant.namespace_id,
@@ -484,7 +486,7 @@ class FilesClient(_GeneratedFilesClient):
         revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
-    ) -> FileDownloadResult:
+    ) -> DownloadResult:
         """Collect download_stream for callers that want all bytes in memory."""
         with self.download_stream(
             namespace_id,
@@ -494,7 +496,7 @@ class FilesClient(_GeneratedFilesClient):
             request_options=request_options,
         ) as stream:
             content = b"".join(stream)
-            return FileDownloadResult(
+            return DownloadResult(
                 content=content,
                 namespace_id=stream.namespace_id,
                 path=stream.path,
@@ -506,7 +508,10 @@ class FilesClient(_GeneratedFilesClient):
 class LoonFS(_GeneratedLoonFS):
     """The generated client with ``files.upload`` and ``files.download``."""
 
-    _transfer_files: typing.Optional[FilesClient] = None
+    def __init__(self, *, actor_id: str | None = None, **kwargs: typing.Any) -> None:
+        super().__init__(**kwargs)
+        self._actor_id = actor_id
+        self._transfer_files: FilesClient | None = None
 
     @property
     def files(self) -> FilesClient:
@@ -518,10 +523,9 @@ class LoonFS(_GeneratedLoonFS):
 
 
 __all__ = [
-    "FileDownloadResult",
-    "FileDownloadStream",
-    "FileUploadResult",
-    "PreparedFileContent",
+    "DownloadResult",
+    "DownloadStream",
+    "PreparedContent",
     "FilesClient",
     "LoonFS",
 ]
@@ -689,12 +693,12 @@ def _stream_multipart(
     )
 
 
-def _completed_content(response: UploadSession) -> PreparedFileContent:
+def _completed_content(response: UploadSession) -> PreparedContent:
     if response.status != "completed":
         raise RuntimeError(
             f"upload {response.upload_id!r} completed with status {response.status!r}"
         )
-    return PreparedFileContent(
+    return PreparedContent(
         content_ref=response.content_ref,
         content_token=response.content_token,
     )

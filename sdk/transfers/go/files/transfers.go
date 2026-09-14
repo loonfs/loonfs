@@ -3,6 +3,7 @@ package files
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -50,14 +51,14 @@ type UploadInput struct {
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
-	ExpectedInodeID    *string
+	ExpectedInodeID    *loonfs.InodeID
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
 
-// PreparedFileContent is a completed upload retained for publication retries.
+// PreparedContent is a completed upload retained for publication retries.
 // Preparation does not publish a file or extend the upload lifetime.
 // Treat its reference and token as immutable.
-type PreparedFileContent struct {
+type PreparedContent struct {
 	ContentRef   *loonfs.ContentRef
 	ContentToken *loonfs.ContentToken
 }
@@ -66,20 +67,13 @@ type PreparedFileContent struct {
 type PreparedUploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
-	Prepared           *PreparedFileContent
+	Prepared           *PreparedContent
 	ActorID            loonfs.ActorID
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
-	ExpectedInodeID    *string
+	ExpectedInodeID    *loonfs.InodeID
 	ExpectedRevisionNo *loonfs.RevisionNo
-}
-
-// UploadResult identifies the commit that made the new revision visible.
-type UploadResult struct {
-	NamespaceID  loonfs.NamespaceID
-	CommitID     loonfs.CommitID
-	CommittedSeq loonfs.ChangeSeq
 }
 
 // DownloadInput describes one current or retained file revision to read.
@@ -98,9 +92,9 @@ type DownloadResult struct {
 	ContentRef  *loonfs.ContentRef
 }
 
-// Upload uploads fresh content and publishes it. For publication retries,
-// retain PrepareFileBytes output and use PutFilePrepared with unchanged inputs.
-func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, error) {
+// Pass CommitID explicitly if you may retry.
+// Retain Prepare output and use UploadPrepared with unchanged inputs for publication retries.
+func (c *Client) Upload(ctx context.Context, in UploadInput) (*loonfs.Commit, error) {
 	size := int64(len(in.Content))
 	return c.UploadStream(ctx, StreamUploadInput{
 		NamespaceID: in.NamespaceID, Path: in.Path,
@@ -110,25 +104,18 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*UploadResult, err
 	})
 }
 
-// PrepareFileBytes stages the same streaming path for an existing byte slice.
-func (c *Client) PrepareFileBytes(ctx context.Context, namespaceID loonfs.NamespaceID, content []byte) (*PreparedFileContent, error) {
+func (c *Client) Prepare(ctx context.Context, namespaceID loonfs.NamespaceID, content []byte) (*PreparedContent, error) {
 	size := int64(len(content))
-	return c.PrepareFileStream(ctx, namespaceID, bytes.NewReader(content), &size)
+	return c.PrepareStream(ctx, namespaceID, bytes.NewReader(content), &size)
 }
 
-// PutFilePrepared publishes retained content without starting another upload.
-// Reuse unchanged inputs to retry the same commit.
-func (c *Client) PutFilePrepared(ctx context.Context, in PreparedUploadInput) (*UploadResult, error) {
+// Pass CommitID explicitly if you may retry. Reuse unchanged publication inputs.
+func (c *Client) UploadPrepared(ctx context.Context, in PreparedUploadInput) (*loonfs.Commit, error) {
 	ctx, cancel := transferContext(ctx)
 	defer cancel()
-	if c == nil {
-		return nil, fmt.Errorf("transfers: client is nil")
-	}
-	if in.ActorID == "" {
-		return nil, fmt.Errorf("transfers: actor_id is required")
-	}
-	if in.CommitID == "" {
-		return nil, fmt.Errorf("transfers: commit id is required")
+	actorID, commitID, err := c.publicationIDs(in.ActorID, in.CommitID)
+	if err != nil {
+		return nil, err
 	}
 	if in.Prepared == nil || in.Prepared.ContentRef == nil {
 		return nil, fmt.Errorf("transfers: prepared content is required")
@@ -144,8 +131,8 @@ func (c *Client) PutFilePrepared(ctx context.Context, in PreparedUploadInput) (*
 	}
 	committed, err := commitsClient.Create(ctx, &loonfs.CommitRequest{
 		NamespaceID:   string(in.NamespaceID),
-		ActorID:       in.ActorID,
-		CommitID:      in.CommitID,
+		ActorID:       actorID,
+		CommitID:      commitID,
 		ContentTokens: contentTokens,
 		Message:       in.Message,
 		Operations: []*loonfs.FilesystemOperation{
@@ -163,11 +150,27 @@ func (c *Client) PutFilePrepared(ctx context.Context, in PreparedUploadInput) (*
 	if err != nil {
 		return nil, fmt.Errorf("transfers: commit file: %w", err)
 	}
-	return &UploadResult{
-		NamespaceID:  committed.NamespaceID,
-		CommitID:     committed.CommitID,
-		CommittedSeq: committed.CommittedSeq,
-	}, nil
+	return committed, nil
+}
+
+func (c *Client) publicationIDs(actorID loonfs.ActorID, commitID loonfs.CommitID) (loonfs.ActorID, loonfs.CommitID, error) {
+	if c == nil {
+		return "", "", fmt.Errorf("transfers: client is nil")
+	}
+	if actorID == "" {
+		actorID = loonfs.ActorID(c.options.ActorID)
+	}
+	if actorID == "" {
+		return "", "", fmt.Errorf("actor_id is required: pass it or set the client default")
+	}
+	if commitID == "" {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", "", fmt.Errorf("generate commit_id: %w", err)
+		}
+		commitID = loonfs.CommitID("c_" + hex.EncodeToString(random[:]))
+	}
+	return actorID, commitID, nil
 }
 
 // Download collects DownloadStream for callers that want a whole byte slice.

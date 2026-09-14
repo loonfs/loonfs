@@ -657,11 +657,15 @@ lifetime.
 | Client | Prepare content | Publish retained content |
 | --- | --- | --- |
 | Rust HTTP and embedded runtime | `prepare_file_bytes()` / `prepare_file_stream()` | `put_file_prepared()` |
-| Python synchronous client | `files.prepare_file_bytes()` | `files.put_file_prepared()` |
-| Go | `Files.PrepareFileBytes()` | `Files.PutFilePrepared()` |
-| TypeScript server and browser clients | `files.prepareFileBytes()` | `files.putFilePrepared()` |
+| Python synchronous client | `files.prepare()` | `files.upload_prepared()` |
+| Go | `Files.Prepare()` | `Files.UploadPrepared()` |
+| TypeScript server and browser clients | `files.prepare()` | `files.uploadPrepared()` |
 
-The whole-file convenience calls (`upload` / `Upload` in generated SDKs,
+The helpers generate a `commit_id` when the caller omits one and return it
+on the commit; an `actor_id` may be set once on the client.
+
+The whole-file convenience calls (`files.upload` / `files.uploadStream` /
+`files.upload_stream` / `Files.Upload` / `Files.UploadStream` in generated SDKs,
 `put_file_bytes()` / `put_file_stream()` in Rust) prepare a new object on each
 invocation. Reusing an already-committed ID with fresh content therefore returns
 `commit_id_reuse_conflict`, even for identical bytes. The unused upload can be
@@ -2990,9 +2994,9 @@ used by the byte helpers, without publishing a filesystem entry:
 
 | SDK | Prepare once | Prepare and publish once |
 | --- | --- | --- |
-| Go | `Files.PrepareFileStream(ctx, namespaceID, reader, sizeBytes)` | `Files.UploadStream(ctx, files.StreamUploadInput{...})` |
-| Python | `files.prepare_file_stream(namespace_id, content=reader, size_bytes=size)` | `files.upload_stream(namespace_id, content=reader, ...)` |
-| TypeScript server/browser | `files.prepareFileStream({ ...namespace, content, size_bytes }, options)` | `files.uploadStream(input, options)` |
+| Go | `Files.PrepareStream(ctx, namespaceID, reader, sizeBytes)` | `Files.UploadStream(ctx, files.StreamUploadInput{...})` |
+| Python | `files.prepare_stream(namespace_id, content=reader, size_bytes=size)` | `files.upload_stream(namespace_id, content=reader, ...)` |
+| TypeScript server/browser | `files.prepareStream({ ...namespace, content, size_bytes }, options)` | `files.uploadStream(input, options)` |
 
 The optional size is checked against the consumed bytes; TypeScript infers it
 for a Blob. Unknown nonempty sources use multipart when advertised, otherwise
@@ -3016,6 +3020,6 @@ size mismatches, and failed payload requests prevent completion and trigger a
 best-effort abort with a separate five-second cleanup timeout (an I/O timeout
 in synchronous Python). An ambiguous
 completion failure leaves the session available for inspection. After successful
-preparation, retain the result and retry `PutFilePrepared` / `put_file_prepared` /
-`putFilePrepared` with identical publication inputs; do not reread a stream or
+preparation, retain the result and retry `UploadPrepared` / `upload_prepared` /
+`uploadPrepared` with identical publication inputs; do not reread a stream or
 start a new upload to retry publication.

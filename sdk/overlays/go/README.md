@@ -21,14 +21,16 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/loonfs/loonfs-sdk-go/server"
+	"github.com/loonfs/loonfs-sdk-go/files"
 	"github.com/loonfs/loonfs-sdk-go/option"
+	"github.com/loonfs/loonfs-sdk-go/server"
 )
 
 func main() {
 	loon := server.NewClient(
 		option.WithBaseURL(os.Getenv("LOONFS_URL")),
 		option.WithToken(os.Getenv("LOONFS_AUTH_TOKEN")),
+		option.WithActorID("example-user"),
 	)
 
 	capabilities, err := loon.Capabilities.Retrieve(context.Background())
@@ -36,8 +38,21 @@ func main() {
 		panic(err)
 	}
 	fmt.Println(capabilities.ProtocolVersion)
+
+	commit, err := loon.Files.Upload(context.Background(), files.UploadInput{
+		NamespaceID: "demo",
+		Path:        "/hello.txt",
+		Content:     []byte("hello"),
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(commit.CommitID, commit.Events)
 }
 ```
+
+Publishing helpers return the commit, including its events. Pass `CommitID`
+explicitly if you may retry. A call's `ActorID` overrides the client default.
 
 `client.Files.DownloadStream(ctx, input)` opens a live, verified `io.ReadCloser`
 in its `Content` field. Consume it through successful EOF to verify size and
@@ -49,7 +64,7 @@ requests carry only the presigned headers, and do not follow redirects.
 
 `client.Files.Download` collects that stream into memory. `client.Files.Upload`
 accepts an in-memory byte slice through the same transfer path.
-`client.Files.PrepareFileStream(ctx, namespaceID, reader, sizeBytes)` consumes an
+`client.Files.PrepareStream(ctx, namespaceID, reader, sizeBytes)` consumes an
 `io.Reader` once and returns prepared content for publication retries. Pass nil
 for an unknown size; multipart retains one provider-sized part.
 `client.Files.UploadStream(ctx, files.StreamUploadInput{...})` prepares and
@@ -98,9 +113,9 @@ The SDK retries responses that carry `Retry-After` and does not retry on
 status alone. It never retries operations that LoonFS marks `not_idempotent`.
 Use `option.WithMaxAttempts` to tune the attempt count.
 
-For publication retries, call `client.Files.PrepareFileBytes(ctx, namespaceID,
-payload)` once and retain the returned `*files.PreparedFileContent`. Publish it
-with `client.Files.PutFilePrepared(ctx, files.PreparedUploadInput{...})`, keeping
+For publication retries, call `client.Files.Prepare(ctx, namespaceID,
+payload)` once and retain the returned `*files.PreparedContent`. Publish it
+with `client.Files.UploadPrepared(ctx, files.PreparedUploadInput{...})`, keeping
 the prepared content, commit ID, path, actor, and options identical on every
 attempt. Preparation does not create a visible file or extend the upload
 lifetime. Calling `Upload` again starts a fresh upload and cannot replay a

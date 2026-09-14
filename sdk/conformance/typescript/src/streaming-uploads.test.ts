@@ -162,11 +162,11 @@ for (const browser of [false, true])
                 maxRetries: 3,
             };
             const result = browser
-                ? new BrowserClient(options).files.prepareFileStream(
+                ? new BrowserClient(options).files.prepareStream(
                       { namespace_alias: "demo", content: source, size_bytes: fixture.size ?? undefined },
                       requestOptions,
                   )
-                : new LoonFSClient(options).files.prepareFileStream(
+                : new LoonFSClient(options).files.prepareStream(
                       { namespace_id: "demo", content: source, size_bytes: fixture.size ?? undefined },
                       requestOptions,
                   );
