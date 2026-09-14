@@ -756,7 +756,7 @@ pub(crate) struct NamespaceForkArgs {
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
-    pub source: String,
+    pub source_namespace_id: String,
     #[arg(value_hint = ValueHint::Other)]
     pub new_namespace_id: String,
     /// Fork from a live snapshot instead of the current head.
@@ -1081,7 +1081,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// deletion recorded, which lands correctly even when the enclosing
     /// directories were renamed since.
     #[arg(value_hint = ValueHint::Other)]
-    pub path: Option<String>,
+    pub destination_path: Option<String>,
     /// Inode ID of the deleted item, as reported by `rm` and the change
     /// feed.
     #[arg(long, value_parser = parse_public_inode_id)]

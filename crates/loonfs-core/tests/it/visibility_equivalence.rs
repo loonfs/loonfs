@@ -147,10 +147,15 @@ impl VisibilityHarness {
         .await
     }
 
-    async fn move_path(&self, from_path: &str, to_path: &str) -> Result<CommitResponse, CoreError> {
+    async fn move_path(
+        &self,
+        source_path: &str,
+        destination_path: &str,
+    ) -> Result<CommitResponse, CoreError> {
         self.publish_operation(FilesystemOperation::MovePath {
-            from_path: AbsolutePath::parse(from_path).expect("valid source path"),
-            to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
+            source_path: AbsolutePath::parse(source_path).expect("valid source path"),
+            destination_path: AbsolutePath::parse(destination_path)
+                .expect("valid destination path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -160,10 +165,15 @@ impl VisibilityHarness {
         .await
     }
 
-    async fn copy_file(&self, from_path: &str, to_path: &str) -> Result<CommitResponse, CoreError> {
+    async fn copy_file(
+        &self,
+        source_path: &str,
+        destination_path: &str,
+    ) -> Result<CommitResponse, CoreError> {
         self.publish_operation(FilesystemOperation::CopyPath {
-            from_path: AbsolutePath::parse(from_path).expect("valid source path"),
-            to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
+            source_path: AbsolutePath::parse(source_path).expect("valid source path"),
+            destination_path: AbsolutePath::parse(destination_path)
+                .expect("valid destination path"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -194,7 +204,7 @@ impl VisibilityHarness {
         self.publish_operation(FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
-            path: Some(AbsolutePath::parse(path).expect("valid path")),
+            destination_path: Some(AbsolutePath::parse(path).expect("valid path")),
         })
         .await
     }
@@ -554,8 +564,8 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
                 expected_inode_id: None,
             },
             FilesystemOperation::MovePath {
-                from_path: AbsolutePath::parse("/reverse/branch").expect("valid source path"),
-                to_path: AbsolutePath::parse("/safe/reverse-branch")
+                source_path: AbsolutePath::parse("/reverse/branch").expect("valid source path"),
+                destination_path: AbsolutePath::parse("/safe/reverse-branch")
                     .expect("valid destination path"),
                 precondition: loonfs_api::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
@@ -578,8 +588,9 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
     let deletion = harness
         .batched_commit(vec![
             FilesystemOperation::MovePath {
-                from_path: AbsolutePath::parse("/source/branch").expect("valid source path"),
-                to_path: AbsolutePath::parse("/safe/branch").expect("valid destination path"),
+                source_path: AbsolutePath::parse("/source/branch").expect("valid source path"),
+                destination_path: AbsolutePath::parse("/safe/branch")
+                    .expect("valid destination path"),
                 precondition: loonfs_api::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,

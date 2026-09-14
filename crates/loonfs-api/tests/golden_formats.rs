@@ -293,7 +293,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             commit_id: commit_id(),
             committed_by: actor(),
             semantic_commit_fingerprint: serde_json::from_str(
-                r#""v4:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
+                r#""v1:sha256:0000000000000000000000000000000000000000000000000000000000000042""#,
             )
             .expect("fingerprint"),
             committed_at_ms: 4_000,
@@ -2287,7 +2287,7 @@ fn provenance_rows_reject_every_missing_required_field() {
             MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
                 commit_id: commit_id(),
                 committed_by: actor(),
-                semantic_commit_fingerprint: serde_json::from_str(r#""v4:sha256:receipt""#)
+                semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:receipt""#)
                     .expect("fingerprint"),
                 committed_seq: ChangeSeq(9),
                 committed_at_ms: 9_000,
@@ -2549,7 +2549,7 @@ fn commit_precondition_wire_shapes_match_golden() {
     };
     let bytes =
         serde_json::to_vec_pretty(&(request, &with_preconditions, details)).expect("wire shapes");
-    assert_matches_golden("commit_preconditions.v0.json", &bytes);
+    assert_matches_golden("commit_preconditions.v1.json", &bytes);
     let (_, decoded, _): (CommitRequest, CommitRequest, ErrorDetails) =
         serde_json::from_slice(&bytes).expect("decode wire shapes");
     assert_eq!(decoded, with_preconditions);

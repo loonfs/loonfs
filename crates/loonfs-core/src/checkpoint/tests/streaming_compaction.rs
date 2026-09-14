@@ -427,7 +427,7 @@ async fn undelete_newest_deletion<S: ObjectStore + ?Sized>(
         FilesystemOperation::Undelete {
             inode_id: root_inode_id,
             deletion_seq,
-            path: None,
+            destination_path: None,
         },
         context,
     )

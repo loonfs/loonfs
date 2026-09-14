@@ -643,25 +643,37 @@ impl ResolvedTarget {
     }
 
     /// Restores the deletion identified by `inode_id` and `deletion_seq`.
-    /// When `path` is absent, the original parent and name are used.
+    /// When `destination_path` is absent, the original parent and name are used.
     pub(crate) async fn undelete(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        path: Option<&AbsolutePath>,
+        destination_path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
     ) -> Result<CommitResponse, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .undelete(namespace_id, inode_id, deletion_seq, path, options)
+                    .undelete(
+                        namespace_id,
+                        inode_id,
+                        deletion_seq,
+                        destination_path,
+                        options,
+                    )
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .undelete(namespace_id, inode_id, deletion_seq, path, options)
+                .undelete(
+                    namespace_id,
+                    inode_id,
+                    deletion_seq,
+                    destination_path,
+                    options,
+                )
                 .await?),
         }
     }

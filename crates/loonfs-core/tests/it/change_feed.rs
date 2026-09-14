@@ -97,8 +97,8 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
         &namespace_id,
         commit_id("copy-file"),
         FilesystemOperation::CopyPath {
-            from_path: path("/report.txt"),
-            to_path: path("/copy.txt"),
+            source_path: path("/report.txt"),
+            destination_path: path("/copy.txt"),
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
@@ -134,7 +134,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
         FilesystemOperation::Undelete {
             inode_id: copied_inode_id,
             deletion_seq: deletion.committed_seq,
-            path: None,
+            destination_path: None,
         },
         &context,
     )

@@ -493,9 +493,9 @@ pub enum FilesystemOperation {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationMovePath"))]
     MovePath {
         /// Absolute source path that must resolve to a visible inode.
-        from_path: AbsolutePath,
+        source_path: AbsolutePath,
         /// Absolute destination whose parent must be visible and writable.
-        to_path: AbsolutePath,
+        destination_path: AbsolutePath,
         /// Replacement behavior and optional destination state.
         #[serde(flatten)]
         precondition: DestinationPrecondition,
@@ -510,9 +510,9 @@ pub enum FilesystemOperation {
         expected_binding_generation: BindingGeneration,
         /// Destination directory.
         #[serde(with = "crate::public_inode_id")]
-        to_parent_inode_id: InodeId,
+        destination_parent_inode_id: InodeId,
         /// New name.
-        to_display_name: DisplayName,
+        destination_display_name: DisplayName,
         /// Replacement behavior and optional destination state.
         #[serde(flatten)]
         precondition: DestinationPrecondition,
@@ -521,9 +521,9 @@ pub enum FilesystemOperation {
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationCopyPath"))]
     CopyPath {
         /// Absolute source path that must resolve to a visible file.
-        from_path: AbsolutePath,
+        source_path: AbsolutePath,
         /// Absolute destination whose parent must be visible and writable.
-        to_path: AbsolutePath,
+        destination_path: AbsolutePath,
         /// Replacement behavior and optional destination state.
         #[serde(flatten)]
         precondition: DestinationPrecondition,
@@ -539,7 +539,7 @@ pub enum FilesystemOperation {
         /// The restore destination, or `None` to use the recorded binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        path: Option<AbsolutePath>,
+        destination_path: Option<AbsolutePath>,
     },
     /// Restore an older revision as the current revision for a path.
     #[cfg_attr(
@@ -1573,8 +1573,8 @@ mod tests {
         );
 
         let move_path = FilesystemOperation::MovePath {
-            from_path: path("/docs/a.txt"),
-            to_path: path("/docs/b.txt"),
+            source_path: path("/docs/a.txt"),
+            destination_path: path("/docs/b.txt"),
             precondition: crate::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(InodeId(7)),
@@ -1585,8 +1585,8 @@ mod tests {
             serde_json::to_value(&move_path).expect("move op json"),
             serde_json::json!({
                 "kind": "move_path",
-                "from_path": "/docs/a.txt",
-                "to_path": "/docs/b.txt",
+                "source_path": "/docs/a.txt",
+                "destination_path": "/docs/b.txt",
                 "behavior": "replace",
                 "expected_destination_inode_id": "ino_7",
                 "expected_destination_revision_no": 3
@@ -1594,8 +1594,8 @@ mod tests {
         );
 
         let copy_path = FilesystemOperation::CopyPath {
-            from_path: path("/docs/a.txt"),
-            to_path: path("/docs/b.txt"),
+            source_path: path("/docs/a.txt"),
+            destination_path: path("/docs/b.txt"),
             precondition: crate::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(InodeId(7)),
@@ -1606,8 +1606,8 @@ mod tests {
             serde_json::to_value(&copy_path).expect("copy op json"),
             serde_json::json!({
                 "kind": "copy_path",
-                "from_path": "/docs/a.txt",
-                "to_path": "/docs/b.txt",
+                "source_path": "/docs/a.txt",
+                "destination_path": "/docs/b.txt",
                 "behavior": "replace",
                 "expected_destination_inode_id": "ino_7",
                 "expected_destination_revision_no": 3
@@ -1744,15 +1744,15 @@ mod tests {
 
         let move_path: FilesystemOperation = serde_json::from_value(serde_json::json!({
             "kind": "move_path",
-            "from_path": "/docs/a.txt",
-            "to_path": "/docs/b.txt"
+            "source_path": "/docs/a.txt",
+            "destination_path": "/docs/b.txt"
         }))
         .expect("move op defaults behavior");
         assert_eq!(
             move_path,
             FilesystemOperation::MovePath {
-                from_path: path("/docs/a.txt"),
-                to_path: path("/docs/b.txt"),
+                source_path: path("/docs/a.txt"),
+                destination_path: path("/docs/b.txt"),
                 precondition: crate::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
@@ -1763,20 +1763,40 @@ mod tests {
 
         let copy_path: FilesystemOperation = serde_json::from_value(serde_json::json!({
             "kind": "copy_path",
-            "from_path": "/docs/a.txt",
-            "to_path": "/docs/b.txt"
+            "source_path": "/docs/a.txt",
+            "destination_path": "/docs/b.txt"
         }))
         .expect("copy op defaults behavior");
         assert_eq!(
             copy_path,
             FilesystemOperation::CopyPath {
-                from_path: path("/docs/a.txt"),
-                to_path: path("/docs/b.txt"),
+                source_path: path("/docs/a.txt"),
+                destination_path: path("/docs/b.txt"),
                 precondition: crate::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
                 },
+            }
+        );
+
+        let move_by_inode: FilesystemOperation = serde_json::from_value(serde_json::json!({
+            "kind": "move_by_inode",
+            "inode_id": "ino_7",
+            "expected_binding_generation": "aaaa",
+            "destination_parent_inode_id": "ino_1",
+            "destination_display_name": "b.txt"
+        }))
+        .expect("inode move defaults behavior");
+        assert_eq!(
+            move_by_inode,
+            FilesystemOperation::MoveByInode {
+                inode_id: InodeId(7),
+                expected_binding_generation: BindingGeneration::parse("aaaa")
+                    .expect("binding generation"),
+                destination_parent_inode_id: InodeId(1),
+                destination_display_name: DisplayName::parse("b.txt").expect("display name"),
+                precondition: DestinationPrecondition::default(),
             }
         );
     }
@@ -1808,13 +1828,13 @@ mod tests {
                 FilesystemOperation::Undelete {
                     inode_id: InodeId(7),
                     deletion_seq: ChangeSeq(8),
-                    path: Some(path("/docs/restored")),
+                    destination_path: Some(path("/docs/restored")),
                 },
                 serde_json::json!({
                     "kind": "undelete",
                     "inode_id": "ino_7",
                     "deletion_seq": 8,
-                    "path": "/docs/restored"
+                    "destination_path": "/docs/restored"
                 }),
             ),
             (
@@ -1864,19 +1884,19 @@ mod tests {
             serde_json::json!({"kind": "delete_path", "path": "relative"}),
             serde_json::json!({
                 "kind": "move_path",
-                "from_path": "relative",
-                "to_path": "/target"
+                "source_path": "relative",
+                "destination_path": "/target"
             }),
             serde_json::json!({
                 "kind": "copy_path",
-                "from_path": "/source",
-                "to_path": "relative"
+                "source_path": "/source",
+                "destination_path": "relative"
             }),
             serde_json::json!({
                 "kind": "undelete",
                 "inode_id": "ino_7",
                 "deletion_seq": 8,
-                "path": "relative"
+                "destination_path": "relative"
             }),
             serde_json::json!({
                 "kind": "restore_revision",
@@ -1904,7 +1924,8 @@ mod tests {
             serde_json::json!({
                 "kind": "undelete",
                 "inode_id": "ino_27",
-                "deletion_seq": 8
+                "deletion_seq": 8,
+                "destination_path": "/docs/restored"
             }),
             serde_json::json!({
                 "kind": "update_attributes",
@@ -2074,6 +2095,38 @@ mod tests {
             assert!(
                 serde_json::from_value::<CommitRequest>(body).is_err(),
                 "an unknown field in {level} decoded instead of failing the request"
+            );
+        }
+
+        for (field, operation) in [
+            (
+                "path",
+                serde_json::json!({
+                    "kind": "undelete",
+                    "inode_id": "ino_7",
+                    "deletion_seq": 8,
+                    "path": "/docs/restored"
+                }),
+            ),
+            (
+                "from_path",
+                serde_json::json!({
+                    "kind": "move_path",
+                    "source_path": "/docs/a.txt",
+                    "destination_path": "/docs/b.txt",
+                    "from_path": "/docs/a.txt"
+                }),
+            ),
+        ] {
+            let mut body = valid();
+            body["operations"] = serde_json::json!([operation]);
+            let error = serde_json::from_value::<CommitRequest>(body)
+                .expect_err("obsolete operation field must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown field `{field}`")),
+                "{error}"
             );
         }
     }

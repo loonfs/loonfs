@@ -534,7 +534,7 @@ mod tests {
             crate::v0::FilesystemOperation::Undelete {
                 inode_id: InodeId(42),
                 deletion_seq: ChangeSeq(417),
-                path: None,
+                destination_path: None,
             }
         ));
 

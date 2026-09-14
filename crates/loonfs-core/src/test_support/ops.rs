@@ -168,8 +168,8 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
 pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    from_path: &str,
-    to_path: &str,
+    source_path: &str,
+    destination_path: &str,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse> {
@@ -178,8 +178,8 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
         namespace_id,
         normalized_commit_id(commit_id),
         FilesystemOperation::MovePath {
-            from_path: parse_mutation_path(from_path)?,
-            to_path: parse_mutation_path(to_path)?,
+            source_path: parse_mutation_path(source_path)?,
+            destination_path: parse_mutation_path(destination_path)?,
             precondition: loonfs_api::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,

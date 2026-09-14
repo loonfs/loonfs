@@ -226,22 +226,22 @@ fn event_from_op_deltas(
         },
         // Rename: retire the old binding, publish the new one.
         [WalDelta::UnbindDirentry {
-            parent_inode_id: from_parent_inode_id,
+            parent_inode_id: source_parent_inode_id,
             display_name: from_name,
             child_inode_id,
             ..
         }, WalDelta::BindDirentry {
             delta_index,
-            parent_inode_id: to_parent_inode_id,
+            parent_inode_id: destination_parent_inode_id,
             display_name: to_name,
             child_inode_id: bound_inode_id,
             ..
         }] if child_inode_id == bound_inode_id => FilesystemChange::Moved {
             inode_id: *child_inode_id,
-            from_parent_inode_id: *from_parent_inode_id,
-            from_display_name: from_name.clone(),
-            to_parent_inode_id: *to_parent_inode_id,
-            to_display_name: to_name.clone(),
+            source_parent_inode_id: *source_parent_inode_id,
+            source_display_name: from_name.clone(),
+            destination_parent_inode_id: *destination_parent_inode_id,
+            destination_display_name: to_name.clone(),
             binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
         },
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.

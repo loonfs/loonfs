@@ -1275,9 +1275,9 @@ pub(crate) async fn run_filesystem_undelete(
     // An absent path restores in place; the destination is then the parent
     // and name the deletion recorded, which no path here could name better.
     let spec = args
-        .path
+        .destination_path
         .as_deref()
-        .map(|path| namespace_path(context.namespace(), "path", path, allow_root))
+        .map(|path| namespace_path(context.namespace(), "destination_path", path, allow_root))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let commit =

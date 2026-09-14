@@ -1082,8 +1082,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             FilesystemOperation::MoveByInode {
                 inode_id: file_inode_id,
                 expected_binding_generation,
-                to_parent_inode_id: inode_directory_id,
-                to_display_name: display_name(&request.moved_file_name),
+                destination_parent_inode_id: inode_directory_id,
+                destination_display_name: display_name(&request.moved_file_name),
                 precondition: loonfs_api::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
@@ -1115,8 +1115,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 "kind": "move_by_inode",
                 "inode_id": file_inode_id,
                 "expected_binding_generation": request.malformed_binding_generation,
-                "to_parent_inode_id": inode_directory_id,
-                "to_display_name": request.moved_file_name,
+                "destination_parent_inode_id": inode_directory_id,
+                "destination_display_name": request.moved_file_name,
                 "behavior": "no_replace",
             }],
         }))

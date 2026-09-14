@@ -504,8 +504,8 @@ impl FsWriter {
     pub async fn move_path(
         &self,
         namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
+        source_path: &str,
+        destination_path: &str,
         options: MoveOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
@@ -513,8 +513,8 @@ impl FsWriter {
             namespace_id,
             &options.commit,
             FilesystemOperation::MovePath {
-                from_path: loonfs_core::path::parse_mutation_path(from_path)?,
-                to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                source_path: loonfs_core::path::parse_mutation_path(source_path)?,
+                destination_path: loonfs_core::path::parse_mutation_path(destination_path)?,
                 precondition: loonfs_api::DestinationPrecondition {
                     behavior: options.behavior,
                     expected_inode_id: options.expected_destination_inode_id,
@@ -543,8 +543,8 @@ impl FsWriter {
     pub async fn copy_path(
         &self,
         namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
+        source_path: &str,
+        destination_path: &str,
         options: CopyOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
@@ -552,8 +552,8 @@ impl FsWriter {
             namespace_id,
             &options.commit,
             FilesystemOperation::CopyPath {
-                from_path: loonfs_core::path::parse_mutation_path(from_path)?,
-                to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                source_path: loonfs_core::path::parse_mutation_path(source_path)?,
+                destination_path: loonfs_core::path::parse_mutation_path(destination_path)?,
                 precondition: loonfs_api::DestinationPrecondition {
                     behavior: options.behavior,
                     expected_inode_id: options.expected_destination_inode_id,
@@ -656,13 +656,13 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        absolute_path: Option<&str>,
+        destination_path: Option<&str>,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         // An absent destination restores in place: the entry re-binds under
         // the parent and name its deletion recorded.
-        let path = absolute_path
+        let destination_path = destination_path
             .map(loonfs_core::path::parse_mutation_path)
             .transpose()?;
         self.commit_one(
@@ -671,7 +671,7 @@ impl FsWriter {
             FilesystemOperation::Undelete {
                 inode_id,
                 deletion_seq,
-                path,
+                destination_path,
             },
         )
         .await

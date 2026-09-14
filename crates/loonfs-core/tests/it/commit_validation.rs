@@ -440,8 +440,8 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
                 loonfs_test_support::test_actor(),
                 None,
                 FilesystemOperation::MovePath {
-                    from_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
-                    to_path: AbsolutePath::parse("/docs/moved.txt").expect("path"),
+                    source_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
+                    destination_path: AbsolutePath::parse("/docs/moved.txt").expect("path"),
                     precondition: loonfs_api::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,

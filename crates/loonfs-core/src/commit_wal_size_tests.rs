@@ -117,8 +117,9 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                         expected_attributes_revision_no: None,
                     },
                     "copy" => FilesystemOperation::CopyPath {
-                        from_path: AbsolutePath::parse("/source").expect("path"),
-                        to_path: AbsolutePath::parse(format!("/{index:0255}")).expect("path"),
+                        source_path: AbsolutePath::parse("/source").expect("path"),
+                        destination_path: AbsolutePath::parse(format!("/{index:0255}"))
+                            .expect("path"),
                         precondition: DestinationPrecondition::default(),
                     },
                     _ => FilesystemOperation::PutFile {

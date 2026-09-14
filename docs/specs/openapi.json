@@ -1686,13 +1686,13 @@
             "$ref": "#/components/schemas/BindingGeneration",
             "description": "Opaque identifier for the binding created by this event."
           },
-          "from_display_name": {
+          "destination_display_name": {
             "$ref": "#/components/schemas/DisplayName",
-            "description": "Spelling of the old binding."
+            "description": "Spelling of the new binding."
           },
-          "from_parent_inode_id": {
+          "destination_parent_inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "Directory that held the old binding."
+            "description": "Directory holding the new binding."
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -1704,21 +1704,21 @@
             ],
             "type": "string"
           },
-          "to_display_name": {
+          "source_display_name": {
             "$ref": "#/components/schemas/DisplayName",
-            "description": "Spelling of the new binding."
+            "description": "Spelling of the removed binding."
           },
-          "to_parent_inode_id": {
+          "source_parent_inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "Directory holding the new binding."
+            "description": "Directory that held the removed binding."
           }
         },
         "required": [
           "inode_id",
-          "from_parent_inode_id",
-          "from_display_name",
-          "to_parent_inode_id",
-          "to_display_name",
+          "source_parent_inode_id",
+          "source_display_name",
+          "destination_parent_inode_id",
+          "destination_display_name",
           "binding_generation",
           "kind"
         ],
@@ -1828,6 +1828,10 @@
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may be replaced."
           },
+          "destination_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination whose parent must be visible and writable."
+          },
           "expected_destination_inode_id": {
             "$ref": "#/components/schemas/InodeId",
             "description": "With `replace` behavior, the destination inode required by the request."
@@ -1836,24 +1840,20 @@
             "$ref": "#/components/schemas/RevisionNo",
             "description": "With `replace` behavior and an inode precondition, the required content revision."
           },
-          "from_path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute source path that must resolve to a visible file."
-          },
           "kind": {
             "enum": [
               "copy_path"
             ],
             "type": "string"
           },
-          "to_path": {
+          "source_path": {
             "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute destination whose parent must be visible and writable."
+            "description": "Absolute source path that must resolve to a visible file."
           }
         },
         "required": [
-          "from_path",
-          "to_path",
+          "source_path",
+          "destination_path",
           "kind"
         ],
         "type": "object"
@@ -2001,6 +2001,14 @@
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may be replaced."
           },
+          "destination_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "New name."
+          },
+          "destination_parent_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Destination directory."
+          },
           "expected_binding_generation": {
             "$ref": "#/components/schemas/BindingGeneration",
             "description": "Binding generation required for the move."
@@ -2022,21 +2030,13 @@
               "move_by_inode"
             ],
             "type": "string"
-          },
-          "to_display_name": {
-            "$ref": "#/components/schemas/DisplayName",
-            "description": "New name."
-          },
-          "to_parent_inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "Destination directory."
           }
         },
         "required": [
           "inode_id",
           "expected_binding_generation",
-          "to_parent_inode_id",
-          "to_display_name",
+          "destination_parent_inode_id",
+          "destination_display_name",
           "kind"
         ],
         "type": "object"
@@ -2048,6 +2048,10 @@
             "$ref": "#/components/schemas/DestinationBehavior",
             "description": "Whether an existing destination file may be replaced."
           },
+          "destination_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute destination whose parent must be visible and writable."
+          },
           "expected_destination_inode_id": {
             "$ref": "#/components/schemas/InodeId",
             "description": "With `replace` behavior, the destination inode required by the request."
@@ -2056,24 +2060,20 @@
             "$ref": "#/components/schemas/RevisionNo",
             "description": "With `replace` behavior and an inode precondition, the required content revision."
           },
-          "from_path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute source path that must resolve to a visible inode."
-          },
           "kind": {
             "enum": [
               "move_path"
             ],
             "type": "string"
           },
-          "to_path": {
+          "source_path": {
             "$ref": "#/components/schemas/AbsolutePath",
-            "description": "Absolute destination whose parent must be visible and writable."
+            "description": "Absolute source path that must resolve to a visible inode."
           }
         },
         "required": [
-          "from_path",
-          "to_path",
+          "source_path",
+          "destination_path",
           "kind"
         ],
         "type": "object"
@@ -2177,6 +2177,10 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
           },
+          "destination_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "The restore destination, or `None` to use the recorded binding."
+          },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
             "description": "Deleted inode to make reachable again."
@@ -2186,10 +2190,6 @@
               "undelete"
             ],
             "type": "string"
-          },
-          "path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "The restore destination, or `None` to use the recorded binding."
           }
         },
         "required": [

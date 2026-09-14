@@ -133,7 +133,7 @@ pub(crate) fn estimated_wal_record_bytes(request: &CommitRequest) -> usize {
         ),
         (
             "semantic_commit_fingerprint",
-            string_bytes("v4:sha256:".len() + 64),
+            string_bytes("v1:sha256:".len() + 64),
         ),
         ("committed_at_ms", INTEGER_BYTES),
         (

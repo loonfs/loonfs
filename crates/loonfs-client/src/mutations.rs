@@ -276,26 +276,26 @@ impl Client {
     /// Moves a path within one namespace.
     pub async fn move_path(
         &self,
-        from: &NamespacePath,
-        to: &NamespacePath,
+        source_path: &NamespacePath,
+        destination_path: &NamespacePath,
         options: &MoveOptions,
     ) -> Result<ApiCommitResponse> {
-        if from.namespace() != to.namespace() {
+        if source_path.namespace() != destination_path.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot move across namespaces: {} -> {}",
-                from.namespace(),
-                to.namespace()
+                source_path.namespace(),
+                destination_path.namespace()
             )));
         }
         self.create_commit(
-            from.namespace(),
+            source_path.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
                 options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::MovePath {
-                    from_path: from.absolute_path().clone(),
-                    to_path: to.absolute_path().clone(),
+                    source_path: source_path.absolute_path().clone(),
+                    destination_path: destination_path.absolute_path().clone(),
                     precondition: loonfs_api::DestinationPrecondition {
                         behavior: options.behavior,
                         expected_inode_id: options.expected_destination_inode_id,
@@ -311,26 +311,26 @@ impl Client {
     /// Copies a path within one namespace.
     pub async fn copy_path(
         &self,
-        from: &NamespacePath,
-        to: &NamespacePath,
+        source_path: &NamespacePath,
+        destination_path: &NamespacePath,
         options: &CopyOptions,
     ) -> Result<ApiCommitResponse> {
-        if from.namespace() != to.namespace() {
+        if source_path.namespace() != destination_path.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot copy across namespaces: {} -> {}",
-                from.namespace(),
-                to.namespace()
+                source_path.namespace(),
+                destination_path.namespace()
             )));
         }
         self.create_commit(
-            from.namespace(),
+            source_path.namespace(),
             &CommitRequest::single(
                 commit_id_or_generated(&options.commit),
                 options.commit.actor_id.clone(),
                 options.commit.message.clone(),
                 FilesystemOperation::CopyPath {
-                    from_path: from.absolute_path().clone(),
-                    to_path: to.absolute_path().clone(),
+                    source_path: source_path.absolute_path().clone(),
+                    destination_path: destination_path.absolute_path().clone(),
                     precondition: loonfs_api::DestinationPrecondition {
                         behavior: options.behavior,
                         expected_inode_id: options.expected_destination_inode_id,
@@ -349,7 +349,7 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        path: Option<&AbsolutePath>,
+        destination_path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
     ) -> Result<ApiCommitResponse> {
         // An absent destination restores in place: the entry re-binds under
@@ -363,7 +363,7 @@ impl Client {
                 FilesystemOperation::Undelete {
                     inode_id,
                     deletion_seq,
-                    path: path.cloned(),
+                    destination_path: destination_path.cloned(),
                 },
             )
             .preconditions(options.commit.preconditions.clone()),
