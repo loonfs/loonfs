@@ -118,7 +118,10 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
-        reject_snapshot_option(&options.snapshot_id, "here; this view is already pinned")?;
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReadSnapshot because it is already pinned",
+        )?;
         validate_pinned_directory_cursor(
             request.cursor.as_ref(),
             self.head_seq(),
@@ -167,7 +170,10 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
-        reject_snapshot_option(&options.snapshot_id, "here; this view is already pinned")?;
+        reject_snapshot_option(
+            &options.snapshot_id,
+            "FsReadSnapshot because it is already pinned",
+        )?;
         validate_pinned_directory_cursor(
             request.cursor.as_ref(),
             self.head_seq(),
@@ -413,7 +419,6 @@ impl FsReader {
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
-            cache_path = tracing::field::Empty,
         )
     )]
     pub async fn get_path_entry(
@@ -432,7 +437,6 @@ impl FsReader {
         let entry = engine
             .resolve_path(absolute_path, options, &read_context)
             .await?;
-        tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_SEGMENTS);
         Ok(entry)
     }
 
@@ -447,7 +451,6 @@ impl FsReader {
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
-            cache_path = tracing::field::Empty,
         )
     )]
     pub async fn get_inode(
@@ -464,7 +467,6 @@ impl FsReader {
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
         let entry = engine.stat_inode(inode_id, options, &read_context).await?;
-        tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_SEGMENTS);
         Ok(entry)
     }
 

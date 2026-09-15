@@ -442,12 +442,13 @@ impl NamespaceCommitEngine {
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-        candidates: Vec<CommitCandidate>,
+        candidates: impl AsRef<[CommitCandidate]>,
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
+        let candidates = candidates.as_ref();
         let mut result =
-            Box::pin(self.publish_batch_inner(store, &candidates, context, tail_options)).await;
+            Box::pin(self.publish_batch_inner(store, candidates, context, tail_options)).await;
         for _ in 1..crate::limits::CONTENTION_RETRY_LIMIT {
             if !result.results.iter().any(|result| {
                 matches!(
@@ -460,7 +461,7 @@ impl NamespaceCommitEngine {
                 break;
             }
             result =
-                Box::pin(self.publish_batch_inner(store, &candidates, context, tail_options)).await;
+                Box::pin(self.publish_batch_inner(store, candidates, context, tail_options)).await;
         }
         result
     }

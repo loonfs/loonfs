@@ -264,6 +264,17 @@ fn error_status_mapping_matches_the_api_spec_table() {
 
 #[test]
 fn request_log_severity_uses_typed_codes_and_status_only_as_a_fallback() {
+    for code in ErrorCode::ALL {
+        assert_eq!(
+            request_log_severity(StatusCode::OK, Some(ServedErrorCode(code))),
+            request_log_severity(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some(ServedErrorCode(code)),
+            ),
+            "registered code `{code}` must not fall back to status-based severity"
+        );
+    }
+
     assert_eq!(
         request_log_severity(
             StatusCode::NOT_IMPLEMENTED,

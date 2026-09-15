@@ -1316,6 +1316,10 @@ impl NamespacePublisher {
                 wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at)
             );
         }
+        let (commit_ids, candidates): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .map(|candidate| (candidate.commit_id, candidate.candidate))
+            .unzip();
 
         let publish_span = phase_span!(
             self.read_core,
@@ -1329,10 +1333,6 @@ impl NamespacePublisher {
             let mut results = Vec::new();
             let mut retry_count = 0_u64;
             for attempt in 0..CONTENTION_RETRY_LIMIT {
-                let batch_candidates = candidates
-                    .iter()
-                    .map(|candidate| candidate.candidate.clone())
-                    .collect::<Vec<_>>();
                 let Some(writer) = self.writer.upgrade() else {
                     results = candidates
                         .iter()
@@ -1340,7 +1340,7 @@ impl NamespacePublisher {
                         .collect();
                     break;
                 };
-                results = self.publish_through_engine(&writer, batch_candidates).await;
+                results = self.publish_through_engine(&writer, &candidates).await;
                 if !results.iter().any(is_retryable_wal_publish) {
                     break;
                 }
@@ -1358,7 +1358,7 @@ impl NamespacePublisher {
         publish_span.record("retry_count", retry_count);
         drop(publish_span);
 
-        self.deliver_batch_results(candidates, results, selected_at);
+        self.deliver_batch_results(commit_ids, results, selected_at);
     }
 
     /// Publishes through the publisher-owned engine: one namespace, one
@@ -1366,7 +1366,7 @@ impl NamespacePublisher {
     async fn publish_through_engine(
         &self,
         writer: &Arc<WriterBits>,
-        candidates: Vec<CommitCandidate>,
+        candidates: &[CommitCandidate],
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
@@ -1709,7 +1709,7 @@ impl NamespacePublisher {
 
     fn deliver_batch_results(
         &self,
-        candidates: Vec<BatchCandidate>,
+        commit_ids: Vec<CommitId>,
         results: Vec<CommitResult>,
         selected_at: u64,
     ) {
@@ -1720,15 +1720,15 @@ impl NamespacePublisher {
             // Positional pairing is meaningless once lengths differ, so a
             // count mismatch fails every candidate instead of delivering
             // misaligned results to the earlier ones.
-            let count_mismatch = (results.len() != candidates.len()).then(|| {
+            let count_mismatch = (results.len() != commit_ids.len()).then(|| {
                 RuntimeError::Core(CoreError::Internal(format!(
                     "publisher batch returned {got} results for {want} candidates",
                     got = results.len(),
-                    want = candidates.len(),
+                    want = commit_ids.len(),
                 )))
             });
             let mut results = results.into_iter();
-            for candidate in candidates {
+            for commit_id in commit_ids {
                 let result = match &count_mismatch {
                     Some(error) => Err(error.clone()),
                     None => results
@@ -1736,7 +1736,7 @@ impl NamespacePublisher {
                         .expect("equal-length batch should hold one result per candidate"),
                 };
                 wait_traces.push((result_label(&result), self.elapsed_ms_since(selected_at)));
-                if let Some(in_flight) = state.in_flight.remove(&candidate.commit_id) {
+                if let Some(in_flight) = state.in_flight.remove(&commit_id) {
                     for waiter in in_flight.waiters {
                         deliveries.push((waiter, result.clone()));
                     }

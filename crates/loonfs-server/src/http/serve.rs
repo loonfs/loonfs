@@ -529,6 +529,8 @@ fn tls_server_config(
 /// the object store. Use `loonfs-server --probe-store` or
 /// `loonfs maintenance store probe` to test storage access. Constructing a local
 /// store still creates its root directory.
+/// The check allocates the configured cache capacity and discards a cache
+/// directory whose geometry is incompatible with the configured size.
 pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     config.validate()?;
     config.object_store()?;

@@ -62,6 +62,7 @@ local block cache directory. It does not bind the configured address and it
 performs no object-store operation, so it belongs in a deployment pipeline
 ahead of the rollout. Opening the cache takes the directory lock a start
 takes, so run the check where the server is not already running.
+The check allocates the configured cache capacity and discards a cache directory whose geometry is incompatible with the configured size.
 
 ## Deploying it
 

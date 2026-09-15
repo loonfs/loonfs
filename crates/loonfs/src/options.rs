@@ -70,7 +70,7 @@ impl MetadataMaintenanceOptions {
 ///
 /// [`GcRequest`] carries optional overrides; [`GcConfig`] carries the values
 /// the pass actually runs with, so the two are deliberately distinct shapes.
-pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
+pub(crate) fn gc_config_from_request(request: GcRequest) -> GcConfig {
     let defaults = GcConfig::default();
     GcConfig {
         grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),

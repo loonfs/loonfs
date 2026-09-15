@@ -1,12 +1,10 @@
 //! OpenAPI document rewrites that utoipa cannot express at the handler or schema.
 
-mod operations;
+pub(crate) mod operations;
 pub(crate) mod proxy;
 mod value;
 
 use operations::{add_sdk_names, validate_operation_retry_classes, validate_pagination_metadata};
-#[cfg(test)]
-pub(crate) use operations::{OPERATION_SDK_NAMES, SDK_EXCLUDED_OPERATIONS};
 use proxy::{
     derive_proxy_paths, describe_proxy_document, prune_proxy_components, remove_proxy_security,
     retain_referenced_tags,
@@ -88,103 +86,4 @@ pub(crate) fn proxy_openapi_json_pretty(
     retain_referenced_tags(&mut document)?;
     prune_proxy_components(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeSet;
-
-    #[test]
-    fn missing_retry_classification_returns_a_named_error() {
-        let document = serde_json::json!({
-            "paths": {
-                "/future": {
-                    "post": {"operationId": "future_operation"}
-                }
-            }
-        });
-
-        let error = validate_operation_retry_classes(&document)
-            .expect_err("unknown operation should fail generation");
-        assert!(matches!(
-            error,
-            OpenapiPostprocessError::MissingRetryClassification { operation_id }
-                if operation_id == "future_operation"
-        ));
-    }
-
-    #[test]
-    fn missing_sdk_name_returns_a_named_error() {
-        let mut document = serde_json::json!({
-            "paths": {
-                "/future": {
-                    "post": {"operationId": "future_operation"}
-                }
-            }
-        });
-
-        let error =
-            add_sdk_names(&mut document).expect_err("unknown operation should fail generation");
-        assert!(matches!(
-            error,
-            OpenapiPostprocessError::MissingSdkName { operation_id }
-                if operation_id == "future_operation"
-        ));
-    }
-
-    #[test]
-    fn sdk_name_tables_are_sorted_and_disjoint() {
-        let named = OPERATION_SDK_NAMES
-            .iter()
-            .map(|(operation_id, _)| *operation_id)
-            .collect::<Vec<_>>();
-        let excluded = SDK_EXCLUDED_OPERATIONS.to_vec();
-
-        let mut sorted_named = named.clone();
-        sorted_named.sort_unstable();
-        assert_eq!(named, sorted_named, "SDK name table must stay sorted");
-
-        let mut sorted_excluded = excluded.clone();
-        sorted_excluded.sort_unstable();
-        assert_eq!(
-            excluded, sorted_excluded,
-            "SDK exclusion table must stay sorted"
-        );
-
-        let named_set = named.iter().copied().collect::<BTreeSet<_>>();
-        let excluded_set = excluded.iter().copied().collect::<BTreeSet<_>>();
-        assert!(named_set.is_disjoint(&excluded_set));
-    }
-
-    #[test]
-    fn sdk_method_names_are_unique_within_each_group() {
-        let methods = OPERATION_SDK_NAMES
-            .iter()
-            .map(|(_, sdk_name)| (sdk_name.group, sdk_name.method))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(methods.len(), OPERATION_SDK_NAMES.len());
-    }
-
-    #[test]
-    fn unregistered_cursor_operation_returns_a_named_error() {
-        let document = serde_json::json!({
-            "components": {"schemas": {}},
-            "paths": {
-                "/future": {
-                    "get": {
-                        "operationId": "future_list",
-                        "parameters": [{"name": "cursor", "in": "query"}]
-                    }
-                }
-            }
-        });
-        let error = validate_pagination_metadata(&document)
-            .expect_err("unregistered cursor operation should fail generation");
-        assert!(matches!(
-            error,
-            OpenapiPostprocessError::MissingPaginationMetadata { operation_id }
-                if operation_id == "future_list"
-        ));
-    }
 }

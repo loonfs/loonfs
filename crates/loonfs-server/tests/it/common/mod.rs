@@ -97,9 +97,7 @@ pub(crate) fn series(scrape: &BTreeMap<String, f64>, name: &str) -> f64 {
 pub(crate) struct TestServer {
     pub(crate) client: Client,
     pub(crate) server_url: String,
-    #[allow(dead_code)]
     pub(crate) store_root: Option<PathBuf>,
-    #[allow(dead_code)]
     pub(crate) store_key_prefix: Option<String>,
     pub(crate) server: tokio::task::JoinHandle<()>,
 }

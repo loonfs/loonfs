@@ -310,6 +310,8 @@ defaults, like metadata compaction. The accepted input limits are
 
 ## Resource sizing
 
+`request_deadline_ms` defaults to 60000 ms for metadata and query requests; streamed content and long-running operator work are exempt.
+
 Start with enough memory for:
 
 ```text
@@ -332,6 +334,8 @@ must keep more namespaces writable at once.
 `loonfs.publisher.wal_folds_waiting` gauge means WAL folds are waiting at the
 cap; raise it only after accounting for the additional object-store and CPU
 work.
+
+`min_publish_interval_ms` defaults to 1000 ms between publication starts per namespace; cold namespaces publish immediately.
 
 Publication admission counts queued and active callers, including duplicate
 commits, conflicts, and namespace deletes. A caller that disconnects stays

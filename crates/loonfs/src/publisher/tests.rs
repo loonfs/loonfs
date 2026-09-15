@@ -680,11 +680,7 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
     );
     let selected_at = publisher.timer.monotonic_now_ms();
     publisher.deliver_batch_results(
-        vec![BatchCandidate {
-            commit_id,
-            candidate,
-            enqueued_at: selected_at,
-        }],
+        vec![commit_id],
         vec![Err(RuntimeError::Bootstrap(
             crate::BootstrapNamespaceError::NamespaceAlreadyExists {
                 namespace_id: namespace_id.clone(),

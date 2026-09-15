@@ -192,12 +192,11 @@ pub use maintenance::{
     MaintenanceRunnerStats, MetadataCompactionJob, MetadataMaintenanceJob, NamespacePublication,
 };
 pub use options::{
-    gc_config_from_request, CommitOptions, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListChangesOptions,
-    ListInodeChildrenOptions, ListPathEntriesOptions, MetadataMaintenanceOptions, MoveOptions,
-    PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions,
-    UndeleteOptions, UpdateAttributesOptions,
+    CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions,
+    ForkNamespaceOptions, ListChangesOptions, ListInodeChildrenOptions, ListPathEntriesOptions,
+    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
+    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState, WriterSessionStats};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
