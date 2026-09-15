@@ -13,10 +13,9 @@ readme = "README.md"
 async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
-futures.workspace = true
 loonfs-api.workspace = true
 loonfs-objectstore.workspace = true
-loonfs-server = { path = "../loonfs-server", features = ["test-support"] }
+loonfs-server = { path = "../loonfs-server" }
 loonfs-test-support.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true

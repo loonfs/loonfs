@@ -1870,7 +1870,6 @@ dependencies = [
  "fs4",
  "futures",
  "hostname",
- "http 1.4.0",
  "insta",
  "loonfs",
  "loonfs-api",
@@ -1882,7 +1881,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "toml",
  "ureq",
@@ -1918,7 +1916,6 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
- "futures",
  "loonfs-api",
  "loonfs-client",
  "loonfs-objectstore",
@@ -1983,7 +1980,6 @@ name = "loonfs-model"
 version = "0.3.0"
 dependencies = [
  "loonfs-api",
- "serde",
 ]
 
 [[package]]

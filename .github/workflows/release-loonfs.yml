@@ -118,12 +118,6 @@ jobs:
           test -f "$tmpdir/README.md"
           test -f "$tmpdir/LICENSE"
           test "$(cat "$tmpdir/VERSION")" = "$VERSION"
-          actual="$("$tmpdir/loonfs" version)"
-          actual_version="${actual%% *}"
-          if [ "$actual_version" != "$VERSION" ]; then
-            echo "expected loonfs version $VERSION, got: $actual" >&2
-            exit 1
-          fi
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4

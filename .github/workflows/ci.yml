@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup component add rustfmt
       - run: cargo fmt --all --check
 
   clippy:
@@ -23,7 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup component add clippy
       - uses: actions/cache@v4
         with:
           path: |
@@ -88,7 +86,7 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-sdk-conformance-${{ hashFiles('sdk/generated/go/go.sum', 'sdk/conformance/go/go.mod') }}
+          key: ${{ runner.os }}-go-sdk-conformance-${{ hashFiles('sdk/conformance/go/go.sum', 'sdk/conformance/go/go.mod') }}
           restore-keys: ${{ runner.os }}-go-sdk-conformance-
       - uses: actions/cache@v4
         if: matrix.language == 'python'
@@ -100,7 +98,7 @@ jobs:
         if: matrix.language == 'typescript'
         with:
           path: ~/.npm
-          key: ${{ runner.os }}-typescript-sdk-conformance-${{ hashFiles('sdk/conformance/typescript/package.json') }}
+          key: ${{ runner.os }}-typescript-sdk-conformance-${{ hashFiles('sdk/conformance/typescript/package-lock.json') }}
           restore-keys: ${{ runner.os }}-typescript-sdk-conformance-
       - uses: actions/cache@v4
         with:
@@ -191,7 +189,7 @@ jobs:
           helm template rel "$CHART" $SECRET >/dev/null
           helm template rel "$CHART" $SECRET \
             --set localCache.enabled=true --set localCache.sizeLimit=100Gi >/dev/null
-          helm template rel "$CHART" $SECRET --set image.tag=0.2.0 >/dev/null
+          helm template rel "$CHART" $SECRET --set image.tag=9.9.9 >/dev/null
           helm template rel "$CHART" $SECRET \
             --set image.digest=sha256:1111111111111111111111111111111111111111111111111111111111111111 >/dev/null
           helm template rel "$CHART" $SECRET \
