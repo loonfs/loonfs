@@ -1,6 +1,5 @@
-//! Simulation scenario configuration and execution contract.
+//! Simulation scenario configuration.
 
-use crate::failure::SimFailure;
 use crate::rng::SimSeed;
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +18,4 @@ impl Default for SimConfig {
             writers: 3,
         }
     }
-}
-
-pub trait SimScenario {
-    fn name(&self) -> &'static str;
-    fn run(&self, config: SimConfig) -> Result<(), SimFailure>;
 }
