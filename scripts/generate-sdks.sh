@@ -41,6 +41,9 @@ prune_generated() {
             maintenance/checkpoints maintenance/diagnostics maintenance/grep_index maintenance/runs; do
             rm "generated/go/${name}_test.go"
         done
+        # The generator's retrier test pins the generator's retry policy; the
+        # overlay replaces it with one that pins the Retry-After contract.
+        rm generated/go/internal/retrier_test.go
         python3 - <<'PY'
 import json
 import pathlib
