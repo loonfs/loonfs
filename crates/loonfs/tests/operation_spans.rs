@@ -39,10 +39,13 @@ fn take_captured_log(captured: &Arc<Mutex<Vec<u8>>>) -> String {
     String::from_utf8(bytes).expect("captured log is utf8")
 }
 
-fn closed_span_count(log: &str, span_name: &str) -> usize {
+fn closed_spans(log: &str, span_name: &str) -> Vec<serde_json::Value> {
     log.lines()
-        .filter(|line| line.contains(span_name) && line.contains("close"))
-        .count()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("captured JSON event"))
+        // `span` is the span closing; `spans` also includes its ancestors.
+        // A child's close event must not count as another parent close.
+        .filter(|event| event["fields"]["message"] == "close" && event["span"]["name"] == span_name)
+        .collect()
 }
 
 #[test]
@@ -52,6 +55,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
     let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&captured);
     let subscriber = tracing_subscriber::fmt()
+        .json()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .with_span_events(FmtSpan::CLOSE)
@@ -101,13 +105,11 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
         "loonfs.get_namespace",
         "loonfs.get_namespace_diagnostics",
     ] {
-        let span = log
-            .lines()
-            .find(|line| line.contains(span_name) && line.contains("namespace_id=operation-spans"))
-            .unwrap_or_else(|| panic!("`{span_name}` lacks `namespace_id` in:\n{log}"));
         assert!(
-            span.contains("close"),
-            "`{span_name}` did not close: {span}"
+            closed_spans(&log, span_name)
+                .iter()
+                .any(|event| event["span"]["namespace_id"] == "operation-spans"),
+            "`{span_name}` lacks a close event with its namespace in:\n{log}"
         );
     }
 }
@@ -119,6 +121,7 @@ fn delegated_writer_calls_close_one_operation_span() {
     let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&captured);
     let subscriber = tracing_subscriber::fmt()
+        .json()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .with_span_events(FmtSpan::CLOSE)
@@ -162,32 +165,29 @@ fn delegated_writer_calls_close_one_operation_span() {
         (create_log, put_log)
     });
 
-    let apply_commit = create_log
-        .lines()
-        .filter(|line| line.contains("loonfs.apply_commit") && line.contains("close"))
-        .collect::<Vec<_>>();
+    let apply_commit = closed_spans(&create_log, "loonfs.apply_commit");
     assert_eq!(
         apply_commit.len(),
         1,
         "create_directory closed the wrong number of apply_commit spans:\n{create_log}"
     );
     assert!(
-        apply_commit[0].contains("method=\"create_directory\""),
+        apply_commit[0]["span"]["method"] == "create_directory",
         "create_directory apply_commit span lacks its method field:\n{}",
         apply_commit[0]
     );
     assert_eq!(
-        closed_span_count(&put_log, "loonfs.put"),
+        closed_spans(&put_log, "loonfs.put").len(),
         1,
         "put_file_bytes closed the wrong number of put spans:\n{put_log}"
     );
     assert_eq!(
-        closed_span_count(&put_log, "loonfs.prepare"),
+        closed_spans(&put_log, "loonfs.prepare").len(),
         0,
         "put_file_bytes closed a prepare span:\n{put_log}"
     );
     assert_eq!(
-        closed_span_count(&put_log, "loonfs.apply_commit"),
+        closed_spans(&put_log, "loonfs.apply_commit").len(),
         0,
         "put_file_bytes closed an apply_commit span:\n{put_log}"
     );
