@@ -1,112 +1,63 @@
-# The WAL Boundary
+# The WAL implementation
 
-The write-ahead log of a namespace is a sequence of numbered, immutable
-objects under one prefix. A data segment carries the commits of one
-publication batch; a fence carries none and advances the number and the
-writer epoch. Discovery probes numbers forward from a hint, replay walks
-a bounded range of them, and reclamation deletes the ones below the
-folded and retention floors. This document records which module owns
-those operations, why there is no trait behind it, and what a second
-implementation of the log would have to answer before one could exist.
+LoonFS records committed metadata changes in a write-ahead log, or WAL. Each namespace has its own log, stored as numbered, immutable objects. Creating the next object with a conditional write publishes its contents; a competing write to the same number fails.
 
-## One owner
+The WAL is also part of recovery, writer fencing, and history retention. Keeping these operations together in `loonfs_core::wal` makes it easier to check that they follow the same rules. This note describes that division of responsibility. The [storage format specification](../specs/format.md) defines the durable format and its requirements.
 
-`loonfs_core::wal` owns every operation that touches a numbered WAL
-object. Nothing outside it builds a numbered key, encodes or decodes a
-segment envelope, or decides what an absent successor means. The module
-is split by responsibility, the same division SlateDB's pluggable-WAL
-design draws, as files rather than traits:
+## WAL numbers and commit sequences
 
-```
-frame.rs     segment and tail types, their errors
-writer.rs    assemble a segment: a batch of accepted commits, or a fence
-publish.rs   the numbered put and its outcome classification
-discover.rs  tip discovery from the hinted or folded number; the probe
-             that advances a cached view by one segment at a time
-reader.rs    bounded loading of the segments between two heads
-replay.rs    replay of a loaded tail onto metadata state
-reclaim.rs   which numbers retention still requires
-```
+A WAL number identifies an object. A commit sequence identifies a committed mutation. They are different counters: one WAL object can contain several commits, and a fence contains none.
 
-The callers speak in heads. The batch planner hands the segment builder
-the head it extends and receives the segment and the resulting head. The
-epoch acquisition asks for a fence at the current head. A reader asks for
-the tail between a base head and the current head and receives the
-replayed state. The change feed asks for the retained tail through the
-head and receives the segments. Garbage collection asks which number
-retention requires and whether a key is above it. Outside `wal/`, no code
-builds a numbered key, encodes or decodes a segment, or names a WAL
-number to load or publish. WAL numbers still appear outside the module
-as fields of the head and the manifest, and in the arithmetic listed
-under what stays outside.
+For example, a namespace might have this log:
 
-The workspace's `clippy.toml` enforces the boundary the way it enforces
-the clock boundary: the numbered-key builder is a disallowed method, and
-only the files under `wal/` carry the allow. The envelope codecs are not
-banned; they are vocabulary, tested where they are defined, and a test
-that decodes a published segment to assert its shape is reading the
-format, not operating the log.
+| WAL number | Contents | Commit sequence after publication |
+| --- | --- | --- |
+| 24 | Two commits at sequences 40 and 41 | 41 |
+| 25 | A fence for a new writer epoch | 41 |
+| 26 | One commit at sequence 42 | 42 |
 
-## What stays outside
+During writer acquisition, LoonFS first records the new writer epoch in a manifest, then publishes a fence at the next available WAL number. The fence prevents a stale writer from successfully publishing at that number. It does not change the filesystem or advance the commit sequence.
 
-The hint object carries a manifest number and a WAL number in one
-document. Manifest discovery reads the first; WAL discovery reads the
-second, through the loaded manifest. Raising it is a compare-and-swap on
-a control object, so it stays in the control module, and the runtime
-paces the raises. A second log implementation would still need the
-manifest half.
+These distinctions matter during recovery and collection. A fence is still a WAL object, even though it contains no commits, and counting WAL objects is different from counting committed changes.
 
-Family enumeration for garbage collection is key-layout vocabulary shared
-by every family. The sweep and the family list stay in `gc/`; only the
-rule for which WAL numbers are still required moved.
+## Module responsibilities
 
-Positions are not opaque, and this change does not pretend they are. The
-manifest records the folded and the retention-floor WAL numbers. The fold
-trigger, the unfolded-segment diagnostic, and the write-stop bound are
-differences between WAL numbers. That arithmetic stays where it was.
+Numbered WAL keys, segment construction, reads, and publication are handled in `wal/`. Discovery and retention decisions specific to the log are defined there as well.
 
-## Why no trait
+| File | Responsibility |
+| --- | --- |
+| `frame.rs` | Segment and tail types, including validation errors |
+| `writer.rs` | Construction of data and fence segments, calculation of the next WAL number and resulting head |
+| `publish.rs` | Conditional writes and classification of successful, conflicting, and uncertain outcomes |
+| `discover.rs` | Discovery of the latest WAL state and incremental updates to cached views |
+| `reader.rs` | Loading and validation of a bounded range of segments |
+| `replay.rs` | Reconstruction of metadata state from committed records |
+| `reclaim.rs` | Identification of WAL objects still required by retention |
 
-A trait with one implementation and a test double gets its signatures
-from guesses, and the guesses that matter here are exactly the ones a
-hosted log would settle differently: what a position is when the
-manifest still records WAL numbers, whether a fence is atomic with epoch
-acquisition, and what the head of a log that is not a numbered prefix
-means. Cutting the interface later, with both implementations in hand,
-is a mechanical extraction from this module; cutting it now would fix
-those answers before anyone knows them.
+Commit publication uses the current namespace head and accepted commits to prepare the next segment. Reads use a base head and current head to load and replay the intervening WAL. For the change feed, the retained segments are loaded through the current head, then converted into filesystem events. The numbered ranges for these reads are calculated inside `wal/`.
 
-## What a second implementation has to answer
+The numbered-key builder is restricted by `clippy.toml`, with explicit exceptions for WAL storage code and tests that inspect physical objects. The envelope codecs remain available for format validation and tests.
 
-- **Position.** `last_folded_wal_no` and `retention_floor_wal_no` are
-  durable manifest fields and `wal_no` is part of the read head. A log
-  whose positions are not dense numbers needs either a mapping the
-  manifest can store or a format change to those fields.
-- **Fence and epoch.** Today the manifest carries the epoch and the fence
-  is a numbered object created conditionally at the tip; the stale
-  writer's put collides. A remote log has to make its fence atomic with
-  the epoch or revalidate the manifest before serving.
-- **Head and discovery.** The tip is discovered by probing numbers until
-  one is absent, starting from the hint. A hosted log needs its own
-  answer to "what is the committed tail", and the hint's WAL half becomes
-  that log's concern or disappears.
-- **Collection.** Reclamation is authorized by the folded and floor
-  numbers with an age grace. A hosted log trims by its own positions and
-  must keep its fence and high-water state after trimming.
-- **Binding.** A namespace must record which log holds its unmaterialized
-  history, immutably, so that an unsupported binary refuses it and no
-  binary opens an empty log in place of missing acknowledged commits.
+## Responsibilities outside the WAL
 
-## Follow-ups
+Several parts of the storage protocol involve both the log and other namespace state:
 
-- Discovery, the incremental probe, and bounded loading are three walks
-  over consecutive numbers that differ only in what an absent successor
-  means and in error type. A shared primitive is possible if it needs no
-  flag parameter.
-- The numbered put is the one durable write that does not use the
-  `CasAttempt` and `WriteEvidence` vocabulary the other conditional
-  writes use; its retry lives in the commit engine. Aligning it would
-  make the unknown-outcome path read like the manifest's.
-- The unfolded-segment count is computed two ways: as a difference of
-  numbers and as a count of publications. They agree today because the
-  numbers are dense.
+- **Manifest and hint management.** A hint contains both a manifest number and a WAL number. Its updates remain in the control module, with their frequency managed by the runtime. WAL discovery uses the hinted WAL number from the loaded manifest.
+- **Garbage collection.** Object enumeration, age checks, and deletion remain in `gc/`. The WAL retention rules determine which numbered objects must be preserved. For a live namespace, an object remains required if its number is above either the folded position or the retention floor. An object at or below both positions is eligible for the remaining collection checks.
+- **Position tracking.** WAL numbers appear in the namespace head and durable manifest. Their differences are used to count unfolded segments and enforce maintenance and write limits.
+
+The module boundary therefore separates WAL operations while preserving the numbered-log model used elsewhere in LoonFS.
+
+## Supporting another WAL implementation
+
+LoonFS currently has one WAL implementation. An internal module is sufficient to organize it; a trait for interchangeable backends would require decisions about storage behavior that have no second implementation to validate them against.
+
+A hosted log, for example, might use offsets that cannot be represented as consecutive WAL numbers. It might also handle writer fencing and history removal differently. Before introducing a shared interface, both implementations would need defined behavior for:
+
+- **Positions.** The manifest stores folded and retention-floor WAL numbers. Different offsets would require a mapping or a storage-format change.
+- **Writer fencing.** A replacement must prevent stale writers from committing after takeover, including when a request has an uncertain outcome. Coordination between the log and the manifest's writer epoch must be explicit.
+- **Discovery.** Readers need a reliable way to identify the committed end of the log. In object storage, discovery probes consecutive numbers until one is absent; a hosted log may use a different mechanism.
+- **Retention.** Removing old records must preserve the history promised to readers and the state needed to prevent stale writes or position reuse.
+- **Namespace binding.** The namespace must durably identify its log implementation and location. An unsupported or unavailable log must produce an error; opening an empty replacement would lose acknowledged history.
+
+Keeping the WAL operations together limits the code involved in that work. A replacement may still require changes to the manifest format, writer acquisition, and retention protocol.
