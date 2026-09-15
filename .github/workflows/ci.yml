@@ -52,8 +52,31 @@ jobs:
       - run: cargo test --all --locked
       - run: cargo test -p loonfs-server --features openapi --locked openapi
 
+  # Builds the conformance server once; the three language legs download it.
+  sdk-conformance-server:
+    name: SDK conformance server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sdk-conformance-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-sdk-conformance-
+      - run: cargo build -p loonfs-conformance --bin conformance-server --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conformance-server
+          path: target/debug/conformance-server
+          if-no-files-found: error
+          retention-days: 1
+
   sdk-conformance:
     name: SDK conformance (${{ matrix.display }})
+    needs: sdk-conformance-server
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -100,16 +123,15 @@ jobs:
           path: ~/.npm
           key: ${{ runner.os }}-typescript-sdk-conformance-${{ hashFiles('sdk/conformance/typescript/package-lock.json') }}
           restore-keys: ${{ runner.os }}-typescript-sdk-conformance-
-      - uses: actions/cache@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-sdk-conformance-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-sdk-conformance-
+          name: conformance-server
+          path: target/debug
+      - run: chmod +x target/debug/conformance-server
       - run: scripts/generate-sdks.sh ${{ matrix.language }}
       - run: scripts/run-sdk-conformance.sh ${{ matrix.language }}
+        env:
+          LOONFS_CONFORMANCE_SERVER_BIN: ${{ github.workspace }}/target/debug/conformance-server
 
   # Checks the declared minimum supported Rust version actually builds the
   # workspace. Keep the toolchain here in sync with `rust-version` in the
