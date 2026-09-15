@@ -16,7 +16,6 @@ esac
 
 set -eu
 
-REPO_SLUG="${LOONFS_REPO_SLUG:-loonfs/loonfs}"
 INSTALL_DIR="${LOONFS_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION=""
 tmpdir=""
@@ -116,10 +115,12 @@ main() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version)
+                [ "$#" -ge 2 ] || die "--version requires a value"
                 VERSION="${2:-}"
                 shift 2
                 ;;
             --install-dir)
+                [ "$#" -ge 2 ] || die "--install-dir requires a value"
                 INSTALL_DIR="${2:-}"
                 shift 2
                 ;;
@@ -142,9 +143,9 @@ main() {
     archive_name="loonfs-$target.tar.gz"
 
     if [ -n "$VERSION" ]; then
-        base_url="${LOONFS_RELEASE_URL_ROOT:-https://github.com/$REPO_SLUG/releases}/download/$VERSION"
+        base_url="${LOONFS_RELEASE_URL_ROOT:-https://github.com/loonfs/loonfs/releases}/download/$VERSION"
     else
-        base_url="${LOONFS_RELEASE_URL_ROOT:-https://github.com/$REPO_SLUG/releases}/latest/download"
+        base_url="${LOONFS_RELEASE_URL_ROOT:-https://github.com/loonfs/loonfs/releases}/latest/download"
     fi
 
     tmpdir=$(mktemp -d)
@@ -173,5 +174,6 @@ main() {
     esac
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 main "$@"
