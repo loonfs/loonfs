@@ -26,10 +26,6 @@ pub struct LoadedGrepManifest {
 }
 
 impl LoadedGrepManifest {
-    pub fn manifest_envelope(&self) -> &GrepManifestEnvelope {
-        &self.manifest
-    }
-
     pub fn manifest_no(&self) -> ManifestNo {
         self.manifest_state().manifest_no()
     }
@@ -39,7 +35,7 @@ impl LoadedGrepManifest {
     }
 }
 
-pub async fn load_grep_hint<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_grep_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<Option<LoadedGrepHint>> {

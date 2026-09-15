@@ -1313,12 +1313,12 @@ mod tests {
 
     use super::{
         apply_update_flags, build_profile_from_create_spec, CreateActorSpec, CreateProfileSpec,
-        CreateProviderSpec, ProfileCreateAzureSpec, ProfileCreateLocalSpec,
+        CreateProviderSpec, ProfileCreateAzureSpec, ProfileCreateLocalSpec, ProfileCreateR2Spec,
         ProfileCreateRemoteSpec, ProfileCreateS3Spec, ProfileUpdateSpec,
     };
     use crate::args::RuntimeBehavior;
     use crate::config::{ProfileConfig, StoreConfig};
-    use loonfs_objectstore::{AwsS3Credentials, AzureAbsCredentials};
+    use loonfs_objectstore::{AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials};
 
     #[test]
     fn create_profile_supports_azure_abs() {
@@ -1367,6 +1367,96 @@ mod tests {
             );
             assert_eq!(key_prefix.as_deref(), Some("tenant-a"));
         }
+    }
+
+    #[test]
+    fn create_profile_supports_cloudflare_r2() {
+        let profile = build_profile_from_create_spec(
+            "default",
+            CreateProfileSpec {
+                provider: CreateProviderSpec::R2(ProfileCreateR2Spec {
+                    bucket: Some("documents".to_owned()),
+                    account_id: Some("account".to_owned()),
+                    endpoint_url: Some("https://account.r2.cloudflarestorage.com".to_owned()),
+                    access_key_id: Some("access".to_owned()),
+                    secret_access_key: Some("secret".to_owned()),
+                    key_prefix: Some("tenant-a".to_owned()),
+                    ..ProfileCreateR2Spec::default()
+                }),
+                actor: empty_actor(),
+            },
+            non_interactive_runtime(),
+        )
+        .expect("build r2 profile");
+        let ProfileConfig::Embedded { store, .. } = profile else {
+            panic!("expected embedded profile, got {profile:?}");
+        };
+        assert_eq!(
+            store,
+            StoreConfig::CloudflareR2 {
+                bucket: "documents".to_owned(),
+                account_id: "account".to_owned(),
+                endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
+                credentials: CloudflareR2Credentials::Static {
+                    access_key_id: "access".into(),
+                    secret_access_key: "secret".into(),
+                },
+                key_prefix: Some("tenant-a".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn update_r2_flags_round_trip_credentials_and_preserve_unspecified_fields() {
+        let profile = build_profile_from_create_spec(
+            "default",
+            CreateProfileSpec {
+                provider: CreateProviderSpec::R2(ProfileCreateR2Spec {
+                    bucket: Some("documents".to_owned()),
+                    account_id: Some("account".to_owned()),
+                    endpoint_url: Some("https://account.r2.cloudflarestorage.com".to_owned()),
+                    ..ProfileCreateR2Spec::default()
+                }),
+                actor: empty_actor(),
+            },
+            non_interactive_runtime(),
+        )
+        .expect("build ambient r2 profile");
+        let spec = update_spec(CreateProviderSpec::R2(ProfileCreateR2Spec {
+            bucket: Some("archive".to_owned()),
+            credential_source: Some("static".to_owned()),
+            access_key_id: Some("access".to_owned()),
+            secret_access_key: Some("secret".to_owned()),
+            key_prefix: Some("tenant-b".to_owned()),
+            ..ProfileCreateR2Spec::default()
+        }));
+        let updated = apply_update_flags("default", profile.clone(), &spec).expect("update r2");
+        let ProfileConfig::Embedded { store, .. } = &updated else {
+            panic!("expected embedded profile, got {updated:?}");
+        };
+        assert_eq!(
+            *store,
+            StoreConfig::CloudflareR2 {
+                bucket: "archive".to_owned(),
+                account_id: "account".to_owned(),
+                endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
+                credentials: CloudflareR2Credentials::Static {
+                    access_key_id: "access".into(),
+                    secret_access_key: "secret".into(),
+                },
+                key_prefix: Some("tenant-b".to_owned()),
+            }
+        );
+        let reset = update_spec(CreateProviderSpec::R2(ProfileCreateR2Spec {
+            bucket: Some("documents".to_owned()),
+            credential_source: Some("ambient".to_owned()),
+            key_prefix: Some(String::new()),
+            ..ProfileCreateR2Spec::default()
+        }));
+        assert_eq!(
+            apply_update_flags("default", updated, &reset).expect("restore r2 profile"),
+            profile
+        );
     }
 
     #[test]

@@ -46,7 +46,7 @@ use std::sync::Arc;
 /// If the checkpoint expires before backfill finishes, garbage collection
 /// eventually deletes it and the worker restarts from a fresh checkpoint.
 /// The worker does not extend an old pin.
-pub const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+pub(crate) const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
 /// Content bytes one backfill step ingests before it checkpoints its cursor.

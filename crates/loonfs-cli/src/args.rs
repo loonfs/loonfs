@@ -260,47 +260,23 @@ impl Command {
         )
     }
 
-    fn pagination(&self) -> Option<PaginationFlags> {
+    fn pagination(&self) -> Option<&PageLimitArgs> {
         match self {
-            Self::Ls(args) => Some(PaginationFlags::from(&args.pagination)),
-            Self::Grep(args) => Some(PaginationFlags::from(&args.pagination)),
-            Self::Revisions(args) => Some(PaginationFlags::from(&args.pagination)),
-            Self::Trash(args) => Some(PaginationFlags::from(&args.pagination)),
-            Self::Changes(args) => Some(PaginationFlags::from(&args.pagination)),
+            Self::Ls(args) => Some(&args.pagination.page_limits),
+            Self::Grep(args) => Some(&args.pagination.page_limits),
+            Self::Revisions(args) => Some(&args.pagination.page_limits),
+            Self::Trash(args) => Some(&args.pagination.page_limits),
+            Self::Changes(args) => Some(&args.pagination.page_limits),
             Self::Snapshot {
                 command: SnapshotCommand::List(args),
-            } => Some(PaginationFlags::from(&args.pagination)),
+            } => Some(&args.pagination.page_limits),
             Self::Maintenance {
                 command:
                     MaintenanceCommand::Checkpoint {
                         command: MaintenanceCheckpointCommand::List(args),
                     },
-            } => Some(PaginationFlags::from(&args.pagination)),
+            } => Some(&args.pagination.page_limits),
             _ => None,
-        }
-    }
-}
-
-/// The pagination flags every listing command validates the same way.
-struct PaginationFlags {
-    all: bool,
-    jsonl: bool,
-}
-
-impl From<&PaginationArgs> for PaginationFlags {
-    fn from(args: &PaginationArgs) -> Self {
-        Self {
-            all: args.all,
-            jsonl: args.jsonl,
-        }
-    }
-}
-
-impl From<&SeqPaginationArgs> for PaginationFlags {
-    fn from(args: &SeqPaginationArgs) -> Self {
-        Self {
-            all: args.all,
-            jsonl: args.jsonl,
         }
     }
 }
@@ -560,19 +536,26 @@ pub(crate) struct ProfileUpdateS3Args {
 pub(crate) struct ProfileUpdateR2Args {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    #[arg(long)]
+    /// R2 bucket name.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
-    #[arg(long, value_name = "ambient|static")]
+    /// R2 credential source.
+    #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
     pub credential_source: Option<String>,
-    #[arg(long)]
+    /// Static access key id.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub access_key_id: Option<String>,
-    #[arg(long)]
+    /// Static secret access key.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub secret_access_key: Option<String>,
+    /// R2 endpoint URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
-    #[arg(long)]
+    /// Cloudflare account id.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub account_id: Option<String>,
-    #[arg(long)]
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
     #[command(flatten)]
     pub actor: ProfileUpdateActorArgs,
@@ -582,11 +565,14 @@ pub(crate) struct ProfileUpdateR2Args {
 pub(crate) struct ProfileUpdateGcsArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    #[arg(long)]
+    /// GCS bucket name.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
+    /// Path to a GCP service-account key.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub service_account_key_path: Option<String>,
-    #[arg(long)]
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
     #[command(flatten)]
     pub actor: ProfileUpdateActorArgs,
@@ -596,15 +582,20 @@ pub(crate) struct ProfileUpdateGcsArgs {
 pub(crate) struct ProfileUpdateAzureArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
-    #[arg(long)]
+    /// Azure storage account name.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub account_name: Option<String>,
-    #[arg(long)]
+    /// Azure blob container name.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub container_name: Option<String>,
-    #[arg(long)]
+    /// Azure storage access key.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub access_key: Option<String>,
+    /// Custom Azure endpoint URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
-    #[arg(long)]
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
     #[command(flatten)]
     pub actor: ProfileUpdateActorArgs,
@@ -614,9 +605,11 @@ pub(crate) struct ProfileUpdateAzureArgs {
 pub(crate) struct ProfileUpdateLocalArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
+    /// Local filesystem store root.
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub root: Option<String>,
-    #[arg(long)]
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
     #[command(flatten)]
     pub actor: ProfileUpdateActorArgs,
@@ -773,22 +766,18 @@ pub(crate) struct PaginationArgs {
     /// Resume from a cursor returned by a previous listing.
     #[arg(long, value_hint = ValueHint::Other)]
     pub cursor: Option<String>,
-    /// Return at most this many items.
-    #[arg(long)]
-    pub limit: Option<u32>,
-    /// Request this many items per page.
-    #[arg(long)]
-    pub page_size: Option<u32>,
-    /// Continue until the limit is reached or no pages remain.
-    #[arg(long)]
-    pub all: bool,
-    /// Write one JSON item per line until the limit is reached or no pages remain.
-    #[arg(long)]
-    pub jsonl: bool,
+    #[command(flatten)]
+    pub page_limits: PageLimitArgs,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SeqPaginationArgs {
+    #[command(flatten)]
+    pub page_limits: PageLimitArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PageLimitArgs {
     /// Return at most this many items.
     #[arg(long)]
     pub limit: Option<u32>,

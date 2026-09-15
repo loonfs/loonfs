@@ -21,7 +21,7 @@ assigned namespace up to date and exits. `--max-steps` and `--deadline-ms`
 limit that work. Omitting `--job` also runs metadata, metadata compaction,
 and core garbage collection.
 
-The `grep_gc` job completes one collection pass per call.
+The `grep-gc` job completes one collection pass per call.
 `loonfs maintenance index gc` runs a pass directly for one namespace,
 including an absent or deleted namespace whose old index data remains.
 Every pass reads the current manifest and hint before deletion. Manifests use

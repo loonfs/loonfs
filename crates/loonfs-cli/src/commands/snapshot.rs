@@ -1,13 +1,11 @@
-use super::context::{resolve_profile_context, CommandContext};
+use super::context::{parse_snapshot_id_arg, resolve_profile_context, CommandContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
 use crate::args::{
     CommandKind, SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs,
     SnapshotListArgs, SnapshotTargetArgs,
 };
-use crate::error::CliError;
 use crate::resolve::parse_namespace_id;
-use loonfs_api::{ErrorCode, SnapshotId};
 use std::path::Path;
 
 async fn resolve_snapshot_context(
@@ -24,13 +22,6 @@ async fn resolve_snapshot_context(
         .map_err(|error| context.fail(kind, error))?;
     context.namespace = Some(namespace_id);
     Ok(context)
-}
-
-pub(super) fn parse_snapshot_id(value: &str) -> Result<SnapshotId, CliError> {
-    SnapshotId::parse(value).map_err(|error| {
-        CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
-            .with_param("snapshot_id")
-    })
 }
 
 pub(crate) async fn run_snapshot_command(
@@ -67,9 +58,9 @@ async fn run_snapshot_list(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination),
+        PagePlan::new(&args.pagination.page_limits),
         args.pagination.cursor,
-        args.pagination.jsonl,
+        args.pagination.page_limits.jsonl,
         async |cursor, limit| {
             context
                 .target
@@ -92,8 +83,8 @@ async fn run_snapshot_extend(
     args: SnapshotExtendArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
-    let snapshot_id =
-        parse_snapshot_id(&args.snapshot_id).map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = parse_snapshot_id_arg("snapshot_id", &args.snapshot_id)
+        .map_err(|error| context.fail(kind, error))?;
     let response = context
         .target
         .extend_snapshot(context.namespace(), &snapshot_id, args.ttl_ms)
@@ -108,8 +99,8 @@ async fn run_snapshot_delete(
     args: SnapshotDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
-    let snapshot_id =
-        parse_snapshot_id(&args.snapshot_id).map_err(|error| context.fail(kind, error))?;
+    let snapshot_id = parse_snapshot_id_arg("snapshot_id", &args.snapshot_id)
+        .map_err(|error| context.fail(kind, error))?;
     let response = context
         .target
         .delete_snapshot(context.namespace(), &snapshot_id)

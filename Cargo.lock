@@ -1891,12 +1891,10 @@ dependencies = [
 name = "loonfs-client"
 version = "0.3.0"
 dependencies = [
- "axum",
  "bytes",
  "futures",
  "http 1.4.0",
  "loonfs-api",
- "loonfs-server",
  "loonfs-test-support",
  "reqwest",
  "serde",

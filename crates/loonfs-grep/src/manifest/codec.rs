@@ -7,16 +7,16 @@ use loonfs_api::wire::envelope::{
 };
 
 /// Durable kind string for a grep hint envelope.
-pub const GREP_HINT_KIND: &str = "grep_hint";
+pub(crate) const GREP_HINT_KIND: &str = "grep_hint";
 /// Durable kind string for a grep manifest envelope.
-pub const GREP_MANIFEST_KIND: &str = "grep_manifest";
+pub(crate) const GREP_MANIFEST_KIND: &str = "grep_manifest";
 /// Sole hint format version this build reads and writes.
-pub const GREP_HINT_FORMAT_VERSION: u32 = 1;
+pub(crate) const GREP_HINT_FORMAT_VERSION: u32 = 1;
 /// Sole manifest format version this build reads and writes.
-pub const GREP_MANIFEST_FORMAT_VERSION: u32 = 1;
+pub(crate) const GREP_MANIFEST_FORMAT_VERSION: u32 = 1;
 
 /// Verified in-memory representation of one grep hint envelope.
-pub type GrepHintEnvelope = VerifiedEnvelope<GrepHint>;
+pub(crate) type GrepHintEnvelope = VerifiedEnvelope<GrepHint>;
 /// Verified in-memory representation of one immutable grep manifest.
 pub type GrepManifestEnvelope = VerifiedEnvelope<GrepManifestState>;
 

@@ -293,6 +293,7 @@ key_prefix = "{key_prefix}"
         path
     }
 
+    // Cargo does not build this binary for CLI tests; run `cargo build -p loonfs-server` first.
     pub(super) fn start_external_server(&self, server_config_path: PathBuf) -> ExternalServer {
         for _ in 0..5 {
             let child = Command::new(loonfs_server_binary_path())
@@ -397,7 +398,7 @@ pub(super) fn loonfs_server_binary_path() -> PathBuf {
     });
     assert!(
         candidate.exists(),
-        "expected loonfs-server binary at {}",
+        "expected loonfs-server binary at {}; run `cargo build -p loonfs-server` first",
         candidate.display()
     );
     candidate
