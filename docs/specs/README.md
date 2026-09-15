@@ -20,7 +20,7 @@ Object storage contains all required recovery state, including control records, 
 
 The storage format is mandatory for a conforming implementation. API requirements apply to the groups and features that an implementation exposes. The glossary and architecture overview explain the model; the format and API documents define its requirements.
 
-For a first read, start with the architecture overview and sections 1–6 of the format. Sections 7–11 describe maintenance and lifecycle protocols. The appendices contain the exact fields, row keys, byte encodings, fingerprints, and timing relationships needed to implement the format.
+For a first read, start with the architecture overview and sections 1–6 of the format. Sections 7–12 describe maintenance and lifecycle protocols. The appendices contain the exact fields, row keys, byte encodings, fingerprints, and timing relationships needed to implement the format.
 
 ## Scope
 

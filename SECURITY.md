@@ -5,7 +5,7 @@
 Serving a LoonFS server beyond localhost means serving it over TLS, because
 the bearer token and the presigned object-store URLs in upload responses are
 both readable by anyone who can read the connection. See
-[Running a server in production](README.md#running-a-server-in-production)
+[Self-hosting](crates/loonfs-server/docs/self-hosting.md)
 for the `[tls]` configuration and the one escape hatch, for deployments where
 a proxy terminates TLS instead.
 

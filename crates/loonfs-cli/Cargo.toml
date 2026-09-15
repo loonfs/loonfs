@@ -20,7 +20,6 @@ futures.workspace = true
 fs4.workspace = true
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 hostname = "0.4"
-http.workspace = true
 loonfs-api.workspace = true
 loonfs-client.workspace = true
 loonfs.workspace = true
@@ -29,7 +28,6 @@ loonfs-objectstore.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-thiserror.workspace = true
 # `io-std` is what makes standard input an asynchronous source, which is
 # how `loonfs put -` reads a payload of unknown length.
 tokio = { workspace = true, features = ["io-std"] }
