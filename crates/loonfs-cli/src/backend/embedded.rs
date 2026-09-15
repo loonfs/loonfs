@@ -982,7 +982,7 @@ mod tests {
             .get()
     }
 
-    /// Jobs selected when `maintenance loop` omits `--job`.
+    /// Jobs selected when `maintenance loop` omits `--jobs`.
     fn every_job() -> [MaintenanceJobId; 5] {
         [
             MaintenanceJobId::METADATA,

@@ -684,7 +684,7 @@ fn maintenance_loop_requires_an_assignment_and_names_the_jobs_it_hosts() {
         "loop",
         "--namespaces",
         "alpha",
-        "--job",
+        "--jobs",
         "bogus",
     ]);
     assert_failure(&unknown_job);

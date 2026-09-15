@@ -9,16 +9,17 @@ A server can run the job with its other maintenance work. A separate process
 can maintain namespaces named on the command line:
 
 ```console
-loonfs maintenance loop --namespaces docs --namespaces source --job grep-index
-loonfs maintenance loop --namespaces docs --job grep-index --drain
-loonfs maintenance loop --namespaces docs --job grep-gc --drain
+loonfs maintenance loop --namespaces docs,source --jobs grep-index,grep-gc
+loonfs maintenance loop --namespaces docs --jobs grep-index --drain
+loonfs maintenance loop --namespaces docs --jobs grep-gc --drain
 loonfs maintenance index gc --namespace docs
 ```
 
 Without `--drain`, the command runs until it receives a stop signal and
 periodically refreshes its assignments. With `--drain`, it brings each
 assigned namespace up to date and exits. `--max-steps` and `--deadline-ms`
-limit that work. Omitting `--job` also runs metadata, metadata compaction,
+limit that work. `--namespaces` and `--jobs` accept comma-separated lists or
+repeated flags. Omitting `--jobs` also runs metadata, metadata compaction,
 and core garbage collection.
 
 The `grep-gc` job completes one collection pass per call.
