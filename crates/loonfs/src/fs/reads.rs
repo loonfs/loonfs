@@ -14,7 +14,7 @@ use crate::{
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
-    PaginationPolicy,
+    PaginationPolicy, TrashPageCursor,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 
@@ -266,6 +266,12 @@ impl FsReadSnapshot {
 pub type PathEntriesPager = loonfs_api::Pager<ListPathEntriesResponse, RuntimeError>;
 /// A pager over directory children addressed by inode.
 pub type InodeChildrenPager = loonfs_api::Pager<ListInodeChildrenResponse, RuntimeError>;
+/// A pager over retained file revisions.
+pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, RuntimeError>;
+/// A pager over recoverable deletions.
+pub type TrashPager = loonfs_api::Pager<loonfs_api::ListTrashResponse, RuntimeError>;
+/// A pager over committed changes.
+pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, RuntimeError>;
 
 fn encoded_pager_cursor<C: PageCursor>(cursor: Option<&C>) -> Option<String> {
     cursor.map(|cursor| loonfs_api::encode_cursor(cursor).expect("typed page cursor should encode"))
@@ -902,6 +908,27 @@ impl FsReader {
         })
     }
 
+    /// Creates a trash pager beginning at `request.cursor`.
+    pub fn list_trash_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        request: PageRequest<TrashPageCursor>,
+    ) -> TrashPager {
+        let cursor = encoded_pager_cursor(request.cursor.as_ref());
+        let limit = request.limit;
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                reader
+                    .list_trash_page(&namespace_id, pager_request(limit, cursor)?)
+                    .await
+            }
+        })
+    }
+
     /// Lists one page of a file path's revision history.
     #[tracing::instrument(
         level = "debug",
@@ -937,6 +964,34 @@ impl FsReader {
         )?)
     }
 
+    /// Creates a path-based revision pager beginning at `request.cursor`.
+    pub fn list_file_revisions_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> FileRevisionsPager {
+        let cursor = encoded_pager_cursor(request.cursor.as_ref());
+        let limit = request.limit;
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            let absolute_path = absolute_path.clone();
+            async move {
+                reader
+                    .list_file_revisions_page(
+                        &namespace_id,
+                        &absolute_path,
+                        pager_request(limit, cursor)?,
+                    )
+                    .await
+            }
+        })
+    }
+
     /// Lists one page of retained revisions for a file inode.
     #[tracing::instrument(
         level = "debug",
@@ -967,6 +1022,32 @@ impl FsReader {
             page,
             Some(inode_id),
         )?)
+    }
+
+    /// Creates an inode-based revision pager beginning at `request.cursor`.
+    pub fn list_file_revisions_by_inode_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> FileRevisionsPager {
+        let cursor = encoded_pager_cursor(request.cursor.as_ref());
+        let limit = request.limit;
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(cursor, move |cursor| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                reader
+                    .list_file_revisions_by_inode_page(
+                        &namespace_id,
+                        inode_id,
+                        pager_request(limit, cursor)?,
+                    )
+                    .await
+            }
+        })
     }
 
     /// Reads the content of one historical file revision by path.
@@ -1094,5 +1175,30 @@ impl FsReader {
             .reader_engine(namespace_id)
             .list_changes_after(after_seq, limit)
             .await?)
+    }
+
+    /// Creates a change-feed pager beginning after `after_seq`.
+    pub fn list_changes_pager(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        options: ListChangesOptions,
+    ) -> ChangesPager {
+        let reader = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(Some(after_seq), move |after_seq| {
+            let reader = reader.clone();
+            let namespace_id = namespace_id.clone();
+            let options = options.clone();
+            async move {
+                reader
+                    .list_changes(
+                        &namespace_id,
+                        after_seq.expect("change pager should carry a sequence"),
+                        options,
+                    )
+                    .await
+            }
+        })
     }
 }

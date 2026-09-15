@@ -177,7 +177,8 @@ pub use config::{
     DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_WRITER_SESSIONS,
 };
 pub use fs::{
-    CheckpointsPager, FsReadSnapshot, InodeChildrenPager, PathEntriesPager, SnapshotsPager,
+    ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
+    PathEntriesPager, SnapshotsPager, TrashPager,
 };
 pub use handle::{
     FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,

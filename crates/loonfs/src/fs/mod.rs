@@ -9,7 +9,10 @@ mod uploads;
 mod writes;
 
 pub use maintenance::CheckpointsPager;
-pub use reads::{FsReadSnapshot, InodeChildrenPager, PathEntriesPager};
+pub use reads::{
+    ChangesPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager, PathEntriesPager,
+    TrashPager,
+};
 pub use snapshots::SnapshotsPager;
 
 pub(crate) use core::{should_invalidate_after_result, ReadCore, WriterBits, WriterIdentity};
