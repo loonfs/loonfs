@@ -5,12 +5,10 @@ use super::{AppQuery, AppState, NoQuery, OptionalAppJson};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::Json;
-use loonfs_api::v0::{
-    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
-};
+use loonfs_api::v0::{StoreProbeRequest, StoreProbeResponse};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
-use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome};
+use loonfs_objectstore::probe::run_store_contract_probe;
 
 #[cfg_attr(
     feature = "openapi",
@@ -44,25 +42,5 @@ pub(super) async fn probe_store(
     // one store never collide, and a provider's own log names the run.
     let run_id = loonfs_api::generated_id("probe");
     let report = run_store_contract_probe(state.probe_store.as_ref(), &run_id).await;
-    Ok(Json(StoreProbeResponse {
-        run_id: report.run_id,
-        checks: report
-            .checks
-            .into_iter()
-            .map(|check| {
-                let (outcome, message) = match check.outcome {
-                    StoreProbeOutcome::Passed => (StoreProbeCheckOutcome::Passed, None),
-                    StoreProbeOutcome::Unsupported => (StoreProbeCheckOutcome::Unsupported, None),
-                    StoreProbeOutcome::Failed { message } => {
-                        (StoreProbeCheckOutcome::Failed, Some(message))
-                    }
-                };
-                StoreProbeCheckResult {
-                    name: check.name.to_owned(),
-                    outcome,
-                    message,
-                }
-            })
-            .collect(),
-    }))
+    Ok(Json(report.into()))
 }

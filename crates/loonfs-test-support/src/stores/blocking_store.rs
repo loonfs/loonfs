@@ -1,7 +1,7 @@
 //! An async gate for selected object-store operations.
 
 use super::{
-    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationClass, OperationContext, Outcome,
+    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationClass, OperationContext,
 };
 use async_trait::async_trait;
 use std::fmt;
@@ -29,14 +29,12 @@ struct Gate {
     block_next: AtomicUsize,
     blocked: AtomicBool,
     released: AtomicBool,
-    completed: AtomicBool,
     blocked_notify: Notify,
     release_notify: Notify,
-    completed_notify: Notify,
 }
 
 impl Gate {
-    async fn park(&self) -> bool {
+    async fn park(&self) {
         let level_triggered = self.armed.load(Ordering::SeqCst);
         let one_shot = !level_triggered
             && self
@@ -46,18 +44,12 @@ impl Gate {
                 })
                 .is_ok();
         if !level_triggered && !one_shot {
-            return false;
+            return;
         }
         self.blocked.store(true, Ordering::SeqCst);
         self.blocked_notify.notify_waiters();
         wait_for_latch(&self.released, &self.release_notify).await;
         self.blocked.store(false, Ordering::SeqCst);
-        true
-    }
-
-    fn mark_completed(&self) {
-        self.completed.store(true, Ordering::SeqCst);
-        self.completed_notify.notify_waiters();
     }
 }
 
@@ -130,32 +122,20 @@ impl<S> InterceptStore<S, BlockingInterceptor> {
         gate.release_notify.notify_waiters();
     }
 
-    /// Waits until the most recently blocked operation finishes forwarding.
-    pub async fn wait_until_completed(&self) {
-        let gate = &self.interceptor().gate;
-        wait_for_latch(&gate.completed, &gate.completed_notify).await;
-    }
-
     fn prepare(&self) {
         let gate = &self.interceptor().gate;
         gate.released.store(false, Ordering::SeqCst);
         gate.blocked.store(false, Ordering::SeqCst);
-        gate.completed.store(false, Ordering::SeqCst);
     }
 }
 
 #[async_trait]
 impl Interceptor for BlockingInterceptor {
     async fn before(&self, context: &OperationContext<'_>) -> Intercept {
-        if (self.predicate)(context) && self.gate.park().await {
-            Intercept::ContinueWithAfter
-        } else {
-            Intercept::Continue
+        if (self.predicate)(context) {
+            self.gate.park().await;
         }
-    }
-
-    fn after(&self, _context: &OperationContext<'_>, _outcome: &Outcome) {
-        self.gate.mark_completed();
+        Intercept::Continue
     }
 }
 
@@ -195,7 +175,6 @@ mod tests {
         );
 
         store.release();
-        store.wait_until_completed().await;
         put.await
             .expect("join the parked put")
             .expect("the released put succeeds");

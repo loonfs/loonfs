@@ -23,35 +23,6 @@ pub struct CreateDownloadRequest {
     pub snapshot_id: Option<SnapshotId>,
 }
 
-impl CreateDownloadRequest {
-    /// Asks for the path's current revision.
-    pub fn for_path(path: AbsolutePath) -> Self {
-        Self {
-            path,
-            revision_no: None,
-            snapshot_id: None,
-        }
-    }
-
-    /// Asks for one prior revision of the path.
-    pub fn for_revision(path: AbsolutePath, revision_no: RevisionNo) -> Self {
-        Self {
-            path,
-            revision_no: Some(revision_no),
-            snapshot_id: None,
-        }
-    }
-
-    /// Asks for the file revision captured by a snapshot.
-    pub fn for_snapshot(path: AbsolutePath, snapshot_id: SnapshotId) -> Self {
-        Self {
-            path,
-            revision_no: None,
-            snapshot_id: Some(snapshot_id),
-        }
-    }
-}
-
 /// A presigned URL for one content object.
 ///
 /// The URL expires at `access.expires_at_ms`; later path changes do not change the object.

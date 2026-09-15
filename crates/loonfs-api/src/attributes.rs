@@ -46,32 +46,25 @@ impl AttributeKey {
 
 fn validate_attribute_key(value: &str) -> Result<(), AttributeKeyValidationError> {
     if value.is_empty() {
-        return Err(attribute_key_error(value, "must not be empty"));
+        return Err(AttributeKeyValidationError::new(value, "must not be empty"));
     }
     if value.len() > MAX_ATTRIBUTE_KEY_BYTES {
         // An oversized or hostile key must not ride along in error payloads
         // that serialize onto the wire. The length check runs before the
         // character check so that no oversized key reaches an error that does
         // echo its input.
-        return Err(attribute_key_error(
+        return Err(AttributeKeyValidationError::new(
             "",
             format!("exceeds the maximum attribute key length of {MAX_ATTRIBUTE_KEY_BYTES} bytes"),
         ));
     }
     if value.chars().any(char::is_control) {
-        return Err(attribute_key_error(
+        return Err(AttributeKeyValidationError::new(
             value,
             "must not contain control characters",
         ));
     }
     Ok(())
-}
-
-fn attribute_key_error(value: &str, reason: impl Into<String>) -> AttributeKeyValidationError {
-    AttributeKeyValidationError {
-        value: value.to_owned(),
-        reason: reason.into(),
-    }
 }
 
 validation_error!(
@@ -92,12 +85,12 @@ string_id! {
 
 fn validate_attribute_value(value: &str) -> Result<(), AttributeValueValidationError> {
     if value.len() > MAX_ATTRIBUTE_VALUE_BYTES {
-        return Err(AttributeValueValidationError {
-            value: String::new(),
-            reason: format!(
+        return Err(AttributeValueValidationError::new(
+            "",
+            format!(
                 "exceeds the maximum attribute value length of {MAX_ATTRIBUTE_VALUE_BYTES} bytes"
             ),
-        });
+        ));
     }
     Ok(())
 }

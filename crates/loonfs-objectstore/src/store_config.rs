@@ -23,8 +23,6 @@ use thiserror::Error;
 pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
 /// Standard AWS environment credential name for the secret access key.
 pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
-/// Standard AWS environment credential name for the optional session token.
-pub const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
 
 /// AWS S3 credential source, stored separately from provider settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

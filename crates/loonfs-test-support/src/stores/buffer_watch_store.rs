@@ -13,7 +13,7 @@ use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
     ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// What one write path was observed to hold.
@@ -23,8 +23,6 @@ pub struct BufferPeaks {
     pub largest_buffer_bytes: u64,
     /// Most payload bytes alive at once across every buffer.
     pub peak_live_bytes: u64,
-    /// Most payload buffers alive at once.
-    pub peak_live_buffers: usize,
     /// Total payload bytes that crossed the boundary.
     pub total_bytes: u64,
 }
@@ -34,8 +32,6 @@ struct Peaks {
     largest_buffer_bytes: AtomicU64,
     live_bytes: AtomicU64,
     peak_live_bytes: AtomicU64,
-    live_buffers: AtomicUsize,
-    peak_live_buffers: AtomicUsize,
     total_bytes: AtomicU64,
 }
 
@@ -45,21 +41,16 @@ impl Peaks {
         self.largest_buffer_bytes.fetch_max(bytes, Ordering::SeqCst);
         let live_bytes = self.live_bytes.fetch_add(bytes, Ordering::SeqCst) + bytes;
         self.peak_live_bytes.fetch_max(live_bytes, Ordering::SeqCst);
-        let live_buffers = self.live_buffers.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak_live_buffers
-            .fetch_max(live_buffers, Ordering::SeqCst);
     }
 
     fn release(&self, bytes: u64) {
         self.live_bytes.fetch_sub(bytes, Ordering::SeqCst);
-        self.live_buffers.fetch_sub(1, Ordering::SeqCst);
     }
 
     fn snapshot(&self) -> BufferPeaks {
         BufferPeaks {
             largest_buffer_bytes: self.largest_buffer_bytes.load(Ordering::SeqCst),
             peak_live_bytes: self.peak_live_bytes.load(Ordering::SeqCst),
-            peak_live_buffers: self.peak_live_buffers.load(Ordering::SeqCst),
             total_bytes: self.total_bytes.load(Ordering::SeqCst),
         }
     }

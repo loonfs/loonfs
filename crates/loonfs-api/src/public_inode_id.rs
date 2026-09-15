@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 /// Prefix used by every public inode ID.
-pub const PREFIX: &str = "ino_";
+const PREFIX: &str = "ino_";
 
 /// OpenAPI pattern for public inode IDs.
 pub const PATTERN: &str = r"^ino_[1-9][0-9]*$";
@@ -32,26 +32,19 @@ pub fn encode(id: InodeId) -> String {
 /// Parses and validates a public inode ID.
 pub fn decode(value: &str) -> Result<InodeId, PublicInodeIdError> {
     let Some(suffix) = value.strip_prefix(PREFIX) else {
-        return Err(invalid(value));
+        return Err(PublicInodeIdError::new(value, INVALID_REASON));
     };
     if suffix.is_empty()
         || suffix.starts_with('0')
         || !suffix.bytes().all(|byte| byte.is_ascii_digit())
     {
-        return Err(invalid(value));
+        return Err(PublicInodeIdError::new(value, INVALID_REASON));
     }
 
     suffix
         .parse::<u64>()
         .map(InodeId)
-        .map_err(|_| invalid(value))
-}
-
-fn invalid(value: &str) -> PublicInodeIdError {
-    PublicInodeIdError {
-        value: value.to_owned(),
-        reason: INVALID_REASON.to_owned(),
-    }
+        .map_err(|_| PublicInodeIdError::new(value, INVALID_REASON))
 }
 
 /// Serializes an inode ID as a public API string.

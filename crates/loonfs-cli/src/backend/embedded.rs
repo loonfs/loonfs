@@ -19,7 +19,7 @@ use loonfs_api::SnapshotId;
 use loonfs_api::{
     v0::{
         GrepGcRequest, GrepGcResponse, GrepIndex, GrepIndexLifecycle, ListSnapshotsResponse,
-        SnapshotSummary, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
+        SnapshotSummary, StoreProbeResponse,
     },
     AbsolutePath, ChangeSeq, Checkpoint, Commit, CreateCheckpointRequest, EffectiveLimit,
     ErrorCode, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
@@ -31,7 +31,7 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
     GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
 };
-use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
+use loonfs_objectstore::probe::run_store_contract_probe;
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
 
@@ -790,7 +790,7 @@ impl EmbeddedBackend {
     pub(super) async fn probe_store(&self) -> StoreProbeResponse {
         let run_id = loonfs_api::generated_id("probe");
         let report = run_store_contract_probe(self.writer.object_store().as_ref(), &run_id).await;
-        store_probe_response(report)
+        report.into()
     }
 
     pub(super) async fn list_changes(
@@ -945,31 +945,6 @@ fn cli_page_request<C: loonfs_api::PageCursor>(
                     .with_param("cursor")
             })?,
     })
-}
-
-/// Converts a store probe report to the response returned by both backends.
-fn store_probe_response(report: StoreProbeReport) -> StoreProbeResponse {
-    StoreProbeResponse {
-        run_id: report.run_id,
-        checks: report
-            .checks
-            .into_iter()
-            .map(|check| {
-                let (outcome, message) = match check.outcome {
-                    StoreProbeOutcome::Passed => (StoreProbeCheckOutcome::Passed, None),
-                    StoreProbeOutcome::Unsupported => (StoreProbeCheckOutcome::Unsupported, None),
-                    StoreProbeOutcome::Failed { message } => {
-                        (StoreProbeCheckOutcome::Failed, Some(message))
-                    }
-                };
-                StoreProbeCheckResult {
-                    name: check.name.to_owned(),
-                    outcome,
-                    message,
-                }
-            })
-            .collect(),
-    }
 }
 
 #[cfg(test)]

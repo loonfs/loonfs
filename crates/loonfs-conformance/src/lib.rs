@@ -71,7 +71,7 @@ pub enum FixtureError {
 }
 
 /// Returns the checked-in case directory.
-pub fn cases_dir() -> PathBuf {
+fn cases_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("cases")
 }
 
