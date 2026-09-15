@@ -166,13 +166,6 @@ pub enum CapabilityDocumentError {
 }
 
 impl CapabilityDocument {
-    /// Whether an API group (for example `filesystem/v0`) is advertised.
-    pub fn has_api_group(&self, api_group: &str) -> bool {
-        self.api_groups
-            .iter()
-            .any(|advertised| advertised == api_group)
-    }
-
     /// Whether a feature is advertised as supported. Absent keys are
     /// unsupported.
     pub fn supports(&self, feature: &str) -> bool {
@@ -191,8 +184,13 @@ impl CapabilityDocument {
     /// feature key's first dotted segment must be the group name of an
     /// advertised API group.
     pub fn validate(&self) -> Result<(), CapabilityDocumentError> {
+        let advertised_api_groups: Vec<&str> = self
+            .api_groups
+            .iter()
+            .map(|api_group| api_group_name(api_group))
+            .collect();
         for feature in self.features.keys() {
-            if !self.feature_is_parented(feature) {
+            if !feature_is_parented(&advertised_api_groups, feature) {
                 return Err(CapabilityDocumentError::UnparentedFeature {
                     feature: feature.clone(),
                 });
@@ -211,15 +209,6 @@ impl CapabilityDocument {
             .collect();
         self.features
             .retain(|feature, _| feature_is_parented(&advertised_api_groups, feature));
-    }
-
-    fn feature_is_parented(&self, feature: &str) -> bool {
-        let advertised_api_groups: Vec<&str> = self
-            .api_groups
-            .iter()
-            .map(|api_group| api_group_name(api_group))
-            .collect();
-        feature_is_parented(&advertised_api_groups, feature)
     }
 }
 
@@ -255,10 +244,8 @@ mod tests {
     }
 
     #[test]
-    fn supports_and_has_api_group_answer_gating_questions() {
+    fn supports_answers_gating_questions() {
         let document = document();
-        assert!(document.has_api_group(API_GROUP_FILESYSTEM_V0));
-        assert!(!document.has_api_group(API_GROUP_QUERY_V0));
         assert!(document.supports(FEATURE_NAMESPACES_CREATE));
         // Advertised-false and absent keys are both unsupported.
         assert!(!document.supports(FEATURE_NAMESPACES_DELETE));

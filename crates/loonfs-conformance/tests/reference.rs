@@ -77,6 +77,14 @@ impl Harness {
     }
 }
 
+fn listed_name(entry: &PathEntry) -> String {
+    entry
+        .display_name
+        .as_ref()
+        .expect("listed name")
+        .to_string()
+}
+
 fn configured_client(server_url: &str, auth_token: Option<&str>) -> Client {
     Client::new(ClientConfig {
         server_url: server_url.to_owned(),
@@ -805,13 +813,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
             expected.renamed_head_seq
         };
         assert_eq!(page.head_seq.0, expected_head_seq);
-        observed.extend(page.entries.iter().map(|entry| {
-            entry
-                .display_name
-                .as_ref()
-                .expect("listed name")
-                .to_string()
-        }));
+        observed.extend(page.entries.iter().map(listed_name));
         cursor = page.next_cursor;
         if page_count == request.resume_after_page {
             saved_cursor = cursor.clone();
@@ -858,13 +860,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
         assert_eq!(page.namespace_id, namespace);
         assert_eq!(page.parent_inode_id, parent_inode_id);
         assert_eq!(page.head_seq.0, expected.renamed_head_seq);
-        resumed.extend(page.entries.iter().map(|entry| {
-            entry
-                .display_name
-                .as_ref()
-                .expect("listed name")
-                .to_string()
-        }));
+        resumed.extend(page.entries.iter().map(listed_name));
     }
     validate_page_walk(&request.entry_names, &observed, resume_offset, &resumed)
         .expect("children-by-inode pagination invariants");
@@ -988,17 +984,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .list_path_entries_page(&directory, None, None, &ListPathEntriesOptions::default())
         .await
         .expect("list inode-mutations directory");
-    let names: Vec<String> = listing
-        .entries
-        .iter()
-        .map(|entry| {
-            entry
-                .display_name
-                .as_ref()
-                .expect("listed name")
-                .to_string()
-        })
-        .collect();
+    let names: Vec<String> = listing.entries.iter().map(listed_name).collect();
     assert_eq!(names, expected.entry_names);
     let generations: HashSet<&str> = listing
         .entries
@@ -1601,16 +1587,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
 }
 
 fn listed_entry_names(entries: &[PathEntry]) -> Vec<String> {
-    entries
-        .iter()
-        .map(|entry| {
-            entry
-                .display_name
-                .as_ref()
-                .expect("listed name")
-                .to_string()
-        })
-        .collect()
+    entries.iter().map(listed_name).collect()
 }
 
 async fn raw_success_json<T>(request: reqwest::RequestBuilder, label: &str) -> T
@@ -1750,13 +1727,7 @@ async fn run_pagination(harness: &Harness, case: &Case) {
             .expect("list pagination page");
         page_count += 1;
         assert_eq!(page.head_seq.0, expected.head_seq);
-        observed.extend(page.entries.iter().map(|entry| {
-            entry
-                .display_name
-                .as_ref()
-                .expect("listed name")
-                .to_string()
-        }));
+        observed.extend(page.entries.iter().map(listed_name));
         cursor = page.next_cursor;
         if page_count == request.resume_after_page {
             saved_cursor = cursor.clone();
@@ -1785,13 +1756,7 @@ async fn run_pagination(harness: &Harness, case: &Case) {
             )
             .await
             .expect("resume pagination page");
-        resumed.extend(page.entries.iter().map(|entry| {
-            entry
-                .display_name
-                .as_ref()
-                .expect("listed name")
-                .to_string()
-        }));
+        resumed.extend(page.entries.iter().map(listed_name));
         cursor = page.next_cursor;
         if cursor.is_none() {
             break;

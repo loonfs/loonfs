@@ -36,28 +36,21 @@ impl ActorId {
 
 fn validate_actor_id(value: &str) -> Result<(), ActorIdValidationError> {
     if value.is_empty() {
-        return Err(actor_id_error(value, "must not be empty"));
+        return Err(ActorIdValidationError::new(value, "must not be empty"));
     }
     if value.len() > MAX_ACTOR_ID_BYTES {
-        return Err(actor_id_error(
+        return Err(ActorIdValidationError::new(
             value,
-            &format!("must be {MAX_ACTOR_ID_BYTES} bytes or fewer"),
+            format!("must be {MAX_ACTOR_ID_BYTES} bytes or fewer"),
         ));
     }
     if !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
-        return Err(actor_id_error(
+        return Err(ActorIdValidationError::new(
             value,
             "must contain only visible ASCII characters",
         ));
     }
     Ok(())
-}
-
-fn actor_id_error(value: &str, reason: &str) -> ActorIdValidationError {
-    ActorIdValidationError {
-        value: value.to_owned(),
-        reason: reason.to_owned(),
-    }
 }
 
 #[cfg(test)]

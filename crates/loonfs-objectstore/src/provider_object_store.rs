@@ -72,12 +72,6 @@ pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 /// Concurrent in-flight parts per multipart upload.
 pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
 
-/// Number of multipart buffers retained by a streamed write.
-///
-/// Streamed writes upload and release each part before buffering the next, so
-/// peak payload memory remains one part regardless of object size.
-pub const PROVIDER_STREAMED_PART_WINDOW: usize = 1;
-
 /// Parts one provider multipart upload accepts. Every supported provider
 /// stops at 10,000, which with the part size sets the largest object a
 /// multipart write can produce.

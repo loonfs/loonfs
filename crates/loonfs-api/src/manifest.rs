@@ -14,7 +14,7 @@ use crate::{ContentStoreId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// An uncompressed JSON envelope document carrying the payload as
+/// Version 1 is an uncompressed JSON envelope document carrying the payload as
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
 pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
@@ -735,7 +735,7 @@ pub mod lookup_keys {
     }
 
     /// Builds a reverse-index row key for one binding generation.
-    pub fn direntry_child_bind_row_key(
+    pub(super) fn direntry_child_bind_row_key(
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
@@ -775,7 +775,7 @@ pub mod lookup_keys {
     }
 
     /// Builds a row key for one unbind event.
-    pub fn direntry_unbind_row_key(
+    pub(super) fn direntry_unbind_row_key(
         parent_inode_id: InodeId,
         name_key: &str,
         bind_seq: ChangeSeq,
@@ -791,7 +791,7 @@ pub mod lookup_keys {
     }
 
     /// Builds the prefix for unbinds below one parent directory.
-    pub fn direntry_unbind_parent_prefix(parent_inode_id: InodeId) -> String {
+    pub(super) fn direntry_unbind_parent_prefix(parent_inode_id: InodeId) -> String {
         format!("{DIRENTRY_UNBIND_ROW_PREFIX}{:020}-", parent_inode_id.0)
     }
 
@@ -814,7 +814,10 @@ pub mod lookup_keys {
     ///
     /// The action is stored in the value, so delete and revoke rows for one
     /// generation share a key.
-    pub fn tombstone_row_key(root_inode_id: InodeId, generation: TombstoneGeneration) -> String {
+    pub(super) fn tombstone_row_key(
+        root_inode_id: InodeId,
+        generation: TombstoneGeneration,
+    ) -> String {
         format!(
             "{}{:020}-{:010}",
             tombstone_prefix(root_inode_id),
@@ -830,14 +833,14 @@ pub mod lookup_keys {
     /// It is the lowest rank on purpose: an ascending scan sees the removal
     /// before the row it removes, so a page never lists a deletion whose
     /// marker was going to arrive one page later.
-    pub const ACTIVE_DELETION_RANK_REMOVED: u32 = 0;
+    pub(super) const ACTIVE_DELETION_RANK_REMOVED: u32 = 0;
 
     /// Rank of the listed row within one deletion generation, and the highest
     /// rank the family defines.
-    pub const ACTIVE_DELETION_RANK_LISTED: u32 = 1;
+    pub(super) const ACTIVE_DELETION_RANK_LISTED: u32 = 1;
 
     /// Builds an active-deletion row key.
-    pub fn active_deletion_row_key(
+    pub(super) fn active_deletion_row_key(
         deletion_seq: ChangeSeq,
         root_inode_id: InodeId,
         sort_rank: u32,
@@ -868,7 +871,10 @@ pub mod lookup_keys {
     }
 
     /// Orders publications by content identity and commit sequence.
-    pub fn content_publication_row_key(content_id: &ContentId, committed_seq: ChangeSeq) -> String {
+    pub(super) fn content_publication_row_key(
+        content_id: &ContentId,
+        committed_seq: ChangeSeq,
+    ) -> String {
         format!(
             "{}{:020}",
             content_publication_prefix(content_id),
@@ -890,7 +896,7 @@ pub mod lookup_keys {
     }
 
     /// Builds a commit receipt row key.
-    pub fn commit_receipt_row_key(commit_id: &str, committed_seq: ChangeSeq) -> String {
+    pub(super) fn commit_receipt_row_key(commit_id: &str, committed_seq: ChangeSeq) -> String {
         format!(
             "{}{:020}",
             commit_receipt_prefix(commit_id),
@@ -943,7 +949,7 @@ pub mod lookup_keys {
     }
 
     /// Builds a row key for an attribute revision.
-    pub fn attributes_row_key(
+    pub(super) fn attributes_row_key(
         inode_id: InodeId,
         attributes_revision_no: AttributeRevisionNo,
         committed_seq: ChangeSeq,

@@ -79,7 +79,7 @@ pub struct InterceptStore<S, I> {
 
 impl<S, I: Interceptor> InterceptStore<S, I> {
     /// Wraps `inner` with `interceptor`.
-    pub fn with_interceptor(inner: S, interceptor: I) -> Self {
+    pub(super) fn with_interceptor(inner: S, interceptor: I) -> Self {
         Self {
             inner: Arc::new(inner),
             interceptor: Arc::new(interceptor),

@@ -1146,7 +1146,7 @@ impl RetainedCandidates {
     }
 
     /// Returns every reason and count in a fixed order.
-    pub fn by_reason(&self) -> [(&'static str, u64); 7] {
+    pub(crate) fn by_reason(&self) -> [(&'static str, u64); 7] {
         let Self {
             referenced,
             within_grace_window,
@@ -1188,7 +1188,7 @@ impl RetainedCandidates {
     }
 
     /// The reason with the highest count, and that count. `None` when
-    /// nothing was retained. Ties go to the first in [`Self::by_reason`]
+    /// nothing was retained. Ties go to the first reason in the fixed table
     /// order, so one pass's report is stable.
     pub fn top_reason(&self) -> Option<(&'static str, u64)> {
         self.by_reason()

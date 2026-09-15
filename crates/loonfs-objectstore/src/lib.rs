@@ -40,7 +40,6 @@ mod transfer_timeouts;
 
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use immutable_write::ImmutableWriteError;
-pub use object_store::ObjectStoreError as Error;
 pub use object_store::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
     ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, Result, SharedObjectStore,
@@ -50,10 +49,10 @@ pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, St
 pub use provider_object_store::{
     ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
     PROVIDER_CONNECT_TIMEOUT, PROVIDER_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_PART_WINDOW,
-    PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE, PROVIDER_STREAMED_PART_WINDOW,
+    PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE,
     PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
 pub use store_config::{
     AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig,
-    StoreConfigError, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV, SESSION_TOKEN_ENV,
+    StoreConfigError, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
 };

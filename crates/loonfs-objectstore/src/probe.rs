@@ -15,6 +15,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
+use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
 use loonfs_api::{Checksum, ChecksumAlgorithm};
 
 /// Prefix for objects created by store probes.
@@ -38,6 +39,34 @@ impl StoreProbeReport {
                 StoreProbeOutcome::Passed | StoreProbeOutcome::Unsupported
             )
         })
+    }
+}
+
+impl From<StoreProbeReport> for StoreProbeResponse {
+    fn from(report: StoreProbeReport) -> Self {
+        Self {
+            run_id: report.run_id,
+            checks: report
+                .checks
+                .into_iter()
+                .map(|check| {
+                    let (outcome, message) = match check.outcome {
+                        StoreProbeOutcome::Passed => (StoreProbeCheckOutcome::Passed, None),
+                        StoreProbeOutcome::Unsupported => {
+                            (StoreProbeCheckOutcome::Unsupported, None)
+                        }
+                        StoreProbeOutcome::Failed { message } => {
+                            (StoreProbeCheckOutcome::Failed, Some(message))
+                        }
+                    };
+                    StoreProbeCheckResult {
+                        name: check.name.to_owned(),
+                        outcome,
+                        message,
+                    }
+                })
+                .collect(),
+        }
     }
 }
 

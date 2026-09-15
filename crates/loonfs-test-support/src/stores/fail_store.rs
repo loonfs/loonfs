@@ -5,14 +5,12 @@ use super::{
     OperationKind,
 };
 use async_trait::async_trait;
-use futures::future::BoxFuture;
 use loonfs_objectstore::ObjectStoreError;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 type Predicate = dyn for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync;
-type BeforeOperation = dyn for<'a> Fn(&'a OperationContext<'a>) -> BoxFuture<'a, ()> + Send + Sync;
 
 /// Error returned by a [`FailStore`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,11 +48,9 @@ pub enum FailureMode {
     ApplyThenFail,
 }
 
-/// Intercepts selected operations with callbacks and configured failures.
+/// Intercepts selected operations with configured failures.
 pub struct FailInterceptor {
     predicate: Arc<Predicate>,
-    before_operation: Option<Arc<BeforeOperation>>,
-    before_operation_pending: AtomicBool,
     error: InjectedError,
     mode: FailureMode,
     remaining: AtomicUsize,
@@ -103,8 +99,6 @@ impl<S> InterceptStore<S, FailInterceptor> {
             inner,
             FailInterceptor {
                 predicate: Arc::new(predicate),
-                before_operation: None,
-                before_operation_pending: AtomicBool::new(false),
                 error,
                 mode: FailureMode::BeforeApply,
                 remaining: AtomicUsize::new(0),
@@ -112,20 +106,6 @@ impl<S> InterceptStore<S, FailInterceptor> {
                 attempts: AtomicUsize::new(0),
             },
         )
-    }
-
-    /// Runs `callback` before the first matching operation.
-    pub fn before_operation(
-        mut self,
-        callback: impl for<'a> Fn(&'a OperationContext<'a>) -> BoxFuture<'a, ()> + Send + Sync + 'static,
-    ) -> Self {
-        let interceptor = Arc::get_mut(&mut self.interceptor)
-            .expect("new fail interceptor should have one owner");
-        interceptor.before_operation = Some(Arc::new(callback));
-        interceptor
-            .before_operation_pending
-            .store(true, Ordering::SeqCst);
-        self
     }
 
     /// Returns failures after selected operations have been applied.
@@ -176,11 +156,6 @@ impl Interceptor for FailInterceptor {
             return Intercept::Continue;
         }
         self.attempts.fetch_add(1, Ordering::SeqCst);
-        if self.before_operation_pending.swap(false, Ordering::SeqCst) {
-            if let Some(callback) = &self.before_operation {
-                callback(context).await;
-            }
-        }
         let fail = self.fail_all.load(Ordering::SeqCst)
             || self
                 .remaining

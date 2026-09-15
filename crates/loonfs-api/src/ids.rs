@@ -24,6 +24,13 @@ macro_rules! validation_error {
         }
 
         impl $name {
+            pub(crate) fn new(value: &str, reason: impl Into<String>) -> Self {
+                Self {
+                    value: value.to_owned(),
+                    reason: reason.into(),
+                }
+            }
+
             /// Returns the rejected input, or an empty string when echoing it would be unsafe.
             pub fn value(&self) -> &str {
                 &self.value
@@ -346,19 +353,19 @@ fn validate_generated_id(
 ) -> Result<(), GeneratedIdValidationError> {
     let expected_prefix = format!("{prefix}_");
     let Some(body) = value.strip_prefix(&expected_prefix) else {
-        return Err(generated_id_error(
+        return Err(GeneratedIdValidationError::new(
             value,
             format!("must start with `{expected_prefix}`"),
         ));
     };
     if body.len() != SERVER_GENERATED_ID_BODY_LEN {
-        return Err(generated_id_error(
+        return Err(GeneratedIdValidationError::new(
             value,
             format!("body must be {SERVER_GENERATED_ID_BODY_LEN} lowercase hex characters"),
         ));
     }
     if !body.bytes().all(is_lower_hex_byte) {
-        return Err(generated_id_error(
+        return Err(GeneratedIdValidationError::new(
             value,
             "body must contain only lowercase hex characters".to_owned(),
         ));
@@ -367,11 +374,11 @@ fn validate_generated_id(
 }
 
 fn validate_namespace_id(value: &str) -> Result<(), NamespaceIdValidationError> {
-    validate_id_grammar(value).map_err(|reason| namespace_id_error(value, reason))?;
+    validate_id_grammar(value).map_err(|reason| NamespaceIdValidationError::new(value, reason))?;
     // System tooling (for example the object-store doctor probes) writes
     // under namespace slots that must never collide with user namespaces.
     if value.starts_with("loonfs-") {
-        return Err(namespace_id_error(
+        return Err(NamespaceIdValidationError::new(
             value,
             "the `loonfs-` prefix is reserved for LoonFS system namespaces",
         ));
@@ -380,7 +387,7 @@ fn validate_namespace_id(value: &str) -> Result<(), NamespaceIdValidationError> 
 }
 
 fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
-    validate_id_grammar(value).map_err(|reason| commit_id_error(value, reason))
+    validate_id_grammar(value).map_err(|reason| CommitIdValidationError::new(value, reason))
 }
 
 /// Maximum name-key length in UTF-8 bytes. Keys are derived from display
@@ -393,20 +400,26 @@ pub const MAX_ID_BYTES: usize = 128;
 
 fn validate_name_key(value: &str) -> Result<(), NameKeyValidationError> {
     if value.is_empty() {
-        return Err(name_key_error(value, "must not be empty"));
+        return Err(NameKeyValidationError::new(value, "must not be empty"));
     }
     if value.contains('/') {
-        return Err(name_key_error(value, "must not contain `/`"));
+        return Err(NameKeyValidationError::new(value, "must not contain `/`"));
     }
     if matches!(value, "." | "..") {
-        return Err(name_key_error(value, "must not be `.` or `..`"));
+        return Err(NameKeyValidationError::new(
+            value,
+            "must not be `.` or `..`",
+        ));
     }
     if value.chars().any(|character| character.is_control()) {
-        return Err(name_key_error(value, "must not contain control characters"));
+        return Err(NameKeyValidationError::new(
+            value,
+            "must not contain control characters",
+        ));
     }
     if value.len() > MAX_NAME_KEY_BYTES {
         // An oversized or hostile name must not ride along in error payloads that serialize onto the wire.
-        return Err(name_key_error(
+        return Err(NameKeyValidationError::new(
             "",
             format!("exceeds the maximum name key length of {MAX_NAME_KEY_BYTES} bytes"),
         ));
@@ -448,51 +461,6 @@ fn is_allowed_id_tail_char(ch: char) -> bool {
     ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
 }
 
-fn namespace_id_error(value: &str, reason: impl Into<String>) -> NamespaceIdValidationError {
-    NamespaceIdValidationError {
-        value: value.to_owned(),
-        reason: reason.into(),
-    }
-}
-
-fn commit_id_error(value: &str, reason: impl Into<String>) -> CommitIdValidationError {
-    CommitIdValidationError {
-        value: value.to_owned(),
-        reason: reason.into(),
-    }
-}
-
-fn generated_id_error(value: &str, reason: String) -> GeneratedIdValidationError {
-    GeneratedIdValidationError {
-        value: value.to_owned(),
-        reason,
-    }
-}
-
-fn name_key_error(value: &str, reason: impl Into<String>) -> NameKeyValidationError {
-    NameKeyValidationError {
-        value: value.to_owned(),
-        reason: reason.into(),
-    }
-}
-
-fn writer_id_error(value: &str, reason: impl Into<String>) -> WriterIdValidationError {
-    WriterIdValidationError {
-        value: value.to_owned(),
-        reason: reason.into(),
-    }
-}
-
-fn binding_generation_error(
-    value: &str,
-    reason: impl Into<String>,
-) -> BindingGenerationValidationError {
-    BindingGenerationValidationError {
-        value: value.to_owned(),
-        reason: reason.into(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // String ids
 // ---------------------------------------------------------------------------
@@ -522,7 +490,7 @@ string_id! {
     error = WriterIdValidationError,
     validate = |value: &str| {
         if value.trim().is_empty() {
-            return Err(writer_id_error(value, "must not be blank"));
+            return Err(WriterIdValidationError::new(value, "must not be blank"));
         }
         Ok(())
     }
@@ -534,10 +502,10 @@ string_id! {
     error = BindingGenerationValidationError,
     validate = |value: &str| {
         if value.is_empty() {
-            return Err(binding_generation_error(value, "must not be empty"));
+            return Err(BindingGenerationValidationError::new(value, "must not be empty"));
         }
         if !value.bytes().all(is_lower_hex_byte) {
-            return Err(binding_generation_error(
+            return Err(BindingGenerationValidationError::new(
                 value,
                 "must contain only lowercase hex characters",
             ));
@@ -598,10 +566,8 @@ string_id! {
     /// id, `pin_{manifest_no:020}-{16 lowercase hex}`.
     SnapshotId,
     error = SnapshotIdValidationError,
-    validate = |value: &str| validate_checkpoint_id(value).map_err(|error| SnapshotIdValidationError {
-        value: error.value,
-        reason: error.reason,
-    }),
+    validate = |value: &str| validate_checkpoint_id(value)
+        .map_err(|error| SnapshotIdValidationError::new(&error.value, error.reason)),
     schema(
         pattern = r"^pin_[0-9]{20}-[0-9a-f]{16}$",
         example = "pin_00000000000000000001-0000000000000002"
@@ -654,7 +620,7 @@ fn validate_checkpoint_id(value: &str) -> Result<(), GeneratedIdValidationError>
                 && entropy.bytes().all(is_lower_hex_byte)
         });
     if !valid {
-        return Err(generated_id_error(value, "must be `pin_` followed by a twenty-digit positive manifest number, `-`, and sixteen lowercase hex characters".to_owned()));
+        return Err(GeneratedIdValidationError::new(value, "must be `pin_` followed by a twenty-digit positive manifest number, `-`, and sixteen lowercase hex characters".to_owned()));
     }
     Ok(())
 }

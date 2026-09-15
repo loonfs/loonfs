@@ -618,13 +618,6 @@ impl<'de> Deserialize<'de> for UploadSessionState {
 /// Control state decoded through its checked durable codec.
 pub type ControlObjectEnvelope<T> = crate::envelope::VerifiedEnvelope<T>;
 
-/// Specializes a control envelope for a durable upload workflow.
-pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
-/// Specializes a control envelope for manifest discovery.
-pub type HintEnvelope = ControlObjectEnvelope<HintState>;
-/// Specializes a control envelope for a durable manifest pin.
-pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>;
-
 /// Encodes control state once, deriving its checksum and family version.
 pub fn encode_control_state<T: Serialize>(
     kind: ControlObjectKind,
