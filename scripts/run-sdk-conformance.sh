@@ -24,7 +24,13 @@ if [ "$LANGUAGE" = "typescript" ] && [ ! -d "$REPO_ROOT/sdk/generated/typescript
 fi
 
 cd "$REPO_ROOT"
-cargo build -p loonfs-conformance --bin conformance-server
+# CI builds the server once and hands each language leg the binary.
+if [ -n "${LOONFS_CONFORMANCE_SERVER_BIN:-}" ]; then
+    CONFORMANCE_SERVER="$LOONFS_CONFORMANCE_SERVER_BIN"
+else
+    cargo build -p loonfs-conformance --bin conformance-server
+    CONFORMANCE_SERVER="$REPO_ROOT/target/debug/conformance-server"
+fi
 
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/loonfs-conformance.XXXXXX")
 SERVER_INPUT="$RUN_DIR/server-input"
@@ -53,7 +59,7 @@ cleanup() {
 trap cleanup 0
 
 exec 3<>"$SERVER_INPUT"
-"$REPO_ROOT/target/debug/conformance-server" \
+"$CONFORMANCE_SERVER" \
     <"$SERVER_INPUT" >"$SERVER_OUTPUT" 3>&- &
 SERVER_PID=$!
 IFS= read -r SERVER_LINE <"$SERVER_OUTPUT"
