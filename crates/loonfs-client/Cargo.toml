@@ -22,8 +22,6 @@ tracing.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]
-axum.workspace = true
-loonfs-server = { path = "../loonfs-server" }
 loonfs-test-support.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

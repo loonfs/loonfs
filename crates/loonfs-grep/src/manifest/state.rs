@@ -161,7 +161,7 @@ impl ChangeFeedResume {
         self.built_through_seq
     }
 
-    pub fn start_event_index(
+    pub(crate) fn start_event_index(
         self,
         change_seq: ChangeSeq,
     ) -> std::result::Result<usize, std::num::TryFromIntError> {

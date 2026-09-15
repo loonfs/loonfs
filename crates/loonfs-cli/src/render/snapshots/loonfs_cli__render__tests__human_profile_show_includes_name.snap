@@ -1,6 +1,5 @@
 ---
-source: crates/loonfs-cli/src/render.rs
-assertion_line: 297
+source: crates/loonfs-cli/src/render/mod.rs
 expression: human_success(&output)
 ---
 name = "default"

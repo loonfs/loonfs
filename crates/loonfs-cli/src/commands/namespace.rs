@@ -1,7 +1,7 @@
 //! `loonfs namespace` commands: create, show, fork, and delete.
 
 use super::context::{
-    fail, fail_for, parse_public_ordinal_arg, resolve_profile_context,
+    fail, fail_for, parse_public_ordinal_arg, parse_snapshot_id_arg, resolve_profile_context,
     resolve_profile_context_from_config,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
@@ -181,7 +181,7 @@ async fn run_namespace_fork(
     let snapshot_id = args
         .snapshot_id
         .as_deref()
-        .map(super::snapshot::parse_snapshot_id)
+        .map(|value| parse_snapshot_id_arg("--snapshot", value))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let namespace = context

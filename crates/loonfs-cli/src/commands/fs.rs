@@ -4,8 +4,8 @@
 use super::context::{
     create_directory_tolerating_existing, default_remote_put_path, destination_path_for_get,
     destination_user_path, directory_intent, fail, namespace_path, parse_public_ordinal_arg,
-    parse_user_path_arg, render_target, resolve_command_context, resolve_mutation_context,
-    CommandContext, RemoteDirectoryOutcome, UndeleteHint,
+    parse_snapshot_id_arg, parse_user_path_arg, render_target, resolve_command_context,
+    resolve_mutation_context, CommandContext, RemoteDirectoryOutcome, UndeleteHint,
 };
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
@@ -59,17 +59,6 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
         .transpose()
 }
 
-fn parse_snapshot_id_arg(snapshot_id: Option<&str>) -> Result<Option<SnapshotId>, CliError> {
-    snapshot_id
-        .map(|value| {
-            SnapshotId::parse(value).map_err(|error| {
-                CliError::invalid_request(format!("invalid --snapshot-id: {error}"))
-                    .with_param("--snapshot-id")
-            })
-        })
-        .transpose()
-}
-
 fn commit_options(actor: &ActorId, args: &CommitArgs) -> Result<CommitOptions, CliError> {
     Ok(CommitOptions {
         preconditions: Vec::new(),
@@ -99,7 +88,7 @@ async fn follow_path_entry_pages(
     let mut heads = ListingHeadObservation::default();
     let mut followed = None;
     visit_pages(
-        PagePlan::new(pagination),
+        PagePlan::new(&pagination.page_limits),
         cursor.map(ToOwned::to_owned),
         async |cursor, limit| {
             context
@@ -139,9 +128,14 @@ pub(crate) async fn run_filesystem_ls(
         allow_root,
     )
     .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
+    let snapshot_id = args
+        .snapshot_id
+        .as_deref()
+        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
+        .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let streams_pages = args.pagination.jsonl || (args.pagination.all && !runtime.json);
+    let streams_pages =
+        args.pagination.page_limits.jsonl || (args.pagination.page_limits.all && !runtime.json);
     if streams_pages {
         let stdout = io::stdout();
         let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
@@ -153,7 +147,7 @@ pub(crate) async fn run_filesystem_ls(
             args.pagination.cursor.as_deref(),
             snapshot_id.as_ref(),
             |entries| {
-                write_path_entries_page(&mut stdout, &entries, args.pagination.jsonl)
+                write_path_entries_page(&mut stdout, &entries, args.pagination.page_limits.jsonl)
                     .map_err(CliError::io)
             },
         )
@@ -204,7 +198,11 @@ pub(crate) async fn run_filesystem_stat(
     args: FilesystemStatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
+    let snapshot_id = args
+        .snapshot_id
+        .as_deref()
+        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
+        .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let entry = match args.inode {
         Some(inode_id) => {
@@ -361,7 +359,7 @@ pub(crate) async fn run_filesystem_grep(
     };
     let mut matches = Vec::new();
     let mut tail_scanned = true;
-    let mut plan = PagePlan::new(&args.pagination);
+    let mut plan = PagePlan::new(&args.pagination.page_limits);
     let stdout = io::stdout();
     let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
     let (namespace_id, head_seq, built_through_seq, next_cursor) = loop {
@@ -376,7 +374,7 @@ pub(crate) async fn run_filesystem_grep(
             response.built_through_seq,
         );
         plan.record(response.matches.len());
-        if args.pagination.jsonl {
+        if args.pagination.page_limits.jsonl {
             write_jsonl_page(&mut stdout, &response.matches)
                 .map_err(CliError::io)
                 .map_err(|error| context.fail(kind, error))?;
@@ -390,7 +388,12 @@ pub(crate) async fn run_filesystem_grep(
         }
         request.cursor.clone_from(&next_cursor);
     };
-    if args.pagination.jsonl {
+    if args.pagination.page_limits.jsonl {
+        if !tail_scanned {
+            crate::render::write_stderr_warning(
+                "recent commits were not scanned (allow_stale); results may be stale",
+            );
+        }
         return Ok(context.output(kind, CommandData::StreamedToStdout));
     }
     Ok(context.output(
@@ -422,7 +425,11 @@ pub(crate) async fn run_filesystem_cat(
         .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
+    let snapshot_id = args
+        .snapshot_id
+        .as_deref()
+        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
+        .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let mut download = context
         .target
@@ -464,7 +471,11 @@ pub(crate) async fn run_filesystem_get(
         .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let snapshot_id = parse_snapshot_id_arg(args.snapshot_id.as_deref())
+    let snapshot_id = args
+        .snapshot_id
+        .as_deref()
+        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
+        .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
@@ -764,9 +775,9 @@ pub(crate) async fn run_filesystem_trash(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &location.path, &args.target).await?;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination),
+        PagePlan::new(&args.pagination.page_limits),
         args.pagination.cursor.clone(),
-        args.pagination.jsonl,
+        args.pagination.page_limits.jsonl,
         async |cursor, limit| {
             context
                 .target
@@ -805,9 +816,9 @@ pub(crate) async fn run_filesystem_revisions(
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination),
+        PagePlan::new(&args.pagination.page_limits),
         args.pagination.cursor.clone(),
-        args.pagination.jsonl,
+        args.pagination.page_limits.jsonl,
         async |cursor, limit| {
             context
                 .target

@@ -7,8 +7,7 @@ mod store;
 
 pub use codec::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest,
-    GrepHintEnvelope, GrepManifestEnvelope, GREP_HINT_FORMAT_VERSION, GREP_HINT_KIND,
-    GREP_MANIFEST_FORMAT_VERSION, GREP_MANIFEST_KIND,
+    GrepManifestEnvelope,
 };
 pub use error::{GrepEnvelopeCodecError, GrepManifestError, GrepManifestStateError};
 pub use state::{
@@ -16,6 +15,6 @@ pub use state::{
     GrepReorganizeState, GrepSegmentRef,
 };
 pub use store::{
-    load_current_grep_manifest, load_grep_hint, load_grep_manifest, publish_grep_manifest,
-    raise_grep_hint, LoadedGrepHint, LoadedGrepManifest,
+    load_current_grep_manifest, load_grep_manifest, publish_grep_manifest, raise_grep_hint,
+    LoadedGrepHint, LoadedGrepManifest,
 };

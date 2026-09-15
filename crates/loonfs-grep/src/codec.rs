@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 /// Bytes per gram. Fixed by the frozen durable format.
-pub const GRAM_LEN: usize = 3;
+pub(crate) const GRAM_LEN: usize = 3;
 /// Largest content the version-1 eligibility rule admits, in bytes.
 pub const INDEX_GRAMS_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -20,12 +20,12 @@ pub struct Gram(pub [u8; GRAM_LEN]);
 
 impl Gram {
     /// The gram as the six lowercase hex characters row keys embed.
-    pub fn as_hex(&self) -> String {
+    pub(crate) fn as_hex(&self) -> String {
         loonfs_api::wire::hex::hex_encode_bytes(&self.0)
     }
 
     /// Parses the row-key hex form back into a gram.
-    pub fn from_hex(hex: &str) -> Result<Self, IndexGramsCodecError> {
+    pub(crate) fn from_hex(hex: &str) -> Result<Self, IndexGramsCodecError> {
         let bytes = loonfs_api::wire::hex::hex_decode_bytes(hex).map_err(|reason| {
             IndexGramsCodecError::InvalidGram {
                 reason: reason.to_string(),
@@ -56,7 +56,7 @@ impl<'de> Deserialize<'de> for Gram {
 
 /// Extracts the distinct grams of one content buffer, in gram order.
 /// Content shorter than one gram contributes nothing.
-pub fn extract_grams(content: &[u8]) -> BTreeSet<Gram> {
+pub(crate) fn extract_grams(content: &[u8]) -> BTreeSet<Gram> {
     content
         .windows(GRAM_LEN)
         .map(|window| {
@@ -105,7 +105,9 @@ pub enum IndexGramsCodecError {
 
 /// Packs postings into the frozen batch layout. The slice must be
 /// non-empty and strictly ascending by `(inode_id, revision_no)`.
-pub fn encode_gram_postings(postings: &[GramPosting]) -> Result<Vec<u8>, IndexGramsCodecError> {
+pub(crate) fn encode_gram_postings(
+    postings: &[GramPosting],
+) -> Result<Vec<u8>, IndexGramsCodecError> {
     let first = postings
         .first()
         .ok_or(IndexGramsCodecError::EmptyPostings)?;
@@ -132,7 +134,7 @@ pub fn encode_gram_postings(postings: &[GramPosting]) -> Result<Vec<u8>, IndexGr
 
 /// Unpacks a posting batch, validating the count, strict ascending order,
 /// and that the batch ends exactly where its bytes do.
-pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGramsCodecError> {
+pub(crate) fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGramsCodecError> {
     let mut cursor = 0usize;
     let count = read_varint(bytes, &mut cursor).map_err(malformed_varint)?;
     if count == 0 {
@@ -288,13 +290,13 @@ pub mod lookup {
     use super::Gram;
 
     /// Scan floor shared by every gram row key.
-    pub const GRAM_ROW_PREFIX: &str = "gram-";
+    pub(crate) const GRAM_ROW_PREFIX: &str = "gram-";
 
-    pub fn gram_probe(gram: Gram) -> String {
+    pub(crate) fn gram_probe(gram: Gram) -> String {
         format!("{GRAM_ROW_PREFIX}{}", gram.as_hex())
     }
 
-    pub fn gram_prefix(gram: Gram) -> String {
+    pub(crate) fn gram_prefix(gram: Gram) -> String {
         format!("{}-", gram_probe(gram))
     }
 }

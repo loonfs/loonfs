@@ -1,6 +1,5 @@
 ---
-source: crates/loonfs-cli/src/render.rs
-assertion_line: 228
+source: crates/loonfs-cli/src/render/mod.rs
 expression: "serde_json::from_str::<serde_json::Value>(&json_error(&failure).unwrap()).unwrap()"
 ---
 {

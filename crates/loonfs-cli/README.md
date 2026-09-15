@@ -152,8 +152,9 @@ Namespace management
   loonfs namespace show [namespace]
     Show the selected namespace's status and creator
 
-  loonfs namespace fork <source> <new-namespace> [--actor-id <stable-id>]
+  loonfs namespace fork <source> <new-namespace> [--snapshot <id>] [--actor-id <stable-id>]
     Fork a namespace into a new one; O(1), no bytes copied
+    Use --snapshot to fork from a live snapshot instead of the current head.
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
     Permanently delete a namespace and retire its id; type the id back at
@@ -186,7 +187,9 @@ Pagination
   pages, --page-size controls each request, and --cursor resumes a previous
   result. --all fetches every page for human output. --json returns a bounded
   document and cannot be combined with --all. Use --jsonl to stream every
-  result. changes uses --after instead of --cursor.
+  result. --jsonl emits items only, without envelope fields such as the
+  namespace, head sequence, or trailing cursor. changes uses --after instead
+  of --cursor.
 
 Reading
   loonfs ls [path] [--limit <n>] [--page-size <n>] [--cursor <cursor>]
@@ -318,13 +321,14 @@ Inspection and diagnostics
     and exits nonzero if a check fails
 
 Maintenance
-  loonfs maintenance loop --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>]
+  loonfs maintenance loop --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>] [--poll-interval-ms <ms>]
     Run maintenance for explicitly named namespaces in embedded mode. The
     command runs until stopped. With --drain, it finishes the current
     assignments and exits. --job selects metadata, metadata-compaction, gc,
     grep-index, or grep-gc; these map to the metadata, metadata_compaction,
     gc, grep_index, and grep_gc job ids. Omitting it selects all five.
     --max-steps and --deadline-ms bound a drain.
+    --poll-interval-ms defaults to 60000, has a minimum of 100, and is ignored by drains.
 
   loonfs maintenance metadata [--max-wal-tail-segments <n>]
     Run the metadata job once: flush the WAL tail when it reaches

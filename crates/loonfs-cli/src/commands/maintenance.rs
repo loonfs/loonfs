@@ -1,7 +1,10 @@
 //! `loonfs maintenance` commands: checkpoints, retention, GC, indexes, and the
 //! change feed.
 
-use super::context::{parse_public_ordinal_arg, resolve_command_context, resolve_profile_context};
+use super::context::{
+    parse_public_ordinal_arg, parse_snapshot_id_arg, resolve_command_context,
+    resolve_profile_context,
+};
 use super::output::{
     CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport, MaintenanceRan,
 };
@@ -19,7 +22,6 @@ use crate::resolve::parse_namespace_id;
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
-use loonfs_api::SnapshotId;
 use loonfs_api::{
     AdvanceRetentionRequest, ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode,
     GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest, RunMaintenanceRequest,
@@ -152,9 +154,9 @@ async fn run_maintenance_checkpoint_list(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let listing = collect_or_stream_pages(
-        PagePlan::new(&args.pagination),
+        PagePlan::new(&args.pagination.page_limits),
         args.pagination.cursor.clone(),
-        args.pagination.jsonl,
+        args.pagination.page_limits.jsonl,
         async |cursor, limit| {
             context
                 .target
@@ -414,22 +416,13 @@ pub(crate) async fn run_changes(
     let snapshot_id = args
         .snapshot_id
         .as_deref()
-        .map(SnapshotId::parse)
+        .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
         .transpose()
-        .map_err(|error| {
-            context.fail(
-                kind,
-                crate::error::CliError::new(
-                    ErrorCode::InvalidRequest.as_str(),
-                    format!("invalid --snapshot-id: {error}"),
-                )
-                .with_param("--snapshot-id"),
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
     let listing = collect_or_stream_pages(
-        PagePlan::for_sequence(&args.pagination),
+        PagePlan::new(&args.pagination.page_limits),
         Some(after_seq),
-        args.pagination.jsonl,
+        args.pagination.page_limits.jsonl,
         async |cursor, limit| {
             context
                 .target

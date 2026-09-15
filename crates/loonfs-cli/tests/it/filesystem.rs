@@ -3,6 +3,155 @@
 use super::common::*;
 
 #[test]
+fn annotate_expected_attributes_revision_rejects_a_stale_update() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["mkdir", "/docs"]));
+    let stat = harness.run(&["--json", "stat", "/docs"]);
+    assert_success(&stat);
+    let entry = json_data(&stat);
+    let inode_id = entry["inode_id"].as_str().expect("inode id");
+    let revision = entry["attributes_revision_no"]
+        .as_u64()
+        .expect("attribute revision")
+        .to_string();
+    let args = [
+        "--json",
+        "annotate",
+        "/docs",
+        "--set",
+        "owner=platform",
+        "--expected-inode-id",
+        inode_id,
+        "--expected-attributes-revision",
+        &revision,
+    ];
+    assert_success(&harness.run(&args));
+    let stale = harness.run(&args);
+    assert_failure(&stale);
+    assert_eq!(json_error(&stale)["code"], "stale_attributes");
+    let stat = harness.run(&["--json", "stat", "/docs"]);
+    assert_success(&stat);
+    assert_eq!(json_data(&stat)["attributes"]["owner"], "platform");
+    assert_eq!(
+        json_data(&stat)["attributes_revision_no"],
+        entry["attributes_revision_no"]
+            .as_u64()
+            .expect("attribute revision")
+            + 1
+    );
+}
+
+#[test]
+fn copy_expected_destination_inode_id_rejects_a_different_binding() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"source").expect("payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/source.txt"]));
+    fs::write(&payload, b"destination").expect("payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/destination.txt",
+    ]));
+    let source = harness.run(&["--json", "stat", "/source.txt"]);
+    let destination = harness.run(&["--json", "stat", "/destination.txt"]);
+    assert_success(&source);
+    assert_success(&destination);
+    let source_entry = json_data(&source);
+    let destination_entry = json_data(&destination);
+    let stale = harness.run(&[
+        "--json",
+        "cp",
+        "/source.txt",
+        "/destination.txt",
+        "--expected-destination-inode-id",
+        source_entry["inode_id"].as_str().expect("source inode id"),
+    ]);
+    assert_failure(&stale);
+    assert_eq!(json_error(&stale)["code"], "path_conflict");
+    let unchanged = harness.run(&["cat", "/destination.txt"]);
+    assert_success(&unchanged);
+    assert_eq!(unchanged.stdout, b"destination");
+    assert_success(
+        &harness.run(&[
+            "cp",
+            "/source.txt",
+            "/destination.txt",
+            "--expected-destination-inode-id",
+            destination_entry["inode_id"]
+                .as_str()
+                .expect("destination inode id"),
+        ]),
+    );
+    let copied = harness.run(&["cat", "/destination.txt"]);
+    assert_success(&copied);
+    assert_eq!(copied.stdout, b"source");
+}
+
+#[test]
+fn move_expected_destination_revision_rejects_a_stale_replacement() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"source").expect("payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/source.txt"]));
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/destination.txt",
+    ]));
+    fs::write(&payload, b"new destination").expect("payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/destination.txt",
+        "--force",
+    ]));
+    let stat = harness.run(&["--json", "stat", "/destination.txt"]);
+    assert_success(&stat);
+    let entry = json_data(&stat);
+    let inode_id = entry["inode_id"].as_str().expect("inode id");
+    let stale = harness.run(&[
+        "--json",
+        "mv",
+        "/source.txt",
+        "/destination.txt",
+        "--expected-destination-inode-id",
+        inode_id,
+        "--expected-destination-revision",
+        "1",
+    ]);
+    assert_failure(&stale);
+    assert_eq!(json_error(&stale)["code"], "stale_revision");
+    let unchanged = harness.run(&["cat", "/destination.txt"]);
+    assert_success(&unchanged);
+    assert_eq!(unchanged.stdout, b"new destination");
+    assert_success(&harness.run(&[
+        "mv",
+        "/source.txt",
+        "/destination.txt",
+        "--expected-destination-inode-id",
+        inode_id,
+        "--expected-destination-revision",
+        "2",
+    ]));
+    let moved = harness.run(&["cat", "/destination.txt"]);
+    assert_success(&moved);
+    assert_eq!(moved.stdout, b"source");
+    let source = harness.run(&["--json", "stat", "/source.txt"]);
+    assert_failure(&source);
+    assert_eq!(json_error(&source)["code"], "path_not_found");
+}
+
+#[test]
 fn revisions_and_trash_use_the_shared_pagination_flags() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

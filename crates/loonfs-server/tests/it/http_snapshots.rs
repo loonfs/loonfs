@@ -5,9 +5,10 @@
 use crate::common::http_split_support::test_config;
 use crate::common::start_server;
 use loonfs_api::{
-    ApiError, ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, ListSnapshotsResponse,
-    SnapshotSummary,
+    ApiError, ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, DestinationBehavior,
+    ListSnapshotsResponse, NamespaceId, SnapshotSummary,
 };
+use loonfs_client::{NamespacePath, PutFileOptions, ReadFileOptions, StatPathOptions};
 use loonfs_server::MaintenanceMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
@@ -388,5 +389,134 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         vec![snapshot.clone()]
     );
 
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn snapshot_lifecycle_round_trips_through_the_client() {
+    let temp_dir = tempdir().expect("tempdir");
+    let config = test_config(
+        temp_dir.path().join("store"),
+        "client-snapshot-lifecycle",
+        "client-snapshot-lifecycle",
+    );
+    let harness = start_server(config).await;
+    let namespace = NamespaceId::parse("demo").expect("namespace id");
+    harness
+        .client
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+
+    let created = harness
+        .client
+        .create_snapshot(&namespace, "first", 5_000)
+        .await
+        .expect("create snapshot");
+    assert_eq!(created.namespace_id, namespace);
+    assert_eq!(created.name, "first");
+    assert_eq!(created.captured_seq, ChangeSeq(0));
+
+    let mut pager = harness
+        .client
+        .list_snapshots_pager(&namespace, Some(1), None);
+    assert_eq!(
+        pager.collect_up_to(10).await.expect("list snapshots"),
+        vec![created.clone()]
+    );
+
+    let extended = harness
+        .client
+        .extend_snapshot(&namespace, &created.snapshot_id, 10_000)
+        .await
+        .expect("extend snapshot");
+    assert!(extended.expires_at_ms > created.expires_at_ms);
+
+    harness
+        .client
+        .delete_snapshot(&namespace, &created.snapshot_id)
+        .await
+        .expect("delete snapshot");
+    assert!(harness
+        .client
+        .list_snapshots_page(&namespace, None, None)
+        .await
+        .expect("list deleted snapshots")
+        .snapshots
+        .is_empty());
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn snapshot_file_read_returns_the_captured_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let config = test_config(
+        temp_dir.path().join("store"),
+        "client-snapshot-read",
+        "client-snapshot-read",
+    );
+    let harness = start_server(config).await;
+    let namespace = NamespaceId::parse("demo").expect("namespace id");
+    let path = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
+    harness
+        .client
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    harness
+        .client
+        .put_file_bytes(
+            &path,
+            b"captured",
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write captured content");
+    let snapshot = harness
+        .client
+        .create_snapshot(&namespace, "captured", 10_000)
+        .await
+        .expect("create snapshot");
+
+    let mut replace = PutFileOptions::new(loonfs_test_support::test_actor());
+    replace.behavior = DestinationBehavior::Replace;
+    harness
+        .client
+        .put_file_bytes(&path, b"current", &replace)
+        .await
+        .expect("replace content");
+
+    let entry = harness
+        .client
+        .get_path_entry(
+            &path,
+            &StatPathOptions {
+                snapshot_id: Some(snapshot.snapshot_id.clone()),
+                ..StatPathOptions::default()
+            },
+        )
+        .await
+        .expect("snapshot stat");
+    assert_eq!(entry.head_seq, snapshot.captured_seq);
+    let bytes = harness
+        .client
+        .get_file_bytes(
+            &path,
+            &ReadFileOptions {
+                revision_no: None,
+                snapshot_id: Some(snapshot.snapshot_id),
+            },
+        )
+        .await
+        .expect("snapshot content");
+    assert_eq!(bytes, b"captured");
+    assert_eq!(
+        harness
+            .client
+            .get_file_bytes(&path, &Default::default())
+            .await
+            .expect("current content"),
+        b"current"
+    );
     harness.server.abort();
 }

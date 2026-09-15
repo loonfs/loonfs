@@ -274,6 +274,50 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
 }
 
 #[tokio::test]
+async fn a_resumed_inode_download_asks_for_the_rest_and_verifies_the_whole_file() {
+    let payload = b"the first half and then the second half".to_vec();
+    let held = 10;
+    let content_ref = ContentRef::blob_v1(
+        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+    );
+    let path_grant = grant(content_ref, "http://example.invalid/object");
+    let inode_grant = CreateDownloadByInodeResponse {
+        namespace_id: path_grant.namespace_id,
+        inode_id: loonfs_api::InodeId(1),
+        revision_no: path_grant.revision_no,
+        content_ref: path_grant.content_ref,
+        access: path_grant.access,
+    };
+    let client = client();
+
+    let guard = test_transport::script([Outcome::Success(payload[held..].to_vec())]);
+    let mut download = client
+        .open_direct_download_by_inode_at(&inode_grant, held as u64)
+        .await
+        .expect("resumed grant");
+    download.fold_resumed_prefix(&payload[..held]);
+    let mut received = Vec::new();
+    while let Some(chunk) = download.next_chunk().await.expect("chunk") {
+        received.extend_from_slice(&chunk);
+    }
+
+    assert_eq!(
+        received,
+        payload[held..],
+        "only the bytes past the resume point arrive"
+    );
+    let sent = guard.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].header("range"),
+        Some("bytes=10-"),
+        "the rest is asked for by range: {sent:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     let payload = b"a whole object".to_vec();
     let content_ref = ContentRef::blob_v1(

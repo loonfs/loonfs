@@ -1,6 +1,6 @@
 //! Pagination shared by CLI listing commands.
 
-use crate::args::{PaginationArgs, SeqPaginationArgs};
+use crate::args::PageLimitArgs;
 use crate::error::CliError;
 use loonfs_api::PagedResponse;
 use std::future::Future;
@@ -113,19 +113,11 @@ pub(super) fn write_jsonl_page<T: serde::Serialize>(
 }
 
 impl PagePlan {
-    pub(super) fn new(args: &PaginationArgs) -> Self {
-        Self::from_values(args.limit, args.page_size, args.all, args.jsonl)
-    }
-
-    pub(super) fn for_sequence(args: &SeqPaginationArgs) -> Self {
-        Self::from_values(args.limit, args.page_size, args.all, args.jsonl)
-    }
-
-    fn from_values(limit: Option<u32>, page_size: Option<u32>, all: bool, jsonl: bool) -> Self {
+    pub(super) fn new(args: &PageLimitArgs) -> Self {
         Self {
-            limit,
-            page_size,
-            follow_to_end: all || jsonl,
+            limit: args.limit,
+            page_size: args.page_size,
+            follow_to_end: args.all || args.jsonl,
             emitted: 0,
         }
     }
@@ -193,9 +185,8 @@ mod tests {
         assert!(delivered.get());
     }
 
-    fn args(limit: Option<u32>, page_size: Option<u32>, all: bool) -> PaginationArgs {
-        PaginationArgs {
-            cursor: None,
+    fn args(limit: Option<u32>, page_size: Option<u32>, all: bool) -> PageLimitArgs {
+        PageLimitArgs {
             limit,
             page_size,
             all,

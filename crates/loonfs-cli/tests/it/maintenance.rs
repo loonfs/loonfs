@@ -3,6 +3,83 @@
 use super::common::*;
 
 #[test]
+fn grep_allow_scan_searches_an_unindexable_pattern() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"xy\n").expect("payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
+    assert_success(&harness.run(&["maintenance", "index", "enable"]));
+    let refused = harness.run(&["--json", "grep", "xy"]);
+    assert_failure(&refused);
+    assert_eq!(json_error(&refused)["code"], "query_unindexable");
+    let scanned = harness.run(&["--json", "grep", "xy", "--allow-scan"]);
+    assert_success(&scanned);
+    let data = json_data(&scanned);
+    assert_eq!(data["matches"].as_array().expect("matches").len(), 1);
+    assert_eq!(data["matches"][0]["path"], "/doc.txt");
+    assert_eq!(data["tail_scanned"], true);
+}
+
+#[tokio::test]
+async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"needle\n").expect("payload");
+    for path in ["/visible.txt", "/hidden.txt"] {
+        assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), path]));
+    }
+    assert_success(&harness.run(&["rm", "/hidden.txt"]));
+    let trash = harness.run(&["--json", "trash"]);
+    assert_success(&trash);
+    let entry = json_data(&trash)["entries"][0].clone();
+    assert_success(&harness.run(&["maintenance", "index", "enable"]));
+    // CLI mutations drain grep maintenance, so leave this restore to a writer without a grep runner.
+    let writer = loonfs::FsWriter::builder(loonfs_objectstore::StoreConfig::LocalFs {
+        root: harness.store_root("default").display().to_string(),
+        key_prefix: None,
+    })
+    .writer_id("stale-grep-fixture")
+    .build()
+    .await
+    .expect("build writer");
+    writer
+        .undelete(
+            &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_api::public_inode_id::decode(entry["inode_id"].as_str().expect("inode id"))
+                .expect("valid inode id"),
+            loonfs_api::ChangeSeq(entry["deletion_seq"].as_u64().expect("deletion sequence")),
+            None,
+            loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("restore without indexing");
+    let exact = harness.run(&["--json", "grep", "needle"]);
+    assert_failure(&exact);
+    assert_eq!(json_error(&exact)["code"], "index_lagging");
+    let stale = harness.run(&["--json", "grep", "needle", "--allow-stale"]);
+    assert_success(&stale);
+    let data = json_data(&stale);
+    assert_eq!(data["tail_scanned"], false);
+    assert_eq!(data["matches"].as_array().expect("matches").len(), 1);
+    assert_eq!(data["matches"][0]["path"], "/visible.txt");
+    let streamed = harness.run(&["grep", "needle", "--allow-stale", "--jsonl"]);
+    assert_success(&streamed);
+    let items: Vec<Value> = stdout_string(&streamed)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json item"))
+        .collect();
+    assert_eq!(items, *data["matches"].as_array().expect("matches"));
+    assert!(stderr_string(&streamed)
+        .contains("warning: recent commits were not scanned (allow_stale); results may be stale"));
+}
+
+#[test]
 fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
