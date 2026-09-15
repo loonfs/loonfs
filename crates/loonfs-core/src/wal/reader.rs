@@ -1,4 +1,4 @@
-//! Loads numbered WAL segments and replays the tail between namespace heads.
+//! Reads numbered WAL segments: one at a time after a position, or a bounded tail between two heads.
 // This module is the physical WAL boundary.
 #![allow(clippy::disallowed_methods)]
 
@@ -42,19 +42,24 @@ pub(super) async fn load_wal_segment<S: ObjectStore + ?Sized>(
         else {
             return Ok(None);
         };
-        let envelope = decode_wal_segment_envelope_zstd(&bytes)
-            .map_err(|error| WalSegmentError::Codec(error.to_string()))?;
+        let envelope =
+            decode_wal_segment_envelope_zstd(&bytes).map_err(|error| WalTailLoadError::Replay {
+                object_key: object_key.clone(),
+                error: WalSegmentError::Codec(error.to_string()),
+            })?;
         if envelope.payload().wal_no != wal_no {
             return Err(WalTailLoadError::NumberMismatch {
                 object_key: object_key.clone(),
             });
         }
         if envelope.payload().namespace_id != *namespace_id {
-            return Err(WalSegmentError::NamespaceMismatch {
-                expected: namespace_id.clone(),
-                actual: envelope.payload().namespace_id.clone(),
-            }
-            .into());
+            return Err(WalTailLoadError::Replay {
+                object_key: object_key.clone(),
+                error: WalSegmentError::NamespaceMismatch {
+                    expected: namespace_id.clone(),
+                    actual: envelope.payload().namespace_id.clone(),
+                },
+            });
         }
         Ok(Some(envelope))
     }
@@ -65,39 +70,101 @@ pub(super) async fn load_wal_segment<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Reads consecutive numbered segments after a position, each validated as
+/// the contiguous successor of the one before.
+pub(super) struct WalWalk<'a> {
+    namespace_id: &'a NamespaceId,
+    wal_no: WalNo,
+    seq: ChangeSeq,
+    tip: Option<WalNo>,
+}
+
+impl<'a> WalWalk<'a> {
+    /// Reads until the first absent number.
+    pub(super) fn after(namespace_id: &'a NamespaceId, wal_no: WalNo, seq: ChangeSeq) -> Self {
+        Self {
+            namespace_id,
+            wal_no,
+            seq,
+            tip: None,
+        }
+    }
+
+    /// Reads every number through `tip`; an absent one is missing history.
+    pub(super) fn through(self, tip: WalNo) -> Self {
+        Self {
+            tip: Some(tip),
+            ..self
+        }
+    }
+
+    pub(super) fn seq(&self) -> ChangeSeq {
+        self.seq
+    }
+
+    pub(super) fn object_key(&self) -> String {
+        wal_segment(self.namespace_id, &self.wal_no)
+    }
+
+    pub(super) async fn next<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+    ) -> Result<Option<ValidatedWalSegment>, WalTailLoadError> {
+        if self.tip.is_some_and(|tip| self.wal_no >= tip) {
+            return Ok(None);
+        }
+        let Ok(wal_no) = self.wal_no.successor() else {
+            return Ok(None);
+        };
+        let LoadedWalSegment {
+            object_key,
+            envelope,
+        } = load_wal_segment(store, self.namespace_id, wal_no).await;
+        let Some(envelope) = envelope? else {
+            return match self.tip {
+                Some(_) => Err(WalTailLoadError::MissingWalObject { object_key }),
+                None => Ok(None),
+            };
+        };
+        validate_wal_segment_for_replay(self.namespace_id, self.seq, &envelope).map_err(
+            |error| WalTailLoadError::Replay {
+                object_key: object_key.clone(),
+                error,
+            },
+        )?;
+        self.wal_no = wal_no;
+        self.seq = envelope.payload().end_seq;
+        Ok(Some(ValidatedWalSegment::new(object_key, envelope)))
+    }
+}
+
 pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     request: WalTailLoadRequest<'_>,
 ) -> Result<ValidatedWalTail, WalTailLoadError> {
+    let mut walk = WalWalk::after(request.namespace_id, request.base_wal_no, request.base_seq)
+        .through(request.tip_wal_no);
     let mut segments = Vec::new();
-    let mut seq = request.base_seq;
     let mut epoch = WriterEpoch(0);
-    for previous in request.base_wal_no.0..request.tip_wal_no.0 {
-        let wal_no = WalNo(previous + 1);
-        let LoadedWalSegment {
-            object_key,
-            envelope,
-        } = load_wal_segment(store, request.namespace_id, wal_no).await;
-        let envelope = envelope?.ok_or_else(|| WalTailLoadError::MissingWalObject {
-            object_key: object_key.clone(),
-        })?;
-        validate_wal_segment_for_replay(request.namespace_id, seq, &envelope)?;
-        let payload = envelope.payload();
-        if payload.writer_epoch < epoch || payload.writer_epoch > request.writer_epoch {
-            return Err(WalSegmentError::WriterEpochMismatch {
-                expected_max: request.writer_epoch,
-                actual: payload.writer_epoch,
-            }
-            .into());
+    while let Some(segment) = walk.next(store).await? {
+        let writer_epoch = segment.envelope().payload().writer_epoch;
+        if writer_epoch < epoch || writer_epoch > request.writer_epoch {
+            return Err(WalTailLoadError::Replay {
+                object_key: segment.object_key().to_owned(),
+                error: WalSegmentError::WriterEpochMismatch {
+                    expected_max: request.writer_epoch,
+                    actual: writer_epoch,
+                },
+            });
         }
-        seq = payload.end_seq;
-        epoch = payload.writer_epoch;
-        segments.push(ValidatedWalSegment::new(object_key, envelope));
+        epoch = writer_epoch;
+        segments.push(segment);
     }
-    if seq != request.head_seq {
+    if walk.seq() != request.head_seq {
         return Err(WalTailLoadError::HeadSeqMismatch {
+            object_key: walk.object_key(),
             expected: request.head_seq,
-            actual: seq,
+            actual: walk.seq(),
         });
     }
     Ok(ValidatedWalTail::new(segments))

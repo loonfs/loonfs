@@ -387,6 +387,50 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
 }
 
 #[tokio::test]
+async fn a_bounded_tail_load_names_the_missing_segment() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("gap").expect("namespace");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(1_000),
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("create");
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    for name in ["one", "two", "three"] {
+        publish(&mut engine, &store, name).await.expect(name);
+    }
+    let hint_bytes = loonfs_api::wire::control::encode_control_state(
+        loonfs_api::wire::control::ControlObjectKind::Hint,
+        &loonfs_api::wire::control::HintState {
+            namespace_id: namespace_id.clone(),
+            manifest_no: ManifestNo(1),
+            wal_no: WalNo(4),
+        },
+    )
+    .expect("hint");
+    store
+        .put_overwrite(&hint(&namespace_id), hint_bytes.into())
+        .await
+        .expect("hint at the tip");
+    let missing = wal_segment(&namespace_id, &WalNo(3));
+    store
+        .delete(&missing)
+        .await
+        .expect("remove the middle segment");
+    let error = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .err()
+        .expect("a gap below the tip is corruption");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error}");
+    assert!(error.to_string().contains(&missing), "{error}");
+}
+
+#[tokio::test]
 async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() {
     use loonfs_test_support::stores::MetadataMapStore;
     let directory = tempdir().expect("directory");

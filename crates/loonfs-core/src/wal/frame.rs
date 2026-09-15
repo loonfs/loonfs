@@ -85,6 +85,10 @@ impl ValidatedWalSegment {
         }
     }
 
+    pub(crate) fn object_key(&self) -> &str {
+        &self.object_key
+    }
+
     pub(crate) fn envelope(&self) -> &WalSegmentEnvelope {
         &self.envelope
     }
@@ -141,13 +145,19 @@ pub enum WalTailLoadError {
     MissingWalObject { object_key: String },
     #[error("WAL number does not match object key `{object_key}`")]
     NumberMismatch { object_key: String },
-    #[error("WAL does not reach head sequence: expected `{expected}`, actual `{actual}`")]
+    #[error(
+        "WAL through object `{object_key}` reaches sequence `{actual}`, expected head sequence `{expected}`"
+    )]
     HeadSeqMismatch {
+        object_key: String,
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
-    #[error("WAL replay validation failed: {0}")]
-    Replay(#[from] WalSegmentError),
+    #[error("WAL object `{object_key}` failed replay validation: {error}")]
+    Replay {
+        object_key: String,
+        error: WalSegmentError,
+    },
 }
 
 impl WalTailLoadError {
