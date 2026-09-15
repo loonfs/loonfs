@@ -90,7 +90,7 @@ fn update_s3_spec(args: ProfileUpdateS3Args) -> ProfileUpdateSpec {
             secret_access_key: args.secret_access_key,
             endpoint_url: args.endpoint_url,
             session_token: args.session_token,
-            force_path_style: false,
+            force_path_style: args.force_path_style,
             key_prefix: args.key_prefix,
         }),
         actor: update_actor_spec(args.actor),
@@ -177,6 +177,7 @@ pub(super) fn has_update_flags(spec: &ProfileUpdateSpec) -> bool {
                     || args.secret_access_key.is_some()
                     || args.endpoint_url.is_some()
                     || args.session_token.is_some()
+                    || args.force_path_style.is_some()
                     || args.key_prefix.is_some()
             }
             CreateProviderSpec::R2(args) => {
@@ -276,7 +277,7 @@ struct ProfileCreateS3Spec {
     secret_access_key: Option<String>,
     endpoint_url: Option<String>,
     session_token: Option<String>,
-    force_path_style: bool,
+    force_path_style: Option<bool>,
     key_prefix: Option<String>,
 }
 
@@ -342,7 +343,7 @@ fn create_s3_spec(args: ProfileCreateS3Args) -> (String, CreateProfileSpec) {
         secret_access_key: args.secret_access_key,
         endpoint_url: args.endpoint_url,
         session_token: args.session_token,
-        force_path_style: args.force_path_style,
+        force_path_style: Some(args.force_path_style),
         key_prefix: args.key_prefix,
     };
     (
@@ -726,7 +727,10 @@ fn s3_store(
             "key prefix",
             source,
         )?,
-        force_path_style: current.map_or(args.force_path_style, |value| value.5),
+        force_path_style: args
+            .force_path_style
+            .or(current.map(|value| value.5))
+            .unwrap_or_default(),
     })
 }
 
@@ -1312,12 +1316,14 @@ mod tests {
     // Profile tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{
-        apply_update_flags, build_profile_from_create_spec, CreateActorSpec, CreateProfileSpec,
-        CreateProviderSpec, ProfileCreateAzureSpec, ProfileCreateLocalSpec, ProfileCreateR2Spec,
-        ProfileCreateRemoteSpec, ProfileCreateS3Spec, ProfileUpdateSpec,
+        apply_update_flags, build_profile_from_create_spec, has_update_flags, profile_update_spec,
+        CreateActorSpec, CreateProfileSpec, CreateProviderSpec, ProfileCreateAzureSpec,
+        ProfileCreateLocalSpec, ProfileCreateR2Spec, ProfileCreateRemoteSpec, ProfileCreateS3Spec,
+        ProfileUpdateSpec,
     };
-    use crate::args::RuntimeBehavior;
+    use crate::args::{Cli, Command, ProfileCommand, RuntimeBehavior};
     use crate::config::{ProfileConfig, StoreConfig};
+    use clap::Parser;
     use loonfs_objectstore::{AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials};
 
     #[test]
@@ -1457,6 +1463,60 @@ mod tests {
             apply_update_flags("default", updated, &reset).expect("restore r2 profile"),
             profile
         );
+    }
+
+    #[test]
+    fn update_s3_flags_set_path_style_and_preserve_it_when_omitted() {
+        let mut profile = build_profile_from_create_spec(
+            "default",
+            CreateProfileSpec {
+                provider: CreateProviderSpec::S3(ProfileCreateS3Spec {
+                    bucket: Some("documents".to_owned()),
+                    region: Some("us-east-1".to_owned()),
+                    ..ProfileCreateS3Spec::default()
+                }),
+                actor: empty_actor(),
+            },
+            non_interactive_runtime(),
+        )
+        .expect("build ambient s3 profile");
+
+        for (flags, expected_value) in [
+            (&["--force-path-style", "true"][..], true),
+            (&[][..], true),
+            (&["--force-path-style", "false"][..], false),
+            (&[][..], false),
+        ] {
+            let cli = Cli::try_parse_from(
+                ["loonfs", "profile", "update", "s3", "default"]
+                    .into_iter()
+                    .chain(flags.iter().copied()),
+            )
+            .expect("parse s3 update flags");
+            let Command::Profile {
+                command: ProfileCommand::Update { provider },
+            } = cli.command
+            else {
+                panic!("expected profile update, got {:?}", cli.command);
+            };
+            let spec = profile_update_spec(*provider);
+            assert_eq!(has_update_flags(&spec), !flags.is_empty());
+
+            let mut expected = profile.clone();
+            let ProfileConfig::Embedded {
+                store:
+                    StoreConfig::AwsS3 {
+                        force_path_style, ..
+                    },
+                ..
+            } = &mut expected
+            else {
+                panic!("expected s3 profile, got {expected:?}");
+            };
+            *force_path_style = expected_value;
+            profile = apply_update_flags("default", profile, &spec).expect("update s3");
+            assert_eq!(profile, expected);
+        }
     }
 
     #[test]

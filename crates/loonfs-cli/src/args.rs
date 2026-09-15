@@ -525,6 +525,9 @@ pub(crate) struct ProfileUpdateS3Args {
     /// Optional static AWS session token.
     #[arg(long)]
     pub session_token: Option<String>,
+    /// Use path-style bucket addressing. Omit to keep the stored value.
+    #[arg(long)]
+    pub force_path_style: Option<bool>,
     /// Optional object-key prefix.
     #[arg(long)]
     pub key_prefix: Option<String>,
@@ -1251,12 +1254,12 @@ pub(crate) struct MaintenanceLoopArgs {
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
-    /// Namespace to maintain. Repeat the flag to select more than one.
-    #[arg(long = "namespaces", required = true, value_hint = ValueHint::Other)]
+    /// Namespaces to maintain. Comma-separated, or repeat the flag.
+    #[arg(long = "namespaces", required = true, value_delimiter = ',', value_hint = ValueHint::Other)]
     pub namespaces: Vec<String>,
-    /// Maintenance job to run. Repeat the flag to select more than one.
+    /// Maintenance jobs to run. Comma-separated, or repeat the flag.
     /// Omitting it selects all five jobs.
-    #[arg(long = "job")]
+    #[arg(long = "jobs", value_delimiter = ',')]
     pub jobs: Vec<MaintenanceJobArg>,
     /// Interval between checks for assigned namespaces, in milliseconds.
     /// Defaults to 60000. Drains ignore this setting.
@@ -1273,7 +1276,7 @@ pub(crate) struct MaintenanceLoopArgs {
     pub deadline_ms: Option<u64>,
 }
 
-/// Jobs accepted by `maintenance loop --job`.
+/// Jobs accepted by `maintenance loop --jobs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum MaintenanceJobArg {
     /// Flush the WAL tail past its threshold and fold one reorganization

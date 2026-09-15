@@ -321,12 +321,13 @@ Inspection and diagnostics
     and exits nonzero if a check fails
 
 Maintenance
-  loonfs maintenance loop --namespaces <ns> [--namespaces <ns>]... [--job <job>]... [--drain] [--max-steps <n>] [--deadline-ms <ms>] [--poll-interval-ms <ms>]
+  loonfs maintenance loop --namespaces <ns>[,<ns>...] [--namespaces <ns>]... [--jobs <job>[,<job>...]]... [--drain] [--max-steps <n>] [--deadline-ms <ms>] [--poll-interval-ms <ms>]
     Run maintenance for explicitly named namespaces in embedded mode. The
     command runs until stopped. With --drain, it finishes the current
-    assignments and exits. --job selects metadata, metadata-compaction, gc,
+    assignments and exits. --jobs selects metadata, metadata-compaction, gc,
     grep-index, or grep-gc; these map to the metadata, metadata_compaction,
     gc, grep_index, and grep_gc job ids. Omitting it selects all five.
+    --namespaces and --jobs accept comma-separated lists or repeated flags.
     --max-steps and --deadline-ms bound a drain.
     --poll-interval-ms defaults to 60000, has a minimum of 100, and is ignored by drains.
 
@@ -450,8 +451,8 @@ Update options
     loonfs profile update <provider> <name>
 
   A flag that does not apply to the profile's own store is rejected, and the
-  mode, the store kind, and --force-path-style are fixed when the profile is
-  created.
+  mode and the store kind are fixed when the profile is created. S3 updates
+  accept --force-path-style true or false; omitting it keeps the stored value.
 
   Shared:
     --key-prefix <prefix>
@@ -467,6 +468,7 @@ Update options
     --secret-access-key <secret>
     --session-token <token>
     --endpoint-url <url>
+    --force-path-style <true|false>
 
   cloudflare-r2 profile updates:
     --bucket <name>
@@ -661,7 +663,8 @@ Behavior notes
 
   Embedded profiles do not run continuous maintenance. Run
   `loonfs maintenance loop --namespaces <ns>` for ongoing maintenance,
-  or `loonfs maintenance metadata` for one pass. Live writers fold their own WAL
+  with `--jobs metadata,gc` to select jobs. Run `loonfs maintenance metadata`
+  for one pass. Live writers fold their own WAL
   tails; explicit maintenance handles inactive namespaces and the other jobs.
   Servers maintain the namespaces they use automatically by default.
 ```

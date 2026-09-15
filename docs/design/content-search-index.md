@@ -118,7 +118,7 @@ A query-only server does not register the maintenance job and rejects index muta
 
 Embedded CLI profiles run a local maintenance scheduler and settle admitted work after mutations. `loonfs maintenance index enable` captures a target sequence and performs bounded passes until the index reaches it. Later namespace writes do not extend that target. `--no-wait` returns after enablement; `--max-steps` and `--deadline-ms` bound the wait and report incomplete progress as an error. Repeating the command can advance an existing index that has fallen behind.
 
-For namespaces that may remain inactive, assign maintenance explicitly with `loonfs maintenance loop --namespaces <id>`. `--job grep-index` selects index maintenance, and `--drain` processes the current assignment and exits, subject to its step and deadline limits. A namespace without an enabled index returns `not_enabled` after the status read.
+For namespaces that may remain inactive, assign maintenance explicitly with `loonfs maintenance loop --namespaces <id>`. `--jobs grep-index` selects index maintenance, and `--drain` processes the current assignment and exits, subject to its step and deadline limits. A namespace without an enabled index returns `not_enabled` after the status read.
 
 These assignments are separate from grep garbage collection. Build and reorganization do not automatically perform the explicit GC operation described below.
 
