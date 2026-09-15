@@ -16,8 +16,9 @@ use loonfs_core::control::{
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tracing::Instrument;
 
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeControlCache {
@@ -35,7 +36,14 @@ pub(crate) struct CachedNamespaceAnchor {
     pub(crate) basis: MetadataBasis,
     locally_published: bool,
     last_control_check_ms: u64,
-    validation: Arc<tokio::sync::Mutex<()>>,
+    validation: Arc<NamespaceValidation>,
+    validated_generation: u64,
+}
+
+#[derive(Debug, Default)]
+struct NamespaceValidation {
+    lock: tokio::sync::Mutex<()>,
+    started: AtomicU64,
 }
 
 /// Snapshot of runtime cache counters.
@@ -224,15 +232,43 @@ impl ReadCore {
             .get(namespace_id)
             .map(|(head, _)| Arc::clone(&head.validation))
             .unwrap_or_default();
-        // Concurrent readers share the interval check and the resulting head.
-        let _validation = validation.lock().await;
-        let result = self
-            .refresh_namespace_head(namespace_id)
-            .await
-            .map(|mut head| {
-                head.validation = Arc::clone(&validation);
-                head
+        let observed_generation = validation.started.load(Ordering::SeqCst);
+        let _validation = validation
+            .lock
+            .lock()
+            .instrument(phase_span!(self, "namespace_validation_wait", namespace_id))
+            .await;
+        {
+            let mut cache = self.inner.control_cache();
+            let reusable = cache.namespaces.get(namespace_id).is_some_and(|(head, _)| {
+                Arc::ptr_eq(&head.validation, &validation)
+                    && head.validated_generation > observed_generation
             });
+            if reusable {
+                // A successful remote validation STARTED after this read
+                // arrived. Its observation is inside our read interval. A
+                // probe already in flight when we arrived cannot authorize
+                // this shortcut: it may have observed before an intervening
+                // write completed. Local publication is not a remote proof.
+                return Ok(cache
+                    .cached_namespace_head(namespace_id)
+                    .expect("checked cached head"));
+            }
+        }
+        // Saturate instead of wrapping: at exhaustion reads simply stop
+        // sharing, since no later generation can exceed the observed one.
+        let generation = validation
+            .started
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
+            .map(|previous| previous + 1)
+            .unwrap_or(u64::MAX);
+        let result = self.refresh_namespace_head(namespace_id).await.map(
+            |(mut head, remotely_validated)| {
+                head.validation = Arc::clone(&validation);
+                head.validated_generation = if remotely_validated { generation } else { 0 };
+                head
+            },
+        );
         match &result {
             Ok(head) => self.inner.control_cache().insert_namespace_head(
                 namespace_id,
@@ -250,7 +286,7 @@ impl ReadCore {
     async fn refresh_namespace_head(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
+    ) -> std::result::Result<(CachedNamespaceAnchor, bool), ControlObjectLoadError> {
         let now_ms = self.inner.timer.monotonic_now_ms();
         let cached = self
             .inner
@@ -259,7 +295,7 @@ impl ReadCore {
         if let Some(mut head) = cached {
             if head.locally_published {
                 head.locally_published = false;
-                return Ok(head);
+                return Ok((head, false));
             }
             let check_due = now_ms.saturating_sub(head.last_control_check_ms)
                 >= self
@@ -273,13 +309,13 @@ impl ReadCore {
                 let mut context = self.runtime_read_context(&head);
                 if loonfs_core::control::probe_namespace_wal(self.store(), &mut context).await? {
                     head.head = context.head;
-                    return Ok(head);
+                    return Ok((head, true));
                 }
             }
         }
         load_namespace_read_anchor(self.store(), namespace_id)
             .await
-            .map(|loaded| cached_anchor(loaded, now_ms))
+            .map(|loaded| (cached_anchor(loaded, now_ms), true))
     }
 
     /// Loads the read anchor, mapping an absent head to the one answer it
@@ -415,6 +451,7 @@ impl ReadCore {
             locally_published: false,
             last_control_check_ms: 0,
             validation: Arc::default(),
+            validated_generation: 0,
         });
         (self.reader_engine(namespace_id), read_context)
     }
@@ -479,6 +516,7 @@ impl ReadCore {
                 locally_published: true,
                 last_control_check_ms,
                 validation,
+                validated_generation: 0,
             },
             max_cached_namespaces,
         );
@@ -531,5 +569,6 @@ fn cached_anchor(
         locally_published: false,
         last_control_check_ms,
         validation: Arc::default(),
+        validated_generation: 0,
     }
 }
