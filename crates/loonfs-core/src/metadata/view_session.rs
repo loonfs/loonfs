@@ -299,7 +299,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             return Ok(Vec::new());
         }
 
-        let raw_scan_limit = limit.max(DIRECTORY_PAGE_RAW_SCAN_LIMIT);
         let mut stream = DirentryBindNameGroupStream::new(
             self.base
                 .tail_direntry_bind_page_candidates(parent_inode_id, start_after_name_key),
@@ -312,7 +311,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                     &mut stream,
                     parent_inode_id,
                     start_after_name_key,
-                    raw_scan_limit,
+                    // Raw scans keep their block-oriented readahead, but
+                    // visibility preloading needs only one page of names.
+                    limit,
                 )
                 .await?;
             if groups.is_empty() {
