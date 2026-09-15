@@ -1,14 +1,15 @@
 //! Discovers the WAL tip and advances cached namespace views.
 
-use super::frame::{ValidatedWalSegment, ValidatedWalTail, WalTailLoadError};
-use super::reader::{load_wal_segment, LoadedWalSegment};
+use super::frame::{ValidatedWalTail, WalTailLoadError};
+use super::reader::{load_wal_segment, WalWalk};
 use super::replay::{project_validated_wal_tail, validate_wal_segment_for_replay};
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::RuntimeReadContext;
-use loonfs_api::{ChangeSeq, NamespaceId};
+use loonfs_api::wire::wal::WalSegmentEnvelope;
+use loonfs_api::{NamespaceId, WalNo, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -22,50 +23,44 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
         return Ok(state);
     }
     let start = manifest.hinted_wal_no.max(state.last_folded_wal_no);
-    let mut number = start;
-    let mut previous_epoch = loonfs_api::WriterEpoch(0);
+    let mut previous_epoch = WriterEpoch(0);
     let mut last_record = None;
-    if number > state.last_folded_wal_no {
-        let segment = load_required_segment(store, namespace_id, number).await?;
+    if start > state.last_folded_wal_no {
+        // The hint skips the folded prefix, so the hinted segment is the
+        // first position the walk can be contiguous from.
+        let (object_key, segment) = load_required_segment(store, namespace_id, start).await?;
         let payload = segment.payload();
-        validate_segment(
-            namespace_id,
-            payload.base_head_seq,
-            &segment,
-            &manifest.object_key,
-        )?;
-        apply_segment(&mut state, &segment, &mut last_record, &manifest.object_key)?;
+        validate_wal_segment_for_replay(namespace_id, payload.base_head_seq, &segment)
+            .map_err(|error| corrupt(&object_key, error))?;
+        apply_segment(&mut state, &segment, &mut last_record, &object_key)?;
         previous_epoch = payload.writer_epoch;
     }
-    while let Ok(next) = number.successor() {
-        let loaded = load_wal_segment(store, namespace_id, next).await;
-        let Some(segment) = loaded
-            .envelope
-            .map_err(|error| wal_error(&manifest.object_key, error))?
-        else {
-            break;
-        };
-        let payload = segment.payload();
+    let mut walk = WalWalk::after(namespace_id, state.wal_no, state.seq);
+    while let Some(segment) = walk.next(store).await.map_err(wal_error)? {
+        let payload = segment.envelope().payload();
         if previous_epoch > payload.writer_epoch {
-            return Err(corrupt(&manifest.object_key, "WAL writer epoch decreases"));
+            return Err(corrupt(segment.object_key(), "WAL writer epoch decreases"));
         }
-        validate_segment(namespace_id, state.seq, &segment, &manifest.object_key)?;
-        apply_segment(&mut state, &segment, &mut last_record, &manifest.object_key)?;
+        apply_segment(
+            &mut state,
+            segment.envelope(),
+            &mut last_record,
+            segment.object_key(),
+        )?;
         previous_epoch = payload.writer_epoch;
-        number = next;
     }
     let mut prior = start;
     while last_record.is_none()
         && state.seq > manifest.envelope.payload().head_seq
         && prior > state.last_folded_wal_no
     {
-        let segment = load_required_segment(store, namespace_id, prior).await?;
+        let (_, segment) = load_required_segment(store, namespace_id, prior).await?;
         last_record = segment
             .payload()
             .records
             .last()
             .map(|record| record.commit_id.clone());
-        prior = loonfs_api::WalNo(prior.0 - 1);
+        prior = WalNo(prior.0 - 1);
     }
     if let Some(commit_id) = last_record {
         state.head_commit_id = commit_id;
@@ -73,31 +68,22 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
     Ok(state)
 }
 
-pub(super) fn validate_segment(
-    namespace_id: &NamespaceId,
-    base_seq: ChangeSeq,
-    segment: &loonfs_api::wire::wal::WalSegmentEnvelope,
-    object_key: &str,
-) -> Result<(), ControlObjectLoadError> {
-    validate_wal_segment_for_replay(namespace_id, base_seq, segment)
-        .map_err(|error| corrupt(object_key, error))
-}
-
 async fn load_required_segment<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    wal_no: loonfs_api::WalNo,
-) -> Result<loonfs_api::wire::wal::WalSegmentEnvelope, ControlObjectLoadError> {
+    wal_no: WalNo,
+) -> Result<(String, WalSegmentEnvelope), ControlObjectLoadError> {
     let loaded = load_wal_segment(store, namespace_id, wal_no).await;
-    loaded
+    let envelope = loaded
         .envelope
-        .map_err(|error| wal_error(&loaded.object_key, error))?
-        .ok_or_else(|| corrupt(&loaded.object_key, "hinted WAL object is missing"))
+        .map_err(wal_error)?
+        .ok_or_else(|| corrupt(&loaded.object_key, "hinted WAL object is missing"))?;
+    Ok((loaded.object_key, envelope))
 }
 
 pub(super) fn apply_segment(
     state: &mut NamespaceReadState,
-    segment: &loonfs_api::wire::wal::WalSegmentEnvelope,
+    segment: &WalSegmentEnvelope,
     last_record: &mut Option<loonfs_api::CommitId>,
     object_key: &str,
 ) -> Result<(), ControlObjectLoadError> {
@@ -114,7 +100,7 @@ pub(super) fn apply_segment(
     Ok(())
 }
 
-pub(super) fn wal_error(object_key: &str, error: WalTailLoadError) -> ControlObjectLoadError {
+pub(super) fn wal_error(error: WalTailLoadError) -> ControlObjectLoadError {
     match error {
         WalTailLoadError::ReadWal {
             object_key,
@@ -125,7 +111,10 @@ pub(super) fn wal_error(object_key: &str, error: WalTailLoadError) -> ControlObj
             message,
             class,
         },
-        error => corrupt(object_key, error),
+        WalTailLoadError::MissingWalObject { ref object_key }
+        | WalTailLoadError::NumberMismatch { ref object_key }
+        | WalTailLoadError::HeadSeqMismatch { ref object_key, .. }
+        | WalTailLoadError::Replay { ref object_key, .. } => corrupt(object_key, &error),
     }
 }
 
@@ -151,29 +140,27 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     };
     let mut rows = None;
     let mut last_record = None;
-    while let Ok(next) = state.wal_no.successor() {
-        let LoadedWalSegment {
-            object_key: key,
-            envelope,
-        } = load_wal_segment(store, &state.namespace_id, next).await;
-        let Some(segment) = envelope.map_err(|error| wal_error(&key, error))? else {
-            break;
-        };
-        let epoch = segment.payload().writer_epoch;
-        if epoch != state.writer_epoch {
+    let mut walk = WalWalk::after(&context.head.namespace_id, state.wal_no, state.seq);
+    while let Some(segment) = walk.next(store).await.map_err(wal_error)? {
+        if segment.envelope().payload().writer_epoch != state.writer_epoch {
             return Ok(false);
         }
-        validate_segment(&state.namespace_id, state.seq, &segment, &key)?;
         if state.wal_no == context.head.wal_no {
             rows = context.tail_cache.get(&cache_key);
         }
         let before = state.clone();
-        apply_segment(&mut state, &segment, &mut last_record, &key)?;
+        apply_segment(
+            &mut state,
+            segment.envelope(),
+            &mut last_record,
+            segment.object_key(),
+        )?;
         if let Some(current) = rows {
-            let tail = ValidatedWalTail::new(vec![ValidatedWalSegment::new(key.clone(), segment)]);
+            let object_key = segment.object_key().to_owned();
+            let tail = ValidatedWalTail::new(vec![segment]);
             let replayed =
                 project_validated_wal_tail(&before, &current, Some(state.writer_epoch), &tail)
-                    .map_err(|error| corrupt(&key, error))?;
+                    .map_err(|error| corrupt(&object_key, error))?;
             rows = Some(Arc::new(replayed.resulting_metadata_state));
         }
         if let Some(commit_id) = &last_record {

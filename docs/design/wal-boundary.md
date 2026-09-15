@@ -30,7 +30,7 @@ Numbered WAL keys, segment construction, reads, and publication are handled in `
 | `writer.rs` | Construction of data and fence segments, calculation of the next WAL number and resulting head |
 | `publish.rs` | Conditional writes and classification of successful, conflicting, and uncertain outcomes |
 | `discover.rs` | Discovery of the latest WAL state and incremental updates to cached views |
-| `reader.rs` | Loading and validation of a bounded range of segments |
+| `reader.rs` | Reading consecutive segments after a position, and loading a bounded range of them |
 | `replay.rs` | Reconstruction of metadata state from committed records |
 | `reclaim.rs` | Identification of WAL objects still required by retention |
 
