@@ -107,12 +107,11 @@ pub mod cache {
 
     pub use crate::checkpoint::metadata_maintenance_due;
     pub use crate::checkpoint::{
-        ManifestLoadError, ManifestLoadFailureClass, MetadataSegmentCache,
-        MetadataSegmentCacheConfig, MetadataSegmentCacheStats, StoredMetadataBlockCache,
-        StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
-        WalTailProjectionCache, WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
-        WalTailProjectionCacheStats, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-        DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+        MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheStats,
+        StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
+        StoredMetadataBlockKind, WalTailProjectionCache, WalTailProjectionCacheConfig,
+        WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+        DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
         load_deleted_namespace_diagnostics, load_namespace, load_namespace_diagnostics,
@@ -128,12 +127,12 @@ pub mod control {
     };
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::namespace::catalog::{
-        load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
+        load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry,
     };
     pub use crate::namespace::control::{
         load_namespace_checkpoint_record_control, load_namespace_current_manifest,
-        load_namespace_hint, load_namespace_read_anchor, load_namespace_read_state,
-        raise_namespace_hint, CurrentManifest, LoadedHint, LoadedManifest,
+        load_namespace_read_anchor, load_namespace_read_state, raise_namespace_hint,
+        CurrentManifest, LoadedHint, LoadedManifest,
     };
     pub use crate::namespace::freshness::probe_namespace_wal;
     pub use crate::namespace::state::NamespaceReadState;
@@ -166,7 +165,7 @@ pub use checkpoint::{
     MetadataFamilyGroup, MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader,
     SegmentRowIterator,
 };
-pub use commit_engine::WalFoldInput;
+pub use checkpoint::{ManifestLoadError, ManifestLoadFailureClass};
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{

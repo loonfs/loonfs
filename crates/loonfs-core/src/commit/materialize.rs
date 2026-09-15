@@ -4,10 +4,9 @@ use super::{CommitPlan, ResolvedBinding, ValidatedOp};
 use loonfs_api::wire::manifest::DeletedDirentry;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{InodeKind, RevisionNo};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MaterializedCommitDelta {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaterializedCommitDelta {
     pub semantic_op_index: u32,
     pub wal_delta: WalDelta,
 }

@@ -247,14 +247,9 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> (UploadId, ContentRef, ContentStoreId) {
-    let begin = crate::protocol::begin_upload(
-        store,
-        namespace_id,
-        loonfs_api::v0::CreateUploadBody::ServiceProxied {},
-        context,
-    )
-    .await
-    .expect("begin upload");
+    let begin = crate::protocol::begin_service_proxied_upload(store, namespace_id, context)
+        .await
+        .expect("begin upload");
     let staged =
         crate::protocol::upload_content(store, namespace_id, &begin.upload_id, b"racing upload\n")
             .await
@@ -863,14 +858,9 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     ContentStoreId,
     crate::publish::PreparedContent,
 ) {
-    let begin = crate::protocol::begin_upload(
-        store,
-        namespace_id,
-        loonfs_api::v0::CreateUploadBody::ServiceProxied {},
-        context,
-    )
-    .await
-    .expect("begin upload");
+    let begin = crate::protocol::begin_service_proxied_upload(store, namespace_id, context)
+        .await
+        .expect("begin upload");
     let staged = crate::protocol::upload_content(store, namespace_id, &begin.upload_id, bytes)
         .await
         .expect("stage upload");

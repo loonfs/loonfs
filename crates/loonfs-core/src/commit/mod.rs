@@ -16,11 +16,9 @@ mod validate;
 mod wal_payload;
 
 pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation, InodeAllocator};
-pub use self::materialize::MaterializedCommitDelta;
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
 pub(crate) use self::ops::CommitOp;
-pub use self::plan::{CommitPlan, ResolvedBinding};
-pub(crate) use self::plan::{ValidatedCommitPlan, ValidatedOp};
+pub(crate) use self::plan::{CommitPlan, ResolvedBinding, ValidatedCommitPlan, ValidatedOp};
 pub(crate) use self::publish::publish_wal;
 pub use self::publish_error::WalPublishError;
 pub(crate) use self::validate::{validate_ops, CommitNumbering, PublishValidationView};

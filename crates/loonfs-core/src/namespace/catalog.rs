@@ -3,13 +3,6 @@ use crate::namespace::control::load_current_manifest;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-use thiserror::Error;
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum NamespaceCatalogLoadError {
-    #[error("failed to load namespace manifest: {0}")]
-    LoadManifest(#[from] ControlObjectLoadError),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedNamespaceCatalogEntry {
@@ -37,18 +30,17 @@ impl VerifiedNamespaceCatalogEntry {
 pub async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<VerifiedNamespaceCatalogEntry, NamespaceCatalogLoadError> {
+) -> Result<VerifiedNamespaceCatalogEntry, ControlObjectLoadError> {
     let manifest = load_current_manifest(store, expected_namespace_id).await?;
-    Ok(VerifiedNamespaceCatalogEntry {
-        namespace_id: manifest.envelope.payload().namespace_id.clone(),
-        content_store_id: manifest.envelope.payload().content_store_id.clone(),
-    })
+    Ok(VerifiedNamespaceCatalogEntry::from_head(
+        &NamespaceReadState::from(manifest.envelope.payload()),
+    ))
 }
 
 pub(crate) async fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<ContentStoreId, NamespaceCatalogLoadError> {
+) -> Result<ContentStoreId, ControlObjectLoadError> {
     Ok(load_namespace_catalog_entry(store, expected_namespace_id)
         .await?
         .content_store_id)

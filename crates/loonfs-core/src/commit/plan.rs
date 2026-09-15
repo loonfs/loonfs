@@ -8,10 +8,9 @@ use loonfs_api::{
     ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef, DisplayName,
     InodeId, NameKey, NamespaceId, RevisionNo, WriterEpoch,
 };
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitPlan {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommitPlan {
     pub namespace_id: NamespaceId,
     pub commit_id: CommitId,
     pub actor_id: ActorId,
@@ -73,8 +72,8 @@ impl ValidatedCommitPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolvedBinding {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedBinding {
     pub parent_inode_id: InodeId,
     pub name_key: NameKey,
     pub display_name: DisplayName,
@@ -83,7 +82,7 @@ pub struct ResolvedBinding {
     pub bind_delta_index: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ValidatedOp {
     CreateDir {
         op_index: u32,

@@ -568,7 +568,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Starts a durable upload session with explicit transport options.
+    /// Starts a service-proxied upload session. Direct transports use
+    /// [`Self::begin_direct_put_upload_target`] or [`Self::begin_direct_multipart_upload_target`].
     pub async fn begin_upload(&self) -> Result<UploadSession> {
         crate::protocol::begin_service_proxied_upload(
             &self.store,

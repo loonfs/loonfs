@@ -162,8 +162,8 @@ pub mod downloads {
 pub mod control {
     pub use loonfs_core::control::{
         load_namespace_catalog_entry, load_namespace_current_manifest, load_namespace_read_state,
-        ControlObjectLoadError, CurrentManifest, LoadedControl, LoadedManifest,
-        NamespaceCatalogLoadError, NamespaceReadState, VerifiedNamespaceCatalogEntry,
+        ControlObjectLoadError, CurrentManifest, LoadedControl, LoadedManifest, NamespaceReadState,
+        VerifiedNamespaceCatalogEntry,
     };
 }
 
