@@ -50,7 +50,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             publish_manifest(
                 store,
                 namespace_id,
-                &manifest,
+                manifest,
                 Some(anchor.manifest.state.manifest.manifest_no),
                 &timer,
                 started_ms
@@ -107,7 +107,7 @@ pub(crate) async fn retire_namespace<S: ObjectStore + ?Sized>(
             publish_manifest(
                 store,
                 namespace_id,
-                &manifest,
+                manifest,
                 Some(current.state.manifest.manifest_no),
                 timer,
                 started_ms

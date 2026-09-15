@@ -7,7 +7,7 @@ async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> ManifestNo {
-    bootstrap_namespace(store, namespace_id, context, false)
+    bootstrap_namespace(store, namespace_id, context)
         .await
         .expect("bootstrap");
     for index in 0..8 {
@@ -216,7 +216,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for index in 0..4 {
@@ -282,7 +282,7 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(&store, &namespace_id, "/docs/a.txt", b"a\n", &context, None)
@@ -358,7 +358,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -461,7 +461,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -528,7 +528,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     // Three checkpoints append three delta runs whose direntry key ranges
@@ -661,7 +661,7 @@ async fn corrupt_inline_filter_fails_the_lookup() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -736,7 +736,7 @@ async fn checkpointed_direntry_segment() -> (
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for index in 0..4 {
@@ -1004,7 +1004,7 @@ async fn multi_block_direntry_segment() -> (
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for index in 0..12 {
@@ -1093,7 +1093,7 @@ async fn segment_rows(
     let index = block_fetch::load_segment_index(store, None, &memo, descriptor)
         .await
         .expect("segment index");
-    data_block_load::load_segment_data_block_span(store, None, &memo, descriptor, &index)
+    data_block_load::load_segment_data_block_span(store, None, Some(&memo), descriptor, &index)
         .await
         .expect("segment data blocks")
         .iter()
@@ -1171,7 +1171,7 @@ async fn wide_read(
     let memo = load::SessionBlockMemo::default();
     store.reset();
     let blocks =
-        data_block_load::load_segment_data_block_span(store, cache, &memo, descriptor, index)
+        data_block_load::load_segment_data_block_span(store, cache, Some(&memo), descriptor, index)
             .await
             .expect("wide read");
     (blocks, store.count(OperationClass::Read))
@@ -1193,7 +1193,7 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
     let cold = data_block_load::load_segment_data_block(
         &store,
         Some(&cold_cache),
-        &load::SessionBlockMemo::default(),
+        Some(&load::SessionBlockMemo::default()),
         &descriptor,
         entry,
     )
@@ -1225,7 +1225,7 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
     let warm = data_block_load::load_segment_data_block(
         &store,
         Some(&warm_cache),
-        &load::SessionBlockMemo::default(),
+        Some(&load::SessionBlockMemo::default()),
         &descriptor,
         entry,
     )
@@ -1313,7 +1313,7 @@ async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
     let read = data_block_load::load_segment_data_block(
         &store,
         Some(&cache),
-        &load::SessionBlockMemo::default(),
+        Some(&load::SessionBlockMemo::default()),
         &descriptor,
         entry,
     )
@@ -1354,7 +1354,7 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 

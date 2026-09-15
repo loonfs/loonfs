@@ -15,13 +15,14 @@ use super::load::load_manifest_segments;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{
     delta_run_count, runs_in_fold_order, MetadataFamilyGroup, MetadataLsmPolicy,
-    MetadataRunManifest, REORGANIZE_FAMILY_GROUPS,
+    MetadataRunManifest,
 };
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_api::wire::envelope::EncodedEnvelope;
 use loonfs_api::wire::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     RunTier,
@@ -83,22 +84,6 @@ pub enum MetadataReorganizeOutcome {
     Fenced,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataReorganizeReport {
-    pub namespace_id: NamespaceId,
-    pub outcome: MetadataReorganizeOutcome,
-}
-
-fn report(
-    namespace_id: &NamespaceId,
-    outcome: MetadataReorganizeOutcome,
-) -> MetadataReorganizeReport {
-    MetadataReorganizeReport {
-        namespace_id: namespace_id.clone(),
-        outcome,
-    }
-}
-
 /// Runs at most one reorganization step against the current manifest. Each
 /// call reloads durable state, so callers may repeat it safely across process
 /// restarts.
@@ -115,7 +100,7 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     compactor_epoch: u64,
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
-) -> Result<MetadataReorganizeReport> {
+) -> Result<MetadataReorganizeOutcome> {
     let timer = StdMonotonicTimer::default();
     reorganize_metadata_step_with_timer(
         store,
@@ -135,7 +120,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
     timer: &dyn MonotonicTimer,
-) -> Result<MetadataReorganizeReport> {
+) -> Result<MetadataReorganizeOutcome> {
     // The publication budget covers the whole unit: measurement starts
     // before any segment object is written and gates the manifest
     // put-if-absent below.
@@ -147,28 +132,18 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let floor_seq = anchor.retention_floor_seq;
     let current_manifest = anchor.manifest.state;
     if current_manifest.compactor_epoch != compactor_epoch {
-        return Ok(report(namespace_id, MetadataReorganizeOutcome::Fenced));
+        return Ok(MetadataReorganizeOutcome::Fenced);
     }
     let segments = load_manifest_segments(store, None, &current_manifest.manifest).await?;
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(previous.payload());
-    if !manifest_has_reorganization_work(
-        previous.payload(),
-        segments.scan_runs.as_ref(),
-        policy,
-        compaction_policy,
-    ) {
-        return Ok(report(
-            namespace_id,
-            MetadataReorganizeOutcome::NotNeeded { delta_runs },
-        ));
-    }
-    let Some(group) = select_family_group(previous.payload(), compaction_policy, policy) else {
-        return Ok(report(
-            namespace_id,
-            MetadataReorganizeOutcome::NotNeeded { delta_runs },
-        ));
+    let runs = segments.scan_runs.as_ref();
+    let group = reorganization_triggered(previous.payload(), runs, policy, compaction_policy)
+        .then(|| select_family_group(runs, previous.payload(), compaction_policy, policy))
+        .flatten();
+    let Some(group) = group else {
+        return Ok(MetadataReorganizeOutcome::NotNeeded { delta_runs });
     };
     let selection =
         select_reorganization_input(&segments, group, policy, floor_seq, &compaction_policy)
@@ -183,16 +158,10 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let input = match selection.plan {
         ReorganizationPlan::BoundedMerge(input) => input,
         ReorganizationPlan::StreamingCompaction(spec) => {
-            return Ok(report(
-                namespace_id,
-                MetadataReorganizeOutcome::CompactionPlanned { group, spec },
-            ))
+            return Ok(MetadataReorganizeOutcome::CompactionPlanned { group, spec })
         }
         ReorganizationPlan::Nothing => {
-            return Ok(report(
-                namespace_id,
-                MetadataReorganizeOutcome::NotNeeded { delta_runs },
-            ))
+            return Ok(MetadataReorganizeOutcome::NotNeeded { delta_runs })
         }
     };
 
@@ -240,39 +209,35 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     )?;
 
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
+    let manifest_no = manifest.envelope().payload().manifest_no;
     match publish_manifest(
         store,
         namespace_id,
-        &manifest,
+        manifest,
         Some(current_manifest.manifest.manifest_no),
         timer,
         publication_started_ms,
     )
     .await?
     {
-        ManifestPublicationOutcome::Published(_) => Ok(report(
-            namespace_id,
-            MetadataReorganizeOutcome::UnitPublished {
-                group,
-                merged_delta_rows: input.merged_delta_rows,
-                input_runs: input.runs.len(),
-                decoded_input_rows: input.decoded_rows,
-                decoded_input_bytes: input.decoded_bytes,
-                manifest_no: manifest.payload().manifest_no,
-                bottom_anchored_merge_blocked,
-            },
-        )),
+        ManifestPublicationOutcome::Published(_) => Ok(MetadataReorganizeOutcome::UnitPublished {
+            group,
+            merged_delta_rows: input.merged_delta_rows,
+            input_runs: input.runs.len(),
+            decoded_input_rows: input.decoded_rows,
+            decoded_input_bytes: input.decoded_bytes,
+            manifest_no,
+            bottom_anchored_merge_blocked,
+        }),
         ManifestPublicationOutcome::CoveredByCurrent(current)
         | ManifestPublicationOutcome::PredecessorChanged(current)
             if current.compactor_epoch != compactor_epoch =>
         {
-            Ok(report(namespace_id, MetadataReorganizeOutcome::Fenced))
+            Ok(MetadataReorganizeOutcome::Fenced)
         }
         ManifestPublicationOutcome::CoveredByCurrent(_)
         | ManifestPublicationOutcome::PredecessorChanged(_)
-        | ManifestPublicationOutcome::Installable => {
-            Ok(report(namespace_id, MetadataReorganizeOutcome::Superseded))
-        }
+        | ManifestPublicationOutcome::Installable => Ok(MetadataReorganizeOutcome::Superseded),
     }
 }
 
@@ -689,20 +654,19 @@ fn manifest_has_reorganization_work(
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> bool {
-    let groups = ranked_family_groups(payload);
-    let triggered = compaction_policy == MetadataCompactionPolicy::CompactImmediately
-        || (delta_run_count(payload) >= policy.max_delta_runs.get() && !groups.is_empty())
-        || manifest_has_partial_reorganization(runs);
-    triggered
-        && groups.into_iter().any(|group| {
-            select_merge_window(
-                &group_candidates(runs, group),
-                group,
-                compaction_policy,
-                policy.small_run_bytes.get() as u64,
-            )
-            .is_some()
-        })
+    reorganization_triggered(payload, runs, policy, compaction_policy)
+        && select_family_group(runs, payload, compaction_policy, policy).is_some()
+}
+
+fn reorganization_triggered(
+    payload: &NamespaceManifestPayload,
+    runs: &[MetadataRunManifest],
+    policy: MetadataLsmPolicy,
+    compaction_policy: MetadataCompactionPolicy,
+) -> bool {
+    compaction_policy == MetadataCompactionPolicy::CompactImmediately
+        || delta_run_count(payload) >= policy.max_delta_runs.get()
+        || manifest_has_partial_reorganization(runs)
 }
 
 fn run_has_group_rows(run: &MetadataRunManifest, group: MetadataFamilyGroup) -> bool {
@@ -729,7 +693,7 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
         let index = load_segment_index_for_reorganization(
             segments.store,
             segments.segment_cache,
-            &segments.block_memo,
+            Some(&segments.block_memo),
             descriptor,
         )
         .await?;
@@ -741,13 +705,13 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
 }
 
 pub(super) fn select_family_group(
+    runs: &[MetadataRunManifest],
     payload: &NamespaceManifestPayload,
     compaction_policy: MetadataCompactionPolicy,
     policy: MetadataLsmPolicy,
 ) -> Option<MetadataFamilyGroup> {
-    let runs = super::runs::runs_in_reorganization_order(payload);
     for group in ranked_family_groups(payload) {
-        let candidates = group_candidates(&runs, group);
+        let candidates = group_candidates(runs, group);
         if select_merge_window(
             &candidates,
             group,
@@ -764,7 +728,7 @@ pub(super) fn select_family_group(
 }
 
 pub(super) fn ranked_family_groups(payload: &NamespaceManifestPayload) -> Vec<MetadataFamilyGroup> {
-    let mut ranked = REORGANIZE_FAMILY_GROUPS
+    let mut ranked = MetadataFamilyGroup::ALL
         .into_iter()
         .map(|group| (group_delta_rows(payload, group), group))
         .filter(|(rows, _)| *rows > 0)
@@ -798,7 +762,7 @@ pub(super) fn build_replacement_manifest(
     surviving: Vec<MetadataRunRef>,
     output: ReplacementOutput,
     floor_seq: ChangeSeq,
-) -> Result<NamespaceManifestEnvelope> {
+) -> Result<EncodedEnvelope<NamespaceManifestPayload>> {
     let next_run_no = if output.segments.is_empty() {
         previous.payload().next_run_no
     } else {

@@ -142,40 +142,6 @@ fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunSh
         .collect()
 }
 
-async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    _context: &MutationContext,
-    policy: MetadataLsmPolicy,
-) -> (ManifestNo, usize) {
-    let mut published = 0usize;
-    for _ in 0..128 {
-        let report = super::reorganize_metadata_step(
-            store,
-            namespace_id,
-            0,
-            policy,
-            MetadataCompactionPolicy::default(),
-        )
-        .await
-        .expect("reorganization step");
-        match report.outcome {
-            super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
-            super::MetadataReorganizeOutcome::Superseded
-            | super::MetadataReorganizeOutcome::Fenced => {
-                panic!("single-writer test must not be superseded")
-            }
-            super::MetadataReorganizeOutcome::CompactionPlanned { .. } => {
-                panic!("test budget must admit a progress-making subset")
-            }
-            super::MetadataReorganizeOutcome::NotNeeded { .. } => {
-                return (current_manifest_no(store, namespace_id).await, published);
-            }
-        }
-    }
-    panic!("reorganization did not converge")
-}
-
 /// Deterministic timer advancing a fixed step per reading, so publication
 /// budgets are consumed by observations instead of wall time.
 #[derive(Debug)]
@@ -207,12 +173,12 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
     store.reset();
-    let unchanged = advance_retention_floor(&store, &namespace_id, &context)
+    let unchanged = advance_retention_floor(&store, &namespace_id)
         .await
         .expect("initial manifest already covers floor zero");
     assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
@@ -256,7 +222,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     .collect::<BTreeSet<_>>()
     .len();
     store.reset();
-    let advanced = advance_retention_floor(&store, &namespace_id, &context)
+    let advanced = advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
@@ -293,7 +259,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -336,7 +302,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .await
         .expect("delete referenced segment");
 
-    let error = advance_retention_floor(&store, &namespace_id, &context)
+    let error = advance_retention_floor(&store, &namespace_id)
         .await
         .expect_err("missing basis segment blocks floor advancement");
     assert!(matches!(
@@ -358,7 +324,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&setup_store, &namespace_id, &context, false)
+    bootstrap_namespace(&setup_store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -410,7 +376,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     );
     store.fail_next(1);
 
-    let error = advance_retention_floor(&store, &namespace_id, &context)
+    let error = advance_retention_floor(&store, &namespace_id)
         .await
         .expect_err("failed basis probe blocks floor advancement");
     assert_eq!(error.code(), ErrorCode::ServerError);
@@ -434,7 +400,7 @@ async fn retention_floor_advancement_preserves_writer_identity() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -455,7 +421,7 @@ async fn retention_floor_advancement_preserves_writer_identity() {
         .expect("load before retention")
         .head;
 
-    advance_retention_floor(&store, &namespace_id, &context)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance retention");
     let after = load_current_projection(&store, &namespace_id)
@@ -500,7 +466,7 @@ async fn deletion_is_terminal_and_the_next_pin_is_a_different_record() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -572,7 +538,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         expires_at_ms,
     };
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -635,7 +601,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -698,7 +664,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -754,7 +720,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let initial = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
@@ -763,10 +729,10 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     write_file_bytes(&store, &namespace_id, "/file", b"content", &context, None)
         .await
         .expect("write");
-    crate::checkpoint::flush_wal(&store, &namespace_id, &context)
+    crate::checkpoint::flush_wal(&store, &namespace_id)
         .await
         .expect("flush");
-    advance_retention_floor(&store, &namespace_id, &context)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance floor");
     let store = loonfs_test_support::stores::RecordingStore::new(
@@ -802,7 +768,7 @@ async fn checkpoint_verification_rejects_a_deleted_namespace() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -847,7 +813,7 @@ async fn checkpoint_basis_verification_store_failure_deletes_the_record() {
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let initial = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
@@ -897,7 +863,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let boundary = usize::try_from(crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS)
@@ -1071,7 +1037,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         max_delta_runs: NonZeroUsize::new(2).expect("test run limit should be nonzero"),
         ..MetadataLsmPolicy::default()
     };
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -1105,7 +1071,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         )
         .await
         .expect("reorganization step");
-        match report.outcome {
+        match report {
             super::MetadataReorganizeOutcome::UnitPublished { manifest_no, .. } => {
                 units += 1;
                 if let Some(previous) = last_manifest_no {
@@ -1153,7 +1119,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for index in 1..=5 {
@@ -1189,7 +1155,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     )
     .await
     .expect("budgeted step");
-    let super::MetadataReorganizeOutcome::CompactionPlanned { group, .. } = blocked.outcome else {
+    let super::MetadataReorganizeOutcome::CompactionPlanned { group, .. } = blocked else {
         panic!("one byte must not admit a metadata run");
     };
     assert_eq!(
@@ -1226,7 +1192,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
         decoded_input_rows,
         decoded_input_bytes,
         ..
-    } = published.outcome
+    } = published
     else {
         panic!("two oldest runs should fit the test budgets");
     };
@@ -1249,7 +1215,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     for store in [&bounded_store, &unbounded_store] {
-        bootstrap_namespace(store, &namespace_id, &context, false)
+        bootstrap_namespace(store, &namespace_id, &context)
             .await
             .expect("bootstrap");
         for index in 1..=6 {
@@ -1292,7 +1258,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     .await
     .expect("first bounded step");
     assert!(matches!(
-        first.outcome,
+        first,
         super::MetadataReorganizeOutcome::UnitPublished { input_runs: 2, .. }
     ));
     let visible_between = load_current_projection(&bounded_store, &namespace_id)
@@ -1304,8 +1270,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     ));
 
     let (bounded_manifest_no, bounded_steps_after_first) =
-        drain_reorganization_with_count(&bounded_store, &namespace_id, &context, bounded_policy)
-            .await;
+        drain_reorganization(&bounded_store, &namespace_id, bounded_policy).await;
     let unbounded_policy = MetadataLsmPolicy {
         max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
         max_input_runs_per_step: unlimited,
@@ -1313,13 +1278,13 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
         max_decoded_input_bytes_per_step: unlimited,
         ..MetadataLsmPolicy::default()
     };
-    let (unbounded_manifest_no, unbounded_steps) = drain_reorganization_with_count(
-        &unbounded_store,
-        &namespace_id,
-        &context,
-        unbounded_policy,
-    )
-    .await;
+    let (unbounded_manifest_no, unbounded_steps) =
+        drain_reorganization(&unbounded_store, &namespace_id, unbounded_policy).await;
+    assert!(
+        bounded_steps_after_first < 128,
+        "reorganization did not converge"
+    );
+    assert!(unbounded_steps < 128, "reorganization did not converge");
     assert!(bounded_steps_after_first + 1 > unbounded_steps);
 
     let bounded = load_manifest_materialization_for_inspection(
@@ -1373,7 +1338,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     .await
     .expect("below-trigger step");
     assert!(matches!(
-        below_trigger.outcome,
+        below_trigger,
         super::MetadataReorganizeOutcome::NotNeeded { delta_runs: 1 }
     ));
 }
@@ -1390,7 +1355,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
             .expect("test segment row budget should be nonzero"),
         ..MetadataLsmPolicy::default()
     };
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -1446,7 +1411,16 @@ async fn whole_run_compaction_rewrites_base_segments() {
     let compacted = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("compacted checkpoint");
-    let compacted_manifest_no = drain_reorganization(&store, &namespace_id, &context, policy).await;
+    let compacted_manifest_no = drain_reorganization(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..policy
+        },
+    )
+    .await
+    .0;
     let compacted_materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
@@ -1497,7 +1471,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
             .expect("test segment row budget should be nonzero"),
         ..MetadataLsmPolicy::default()
     };
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for index in 0..6 {
@@ -1543,7 +1517,16 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
     let _compacted = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("compacted checkpoint");
-    let compacted_manifest_no = drain_reorganization(&store, &namespace_id, &context, policy).await;
+    let compacted_manifest_no = drain_reorganization(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..policy
+        },
+    )
+    .await
+    .0;
     let compacted_materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
@@ -1584,7 +1567,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
         max_delta_runs: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for index in 1..=3 {
@@ -1604,9 +1587,9 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     .expect("first unit");
     let super::MetadataReorganizeOutcome::UnitPublished {
         group: first_group, ..
-    } = first_report.outcome
+    } = first_report
     else {
-        panic!("expected a published unit, got {:?}", first_report.outcome);
+        panic!("expected a published unit, got {:?}", first_report);
     };
 
     // A checkpoint lands in between, adding a fresh delta run.
@@ -1625,7 +1608,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
         )
         .await
         .expect("resumed unit");
-        match report.outcome {
+        match report {
             super::MetadataReorganizeOutcome::UnitPublished { group, .. } => {
                 folded_groups.push(group);
             }
@@ -1664,17 +1647,18 @@ async fn a_namespace_retains_from_birth_before_retention_advances() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
     let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("head");
-    let floor =
-        crate::namespace::read_anchor::resolve_retention_floor_seq(&store, &head.namespace_id)
-            .await
-            .expect("missing floor defaults");
+    let floor = load_current_manifest(&store, &head.namespace_id)
+        .await
+        .expect("missing floor defaults")
+        .state
+        .retention_floor_seq;
     assert_eq!(floor, ChangeSeq(0));
 }
 
@@ -1687,7 +1671,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         writer_id: loonfs_api::WriterId::parse("budget-test").expect("writer id"),
         now_ms: 1_000,
     };
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     put_file_bytes(
@@ -1709,7 +1693,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     // Every reading advances 20 minutes against the 15-minute budget: the
     // pre-CAS check observes the publication as over budget.
     let overrun = SteppingTimer::new(20 * 60 * 1000);
-    let error = super::flush::flush_wal_with_timer(&store, &namespace_id, &context, &overrun)
+    let error = super::flush::flush_wal_with_timer(&store, &namespace_id, &overrun)
         .await
         .expect_err("over-budget publication must abort");
     assert!(
@@ -1727,7 +1711,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     );
 
     // The in-budget retry publishes normally over fresh outputs.
-    let advanced = super::flush::flush_wal(&store, &namespace_id, &context)
+    let advanced = super::flush::flush_wal(&store, &namespace_id)
         .await
         .expect("in-budget retry succeeds");
     assert_eq!(advanced.outcome, loonfs_api::FlushWalOutcome::Published);
@@ -1743,7 +1727,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         writer_id: loonfs_api::WriterId::parse("budget-test").expect("writer id"),
         now_ms: 1_000,
     };
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     put_file_bytes(
@@ -1757,7 +1741,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     )
     .await
     .expect("seed file");
-    super::flush::flush_wal(&store, &namespace_id, &context)
+    super::flush::flush_wal(&store, &namespace_id)
         .await
         .expect("publish a delta run to fold");
     let manifest_before = load_current_manifest(&store, &namespace_id)
@@ -1801,7 +1785,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     .await
     .expect("in-budget retry folds the unit");
     assert!(matches!(
-        report.outcome,
+        report,
         super::MetadataReorganizeOutcome::UnitPublished { .. }
     ));
 }
@@ -1822,6 +1806,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
             .await
             .expect("load manifest segments");
     let group = super::reorganize::select_family_group(
+        segments.scan_runs.as_ref(),
         segments.manifest().payload(),
         MetadataCompactionPolicy::default(),
         policy,
@@ -1893,7 +1878,7 @@ async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -1904,8 +1889,10 @@ async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
     drain_reorganization(
         &store,
         &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await;
     for index in 5..=8 {
@@ -1980,7 +1967,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -2020,8 +2007,10 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     drain_reorganization(
         &store,
         &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await;
 
@@ -2046,7 +2035,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint the extra file");
-    advance_retention_floor(&store, &namespace_id, &context)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance the floor");
     assert!(
@@ -2156,7 +2145,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -2164,8 +2153,10 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     drain_reorganization(
         &store,
         &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await;
     // One wide delta run, then a narrow one above it.
@@ -2246,11 +2237,11 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     .expect("reorganization step");
     assert!(
         matches!(
-            report.outcome,
+            report,
             super::MetadataReorganizeOutcome::CompactionPlanned { .. }
         ),
         "expected a planned compaction, got {:?}",
-        report.outcome
+        report
     );
     assert_eq!(
         current_manifest_no(&store, &namespace_id).await,
@@ -2265,7 +2256,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     // Small segments so the folded base is many segments rather than one, and
@@ -2309,7 +2300,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("checkpoint the deletions");
-        advance_retention_floor(&store, &namespace_id, &context)
+        advance_retention_floor(&store, &namespace_id)
             .await
             .expect("advance the floor past the deletions");
         let visible = visible_namespace(&store, &namespace_id).await;
@@ -2343,7 +2334,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 visible,
                 "cycle {cycle}: a step changed what a read answers"
             );
-            match report.outcome {
+            match report {
                 super::MetadataReorganizeOutcome::NotNeeded { .. } => {
                     settled = true;
                     break;
@@ -2396,7 +2387,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("retained-pin").expect("namespace");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(&store, &namespace_id, "/first", b"first", &context, None)
@@ -2412,7 +2403,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     write_file_bytes(&store, &namespace_id, "/second", b"second", &context, None)
         .await
         .expect("second write");
-    crate::checkpoint::flush_wal(&store, &namespace_id, &context)
+    crate::checkpoint::flush_wal(&store, &namespace_id)
         .await
         .expect("flush");
     let current_segments = super::compact_a_family_group(&store, &namespace_id, &context).await;
@@ -2421,7 +2412,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .cloned()
         .collect();
     assert!(!only_pinned.is_empty());
-    let floor = advance_retention_floor(&store, &namespace_id, &context)
+    let floor = advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance floor");
     assert!(floor.retention_floor_seq > pin.captured_seq);

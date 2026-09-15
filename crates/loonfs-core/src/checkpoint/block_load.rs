@@ -194,7 +194,7 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
             blocks: load_segment_data_block_span(
                 store,
                 segment_cache,
-                memo,
+                Some(memo),
                 descriptor,
                 &index[start..extended_end],
             )

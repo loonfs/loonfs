@@ -103,7 +103,6 @@ pub(crate) async fn delete_snapshot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-    _context: &MutationContext,
 ) -> Result<DeleteSnapshotResponse> {
     delete_owned_checkpoint(
         store,

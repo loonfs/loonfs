@@ -50,7 +50,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("publish-fold").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     crate::test_support::append_wal_segments(&store, &namespace_id, 3, &context)
@@ -92,7 +92,6 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         None,
         &namespace_id,
         Some(input),
-        &context,
         &crate::time::StdMonotonicTimer::default(),
     )
     .await
@@ -138,7 +137,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -197,7 +196,7 @@ async fn manifest_round_trip_preserves_direntry_unbind_rows() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -321,7 +320,7 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -358,7 +357,7 @@ async fn current_reads_report_a_missing_hint_as_absent_after_retention_advances(
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -374,7 +373,7 @@ async fn current_reads_report_a_missing_hint_as_absent_after_retention_advances(
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("materialize the committed state");
-    advance_retention_floor(&store, &namespace_id, &context)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance retention");
 
@@ -396,7 +395,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    bootstrap_namespace(&inner, &namespace_id, &context, false)
+    bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -436,7 +435,7 @@ async fn checkpoint_publication_preserves_writer_identity() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     acquire_writer_epoch(&store, &namespace_id, &context)
@@ -465,7 +464,7 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -529,7 +528,7 @@ async fn manifest_materialization_uses_written_segments() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -548,10 +547,13 @@ async fn manifest_materialization_uses_written_segments() {
     let reorganized_manifest_no = drain_reorganization(
         &store,
         &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
     )
-    .await;
+    .await
+    .0;
 
     let materialized = load_manifest_materialization_for_inspection(
         &store,
@@ -590,7 +592,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -701,7 +703,7 @@ async fn manifest_delta_run_missing_segment_fails_load() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -763,7 +765,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
@@ -868,7 +870,7 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for index in 0..6 {
@@ -930,7 +932,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -962,10 +964,11 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     )
     .await
     .expect("build manifest");
+    let manifest_checksum = manifest_without_checkpoint.payload_checksum().to_owned();
     publish_manifest(
         &store,
         &namespace_id,
-        &manifest_without_checkpoint,
+        encode_manifest(manifest_without_checkpoint.into_payload()).expect("encode manifest"),
         Some(materialization.manifest.manifest.manifest_no),
     )
     .await
@@ -985,10 +988,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         .expect("record exists")
         .state;
     assert_eq!(record.manifest_no, covering_manifest_no);
-    assert_eq!(
-        record.manifest_payload_checksum,
-        manifest_without_checkpoint.payload_checksum()
-    );
+    assert_eq!(record.manifest_payload_checksum, manifest_checksum);
 }
 
 #[tokio::test]
@@ -997,7 +997,7 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(

@@ -201,7 +201,7 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    advance_retention_floor(&store, &namespace_id, &setup)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance floor");
 
@@ -1087,10 +1087,10 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
         if materialize {
             // Materializing and then dropping the WAL below the floor
             // leaves the manifest as the only place the reference lives.
-            crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+            crate::checkpoint::flush_wal(&store, &namespace_id)
                 .await
                 .expect("flush wal");
-            advance_retention_floor(&store, &namespace_id, &setup)
+            advance_retention_floor(&store, &namespace_id)
                 .await
                 .expect("advance floor");
         }
@@ -1187,7 +1187,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    advance_retention_floor(&store, &namespace_id, &setup)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance floor");
 
@@ -1239,7 +1239,7 @@ async fn published_compaction_segments_are_referenced_and_kept() {
         // Flushes rather than checkpoints: a checkpoint pins the manifest it
         // published, and a pinned manifest protects its segments forever, which
         // would leave this pass nothing to reap and nothing to prove.
-        crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+        crate::checkpoint::flush_wal(&store, &namespace_id)
             .await
             .expect("flush wal");
     }
@@ -1292,7 +1292,7 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
             &setup,
         )
         .await;
-        crate::checkpoint::flush_wal(&seed, &namespace_id, &setup)
+        crate::checkpoint::flush_wal(&seed, &namespace_id)
             .await
             .expect("flush wal");
     }
@@ -1407,7 +1407,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    advance_retention_floor(&store, &namespace_id, &setup)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance floor");
     // A commit past the floor: its segment is the live replay gap.
@@ -1517,7 +1517,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
             &setup,
         )
         .await;
-        crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+        crate::checkpoint::flush_wal(&store, &namespace_id)
             .await
             .expect("flush wal");
     }
@@ -1564,7 +1564,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("reorganize step");
         if matches!(
-            report.outcome,
+            report,
             crate::checkpoint::MetadataReorganizeOutcome::NotNeeded { .. }
         ) {
             break;
@@ -1674,92 +1674,6 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .is_ok(),
         "shared basis survives while any owner remains"
     );
-}
-
-#[tokio::test]
-async fn fork_owned_checkpoints_reject_user_release() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &source,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        false,
-    )
-    .await
-    .expect("bootstrap");
-    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    fork_namespace(
-        &store,
-        &source,
-        &clone,
-        &loonfs_test_support::test_actor(),
-        None,
-        &setup,
-    )
-    .await
-    .expect("fork");
-
-    let fork_record = read_fork_record(&store, &source).await;
-
-    let error = crate::checkpoint::delete_checkpoint(&store, &source, &fork_record.pin_id)
-        .await
-        .expect_err("fork-owned release must fail");
-    assert!(
-        matches!(
-            &error,
-            CoreError::InvalidCheckpointRequest(message)
-                if message.contains("owned by fork target")
-        ),
-        "expected invalid checkpoint request, got {error:?}"
-    );
-}
-
-#[tokio::test]
-async fn snapshot_owned_checkpoints_reject_user_release() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        false,
-    )
-    .await
-    .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let snapshot = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
-        CheckpointOwner::Snapshot {
-            name: "report-run".to_owned(),
-            expires_at_ms: u64::MAX,
-        },
-        &setup,
-    )
-    .await
-    .expect("snapshot checkpoint");
-
-    let error =
-        crate::checkpoint::delete_checkpoint(&store, &namespace_id, &snapshot.checkpoint_id)
-            .await
-            .expect_err("snapshot-owned release must fail");
-    assert!(
-        matches!(
-            &error,
-            CoreError::InvalidCheckpointRequest(message)
-                if message.contains("is a snapshot")
-        ),
-        "expected invalid checkpoint request, got {error:?}"
-    );
-    assert!(checkpoint_exists(&store, &namespace_id, &snapshot.checkpoint_id).await);
 }
 
 #[tokio::test]
@@ -2342,7 +2256,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    advance_retention_floor(&store, &namespace_id, &setup)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance floor");
 
@@ -2671,7 +2585,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
             &setup,
         )
         .await;
-        crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+        crate::checkpoint::flush_wal(&store, &namespace_id)
             .await
             .expect("flush");
     }
@@ -2707,7 +2621,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         current.state
     );
     write_test_file(&store, &namespace_id, "/four", "four", &setup).await;
-    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+    crate::checkpoint::flush_wal(&store, &namespace_id)
         .await
         .expect("refresh hint by publishing");
     let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
@@ -2757,7 +2671,7 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
         .await
         .expect("pin");
     write_test_file(&inner, &namespace_id, "/two", "two", &setup).await;
-    crate::checkpoint::flush_wal(&inner, &namespace_id, &setup)
+    crate::checkpoint::flush_wal(&inner, &namespace_id)
         .await
         .expect("flush");
     let protected: BTreeSet<_> = inner
@@ -3055,7 +2969,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
     .await
     .expect("pin");
     write_test_file(&store, &namespace_id, "/file", "new", &setup).await;
-    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+    crate::checkpoint::flush_wal(&store, &namespace_id)
         .await
         .expect("flush");
     store

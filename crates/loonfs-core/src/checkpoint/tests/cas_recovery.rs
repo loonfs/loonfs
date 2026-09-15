@@ -32,6 +32,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let mut payload = current.envelope.payload().clone();
         payload.manifest_no = predecessor.successor().expect("next number");
         let first = encode_manifest(payload.clone()).expect("candidate");
+        let first_manifest_no = first.envelope().payload().manifest_no;
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
                 crate::commit_engine::WriterSessionState::Acquired(
@@ -96,10 +97,10 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             OperationClass::Put,
         );
         blocked.block_next();
-        let losing = publish_manifest(&blocked, &namespace_id, &second, Some(predecessor));
+        let losing = publish_manifest(&blocked, &namespace_id, second.clone(), Some(predecessor));
         let winning = async {
             blocked.wait_until_blocked().await;
-            let result = publish_manifest(&store, &namespace_id, &first, Some(predecessor)).await;
+            let result = publish_manifest(&store, &namespace_id, first, Some(predecessor)).await;
             blocked.release();
             result
         };
@@ -124,14 +125,14 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                 losing,
                 ManifestPublicationOutcome::PredecessorChanged(_)
             ));
-            let mut retry = second.into_payload();
+            let mut retry = second.into_parts().0.into_payload();
             retry.manifest_no = retry.manifest_no.successor().expect("next number");
             assert!(matches!(
                 publish_manifest(
                     &store,
                     &namespace_id,
-                    &encode_manifest(retry).expect("retry"),
-                    Some(first.payload().manifest_no)
+                    encode_manifest(retry).expect("retry"),
+                    Some(first_manifest_no)
                 )
                 .await
                 .expect("publish retry"),
@@ -167,7 +168,7 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
     write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
         .await
         .expect("write");
-    flush::flush_wal(&store, &namespace_id, &context)
+    flush::flush_wal(&store, &namespace_id)
         .await
         .expect("flush");
     let expected = load_current_manifest(&store, &namespace_id)
@@ -235,14 +236,14 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
         .await
         .expect("write");
-    flush::flush_wal(&store, &namespace_id, &context)
+    flush::flush_wal(&store, &namespace_id)
         .await
         .expect("flush");
     let before = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current");
     store.reset();
-    let advanced = advance_retention_floor(&store, &namespace_id, &context)
+    let advanced = advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance");
     assert_eq!(store.counts().create_if_absent_puts, 1);
@@ -263,7 +264,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
             .expect("writer floor");
     assert_eq!(writer_floor, expected.head_seq);
     store.reset();
-    advance_retention_floor(&store, &namespace_id, &context)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("already advanced");
     assert_eq!(store.counts().puts, 0);
@@ -291,6 +292,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         let mut payload = current.envelope.into_payload();
         payload.manifest_no = payload.manifest_no.successor().expect("next");
         let candidate = encode_manifest(payload).expect("candidate");
+        let candidate_manifest_no = candidate.envelope().payload().manifest_no;
         let keys = if fail_hint {
             KeyPredicate::hint(&namespace_id)
         } else {
@@ -308,7 +310,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
             publish_manifest(
                 &store,
                 &namespace_id,
-                &candidate,
+                candidate,
                 Some(current.state.manifest.manifest_no)
             )
             .await
@@ -322,7 +324,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
                 .state
                 .manifest
                 .manifest_no,
-            candidate.payload().manifest_no
+            candidate_manifest_no
         );
     }
 }
@@ -509,7 +511,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     create_checkpoint(&inner, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    advance_retention_floor(&inner, &namespace_id, &context)
+    advance_retention_floor(&inner, &namespace_id)
         .await
         .expect("advance retention");
 

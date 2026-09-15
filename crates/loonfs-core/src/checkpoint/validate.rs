@@ -3,7 +3,7 @@
 
 use super::error::ManifestLoadError;
 use super::row::manifest_row_commit_seq;
-use super::runs::{runs_in_materialization_order, MetadataRunManifest, REORGANIZE_FAMILY_GROUPS};
+use super::runs::{runs_in_materialization_order, MetadataFamilyGroup, MetadataRunManifest};
 use super::scan::ordered_manifest_segments;
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
@@ -332,7 +332,7 @@ fn validate_one_base_run_per_family_group(
     object_key: &str,
     runs: &[MetadataRunManifest],
 ) -> Result<(), ManifestLoadError> {
-    for group in REORGANIZE_FAMILY_GROUPS {
+    for group in MetadataFamilyGroup::ALL {
         let mut base_runs = runs.iter().filter(|run| {
             run.tier == RunTier::Base
                 && run.segments.iter().any(|family_segments| {

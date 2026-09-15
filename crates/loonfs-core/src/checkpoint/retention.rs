@@ -4,7 +4,6 @@ use super::error::ManifestLoadError;
 use super::flush::next_manifest_no_after;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::MAX_MAINTENANCE_SEGMENT_IO;
-use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::read_anchor::load_read_anchor;
@@ -52,7 +51,6 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    _context: &MutationContext,
 ) -> Result<AdvanceRetentionResponse> {
     let floor = retry_while_contended(
         || async {
@@ -82,7 +80,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             match publish_manifest(
                 store,
                 namespace_id,
-                &manifest,
+                manifest,
                 Some(current.state.manifest.manifest_no),
                 &timer,
                 started_ms,

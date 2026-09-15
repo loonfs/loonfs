@@ -1,7 +1,6 @@
 //! Streams rows from multiple runs in row-key order with bounded buffering.
 
 use super::block_fetch::load_segment_index_for_reorganization;
-use super::block_load::SessionBlockMemo;
 use super::data_block_load::load_segment_data_block_span;
 use super::streaming_compaction::manifest_load_failure;
 use super::validate::validate_manifest_row_seq_range;
@@ -260,14 +259,9 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
         &self,
         segment: MetadataSegmentInput,
     ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
-        load_segment_index_for_reorganization(
-            self.store,
-            None,
-            &SessionBlockMemo::default(),
-            &segment.descriptor,
-        )
-        .await
-        .map_err(manifest_load_failure)
+        load_segment_index_for_reorganization(self.store, None, None, &segment.descriptor)
+            .await
+            .map_err(manifest_load_failure)
     }
 
     async fn load_data_blocks(
@@ -275,15 +269,10 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
         segment: MetadataSegmentInput,
         entries: Vec<SegmentIndexEntry>,
     ) -> Result<Vec<Arc<DecodedDataBlock>>> {
-        let blocks = load_segment_data_block_span(
-            self.store,
-            None,
-            &SessionBlockMemo::default(),
-            &segment.descriptor,
-            &entries,
-        )
-        .await
-        .map_err(manifest_load_failure)?;
+        let blocks =
+            load_segment_data_block_span(self.store, None, None, &segment.descriptor, &entries)
+                .await
+                .map_err(manifest_load_failure)?;
         validate_manifest_row_seq_range(
             &metadata_segment_object_key(&segment.descriptor),
             blocks.iter().flat_map(|block| block.rows.iter()),

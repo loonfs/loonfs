@@ -199,7 +199,7 @@ fn base_segment_of_family(
 /// the smallest shape a second base-tier run can be added to.
 async fn seed_folded_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &NamespaceId) {
     let context = test_context();
-    bootstrap_namespace(store, namespace_id, &context, false)
+    bootstrap_namespace(store, namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -215,7 +215,15 @@ async fn seed_folded_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &
     create_checkpoint(store, namespace_id, &context)
         .await
         .expect("checkpoint the seed");
-    drain_reorganization(store, namespace_id, &context, MetadataLsmPolicy::default()).await;
+    drain_reorganization(
+        store,
+        namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
     write_file_bytes(
         store,
         namespace_id,
@@ -250,7 +258,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for (path, body) in [
@@ -270,7 +278,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let advanced = advance_retention_floor(&store, &namespace_id, &context)
+    let advanced = advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance floor");
     let floor = advanced.retention_floor_seq;
@@ -300,10 +308,13 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     let reorganized_manifest_no = drain_reorganization(
         &store,
         &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
     )
-    .await;
+    .await
+    .0;
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
@@ -502,7 +513,7 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -558,7 +569,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -626,7 +637,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -723,7 +734,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -780,7 +791,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -865,7 +876,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for index in 1..=6 {
@@ -975,7 +986,7 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -1180,7 +1191,7 @@ async fn manifest_rejects_duplicate_revision_rows() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(

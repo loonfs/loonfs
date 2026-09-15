@@ -96,7 +96,7 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
         .expect_err("missing namespace");
     assert_eq!(missing_error.code(), ErrorCode::NamespaceNotFound);
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     begin_upload(&store, &namespace_id, &context)
@@ -124,7 +124,7 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let first =
@@ -154,7 +154,7 @@ async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&setup_store, &namespace_id, &context, false)
+    bootstrap_namespace(&setup_store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     put_file_bytes(
@@ -198,7 +198,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let begin = begin_upload(&store, &namespace_id, &context)
@@ -261,7 +261,7 @@ mod streamed_content {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(&store, &namespace_id, &context, false)
+        bootstrap_namespace(&store, &namespace_id, &context)
             .await
             .expect("bootstrap");
         let bytes = payload();
@@ -300,7 +300,7 @@ mod streamed_content {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(&store, &namespace_id, &context, false)
+        bootstrap_namespace(&store, &namespace_id, &context)
             .await
             .expect("bootstrap");
         let bytes = payload();
@@ -361,7 +361,7 @@ mod streamed_content {
         ));
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(blocking.as_ref(), &namespace_id, &context, false)
+        bootstrap_namespace(blocking.as_ref(), &namespace_id, &context)
             .await
             .expect("bootstrap");
         let begin = begin_upload(blocking.as_ref(), &namespace_id, &context)
@@ -502,7 +502,7 @@ mod direct_multipart {
         context: &MutationContext,
     ) -> Session {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(store, &namespace_id, context, false)
+        bootstrap_namespace(store, &namespace_id, context)
             .await
             .expect("bootstrap");
         let payload = PART.repeat(3);
@@ -1090,7 +1090,7 @@ mod direct_multipart {
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        bootstrap_namespace(&store, &namespace_id, &context, false)
+        bootstrap_namespace(&store, &namespace_id, &context)
             .await
             .expect("bootstrap");
 

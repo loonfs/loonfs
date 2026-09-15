@@ -74,11 +74,9 @@ pub(super) async fn delete_owned_checkpoint<S: ObjectStore + ?Sized>(
             CheckpointOwnerKind::Snapshot => CoreError::SnapshotNotFound {
                 snapshot_id: checkpoint_id.clone(),
             },
-            CheckpointOwnerKind::User | CheckpointOwnerKind::Fork => {
-                CoreError::CheckpointNotFound {
-                    checkpoint_id: checkpoint_id.clone(),
-                }
-            }
+            _ => CoreError::CheckpointNotFound {
+                checkpoint_id: checkpoint_id.clone(),
+            },
         });
     };
     ensure_owner_is(checkpoint_id, &loaded.state.owner, expected)?;

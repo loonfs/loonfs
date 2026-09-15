@@ -909,13 +909,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         checkpoint_id: &CheckpointId,
     ) -> Result<DeleteSnapshotResponse> {
-        crate::checkpoint::delete_snapshot(
-            &self.store,
-            &self.namespace_id,
-            checkpoint_id,
-            &self.mutation_context()?,
-        )
-        .await
+        self.mutation_context()?;
+        crate::checkpoint::delete_snapshot(&self.store, &self.namespace_id, checkpoint_id).await
     }
 
     /// Flushes the visible WAL tail and publishes a
@@ -926,8 +921,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// checkpoint record. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
     pub async fn flush_wal(&self) -> Result<FlushWalResponse> {
-        crate::checkpoint::flush_wal(&self.store, &self.namespace_id, &self.mutation_context()?)
-            .await
+        self.mutation_context()?;
+        crate::checkpoint::flush_wal(&self.store, &self.namespace_id).await
     }
 
     /// Claims the namespace compactor epoch for a maintenance runtime.
@@ -940,7 +935,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         compaction_policy: crate::checkpoint::MetadataCompactionPolicy,
         compactor_epoch: u64,
-    ) -> Result<crate::checkpoint::MetadataReorganizeReport> {
+    ) -> Result<crate::checkpoint::MetadataReorganizeOutcome> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
             &self.namespace_id,
@@ -971,12 +966,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
     /// Advances the retention floor when a verified checkpoint makes it safe.
     pub async fn advance_retention_floor(&self) -> Result<AdvanceRetentionResponse> {
-        crate::checkpoint::advance_retention_floor(
-            &self.store,
-            &self.namespace_id,
-            &self.mutation_context()?,
-        )
-        .await
+        self.mutation_context()?;
+        crate::checkpoint::advance_retention_floor(&self.store, &self.namespace_id).await
     }
 
     /// Builds the mutation context for this engine's writer identity.

@@ -258,7 +258,7 @@ pub struct NamespaceCommitEnginePublishResult {
 pub struct WalFoldInput {
     pub head: NamespaceReadState,
     pub basis: MetadataBasis,
-    pub retention_floor_seq: Option<ChangeSeq>,
+    pub retention_floor_seq: ChangeSeq,
     pub tail_state: Arc<MetadataState>,
     pub wal_tail_segments: u64,
 }

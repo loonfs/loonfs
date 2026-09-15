@@ -6,6 +6,7 @@ use crate::namespace::control::{load_current_manifest_if_present, raise_hint, Cu
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::ManifestRef;
+use loonfs_api::wire::envelope::EncodedEnvelope;
 use loonfs_api::wire::manifest::{
     encode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
@@ -23,14 +24,12 @@ pub(crate) enum ManifestPublicationOutcome {
 
 pub(crate) fn encode_manifest(
     payload: NamespaceManifestPayload,
-) -> Result<NamespaceManifestEnvelope> {
+) -> Result<EncodedEnvelope<NamespaceManifestPayload>> {
     let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
-    encode_namespace_manifest_json(payload)
-        .map(|encoded| encoded.into_parts().0)
-        .map_err(|error| CoreError::Codec {
-            object_key,
-            message: error.to_string(),
-        })
+    encode_namespace_manifest_json(payload).map_err(|error| CoreError::Codec {
+        object_key,
+        message: error.to_string(),
+    })
 }
 
 #[tracing::instrument(
@@ -43,22 +42,22 @@ pub(crate) fn encode_manifest(
 pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest: &NamespaceManifestEnvelope,
+    manifest: EncodedEnvelope<NamespaceManifestPayload>,
     expected_predecessor: Option<ManifestNo>,
     timer: &dyn MonotonicTimer,
     started_ms: u64,
 ) -> Result<ManifestPublicationOutcome> {
     let candidate = CurrentManifest {
-        manifest: manifest_ref_for(namespace_id, manifest),
-        retention_floor_seq: manifest.payload().retention_floor_seq,
-        last_folded_wal_no: manifest.payload().last_folded_wal_no,
-        compactor_epoch: manifest.payload().compactor_epoch,
+        manifest: manifest_ref_for(namespace_id, manifest.envelope()),
+        retention_floor_seq: manifest.envelope().payload().retention_floor_seq,
+        last_folded_wal_no: manifest.envelope().payload().last_folded_wal_no,
+        compactor_epoch: manifest.envelope().payload().compactor_epoch,
     };
     let current = load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     if let Some(current) = &current {
-        if manifest.payload().writer_epoch < current.envelope.payload().writer_epoch {
+        if manifest.envelope().payload().writer_epoch < current.envelope.payload().writer_epoch {
             return Ok(ManifestPublicationOutcome::PredecessorChanged(
                 current.state.clone(),
             ));
@@ -72,7 +71,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         .as_ref()
         .map_or(ManifestNo(0), |loaded| loaded.state.manifest.manifest_no);
     if predecessor_no.successor().ok() != Some(candidate.manifest.manifest_no)
-        || manifest.payload().namespace_id != *namespace_id
+        || manifest.envelope().payload().namespace_id != *namespace_id
         || current.as_ref().is_some_and(|loaded| {
             candidate.manifest.manifest_head_seq < loaded.state.manifest.manifest_head_seq
                 || candidate.retention_floor_seq < loaded.state.retention_floor_seq
@@ -84,10 +83,11 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         current
             .envelope
             .payload()
-            .ensure_successor_identity(manifest.payload())
+            .ensure_successor_identity(manifest.envelope().payload())
             .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
-        if manifest.payload().last_folded_wal_no < current.envelope.payload().last_folded_wal_no
-            || manifest.payload().retention_floor_wal_no
+        if manifest.envelope().payload().last_folded_wal_no
+            < current.envelope.payload().last_folded_wal_no
+            || manifest.envelope().payload().retention_floor_wal_no
                 < current.envelope.payload().retention_floor_wal_no
         {
             return Err(CoreError::NamespaceCorrupt(
@@ -96,14 +96,11 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         }
     }
     let object_key = metadata_manifest_object(namespace_id, &candidate.manifest.manifest_no);
-    let (_, bytes) = encode_namespace_manifest_json(manifest.payload().clone())
-        .map_err(|error| CoreError::Codec {
-            object_key: object_key.clone(),
-            message: error.to_string(),
-        })?
-        .into_parts();
     super::flush::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
-    let outcome = match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
+    let outcome = match store
+        .put_if_absent(&object_key, Bytes::from(manifest.into_bytes()))
+        .await
+    {
         Ok(_) => ManifestPublicationOutcome::Published(candidate.clone()),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
             classify_current_manifest(store, namespace_id, &candidate, expected_predecessor).await?
@@ -138,7 +135,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             store,
             namespace_id,
             candidate.manifest.manifest_no,
-            manifest.payload().last_folded_wal_no,
+            candidate.last_folded_wal_no,
             None,
         )
         .await

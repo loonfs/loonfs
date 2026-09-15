@@ -10,7 +10,6 @@ use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit::WalPublishError;
 use crate::commit_engine::WalFoldInput;
-use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
@@ -19,7 +18,7 @@ use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::load_current_manifest;
-use crate::namespace::read_anchor::{load_read_anchor, resolve_retention_floor_seq};
+use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{
@@ -65,30 +64,26 @@ pub(super) enum TryFlushWal {
 pub(crate) async fn flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
 ) -> Result<FlushWalResponse> {
     let timer = StdMonotonicTimer::default();
-    flush_wal_with_timer(store, namespace_id, context, &timer).await
+    flush_wal_with_timer(store, namespace_id, &timer).await
 }
 
 pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<FlushWalResponse> {
     retry_while_contended(
         || async move {
-            Result::Ok(
-                match try_flush_wal(store, namespace_id, context, timer).await? {
-                    TryFlushWal::Settled(basis) => {
-                        CasAttempt::Settled(flush_wal_response(namespace_id, *basis))
-                    }
-                    TryFlushWal::RaceLost => {
-                        CasAttempt::Contended(CoreError::WalPublish(WalPublishError::StaleHead))
-                    }
-                },
-            )
+            Result::Ok(match try_flush_wal(store, namespace_id, timer).await? {
+                TryFlushWal::Settled(basis) => {
+                    CasAttempt::Settled(flush_wal_response(namespace_id, *basis))
+                }
+                TryFlushWal::RaceLost => {
+                    CasAttempt::Contended(CoreError::WalPublish(WalPublishError::StaleHead))
+                }
+            })
         },
         |_, ()| async { Ok(WriteEvidence::Unknown) },
     )
@@ -104,7 +99,6 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
 pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<TryFlushWal> {
     let projection = load_manifest_projection(store, namespace_id)
@@ -113,14 +107,13 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
             phase = "scan_namespace_state"
         ))
         .await?;
-    try_flush_wal_projection(store, namespace_id, &projection, context, timer).await
+    try_flush_wal_projection(store, namespace_id, &projection, timer).await
 }
 
 async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &ManifestProjection<'_, S>,
-    _context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<TryFlushWal> {
     let publication_started_ms = timer.monotonic_now_ms();
@@ -151,10 +144,12 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     let manifest = encode_manifest(manifest)?;
     // Written segments may outlive the GC grace if publication exceeds its budget.
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
+    let candidate_ref = manifest_ref_for(namespace_id, manifest.envelope());
+    let candidate_head_commit_id = manifest.envelope().payload().head_commit_id.clone();
     let (outcome, current) = match publish_manifest(
         store,
         namespace_id,
-        &manifest,
+        manifest,
         Some(basis_manifest_no),
         timer,
         publication_started_ms,
@@ -173,8 +168,8 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         }
         ManifestPublicationOutcome::Installable => return Ok(TryFlushWal::RaceLost),
     };
-    let head_commit_id = if current.manifest == manifest_ref_for(namespace_id, &manifest) {
-        manifest.payload().head_commit_id.clone()
+    let head_commit_id = if current.manifest == candidate_ref {
+        candidate_head_commit_id
     } else {
         let winner = super::load::load_namespace_manifest_envelope(
             store,
@@ -205,11 +200,10 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     input: Option<WalFoldInput>,
-    context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<FlushWalResponse> {
     let Some(input) = input else {
-        return flush_wal(store, namespace_id, context).await;
+        return flush_wal(store, namespace_id).await;
     };
     let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
     let current_manifest = load_current_manifest(store, namespace_id)
@@ -217,27 +211,19 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     let current_basis = MetadataBasis(current_manifest.state.manifest);
     if current_basis != input.basis {
-        return flush_wal(store, namespace_id, context).await;
+        return flush_wal(store, namespace_id).await;
     }
-    let floor_seq = match input.retention_floor_seq {
-        Some(floor_seq) => floor_seq,
-        None => resolve_retention_floor_seq(store, &input.head.namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?,
-    };
     let manifest_projection = ManifestProjection {
         head: input.head,
         basis: input.basis,
-        floor_seq,
+        floor_seq: input.retention_floor_seq,
         manifest_segments: loaded_basis.segments,
         tail_state: input.tail_state,
     };
     // A fold publishes metadata without updating the namespace head.
-    match try_flush_wal_projection(store, namespace_id, &manifest_projection, context, timer)
-        .await?
-    {
+    match try_flush_wal_projection(store, namespace_id, &manifest_projection, timer).await? {
         TryFlushWal::Settled(basis) => Ok(flush_wal_response(namespace_id, *basis)),
-        TryFlushWal::RaceLost => flush_wal(store, namespace_id, context).await,
+        TryFlushWal::RaceLost => flush_wal(store, namespace_id).await,
     }
 }
 

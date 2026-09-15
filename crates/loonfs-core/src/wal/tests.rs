@@ -90,10 +90,10 @@ async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence(
     acquire_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");
-    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+    crate::checkpoint::flush_wal(&store, &namespace_id)
         .await
         .expect("fold fence");
-    crate::checkpoint::advance_retention_floor(&store, &namespace_id, &setup)
+    crate::checkpoint::advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance WAL floor at sequence zero");
     acquire_writer_epoch(&store, &namespace_id, &setup)
@@ -123,14 +123,14 @@ async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence(
         .await
         .expect("second")
         .is_some());
-    crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+    crate::checkpoint::flush_wal(&store, &namespace_id)
         .await
         .expect("fold second fence");
     let retained = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
         .await
         .expect("floor retains");
     assert_eq!(retained.deleted.wal_segments, 0);
-    crate::checkpoint::advance_retention_floor(&store, &namespace_id, &setup)
+    crate::checkpoint::advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance second floor");
     let reclaimed = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
@@ -169,15 +169,13 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
         .await
         .expect("first fence");
     store.block_next();
-    let (flushed, acquired) = futures::join!(
-        crate::checkpoint::flush_wal(&store, &namespace_id, &setup),
-        async {
+    let (flushed, acquired) =
+        futures::join!(crate::checkpoint::flush_wal(&store, &namespace_id), async {
             store.wait_until_blocked().await;
             let acquired = acquire_writer_epoch(store.inner(), &namespace_id, &setup).await;
             store.release();
             acquired
-        }
-    );
+        });
     acquired.expect("second fence");
     flushed.expect("flush retries");
     let current = load_current_manifest(&store, &namespace_id)
