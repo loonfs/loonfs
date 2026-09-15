@@ -1,11 +1,13 @@
-//! Commits a batch by creating its next numbered WAL object.
+//! Publishes immutable numbered WAL segments.
+// This module is the physical WAL boundary.
+#![allow(clippy::disallowed_methods)]
 
-use super::WalPublishError;
-use crate::wal::PreparedWalSegment;
+use super::PreparedWalSegment;
+use crate::commit::WalPublishError;
 use bytes::Bytes;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
-pub(crate) async fn publish_wal<S: ObjectStore + ?Sized>(
+pub(crate) async fn publish_segment<S: ObjectStore + ?Sized>(
     store: &S,
     wal: &PreparedWalSegment,
 ) -> crate::error::Result<()> {

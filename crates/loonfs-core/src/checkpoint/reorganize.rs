@@ -254,7 +254,7 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
     let head = &anchor.read_state;
-    let wal_tail_segments = head.wal_no.0 - head.last_folded_wal_no.0;
+    let wal_tail_segments = head.unfolded_wal_segments();
     if wal_tail_segments >= max_wal_tail_segments {
         return Ok(true);
     }

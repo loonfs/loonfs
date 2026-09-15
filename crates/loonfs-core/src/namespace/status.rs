@@ -106,7 +106,7 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceStorageDiagnostics> {
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
-    let wal_tail_segments = loaded.head.wal_no.0 - loaded.head.last_folded_wal_no.0;
+    let wal_tail_segments = loaded.head.unfolded_wal_segments();
     Ok(NamespaceStorageDiagnostics::new(
         loaded.head,
         loaded.retention_floor_seq,

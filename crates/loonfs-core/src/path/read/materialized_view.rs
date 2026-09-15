@@ -7,6 +7,7 @@ use crate::checkpoint::{
     load_basis_metadata_segments, MetadataSegmentCache, VerifiedMetadataSegments,
     WalTailProjectionCache, WalTailProjectionCacheKey,
 };
+#[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::{
@@ -20,9 +21,7 @@ use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
-use crate::wal::{
-    ensure_replayed_head_matches, load_wal_tail, project_validated_wal_tail, WalTailLoadRequest,
-};
+use crate::wal::load_replayed_wal_tail;
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::{
     AbsolutePath, AttributeInclusion, AttributesProjection, ChangeSeq, ContentRef, ContentStoreId,
@@ -201,35 +200,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 });
             }
         }
-        let wal_tail = load_wal_tail(
+        let replayed = load_replayed_wal_tail(
             store,
-            WalTailLoadRequest {
-                namespace_id,
-                base_seq: manifest_head.seq,
-                head_seq: head.seq,
-                base_wal_no: head.last_folded_wal_no,
-                tip_wal_no: head.wal_no,
-                writer_epoch: head.writer_epoch,
-            },
+            &manifest_head,
+            &head,
+            &loaded_basis.base_state,
+            Some(head.writer_epoch),
         )
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::WalTailLoad(error))
-        })?;
-        let replayed = {
-            let _span =
-                tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
-            project_validated_wal_tail(
-                &manifest_head,
-                &loaded_basis.base_state,
-                Some(head.writer_epoch),
-                &wal_tail,
-            )
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
-            })
-        }?;
-        ensure_replayed_head_matches(&head, &replayed.resulting_head)?;
+        .map_err(CoreError::MetadataProjection)?;
         let wal_tail_rows = Arc::new(replayed.resulting_metadata_state);
         if let Some(cache) = load_context.tail_cache {
             cache.insert(cache_key, Arc::clone(&wal_tail_rows));
@@ -997,6 +976,8 @@ mod tests {
         (temp_dir, store, namespace_id)
     }
 
+    // This corruption test deliberately rewrites physical WAL bytes.
+    #[allow(clippy::disallowed_methods)]
     #[tokio::test]
     async fn a_tail_that_replays_to_another_head_is_refused_by_reads_and_publishes_alike() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;

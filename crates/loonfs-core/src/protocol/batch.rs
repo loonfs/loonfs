@@ -8,9 +8,7 @@ use super::candidates::{
 };
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
-use crate::commit::{
-    materialize_commit, publish_wal, wal_payload_from_materialized_commit, WalPublishError,
-};
+use crate::commit::{materialize_commit, wal_payload_from_materialized_commit, WalPublishError};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -18,7 +16,7 @@ use crate::limits::WAL_PUBLISH_BUDGET_MS;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::time::MonotonicTimer;
-use crate::wal::prepare_wal_segment;
+use crate::wal::{prepare_wal_segment, publish_segment, resulting_head_after};
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
@@ -192,16 +190,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if accepted_commits.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(finish_batch_outcomes(&slots));
     }
-    let wal_no = match view.head.wal_no.successor() {
-        Ok(number) => number,
-        Err(error) => {
-            return abort_batch(slots, &CoreError::Internal(format!("WAL number {error}")))
-        }
-    };
     let wal = match prepare_wal_segment(
         namespace_id.clone(),
         view.acquired_writer.writer_epoch,
-        wal_no,
+        &view.head,
         &accepted_commits,
     ) {
         Ok(wal) => wal,
@@ -216,13 +208,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         .last()
         .expect("accepted commits should be nonempty")
         .commit;
-    let resulting_head = NamespaceReadState {
-        seq: wal.envelope().payload().end_seq,
-        head_commit_id: last_plan.commit_id.clone(),
-        next_inode_id: wal.envelope().payload().next_inode_id,
-        wal_no,
-        ..view.head.clone()
-    };
+    let resulting_head = resulting_head_after(&wal, &view.head, last_plan.commit_id.clone());
     let now_ms = clock.timer.monotonic_now_ms();
     let elapsed_ms = now_ms.saturating_sub(clock.attempt_started_ms);
     let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
@@ -253,7 +239,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             }),
         );
     }
-    if let Err(error) = publish_wal(store, &wal).await {
+    if let Err(error) = publish_segment(store, &wal).await {
         return abort_batch(slots, &error);
     }
 

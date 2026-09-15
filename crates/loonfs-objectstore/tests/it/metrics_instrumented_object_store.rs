@@ -1,3 +1,5 @@
+// The WAL key is built here to exercise the metrics wrapper, not the log.
+#![allow(clippy::disallowed_methods)]
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};

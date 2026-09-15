@@ -1,4 +1,5 @@
 disallowed-methods = [
+  { path = "loonfs_objectstore::keys::wal_segment", reason = "physical WAL objects are handled in loonfs_core::wal", allow-invalid = true },
   { path = "std::time::SystemTime::now", reason = "use an explicit clock boundary so core behavior stays deterministic" },
   { path = "std::time::Instant::now", reason = "use an explicit timing boundary so protocol code does not grow ambient time dependencies" },
   { path = "std::thread::sleep", reason = "use deterministic coordination in tests and async timers in async code" },

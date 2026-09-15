@@ -21,9 +21,7 @@ use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use crate::wal::{
-    ensure_replayed_head_matches, load_wal_tail, project_validated_wal_tail, WalTailLoadRequest,
-};
+use crate::wal::load_replayed_wal_tail;
 use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_api::{
@@ -296,34 +294,15 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     let loaded_basis = load_basis_metadata_segments(store, None, &basis).await?;
     let manifest_head = loaded_basis.replay_head(&head);
     let manifest_segments = loaded_basis.segments;
-    let wal_tail = load_wal_tail(
+    let replayed = load_replayed_wal_tail(
         store,
-        WalTailLoadRequest {
-            namespace_id,
-            base_seq: manifest_head.seq,
-            head_seq: head.seq,
-            base_wal_no: head.last_folded_wal_no,
-            tip_wal_no: head.wal_no,
-            writer_epoch: head.writer_epoch,
-        },
+        &manifest_head,
+        &head,
+        &loaded_basis.base_state,
+        Some(head.writer_epoch),
     )
     .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::WalTailLoad(error))
-    })?;
-    let replayed = {
-        let _span =
-            tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
-        project_validated_wal_tail(
-            &manifest_head,
-            &loaded_basis.base_state,
-            Some(head.writer_epoch),
-            &wal_tail,
-        )
-        .map_err(MetadataProjectionLoadError::WalReplay)
-        .map_err(CoreError::MetadataProjection)?
-    };
-    ensure_replayed_head_matches(&head, &replayed.resulting_head)?;
+    .map_err(CoreError::MetadataProjection)?;
     Ok(ManifestProjection {
         head,
         basis,

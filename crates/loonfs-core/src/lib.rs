@@ -135,9 +135,9 @@ pub mod control {
         load_namespace_read_anchor, load_namespace_read_state, raise_namespace_hint,
         CurrentManifest, LoadedHint, LoadedManifest,
     };
-    pub use crate::namespace::freshness::probe_namespace_wal;
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::MetadataBasis;
+    pub use crate::wal::probe_namespace_wal;
 }
 
 /// Commit publication types for runtime integrations. Consumed by `loonfs`'s

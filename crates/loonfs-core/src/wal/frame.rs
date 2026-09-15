@@ -30,6 +30,8 @@ pub enum WalSegmentError {
     Codec(String),
     #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
+    #[error("WAL number cannot exceed 9007199254740991")]
+    NumberOverflow,
     #[error("WAL segment base head seq mismatch: expected `{expected}`, actual `{actual}`")]
     BaseHeadSeqMismatch {
         expected: ChangeSeq,
@@ -47,7 +49,7 @@ pub enum WalSegmentError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WalTailLoadRequest<'a> {
+pub(super) struct WalTailLoadRequest<'a> {
     pub(crate) namespace_id: &'a NamespaceId,
     pub(crate) base_seq: ChangeSeq,
     pub(crate) head_seq: ChangeSeq,
