@@ -49,7 +49,7 @@ pub enum WalSegmentError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WalTailLoadRequest<'a> {
+pub(super) struct WalTailLoadRequest<'a> {
     pub(crate) namespace_id: &'a NamespaceId,
     pub(crate) base_seq: ChangeSeq,
     pub(crate) head_seq: ChangeSeq,

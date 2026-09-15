@@ -32,9 +32,13 @@ The callers speak in heads. The batch planner hands the segment builder
 the head it extends and receives the segment and the resulting head. The
 epoch acquisition asks for a fence at the current head. A reader asks for
 the tail between a base head and the current head and receives the
-replayed state. Garbage collection asks which number retention requires
-and whether a key is above it. No caller names a WAL number to load or
-publish.
+replayed state. The change feed asks for the retained tail through the
+head and receives the segments. Garbage collection asks which number
+retention requires and whether a key is above it. Outside `wal/`, no code
+builds a numbered key, encodes or decodes a segment, or names a WAL
+number to load or publish. WAL numbers still appear outside the module
+as fields of the head and the manifest, and in the arithmetic listed
+under what stays outside.
 
 The workspace's `clippy.toml` enforces the boundary the way it enforces
 the clock boundary: the numbered-key builder is a disallowed method, and
