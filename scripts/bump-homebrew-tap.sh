@@ -7,9 +7,9 @@ usage() {
 Usage: bump-homebrew-tap.sh --version <version> [--tap-dir <path>]
 
 Updates the LoonFS formula in the Homebrew tap for an existing GitHub
-release. The script downloads SHA256SUMS and updates the two macOS URLs,
-their checksums. It does not commit or
-push the changes.
+release. The script downloads SHA256SUMS and updates the two macOS URLs
+and their checksums. It supports macOS-only formulas.
+It does not commit or push the changes.
 
 The tap checkout defaults to ../homebrew-tap next to this repository.
 EOF

@@ -7,8 +7,8 @@ usage() {
 Usage: prepare-release.sh --version <version>
 
 Updates the workspace version references, regenerates the OpenAPI
-documents, and refreshes Cargo.lock. It then runs the version and
-OpenAPI checks used by the release workflow:
+documents, and refreshes Cargo.lock. Its workspace and chart version checks
+match the release workflow; its OpenAPI specification test matches CI:
 
   Cargo.toml               workspace.package.version and the pinned
                            versions of the published workspace crates
@@ -104,7 +104,7 @@ mv "$chart.tmp" "$chart"
 cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- \
     "$spec" "$proxy_spec"
 
-# Run the version checks used by the release workflow.
+# The workspace and chart versions must match the release tag.
 resolved=$(cargo pkgid -p loonfs-cli | sed 's/.*#//')
 [ "$resolved" = "$version" ] \
     || die "cargo resolves loonfs-cli to $resolved, expected $version"

@@ -25,8 +25,8 @@ scripts/prepare-release.sh --version X.Y.Z
 
 The script updates `workspace.package.version` and the pinned registry
 versions in `Cargo.toml`, updates the server chart, regenerates the OpenAPI
-specification, and refreshes `Cargo.lock`. It then runs the version checks and
-OpenAPI specification test that the release workflow runs for the tag.
+specification, and refreshes `Cargo.lock`. Its workspace and chart version checks
+match the release workflow; its OpenAPI specification test matches CI.
 
 Commit the result as `chore(release): prepare vX.Y.Z` and open a PR. Merge it
 only after the normal PR checks pass.

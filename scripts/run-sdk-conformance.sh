@@ -71,6 +71,7 @@ export LOONFS_PROXY_DOCUMENT LOONFS_SERVER_DOCUMENT
 case "$LANGUAGE" in
     go)
         (cd "$REPO_ROOT/sdk/conformance/go" && go test ./...)
+        (cd "$REPO_ROOT/sdk/generated/go" && go test ./...)
         ;;
     python)
         PYTHON_HARNESS="$REPO_ROOT/sdk/conformance/python"

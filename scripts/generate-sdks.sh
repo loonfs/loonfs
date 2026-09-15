@@ -10,8 +10,8 @@
 
 set -eu
 
-FERN_CLI_VERSION="5.98.3"
 cd "$(dirname "$0")/../sdk"
+FERN_CLI_VERSION=$(python3 -c 'import json; print(json.load(open("fern/fern.config.json"))["version"])')
 
 npx --yes "fern-api@${FERN_CLI_VERSION}" check
 
@@ -41,6 +41,7 @@ prune_generated() {
             maintenance/checkpoints maintenance/diagnostics maintenance/grep_index maintenance/runs; do
             rm "generated/go/${name}_test.go"
         done
+        rm -r generated/go/*/*_test generated/go/*/*/*_test
         # The generator's retrier test pins the generator's retry policy; the
         # overlay replaces it with one that pins the Retry-After contract.
         rm generated/go/internal/retrier_test.go

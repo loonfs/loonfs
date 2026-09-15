@@ -40,7 +40,13 @@ def count_token(root: Path, suffix: str, token: str) -> int:
     )
 
 
-def verify_retry_predicate(path: Path, predicate: str, status_checks: tuple[str, ...]) -> None:
+def verify_retry_predicate(
+    path: Path,
+    predicate: str,
+    status_checks: tuple[str, ...],
+    retry_budget: str,
+    expected_budgets: int = 1,
+) -> None:
     source = path.read_text()
     actual = source.count(predicate)
     if actual != 1:
@@ -48,6 +54,8 @@ def verify_retry_predicate(path: Path, predicate: str, status_checks: tuple[str,
     for status_check in status_checks:
         if status_check in source:
             raise SystemExit(f"{path} still retries on status alone: {status_check}")
+    if len(re.findall(retry_budget, source, re.MULTILINE)) != expected_budgets:
+        raise SystemExit(f"{path} does not default to exactly three HTTP attempts")
 
 
 def verify_group(group: str) -> None:
@@ -65,6 +73,7 @@ def verify_group(group: str) -> None:
             generated / "core" / "fetcher" / "requestWithRetries.ts",
             'response.headers.has("retry-after")',
             ("statusCode >= 500", "[408, 429]"),
+            r"^\s*const DEFAULT_MAX_RETRIES\s*=\s*2;\s*$",
         )
         # Only generated endpoint clients correspond to operations in the spec.
         # Handwritten transfer helpers independently disable payload retries.
@@ -78,6 +87,8 @@ def verify_group(group: str) -> None:
             generated / "core" / "http_client.py",
             'return "retry-after" in response.headers',
             ("status_code >= 500",),
+            r"^\s*base_max_retries:\s*int\s*=\s*2,\s*$",
+            expected_budgets=2,
         )
         actual = count_token(generated, ".py", "_request_options_with_retries_disabled:")
         expected_call_sites = expected * 2  # Synchronous and asynchronous clients.
@@ -91,6 +102,7 @@ def verify_group(group: str) -> None:
             retrier_path,
             'response.Header.Get("Retry-After") != ""',
             ("http.StatusInternalServerError",),
+            r"^\s*defaultRetryAttempts\s*=\s*3\s*$",
         )
         actual = sum(
             len(re.findall(r"\bDisableRetries:[ \t]+true,", path.read_text()))
@@ -99,9 +111,6 @@ def verify_group(group: str) -> None:
         )
         if actual != expected:
             raise SystemExit(f"go disables retries at {actual} call sites; expected {expected}")
-        retrier = retrier_path.read_text()
-        if not re.search(r"^\s*defaultRetryAttempts\s*=\s*3\s*$", retrier, re.MULTILINE):
-            raise SystemExit("go does not default to exactly three HTTP attempts")
 
     print(f"Verified generated retry safety for {group}")
 

@@ -67,10 +67,11 @@ summary() {
       echo "  $check"
     done
   fi
-  case " ${CHECKS[*]-} " in
-    *"FAIL  "*) echo "FAIL: the deployment did not pass every check" ;;
-    *) echo "PASS: the deployment serves, probes, and round-trips a file" ;;
-  esac
+  if [[ "$1" -eq 0 && " ${CHECKS[*]-} " != *"FAIL  "* ]]; then
+    echo "PASS: the deployment serves, probes, and round-trips a file"
+  else
+    echo "FAIL: the deployment did not pass every check"
+  fi
 }
 
 cleanup() {
@@ -87,7 +88,7 @@ cleanup() {
   if [[ -n "$WORK_DIR" ]]; then
     rm -rf "$WORK_DIR"
   fi
-  summary
+  summary "$status"
   return "$status"
 }
 

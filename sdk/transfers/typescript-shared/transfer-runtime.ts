@@ -1,8 +1,8 @@
 /** Shared by server and browser transfers; no Node-only APIs or whole-file hashing. */
-export type ChecksumAlgorithm = "sha256" | "crc32c" | "crc64nvme";
-export const TRANSFER_CHUNK_BYTES = 64 * 1024;
+type ChecksumAlgorithm = "sha256" | "crc32c" | "crc64nvme";
+const TRANSFER_CHUNK_BYTES = 64 * 1024;
 
-export interface TransferRequestOptions {
+interface TransferRequestOptions {
     timeoutInSeconds?: number;
     abortSignal?: AbortSignal;
 }
