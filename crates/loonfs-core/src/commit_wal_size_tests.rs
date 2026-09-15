@@ -1,16 +1,14 @@
 //! WAL size estimates checked against planned requests at the API limits.
 
 use super::*;
-use crate::commit::{materialize_commit, wal_payload_from_materialized_commit};
+use crate::commit::materialize_commit;
 use crate::commit_engine::CommitCandidate;
 use crate::limits::{MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
-use loonfs_api::wire::wal::{
-    encode_wal_segment_envelope_zstd, WalDelta, WalSegmentPayload, MAX_WAL_SEGMENT_BYTES,
-    WAL_SEGMENT_OVERHEAD_BYTES,
-};
+use crate::wal::prepare_wal_segment;
+use loonfs_api::wire::wal::{WalDelta, MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{
     ActorId, AttributeKey, AttributeRevisionNo, Attributes, ChangeSeq, Checksum, CommitId,
     ContentId, ContentRef, ContentRefKind, ContentStoreId, DestinationBehavior,
@@ -49,6 +47,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         loonfs_test_support::test_actor(),
     );
     head.seq = ChangeSeq(MAX_PUBLIC_INTEGER - 1);
+    head.wal_no = WalNo(MAX_PUBLIC_INTEGER - 1);
     head.next_inode_id = InodeId(MAX_PUBLIC_INTEGER - 1_000_000);
     head.writer_epoch = WriterEpoch(MAX_PUBLIC_INTEGER);
     let content_ref = ContentRef {
@@ -161,18 +160,12 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             .expect("plan");
         let next_inode_id = session.commit_candidate(allocation).expect("allocation");
         let materialized = materialize_commit(plan.finish(next_inode_id), u64::MAX);
-        let record = wal_payload_from_materialized_commit(&materialized);
-        drop(materialized);
-        let encoded = encode_wal_segment_envelope_zstd(WalSegmentPayload {
-            namespace_id: namespace_id.clone(),
-            wal_no: WalNo(MAX_PUBLIC_INTEGER),
-            next_inode_id,
-            writer_epoch: head.writer_epoch,
-            base_head_seq: head.seq,
-            start_seq: record.seq,
-            end_seq: record.seq,
-            records: vec![record],
-        })
+        let encoded = prepare_wal_segment(
+            namespace_id.clone(),
+            head.writer_epoch,
+            &head,
+            &[materialized],
+        )
         .expect("encode");
         assert!(
             encoded.document_len() <= estimate,

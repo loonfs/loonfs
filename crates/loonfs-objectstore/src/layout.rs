@@ -172,6 +172,9 @@ fn parsed<'a>(
 
 #[cfg(test)]
 mod tests {
+    // The key builder is tested where it is defined.
+    #![allow(clippy::disallowed_methods)]
+
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
         checkpoint_record, content_blob, content_owner_prefix, content_store, hint,

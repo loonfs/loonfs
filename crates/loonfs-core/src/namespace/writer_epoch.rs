@@ -6,8 +6,8 @@ use crate::error::{CoreError, Result, WriterFence};
 use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::wal::{prepare_fence_segment, publish_segment};
 use loonfs_api::wire::control::{AcquiredWriter, WriterBlock};
-use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentPayload};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
 
@@ -58,26 +58,10 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         let head = load_namespace_read_state(store, namespace_id).await?;
         ensure_writer_not_fenced(&head, &acquired)?;
         super::control::ensure_namespace_live(&head)?;
-        let wal_no = head
-            .wal_no
-            .successor()
-            .map_err(|error| CoreError::Internal(format!("WAL number {error}")))?;
-        let fence = encode_wal_segment_envelope_zstd(WalSegmentPayload {
-            namespace_id: namespace_id.clone(),
-            wal_no,
-            writer_epoch: acquired.writer_epoch,
-            next_inode_id: head.next_inode_id,
-            base_head_seq: head.seq,
-            start_seq: head.seq,
-            end_seq: head.seq,
-            records: Vec::new(),
-        })
-        .map_err(|error| CoreError::Codec {
-            object_key: loonfs_objectstore::keys::wal_segment(namespace_id, &wal_no),
-            message: error.to_string(),
-        })?;
+        let fence = prepare_fence_segment(namespace_id.clone(), acquired.writer_epoch, &head)
+            .map_err(|error| CoreError::Internal(format!("WAL fence build failed: {error}")))?;
         crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
-        match crate::commit::publish_wal(store, &fence).await {
+        match publish_segment(store, &fence).await {
             Ok(()) => return Ok(acquired),
             Err(CoreError::WalPublish(crate::commit::WalPublishError::StaleHead)) => {}
             Err(error) => return Err(error),

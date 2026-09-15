@@ -25,6 +25,13 @@ pub struct NamespaceReadState {
     pub retention_floor_wal_no: WalNo,
 }
 
+impl NamespaceReadState {
+    /// Counts the WAL segments after the last folded position, including fences.
+    pub fn unfolded_wal_segments(&self) -> u64 {
+        self.wal_no.0 - self.last_folded_wal_no.0
+    }
+}
+
 impl From<&NamespaceManifestPayload> for NamespaceReadState {
     fn from(manifest: &NamespaceManifestPayload) -> Self {
         Self {

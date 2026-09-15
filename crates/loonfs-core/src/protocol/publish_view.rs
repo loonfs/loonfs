@@ -2,8 +2,7 @@
 
 use crate::checkpoint::VerifiedMetadataSegments;
 use crate::checkpoint::{load_basis_metadata_segments, LoadedMetadataBasis, MetadataSegmentCache};
-use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
@@ -11,9 +10,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
-use crate::wal::{
-    ensure_replayed_head_matches, load_wal_tail, project_validated_wal_tail, WalTailLoadRequest,
-};
+use crate::wal::load_replayed_wal_tail;
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
@@ -211,32 +208,16 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<PublishTailProjection> {
     let manifest_head = loaded_basis.replay_head(head);
-    let wal_tail = load_wal_tail(
+    let replayed = load_replayed_wal_tail(
         store,
-        WalTailLoadRequest {
-            namespace_id: &key.namespace_id,
-            base_seq: manifest_head.seq,
-            head_seq: head.seq,
-            base_wal_no: head.last_folded_wal_no,
-            tip_wal_no: head.wal_no,
-            writer_epoch: head.writer_epoch,
-        },
-    )
-    .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::WalTailLoad(error))
-    })?;
-    let replayed = project_validated_wal_tail(
         &manifest_head,
+        head,
         &loaded_basis.base_state,
         Some(head.writer_epoch),
-        &wal_tail,
     )
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
-    })?;
-    ensure_replayed_head_matches(head, &replayed.resulting_head)?;
-    let wal_tail_segments = u64::try_from(wal_tail.segments().len()).unwrap_or(u64::MAX);
+    .await
+    .map_err(CoreError::MetadataProjection)?;
+    let wal_tail_segments = head.unfolded_wal_segments();
     let projection = PublishTailProjection {
         key,
         head: head.clone(),

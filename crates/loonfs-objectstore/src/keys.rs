@@ -23,11 +23,6 @@ pub fn wal_segment_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/wal/")
 }
 
-/// Parses a WAL object number from a durable key.
-pub fn wal_no_from_key(key: &str) -> Option<WalNo> {
-    crate::layout::wal_no_of(key)
-}
-
 /// Builds the starting point for numbered manifest discovery.
 pub fn hint(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/hint.json")
@@ -109,10 +104,13 @@ pub fn content_blob(
 
 #[cfg(test)]
 mod tests {
+    // The key builder is tested where it is defined.
+    #![allow(clippy::disallowed_methods)]
+
     use super::{
         checkpoint_record, content_blob, content_store, hint, metadata_manifest_object,
-        metadata_segment, metadata_segment_object_key, upload_session, wal_no_from_key,
-        wal_segment, wal_segment_prefix,
+        metadata_segment, metadata_segment_object_key, upload_session, wal_segment,
+        wal_segment_prefix,
     };
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
@@ -247,15 +245,10 @@ mod tests {
     }
 
     #[test]
-    fn listing_prefixes_match_their_keys_and_wal_numbers_parse_back() {
+    fn listing_prefixes_match_their_keys() {
         assert_eq!(wal_segment_prefix(&namespace_id()), "namespaces/ns-1/wal/");
         assert!(wal_segment(&namespace_id(), &WalNo(42))
             .starts_with(&wal_segment_prefix(&namespace_id())));
-        assert_eq!(
-            wal_no_from_key(&wal_segment(&namespace_id(), &WalNo(42))),
-            Some(WalNo(42))
-        );
-        assert_eq!(wal_no_from_key("namespaces/ns-1/wal/random.tmp"), None);
     }
 
     fn segment_descriptor() -> MetadataSegmentRef {

@@ -1,20 +1,24 @@
-//! The write-ahead log: segment framing, tail loading, replay onto
-//! metadata state, and segment preparation for publication.
+//! The write-ahead log: numbered segment objects, their framing, publication,
+//! discovery, loading, replay, and reclamation.
 
+mod discover;
 mod frame;
+mod publish;
 mod reader;
+mod reclaim;
 mod replay;
 mod writer;
 
-pub(crate) use self::frame::{
+pub(crate) use self::discover::discover_tip;
+pub use self::discover::probe_namespace_wal;
+use self::frame::{
     DecodedWalRecord, PreparedWalSegment, ReplayedWalTail, ValidatedWalSegment, ValidatedWalTail,
-    WalSegmentError, WalTailLoadError, WalTailLoadRequest,
 };
-pub(crate) use self::reader::{load_wal_segment, load_wal_tail};
-pub(crate) use self::replay::{
-    ensure_replayed_head_matches, project_validated_wal_tail, validate_wal_segment_for_replay,
-};
-pub(crate) use self::writer::prepare_wal_segment;
+pub(crate) use self::frame::{WalSegmentError, WalTailLoadError, WalTailLoadRequest};
+pub(crate) use self::publish::publish_segment;
+pub(crate) use self::reader::{load_replayed_wal_tail, load_wal_tail};
+pub(crate) use self::reclaim::{object_is_required, required_from};
+pub(crate) use self::writer::{prepare_fence_segment, prepare_wal_segment, resulting_head_after};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

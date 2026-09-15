@@ -1,15 +1,16 @@
-//! Manifests and runs protected by the complete pin key listing.
+//! Manifests, runs, and WAL objects protected by namespace retention and pins.
 
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::checkpoint::record::checkpoint_key_ids;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
+use crate::wal::{object_is_required, required_from};
 use futures::StreamExt;
 use loonfs_api::{ContentStoreId, ManifestNo, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key,
 };
-use loonfs_objectstore::{keys::wal_no_from_key, ObjectStore};
+use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
 pub(super) struct LiveSet {
@@ -18,7 +19,7 @@ pub(super) struct LiveSet {
     pub(super) reclaim_after_ms: Option<u64>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
-    folded_and_floor_wal_no: Option<WalNo>,
+    required_wal_from: Option<WalNo>,
 }
 
 impl LiveSet {
@@ -34,8 +35,7 @@ impl LiveSet {
             reclaim_after_ms: head.status.reclaim_after_ms(),
             discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no,
             objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
-            folded_and_floor_wal_no: (!head.status.is_deleted())
-                .then_some(head.last_folded_wal_no.min(head.retention_floor_wal_no)),
+            required_wal_from: required_from(head),
         };
         let mut manifests = BTreeSet::new();
         if !live.namespace_deleted {
@@ -108,8 +108,8 @@ impl LiveSet {
     }
 
     pub(super) fn protects_wal(&self, key: &str) -> bool {
-        self.folded_and_floor_wal_no
-            .is_some_and(|floor| wal_no_from_key(key).is_none_or(|number| number > floor))
+        self.required_wal_from
+            .is_some_and(|floor| object_is_required(key, floor))
     }
 
     pub(super) fn retired_content(&self, now_ms: u64) -> bool {

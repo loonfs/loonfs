@@ -10,7 +10,6 @@ mod inode_allocator;
 mod materialize;
 mod ops;
 mod plan;
-mod publish;
 mod publish_error;
 mod validate;
 mod wal_payload;
@@ -19,7 +18,6 @@ pub(crate) use self::inode_allocator::{next_inode_after, CandidateAllocation, In
 pub(crate) use self::materialize::{materialize_commit, MaterializedCommit};
 pub(crate) use self::ops::CommitOp;
 pub(crate) use self::plan::{CommitPlan, ResolvedBinding, ValidatedCommitPlan, ValidatedOp};
-pub(crate) use self::publish::publish_wal;
 pub use self::publish_error::WalPublishError;
 pub(crate) use self::validate::{validate_ops, CommitNumbering, PublishValidationView};
 pub use self::validate::{CommitOperand, CommitValidationError};
