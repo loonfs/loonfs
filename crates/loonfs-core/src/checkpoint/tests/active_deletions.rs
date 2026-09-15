@@ -410,7 +410,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("differential-trash").expect("namespace id");
     let mut context = mutation_context("writer-1", 5_000);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -485,8 +485,10 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
     drain_reorganization(
         &store,
         &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await;
     assert_listing_matches_the_old_walk(&store, &namespace_id, usize::MAX).await;
@@ -502,7 +504,7 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-order").expect("namespace id");
     let context = mutation_context("writer-1", 5_000);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -581,7 +583,7 @@ async fn trash_pages_resume_after_the_generation_the_cursor_names() {
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-paging").expect("namespace id");
     let context = mutation_context("writer-1", 5_000);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
     for index in 0..5u32 {
@@ -669,7 +671,7 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-below-floor").expect("namespace id");
     let context = mutation_context("writer-1", 5_000);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -701,14 +703,16 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    advance_retention_floor(&store, &namespace_id, &context)
+    advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance retention floor");
     drain_reorganization(
         &store,
         &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
     )
     .await;
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
@@ -755,7 +759,7 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
         );
         let namespace_id = NamespaceId::parse("trash-bounded").expect("namespace id");
         let context = mutation_context("writer-1", 5_000);
-        bootstrap_namespace(&store, &namespace_id, &context, false)
+        bootstrap_namespace(&store, &namespace_id, &context)
             .await
             .expect("bootstrap namespace");
         for index in 0..deletions {
@@ -778,8 +782,10 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
         drain_reorganization(
             &store,
             &namespace_id,
-            &context,
-            MetadataLsmPolicy::default(),
+            MetadataLsmPolicy {
+                max_delta_runs: NonZeroUsize::MIN,
+                ..MetadataLsmPolicy::default()
+            },
         )
         .await;
 
@@ -812,7 +818,7 @@ async fn nested_deletions_each_keep_their_own_entry() {
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-nested").expect("namespace id");
     let context = mutation_context("writer-1", 5_000);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
     write_test_file(
@@ -867,7 +873,7 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-wal-tail").expect("namespace id");
     let context = mutation_context("writer-1", 5_000);
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
     write_test_file(

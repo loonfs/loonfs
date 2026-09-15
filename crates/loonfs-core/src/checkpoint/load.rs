@@ -195,14 +195,8 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
                 object_key: manifest_key.clone(),
             });
         };
-        let manifest = decode_namespace_manifest_json(&manifest_bytes).map_err(|err| {
-            ManifestLoadError::ManifestCodec {
-                object_key: manifest_key.clone(),
-                message: err.to_string(),
-            }
-        })?;
-        validate_namespace_manifest(namespace_id, *manifest_no, &manifest_key, &manifest)?;
-        validate_manifest(&manifest_key, manifest.payload())?;
+        let manifest =
+            decode_manifest_at(namespace_id, *manifest_no, &manifest_key, &manifest_bytes)?;
         let scan_runs = Arc::new(runs_in_reorganization_order(manifest.payload()));
         Ok(DecodedMetadataSegmentBlock::Manifest {
             manifest: (Arc::new(manifest), scan_runs),

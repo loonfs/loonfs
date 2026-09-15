@@ -35,7 +35,6 @@ mod streaming_compaction;
 pub(crate) mod tests;
 mod validate;
 
-pub use self::build::write_segments_in_waves;
 pub use self::cache::{
     MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheStats,
     WalTailProjectionCache, WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
@@ -51,9 +50,7 @@ pub use self::flush::{ensure_metadata_publication_budget, fold_wal_tail, next_ru
 pub use self::list::CheckpointPageCursor;
 pub(crate) use self::load::decode_manifest_at;
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
-pub use self::reorganize::{
-    MetadataCompactionPolicy, MetadataReorganizeOutcome, MetadataReorganizeReport,
-};
+pub use self::reorganize::{MetadataCompactionPolicy, MetadataReorganizeOutcome};
 pub use self::runs::MetadataFamilyGroup;
 pub(crate) use self::runs::MetadataLsmPolicy;
 pub use self::snapshot::load_snapshot_read_basis;

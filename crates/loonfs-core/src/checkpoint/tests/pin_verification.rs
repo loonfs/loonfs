@@ -19,14 +19,14 @@ async fn pin_creation_retries_after_compaction_and_collection() {
             OperationClass::PutCreateIfAbsent,
         );
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false)
+        bootstrap_namespace(&store, &namespace_id, &context)
             .await
             .expect("bootstrap");
         for path in ["/one", "/two"] {
             write_file_bytes(&store, &namespace_id, path, b"data", &context, None)
                 .await
                 .expect("write");
-            flush::flush_wal(&store, &namespace_id, &context)
+            flush::flush_wal(&store, &namespace_id)
                 .await
                 .expect("flush");
         }
@@ -41,7 +41,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                     write_file_bytes(&store, &namespace_id, "/three", b"data", &context, None)
                         .await
                         .expect("advance head");
-                    flush::flush_wal(&store, &namespace_id, &context)
+                    flush::flush_wal(&store, &namespace_id)
                         .await
                         .expect("flush newer head");
                 }
@@ -98,7 +98,7 @@ async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     .await
     .expect("compact");
     assert!(matches!(
-        report.outcome,
+        report,
         MetadataReorganizeOutcome::UnitPublished { .. }
     ));
     let current = load_current_manifest(store, namespace_id)
@@ -156,7 +156,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
         OperationClass::Read,
     );
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let writer = acquire_writer_epoch(&store, &namespace_id, &context)
@@ -217,7 +217,7 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
         KeyPredicate::any(),
     );
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
@@ -254,4 +254,114 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
         );
         assert_eq!(store.take(), expected);
     }
+}
+
+#[tokio::test]
+async fn fork_owned_checkpoints_reject_user_release() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("namespace id");
+    let clone = NamespaceId::parse("clone").expect("namespace id");
+    let setup = mutation_context("gc-test", 1_000);
+    crate::namespace::bootstrap::bootstrap_namespace(
+        &store,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    crate::namespace::fork::fork_namespace(
+        &store,
+        &source,
+        &clone,
+        &loonfs_test_support::test_actor(),
+        None,
+        &setup,
+    )
+    .await
+    .expect("fork");
+
+    let keys = store
+        .list_prefix(&checkpoint_prefix(&source))
+        .await
+        .expect("list checkpoints");
+    assert_eq!(keys.len(), 1);
+    let bytes = store
+        .get(&keys[0], None)
+        .await
+        .expect("get record")
+        .expect("record exists");
+    let fork_record = loonfs_api::wire::control::decode_control_object::<
+        loonfs_api::wire::control::CheckpointRecordState,
+    >(
+        &bytes,
+        loonfs_api::wire::control::ControlObjectKind::CheckpointRecord,
+    )
+    .expect("decode record")
+    .into_payload();
+
+    let error = crate::checkpoint::delete_checkpoint(&store, &source, &fork_record.pin_id)
+        .await
+        .expect_err("fork-owned release must fail");
+    assert!(
+        matches!(
+            &error,
+            CoreError::InvalidCheckpointRequest(message)
+                if message.contains("owned by fork target")
+        ),
+        "expected invalid checkpoint request, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_owned_checkpoints_reject_user_release() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = mutation_context("gc-test", 1_000);
+    crate::namespace::bootstrap::bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        false,
+    )
+    .await
+    .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    let snapshot = crate::checkpoint::create_checkpoint(
+        &store,
+        &namespace_id,
+        CheckpointOwner::Snapshot {
+            name: "report-run".to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        &setup,
+    )
+    .await
+    .expect("snapshot checkpoint");
+
+    let error =
+        crate::checkpoint::delete_checkpoint(&store, &namespace_id, &snapshot.checkpoint_id)
+            .await
+            .expect_err("snapshot-owned release must fail");
+    assert!(
+        matches!(
+            &error,
+            CoreError::InvalidCheckpointRequest(message)
+                if message.contains("is a snapshot")
+        ),
+        "expected invalid checkpoint request, got {error:?}"
+    );
+    assert!(crate::checkpoint::load_checkpoint_record(
+        &store,
+        &namespace_id,
+        &snapshot.checkpoint_id
+    )
+    .await
+    .expect("read checkpoint record")
+    .is_some());
 }

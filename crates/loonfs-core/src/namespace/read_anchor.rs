@@ -23,7 +23,7 @@ impl NamespaceReadAnchor {
 pub(crate) struct LoadedNamespaceBasis {
     pub(crate) head: NamespaceReadState,
     pub(crate) basis: MetadataBasis,
-    pub(crate) retention_floor_seq: Option<ChangeSeq>,
+    pub(crate) retention_floor_seq: ChangeSeq,
 }
 
 pub(crate) async fn load_head_and_retention_floor<S: ObjectStore + ?Sized>(
@@ -41,7 +41,7 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     let anchor = load_read_anchor(store, namespace_id).await?;
     Ok(LoadedNamespaceBasis {
         basis: anchor.basis(),
-        retention_floor_seq: Some(anchor.retention_floor_seq),
+        retention_floor_seq: anchor.retention_floor_seq,
         head: anchor.read_state,
     })
 }
@@ -213,14 +213,4 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
         object_key: object_key.to_owned(),
         message: error.to_string(),
     }
-}
-
-pub(crate) async fn resolve_retention_floor_seq<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<ChangeSeq, ControlObjectLoadError> {
-    Ok(load_current_manifest(store, namespace_id)
-        .await?
-        .state
-        .retention_floor_seq)
 }

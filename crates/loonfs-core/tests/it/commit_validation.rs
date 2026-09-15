@@ -148,7 +148,7 @@ async fn unadmitted_content_fails_every_candidate_without_being_read() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
@@ -221,7 +221,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     // A receipt exists only for a session the store already says completed,
@@ -346,7 +346,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let engine = namespace_engine(&store, &namespace_id, &context);
@@ -413,7 +413,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -480,7 +480,7 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     submit_operation(
@@ -533,7 +533,7 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -594,7 +594,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
 
@@ -655,7 +655,7 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -694,7 +694,7 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -750,7 +750,7 @@ async fn restore_revision_missing_source_is_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -785,7 +785,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
     let first = store_bytes_as_content(&store, &namespace_id, b"first")
@@ -850,7 +850,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -910,7 +910,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -980,7 +980,7 @@ async fn operation_order_decides_the_outcome() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -1041,7 +1041,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -1128,7 +1128,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let engine = namespace_engine(&store, &namespace_id, &context);

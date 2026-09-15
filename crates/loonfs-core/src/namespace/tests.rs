@@ -443,10 +443,10 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         super::control::raise_namespace_hint(&store, &namespace_id, WalNo(2), None),
         async {
             store.wait_until_blocked().await;
-            crate::checkpoint::flush_wal(store.inner(), &namespace_id, &context())
+            crate::checkpoint::flush_wal(store.inner(), &namespace_id)
                 .await
                 .expect("replace manifest");
-            crate::checkpoint::advance_retention_floor(store.inner(), &namespace_id, &context())
+            crate::checkpoint::advance_retention_floor(store.inner(), &namespace_id)
                 .await
                 .expect("advance floor");
             let aged = MutationContext {
@@ -534,10 +534,10 @@ async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number()
     store.block_next();
     let (published, ()) = futures::join!(publish(&mut engine, &store, "after-gc"), async {
         store.wait_until_blocked().await;
-        crate::checkpoint::flush_wal(store.inner(), &namespace_id, &context())
+        crate::checkpoint::flush_wal(store.inner(), &namespace_id)
             .await
             .expect("fold old WAL");
-        crate::checkpoint::advance_retention_floor(store.inner(), &namespace_id, &context())
+        crate::checkpoint::advance_retention_floor(store.inner(), &namespace_id)
             .await
             .expect("advance floor");
         let aged = MutationContext {

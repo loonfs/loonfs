@@ -320,7 +320,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
@@ -380,7 +380,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     put_file_bytes(
@@ -511,7 +511,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     put_file_bytes(
@@ -559,7 +559,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     create_directory_path(&store, &namespace_id, "/wide", &context, Some("mkdir-wide"))
@@ -688,7 +688,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
@@ -882,7 +882,7 @@ async fn revision_history_and_change_feed_name_the_same_supplied_commit() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let supplied_commit_id = CommitId::parse("c_cross_projection").expect("commit id");
@@ -928,7 +928,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -1051,7 +1051,7 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     // A spelling whose canonical lookup key differs from it: planning must
@@ -1108,7 +1108,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
@@ -1215,7 +1215,7 @@ async fn move_path_respells_the_same_slot_without_a_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -1269,7 +1269,7 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -1336,7 +1336,7 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
 
@@ -1372,7 +1372,7 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -1453,7 +1453,7 @@ async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -1510,7 +1510,7 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -1670,7 +1670,7 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -1708,7 +1708,7 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
     write_file_bytes(
@@ -1766,7 +1766,7 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
     );
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
     let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone());
@@ -1822,7 +1822,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+    bootstrap_namespace(&store, &namespace_id("demo"), &context)
         .await
         .expect("bootstrap namespace");
 
@@ -1909,7 +1909,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     put_file_bytes(
@@ -1994,7 +1994,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     put_file_bytes(
@@ -2066,7 +2066,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     put_file_bytes(
@@ -2136,7 +2136,7 @@ async fn move_path_precondition_matrix_checks_the_destination_state() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for (path, bytes, commit_id) in [
@@ -2296,7 +2296,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     for (path, bytes, commit_id) in [
@@ -2467,7 +2467,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(

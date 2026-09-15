@@ -113,7 +113,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
             .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
             .await
             .expect("compact source");
-        match report.outcome {
+        match report {
             loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
             loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => compacted = true,
             other => panic!("expected bounded compaction, got {other:?}"),
@@ -288,7 +288,7 @@ async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) {
-    bootstrap_namespace(store, source_namespace_id, context, false)
+    bootstrap_namespace(store, source_namespace_id, context)
         .await
         .expect("bootstrap source namespace");
     write_file_bytes(
@@ -329,7 +329,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
 
-    let created = bootstrap_namespace(&store, &namespace_id, &context, false)
+    let created = bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
     assert_eq!(created.namespace_id, namespace_id);
@@ -427,7 +427,7 @@ async fn namespace_create_recovers_when_manifest_one_lands_ambiguously() {
     .apply_then_fail();
     store.fail_next(1);
 
-    let created = bootstrap_namespace(&store, &namespace_id, &mutation_context(), false)
+    let created = bootstrap_namespace(&store, &namespace_id, &mutation_context())
         .await
         .expect("head identity reconciles the landed create");
 
@@ -449,8 +449,8 @@ async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
     second.writer_id = loonfs_api::WriterId::parse("writer-second").expect("writer id");
 
     let (left, right) = tokio::join!(
-        bootstrap_namespace(store.as_ref(), &namespace_id, &first, false),
-        bootstrap_namespace(store.as_ref(), &namespace_id, &second, false),
+        bootstrap_namespace(store.as_ref(), &namespace_id, &first),
+        bootstrap_namespace(store.as_ref(), &namespace_id, &second),
     );
     let outcomes = [left, right];
     let winners = outcomes.iter().filter(|result| result.is_ok()).count();
@@ -476,28 +476,28 @@ async fn a_create_retry_after_a_lost_acknowledgment_reports_the_id_as_taken() {
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("first create lands");
     let head_before = head_state(&store, &namespace_id).await;
 
     let mut retry_context = context.clone();
     retry_context.now_ms += 5_000;
-    let conflict = bootstrap_namespace(&store, &namespace_id, &retry_context, false)
+    let conflict = bootstrap_namespace(&store, &namespace_id, &retry_context)
         .await
         .expect_err("the id is taken, whoever took it");
     assert_eq!(conflict.code(), ErrorCode::NamespaceExists);
 
     let mut other_writer = context.clone();
     other_writer.writer_id = loonfs_api::WriterId::parse("writer-other").expect("writer id");
-    let conflict = bootstrap_namespace(&store, &namespace_id, &other_writer, false)
+    let conflict = bootstrap_namespace(&store, &namespace_id, &other_writer)
         .await
         .expect_err("another writer may not adopt this namespace either");
     assert_eq!(conflict.code(), ErrorCode::NamespaceExists);
 
     // Opting in makes the retry succeed, and the namespace it returns is
     // the one that landed.
-    let adopted = bootstrap_namespace(&store, &namespace_id, &retry_context, true)
+    let adopted = bootstrap_namespace_allowing_existing(&store, &namespace_id, &retry_context)
         .await
         .expect("allow_existing adopts the landed namespace");
     assert_eq!(adopted.namespace_id, namespace_id);
@@ -542,7 +542,7 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     // sees a half-installed namespace.
     let contested = NamespaceId::parse("contested").expect("valid namespace id");
     let (created, forked) = tokio::join!(
-        bootstrap_namespace(store.as_ref(), &contested, &context, false),
+        bootstrap_namespace(store.as_ref(), &contested, &context),
         fork_namespace(store.as_ref(), &source, &contested, &second),
     );
     assert_eq!(
@@ -627,7 +627,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
-    bootstrap_namespace(&store, &source_namespace_id, &context, false)
+    bootstrap_namespace(&store, &source_namespace_id, &context)
         .await
         .expect("bootstrap source");
     let source_ref = upload_content(&store, &source_namespace_id, b"base", &context).await;
@@ -874,7 +874,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
             .await
             .expect("compact clone");
-        match report.outcome {
+        match report {
             loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
             loonfs_core::MetadataReorganizeOutcome::UnitPublished { group, .. } => {
                 revisions_compacted |= group == loonfs_api::MetadataFamilyGroup::Revisions;
@@ -961,7 +961,6 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
             .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
             .await
             .expect("compact descendant")
-            .outcome
         {
             loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
             loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => compacted = true,
@@ -1192,7 +1191,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
         },
     );
 
-    let error = bootstrap_namespace(&store, &namespace_id, &context, false)
+    let error = bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect_err("another namespace owns the id");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
@@ -1217,7 +1216,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"will vanish")
@@ -1282,13 +1281,13 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         .await
         .expect_err("repeat delete");
     assert_eq!(again.code(), ErrorCode::NamespaceDeleted);
-    let recreate = bootstrap_namespace(&store, &namespace_id, &context, false).await;
+    let recreate = bootstrap_namespace(&store, &namespace_id, &context).await;
     assert!(matches!(
         recreate,
         Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
     ));
     // Even `allow_existing` cannot revive a retired id.
-    let adopt = bootstrap_namespace(&store, &namespace_id, &context, true).await;
+    let adopt = bootstrap_namespace_allowing_existing(&store, &namespace_id, &context).await;
     assert!(matches!(
         adopt,
         Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
@@ -1307,7 +1306,7 @@ async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -1387,7 +1386,7 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     );
     let context = mutation_context();
     let source = namespace_id("source");
-    bootstrap_namespace(&store, &source, &context, false)
+    bootstrap_namespace(&store, &source, &context)
         .await
         .expect("bootstrap");
     let head = load_namespace_read_state(&store, &source)
@@ -1462,7 +1461,11 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     assert_eq!(fork_head.content_store_id, descriptor.content_store_id);
     for allow_existing in [false, true] {
         store.reset();
-        let result = bootstrap_namespace(&store, &source, &context, allow_existing).await;
+        let result = if allow_existing {
+            bootstrap_namespace_allowing_existing(&store, &source, &context).await
+        } else {
+            bootstrap_namespace(&store, &source, &context).await
+        };
         if allow_existing {
             assert_eq!(result.expect("adopt source").namespace_id, source);
         } else {
@@ -1488,7 +1491,7 @@ async fn bootstrap_of_a_deleted_namespace_writes_nothing() {
     );
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     namespace_engine(&store, &namespace_id, &context)
@@ -1497,9 +1500,12 @@ async fn bootstrap_of_a_deleted_namespace_writes_nothing() {
         .expect("delete");
     for allow_existing in [false, true] {
         store.reset();
-        let error = bootstrap_namespace(&store, &namespace_id, &context, allow_existing)
-            .await
-            .expect_err("retired id");
+        let error = (if allow_existing {
+            bootstrap_namespace_allowing_existing(&store, &namespace_id, &context).await
+        } else {
+            bootstrap_namespace(&store, &namespace_id, &context).await
+        })
+        .expect_err("retired id");
         assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
         let counts = store.counts();
         assert_eq!(
@@ -1526,10 +1532,13 @@ async fn bootstrap_hint_read_failures_never_create_a_descriptor() {
         failing.fail_all();
         let store = RecordingStore::new(failing, KeyPredicate::any());
         for allow_existing in [false, true] {
-            let error =
-                bootstrap_namespace(&store, &namespace_id, &mutation_context(), allow_existing)
+            let error = (if allow_existing {
+                bootstrap_namespace_allowing_existing(&store, &namespace_id, &mutation_context())
                     .await
-                    .expect_err("hint read failed");
+            } else {
+                bootstrap_namespace(&store, &namespace_id, &mutation_context()).await
+            })
+            .expect_err("hint read failed");
             assert!(matches!(
                 error,
                 loonfs_core::BootstrapNamespaceError::Core(CoreError::ControlObjectLoad(_))
@@ -1557,9 +1566,12 @@ async fn bootstrap_of_a_corrupt_hint_writes_nothing() {
         .expect("corrupt hint");
     store.reset();
     for allow_existing in [false, true] {
-        let error = bootstrap_namespace(&store, &namespace_id, &mutation_context(), allow_existing)
-            .await
-            .expect_err("corrupt hint");
+        let error = (if allow_existing {
+            bootstrap_namespace_allowing_existing(&store, &namespace_id, &mutation_context()).await
+        } else {
+            bootstrap_namespace(&store, &namespace_id, &mutation_context()).await
+        })
+        .expect_err("corrupt hint");
         assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
     let counts = store.counts();
@@ -1580,10 +1592,10 @@ async fn a_creator_losing_after_namespace_discovery_leaves_only_an_orphan_descri
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
     store.block_next();
-    let delayed = bootstrap_namespace(&store, &namespace_id, &context, false);
+    let delayed = bootstrap_namespace(&store, &namespace_id, &context);
     let winner = async {
         store.wait_until_blocked().await;
-        let result = bootstrap_namespace(&store, &namespace_id, &context, false).await;
+        let result = bootstrap_namespace(&store, &namespace_id, &context).await;
         store.release();
         result.expect("concurrent creator wins")
     };

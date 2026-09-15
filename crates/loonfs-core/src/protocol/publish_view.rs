@@ -105,7 +105,7 @@ struct PublishProjectionKey {
 pub(crate) struct PublishTailProjection {
     key: PublishProjectionKey,
     pub(crate) head: NamespaceReadState,
-    pub(crate) retention_floor_seq: Option<ChangeSeq>,
+    pub(crate) retention_floor_seq: ChangeSeq,
     pub(crate) wal_tail_segments: u64,
     pub(crate) tail_state: Arc<MetadataState>,
 }
@@ -206,7 +206,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     store: &S,
     head: &NamespaceReadState,
-    retention_floor_seq: Option<ChangeSeq>,
+    retention_floor_seq: ChangeSeq,
     key: PublishProjectionKey,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<PublishTailProjection> {
@@ -288,7 +288,7 @@ mod tests {
         head.seq = key.head_seq;
         PublishTailProjection {
             head,
-            retention_floor_seq: Some(ChangeSeq(0)),
+            retention_floor_seq: ChangeSeq(0),
             key,
             wal_tail_segments: 3,
             tail_state: Arc::new(bootstrap_metadata_state(1_000)),

@@ -53,7 +53,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("feed-matrix").expect("namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 

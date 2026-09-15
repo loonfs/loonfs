@@ -39,7 +39,7 @@ async fn namespace_with_docs() -> (
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
     create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
@@ -539,7 +539,7 @@ async fn foreign_and_root_binding_preconditions_are_invalid() {
     let (docs_inode_id, local_generation) = read_entry(&store, &namespace_id, "/docs").await;
 
     let other_namespace_id = NamespaceId::parse("other").expect("valid namespace id");
-    bootstrap_namespace(&store, &other_namespace_id, &context, false)
+    bootstrap_namespace(&store, &other_namespace_id, &context)
         .await
         .expect("bootstrap other namespace");
     create_directory_path(

@@ -30,8 +30,6 @@ pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 10] = [
     MetadataRowFamily::Attributes,
 ];
 
-pub(super) const REORGANIZE_FAMILY_GROUPS: [MetadataFamilyGroup; 8] = MetadataFamilyGroup::ALL;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataFamilySegments {
     pub(super) family: MetadataRowFamily,

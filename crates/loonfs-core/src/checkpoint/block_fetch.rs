@@ -213,7 +213,7 @@ pub(super) fn segment_object_len(descriptor: &MetadataSegmentRef) -> u64 {
 async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    memo: &SessionBlockMemo,
+    memo: Option<&SessionBlockMemo>,
     descriptor: &MetadataSegmentRef,
     want: MetadataSegmentBlockKind,
 ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
@@ -348,11 +348,13 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
 
 fn publish_segment_block(
     segment_cache: Option<&MetadataSegmentCache>,
-    memo: &SessionBlockMemo,
+    memo: Option<&SessionBlockMemo>,
     cache_key: MetadataSegmentCacheKey,
     block: &DecodedMetadataSegmentBlock,
 ) {
-    memo.record(&cache_key, block);
+    if let Some(memo) = memo {
+        memo.record(&cache_key, block);
+    }
     if let Some(cache) = segment_cache {
         cache.insert(cache_key, block.clone());
     }
@@ -364,7 +366,7 @@ pub(super) async fn load_segment_index<S: ObjectStore + ?Sized>(
     memo: &SessionBlockMemo,
     descriptor: &MetadataSegmentRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
-    load_segment_index_inner(store, segment_cache, memo, descriptor, true).await
+    load_segment_index_inner(store, segment_cache, Some(memo), descriptor, true).await
 }
 
 /// Loads only the index section even for a small segment. Reorganization
@@ -373,7 +375,7 @@ pub(super) async fn load_segment_index<S: ObjectStore + ?Sized>(
 pub(super) async fn load_segment_index_for_reorganization<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    memo: &SessionBlockMemo,
+    memo: Option<&SessionBlockMemo>,
     descriptor: &MetadataSegmentRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
     load_segment_index_inner(store, segment_cache, memo, descriptor, false).await
@@ -382,14 +384,16 @@ pub(super) async fn load_segment_index_for_reorganization<S: ObjectStore + ?Size
 async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    memo: &SessionBlockMemo,
+    memo: Option<&SessionBlockMemo>,
     descriptor: &MetadataSegmentRef,
     load_small_segment_whole: bool,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
     let handle = descriptor.index_block;
     let cache_key =
         segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Index, handle.offset);
-    if let Some(DecodedMetadataSegmentBlock::Index { entries, .. }) = memo.get(&cache_key) {
+    if let Some(DecodedMetadataSegmentBlock::Index { entries, .. }) =
+        memo.and_then(|memo| memo.get(&cache_key))
+    {
         return Ok(entries);
     }
     let fetch = || async {
@@ -441,7 +445,9 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
         Some(cache) => cache.get_or_load(&cache_key, fetch).await?,
         None => fetch().await?,
     };
-    memo.record(&cache_key, &block);
+    if let Some(memo) = memo {
+        memo.record(&cache_key, &block);
+    }
     block.into_index(&metadata_segment_object_key(descriptor))
 }
 
@@ -478,7 +484,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
             decoded_bytes: handle.decoded_len as usize,
             filter: Arc::clone(&filter),
         };
-        publish_segment_block(segment_cache, memo, cache_key, &block);
+        publish_segment_block(segment_cache, Some(memo), cache_key, &block);
         return Ok(filter);
     }
     let fetch = || async {
@@ -501,7 +507,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         load_and_publish_segment_sections(
             store,
             segment_cache,
-            memo,
+            Some(memo),
             descriptor,
             MetadataSegmentBlockKind::Filter,
         )

@@ -34,7 +34,7 @@ use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_segments, runs_in_materialization_order, runs_in_reorganization_order,
     MetadataFamilyGroup, MetadataFamilySegments, MetadataLsmPolicy, MetadataRunManifest,
-    CHECKPOINT_ROW_FAMILIES, DEFAULT_MAX_CHECKPOINT_DELTA_RUNS, REORGANIZE_FAMILY_GROUPS,
+    CHECKPOINT_ROW_FAMILIES, DEFAULT_MAX_CHECKPOINT_DELTA_RUNS,
 };
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
@@ -207,20 +207,19 @@ async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    allow_existing: bool,
 ) -> Result<loonfs_api::Namespace, crate::namespace::BootstrapNamespaceError> {
     let summary = crate::namespace::bootstrap::bootstrap_namespace(
         store,
         namespace_id,
         context,
         &loonfs_test_support::test_actor(),
-        allow_existing,
+        false,
     )
     .await?;
     acquire_writer_epoch(store, namespace_id, context)
         .await
         .expect("acquire fixture writer");
-    flush::flush_wal(store, namespace_id, context)
+    flush::flush_wal(store, namespace_id)
         .await
         .expect("publish the first manifest");
     Ok(summary)
@@ -236,9 +235,11 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
     let head = load_namespace_read_state(store, namespace_id)
         .await
         .expect("read head");
-    crate::namespace::read_anchor::resolve_retention_floor_seq(store, &head.namespace_id)
+    load_current_manifest(store, &head.namespace_id)
         .await
         .expect("resolve retention floor")
+        .state
+        .retention_floor_seq
 }
 
 /// Checkpoints, then folds every delta run into the base through
@@ -255,7 +256,16 @@ async fn checkpoint_then_reorganize<S: ObjectStore + ?Sized>(
     create_checkpoint(store, namespace_id, context)
         .await
         .expect("create checkpoint");
-    drain_reorganization(store, namespace_id, context, policy).await
+    drain_reorganization(
+        store,
+        namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..policy
+        },
+    )
+    .await
+    .0
 }
 
 /// Runs the merge engine's retention operators over rows a test holds in
@@ -333,44 +343,39 @@ fn fold_rows_with_retention(
     Ok(())
 }
 
-/// Runs reorganization units until nothing is left to fold, with the
-/// trigger forced so even one delta run folds.
 async fn drain_reorganization<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    _context: &MutationContext,
     policy: MetadataLsmPolicy,
-) -> ManifestNo {
-    let fold_policy = MetadataLsmPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..policy
-    };
+) -> (ManifestNo, usize) {
+    let mut published = 0;
     loop {
-        let report = super::reorganize_metadata_step(
+        let outcome = super::reorganize_metadata_step(
             store,
             namespace_id,
             0,
-            fold_policy,
+            policy,
             MetadataCompactionPolicy::default(),
         )
         .await
         .expect("reorganization step");
-        match report.outcome {
-            super::MetadataReorganizeOutcome::UnitPublished { .. }
-            | super::MetadataReorganizeOutcome::Superseded
-            | super::MetadataReorganizeOutcome::Fenced => continue,
-            super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-            super::MetadataReorganizeOutcome::CompactionPlanned { .. } => {
+        match outcome {
+            MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
+            MetadataReorganizeOutcome::Superseded | MetadataReorganizeOutcome::Fenced => continue,
+            MetadataReorganizeOutcome::NotNeeded { .. } => {
+                let manifest_no = load_current_manifest(store, namespace_id)
+                    .await
+                    .expect("read metadata manifest")
+                    .state
+                    .manifest
+                    .manifest_no;
+                return (manifest_no, published);
+            }
+            MetadataReorganizeOutcome::CompactionPlanned { .. } => {
                 panic!("test reorganization budget should admit a progress-making subset")
             }
         }
     }
-    load_current_manifest(store, namespace_id)
-        .await
-        .expect("read metadata manifest")
-        .state
-        .manifest
-        .manifest_no
 }
 
 /// Runs the job a step planned, the way the maintenance runner's background
@@ -473,7 +478,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("plan a streaming compaction");
-    let MetadataReorganizeOutcome::CompactionPlanned { spec, .. } = report.outcome else {
+    let MetadataReorganizeOutcome::CompactionPlanned { spec, .. } = report else {
         panic!("a budget that admits no run whole must plan a streaming compaction");
     };
     (policy, spec)
@@ -638,7 +643,7 @@ fn group_delta_runs(
 fn base_runs_per_family_group(
     manifest: &NamespaceManifestEnvelope,
 ) -> Vec<(&'static [ApiMetadataRowFamily], Vec<MetadataRunManifest>)> {
-    REORGANIZE_FAMILY_GROUPS
+    MetadataFamilyGroup::ALL
         .into_iter()
         .map(|group| {
             (
@@ -650,7 +655,7 @@ fn base_runs_per_family_group(
 }
 
 fn group_containing(family: ApiMetadataRowFamily) -> &'static [ApiMetadataRowFamily] {
-    REORGANIZE_FAMILY_GROUPS
+    MetadataFamilyGroup::ALL
         .into_iter()
         .find(|group| group.families().contains(&family))
         .expect("every family belongs to a reorganization group")
@@ -717,21 +722,7 @@ impl ConflictOnManifestCreateStore {
 
 #[async_trait]
 impl ObjectStore for ConflictOnManifestCreateStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
+    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
 
     async fn put(
         &self,
@@ -763,18 +754,6 @@ impl ObjectStore for ConflictOnManifestCreateStore {
             }
         }
         self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -945,7 +924,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
 async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest: &NamespaceManifestEnvelope,
+    manifest: loonfs_api::wire::envelope::EncodedEnvelope<NamespaceManifestPayload>,
     expected_predecessor: Option<ManifestNo>,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
     use crate::time::{MonotonicTimer, StdMonotonicTimer};

@@ -921,7 +921,7 @@ async fn drain_reorganization(
             .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::default(), 0)
             .await
             .expect("reorganize metadata");
-        match report.outcome {
+        match report {
             MetadataReorganizeOutcome::NotNeeded { .. } => {
                 assert!(published_units > 0, "scenario must force reorganization");
                 return;

@@ -69,6 +69,7 @@ mod protocol;
 mod recency;
 mod storage;
 mod wal;
+mod write_waves;
 
 /// Commit planning, validation, and materialization. Consumed by the `loonfs`
 /// publisher and by this crate's commit-validation integration tests.
@@ -156,15 +157,12 @@ pub mod publish {
 }
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
-// `MetadataReorganizeReport` remains public because
-// `NamespaceEngine::reorganize_metadata` returns it.
 pub use checkpoint::{
     ensure_metadata_publication_budget, fold_wal_tail, next_run_no_after, refill_iterators,
-    select_next_iterator, write_segments_in_waves, CheckpointFile, CheckpointFilesPage,
-    CheckpointFilesPageCursor, CheckpointPageCursor, MetadataCompactionCancellation,
-    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataCompactionSpec,
-    MetadataFamilyGroup, MetadataReorganizeOutcome, MetadataReorganizeReport, SegmentBlockLoader,
-    SegmentRowIterator,
+    select_next_iterator, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
+    CheckpointPageCursor, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
+    MetadataCompactionPolicy, MetadataCompactionSpec, MetadataFamilyGroup,
+    MetadataReorganizeOutcome, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use commit_engine::WalFoldInput;
 pub use context::MutationContext;
@@ -187,6 +185,7 @@ pub use protocol::{
     DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
     ResolvedUploadCompletion, UploadSessionView,
 };
+pub use write_waves::write_segments_in_waves;
 // The streaming read `loonfs`'s reader handle returns, and the chunk size it
 // reads in.
 pub use storage::content::{FileContentStream, CONTENT_READ_CHUNK_BYTES};

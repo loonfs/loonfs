@@ -428,12 +428,12 @@ impl FsMaintenance {
             ));
         }
         let compactor_epoch = self.compactor_epoch(namespace_id).await?;
-        let report = self
+        let outcome = self
             .engine(namespace_id)
             .reorganize_metadata(compaction_policy, compactor_epoch)
             .await
             .map_err(RuntimeError::Core)?;
-        Ok(ReorganizationStep::Concluded(match report.outcome {
+        Ok(ReorganizationStep::Concluded(match outcome {
             loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
                 ReorganizeStepOutcome::NotNeeded {}
             }

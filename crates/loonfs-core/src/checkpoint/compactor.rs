@@ -37,10 +37,10 @@ pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(
             publish_manifest(
                 store,
                 namespace_id,
-                &manifest,
+                manifest,
                 Some(current.state.manifest.manifest_no),
                 &timer,
-                started_ms,
+                started_ms
             )
             .await?,
             ManifestPublicationOutcome::Published(_)

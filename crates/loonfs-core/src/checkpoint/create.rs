@@ -32,7 +32,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     let owner = &owner;
     let created = retry_while_contended(
         || async move {
-            let basis = match try_flush_wal(store, namespace_id, context, timer).await? {
+            let basis = match try_flush_wal(store, namespace_id, timer).await? {
                 TryFlushWal::Settled(basis) => basis,
                 TryFlushWal::RaceLost => {
                     return Ok(CasAttempt::Contended(CoreError::WalPublish(

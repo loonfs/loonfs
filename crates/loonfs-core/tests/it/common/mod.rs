@@ -58,7 +58,6 @@ pub(crate) mod commit_split_support {
     use super::{namespace_engine, read_context};
     use async_trait::async_trait;
     use bytes::Bytes;
-    use futures::stream::BoxStream;
     use loonfs_api::{
         AbsolutePath, ChangeSeq, CommitId, ContentRef, DestinationBehavior, NamespaceId,
     };
@@ -72,9 +71,7 @@ pub(crate) mod commit_split_support {
     use loonfs_core::{BootstrapOptions, Error as CoreError, MutationContext};
 
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::{
-        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-    };
+    use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
     use loonfs_test_support::ids::page_limit;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
     use std::collections::HashSet;
@@ -86,12 +83,24 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-        allow_existing: bool,
     ) -> Result<loonfs_api::Namespace, loonfs_core::BootstrapNamespaceError> {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(BootstrapOptions {
                 actor_id: loonfs_test_support::test_actor(),
-                allow_existing,
+                allow_existing: false,
+            })
+            .await
+    }
+
+    pub(crate) async fn bootstrap_namespace_allowing_existing<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        context: &MutationContext,
+    ) -> Result<loonfs_api::Namespace, loonfs_core::BootstrapNamespaceError> {
+        namespace_engine(store, namespace_id, context)
+            .bootstrap_namespace(BootstrapOptions {
+                actor_id: loonfs_test_support::test_actor(),
+                allow_existing: true,
             })
             .await
     }
@@ -422,24 +431,7 @@ pub(crate) mod commit_split_support {
 
     #[async_trait]
     impl ObjectStore for InjectCreateFailureStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key).await
-        }
+        loonfs_test_support::delegate_object_store!(self => self.inner; except put);
 
         async fn put(
             &self,
@@ -469,18 +461,6 @@ pub(crate) mod commit_split_support {
             }
 
             self.inner.put(key, bytes, mode).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_from_stream(
-            &self,
-            prefix: &str,
-            start_after: Option<&str>,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_from_stream(prefix, start_after)
         }
     }
 

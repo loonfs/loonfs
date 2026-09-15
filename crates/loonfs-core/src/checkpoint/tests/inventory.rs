@@ -63,7 +63,7 @@ async fn two_pins_under_one_label_list_as_two_records() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -110,7 +110,7 @@ async fn an_expired_record_is_listed_with_its_expiry_until_it_is_deleted() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -150,7 +150,7 @@ async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -205,7 +205,7 @@ async fn deleted_pins_are_absent_from_later_pages() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -336,7 +336,7 @@ async fn checkpoint_deleted_between_listing_and_load_is_skipped() {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&inner, &namespace_id, &context, false)
+    bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -378,7 +378,7 @@ async fn first_page_loads_only_the_records_needed_to_fill_it() {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&inner, &namespace_id, &context, false)
+    bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
     for index in 0..20 {
@@ -420,7 +420,7 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
     let target = NamespaceId::parse("target").expect("namespace id");
     let context = test_context();
     for namespace_id in [&source, &target] {
-        bootstrap_namespace(&store, namespace_id, &context, false)
+        bootstrap_namespace(&store, namespace_id, &context)
             .await
             .expect("bootstrap namespace");
     }
@@ -457,7 +457,7 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 
@@ -494,7 +494,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
 

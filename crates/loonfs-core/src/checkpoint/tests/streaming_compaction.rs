@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[test]
 fn every_family_belongs_to_exactly_one_reorganization_group() {
     for family in CHECKPOINT_ROW_FAMILIES {
-        let groups: Vec<_> = REORGANIZE_FAMILY_GROUPS
+        let groups: Vec<_> = MetadataFamilyGroup::ALL
             .into_iter()
             .filter(|group| group.families().contains(&family))
             .collect();
@@ -44,7 +44,7 @@ fn every_family_belongs_to_exactly_one_reorganization_group() {
             groups.len()
         );
     }
-    let listed: usize = REORGANIZE_FAMILY_GROUPS
+    let listed: usize = MetadataFamilyGroup::ALL
         .iter()
         .map(|group| group.families().len())
         .sum();
@@ -65,7 +65,7 @@ fn every_family_belongs_to_exactly_one_reorganization_group() {
 /// do.
 async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId) {
     let context = test_context();
-    bootstrap_namespace(store, namespace_id, &context, false)
+    bootstrap_namespace(store, namespace_id, &context)
         .await
         .expect("bootstrap");
 
@@ -125,14 +125,16 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
     drain_reorganization(
         store,
         namespace_id,
-        &context,
         MetadataLsmPolicy {
-            max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
-            ..MetadataLsmPolicy::default()
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy {
+                max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
+                ..MetadataLsmPolicy::default()
+            }
         },
     )
     .await;
-    advance_retention_floor(store, namespace_id, &context)
+    advance_retention_floor(store, namespace_id)
         .await
         .expect("advance the floor past the deletions");
 
@@ -172,7 +174,7 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
 /// the shape the old per-step row budget had no answer for.
 async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceId) {
     let context = test_context();
-    bootstrap_namespace(store, namespace_id, &context, false)
+    bootstrap_namespace(store, namespace_id, &context)
         .await
         .expect("bootstrap");
     for file in 0..6u64 {
@@ -214,14 +216,16 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
     drain_reorganization(
         store,
         namespace_id,
-        &context,
         MetadataLsmPolicy {
-            max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
-            ..MetadataLsmPolicy::default()
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy {
+                max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
+                ..MetadataLsmPolicy::default()
+            }
         },
     )
     .await;
-    advance_retention_floor(store, namespace_id, &context)
+    advance_retention_floor(store, namespace_id)
         .await
         .expect("advance the floor past the renames");
 
@@ -249,7 +253,7 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
 /// hot locality proves that the rules inside one do not accumulate either.
 async fn seed_one_hot_locality_of_each_kind(store: &LocalFsStore, namespace_id: &NamespaceId) {
     let context = test_context();
-    bootstrap_namespace(store, namespace_id, &context, false)
+    bootstrap_namespace(store, namespace_id, &context)
         .await
         .expect("bootstrap");
     write_file_bytes(
@@ -277,7 +281,7 @@ async fn seed_one_hot_locality_of_each_kind(store: &LocalFsStore, namespace_id: 
         )
         .await;
         if revision % 16 == 15 {
-            flush::flush_wal(store, namespace_id, &context)
+            flush::flush_wal(store, namespace_id)
                 .await
                 .expect("flush the tail");
         }
@@ -299,7 +303,7 @@ async fn seed_one_hot_locality_of_each_kind(store: &LocalFsStore, namespace_id: 
             .await
             .expect("delete the file");
         if round % 8 == 7 {
-            flush::flush_wal(store, namespace_id, &context)
+            flush::flush_wal(store, namespace_id)
                 .await
                 .expect("flush the tail");
         }
@@ -329,14 +333,16 @@ async fn seed_one_hot_locality_of_each_kind(store: &LocalFsStore, namespace_id: 
     drain_reorganization(
         store,
         namespace_id,
-        &context,
         MetadataLsmPolicy {
-            max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
-            ..MetadataLsmPolicy::default()
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy {
+                max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
+                ..MetadataLsmPolicy::default()
+            }
         },
     )
     .await;
-    advance_retention_floor(store, namespace_id, &context)
+    advance_retention_floor(store, namespace_id)
         .await
         .expect("advance the floor past the churn");
 
@@ -774,7 +780,7 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("fold the group whole");
-    let MetadataReorganizeOutcome::UnitPublished { group: folded, .. } = report.outcome else {
+    let MetadataReorganizeOutcome::UnitPublished { group: folded, .. } = report else {
         panic!("the whole-group fold must publish a unit");
     };
     assert_eq!(
@@ -864,7 +870,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     )
     .await
     .expect("budgeted step");
-    let MetadataReorganizeOutcome::CompactionPlanned { group, spec } = report.outcome else {
+    let MetadataReorganizeOutcome::CompactionPlanned { group, spec } = report else {
         panic!("a group no window fits must plan a streaming compaction");
     };
     assert_eq!(group, MetadataFamilyGroup::Bindings);
@@ -915,7 +921,7 @@ async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges
         )
         .await
         .expect("maintenance pass");
-        match report.outcome {
+        match report {
             MetadataReorganizeOutcome::CompactionPlanned {
                 group: planned_group,
                 spec,
@@ -975,7 +981,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         )
         .await
         .expect("maintenance pass");
-        match report.outcome {
+        match report {
             MetadataReorganizeOutcome::UnitPublished {
                 group: folded,
                 bottom_anchored_merge_blocked,
@@ -1022,7 +1028,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         )
         .await
         .expect("maintenance pass");
-        match report.outcome {
+        match report {
             MetadataReorganizeOutcome::UnitPublished { .. } => {}
             MetadataReorganizeOutcome::NotNeeded { .. } => break,
             other => panic!("a group whose window fits must never plan a job, got {other:?}"),
@@ -1315,7 +1321,15 @@ async fn a_repeated_revision_row_key_is_refused() {
     let group = MetadataFamilyGroup::Revisions;
 
     // Fold everything into one base run, then repeat one revision.
-    drain_reorganization(&store, &namespace_id, &context, fold_everything_policy()).await;
+    drain_reorganization(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..fold_everything_policy()
+        },
+    )
+    .await;
     let mut manifest = load_current_manifest_segments(&store, &namespace_id)
         .await
         .manifest()
@@ -1547,7 +1561,7 @@ async fn seed_reverse_binds_that_jump_the_unbind_keyspace(
     rounds: u64,
 ) {
     let context = test_context();
-    bootstrap_namespace(store, namespace_id, &context, false)
+    bootstrap_namespace(store, namespace_id, &context)
         .await
         .expect("bootstrap");
     for round in 0..rounds {
@@ -1589,14 +1603,16 @@ async fn seed_reverse_binds_that_jump_the_unbind_keyspace(
     drain_reorganization(
         store,
         namespace_id,
-        &context,
         MetadataLsmPolicy {
-            max_rows_per_segment: NonZeroUsize::new(16).expect("nonzero"),
-            ..fold_everything_policy()
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy {
+                max_rows_per_segment: NonZeroUsize::new(16).expect("nonzero"),
+                ..fold_everything_policy()
+            }
         },
     )
     .await;
-    advance_retention_floor(store, namespace_id, &context)
+    advance_retention_floor(store, namespace_id)
         .await
         .expect("advance the floor past the deletions");
     write_file_bytes(store, namespace_id, "/late.txt", b"late\n", &context, None)
@@ -1731,7 +1747,7 @@ async fn install_synthetic_bindings_base(
         let index = block_fetch::load_segment_index_for_reorganization(
             store,
             None,
-            &Default::default(),
+            Some(&Default::default()),
             descriptor,
         )
         .await
@@ -1881,9 +1897,7 @@ struct CancelAfterReadsStore {
 
 #[async_trait]
 impl ObjectStore for CancelAfterReadsStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
+    loonfs_test_support::delegate_object_store!(self => self.inner; except get);
 
     async fn get(
         &self,
@@ -1894,31 +1908,6 @@ impl ObjectStore for CancelAfterReadsStore {
             self.cancellation.cancel();
         }
         self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -2307,7 +2296,7 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
     // What both stores hold before either of them rebuilds anything. The trees
     // are byte-identical here, so one read stands for both.
     let mut rows_before = BTreeMap::new();
-    for group in REORGANIZE_FAMILY_GROUPS {
+    for group in MetadataFamilyGroup::ALL {
         rows_before.insert(
             group,
             group_rows_of_current_manifest(&store, &namespace_id, group).await,
@@ -2318,12 +2307,14 @@ async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
     drain_reorganization(
         &fold_store,
         &namespace_id,
-        &test_context(),
-        fold_everything_policy(),
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..fold_everything_policy()
+        },
     )
     .await;
 
-    for group in REORGANIZE_FAMILY_GROUPS {
+    for group in MetadataFamilyGroup::ALL {
         let before = rows_before[&group].clone();
         if before.values().all(Vec::is_empty) {
             continue;
@@ -2487,7 +2478,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
         )
         .await
         .expect("maintenance pass");
-        match report.outcome {
+        match report {
             MetadataReorganizeOutcome::UnitPublished { group: folded, .. } => {
                 if active.is_some() {
                     assert_ne!(
@@ -2622,7 +2613,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
         )
         .await
         .expect("maintenance pass");
-        match report.outcome {
+        match report {
             MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => return spec,
             MetadataReorganizeOutcome::UnitPublished { .. } => {}
             other => panic!("expected a plan or a merge, got {other:?}"),
@@ -2738,21 +2729,7 @@ struct FlushDuringFinalizationStore {
 
 #[async_trait]
 impl ObjectStore for FlushDuringFinalizationStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
+    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
 
     async fn put(
         &self,
@@ -2763,23 +2740,11 @@ impl ObjectStore for FlushDuringFinalizationStore {
         if loonfs_objectstore::layout::manifest_no_of(key).is_some()
             && self.flushed.fetch_add(1, Ordering::SeqCst) == 0
         {
-            super::super::flush::flush_wal(&self.inner, &self.namespace_id, &test_context())
+            super::super::flush::flush_wal(&self.inner, &self.namespace_id)
                 .await
                 .expect("the competing flush must publish");
         }
         self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -2953,21 +2918,7 @@ struct CancelAtTheFirstPublicationStore {
 
 #[async_trait]
 impl ObjectStore for CancelAtTheFirstPublicationStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
+    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
 
     async fn put(
         &self,
@@ -2987,18 +2938,6 @@ impl ObjectStore for CancelAtTheFirstPublicationStore {
             });
         }
         self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
     }
 }
 
@@ -3062,7 +3001,7 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
     let store = LocalFsStore::new(dir.path()).expect("store");
     let namespace = NamespaceId::parse("backlog").expect("namespace");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace, &context, false)
+    bootstrap_namespace(&store, &namespace, &context)
         .await
         .expect("bootstrap");
     for index in 0..20 {
@@ -3280,7 +3219,7 @@ async fn a_new_compactor_epoch_and_an_expired_job_each_prevent_publication() {
     )
     .await
     .expect("bounded fence");
-    assert_eq!(bounded.outcome, MetadataReorganizeOutcome::Fenced);
+    assert_eq!(bounded, MetadataReorganizeOutcome::Fenced);
     assert_eq!(store.counts().puts, 0);
 
     publication.compactor_epoch = next_epoch;

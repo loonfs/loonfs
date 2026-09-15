@@ -206,7 +206,6 @@ pub(super) struct MetadataMergeResult {
     pub(super) rows_written: u64,
     pub(super) input_bytes: u64,
     pub(super) output_bytes: u64,
-    pub(super) rows_written_by_family: BTreeMap<MetadataRowFamily, u64>,
     /// Point reads into the input's unbind family, one per reverse bind
     /// row at or below the frozen floor. Zero for a merge that resolves the
     /// reverse index from what it streamed
@@ -516,10 +515,11 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             return Ok(MetadataCompactionJobOutcome::Abandoned);
         }
         ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
+        let manifest_no = manifest.envelope().payload().manifest_no;
         let published = publish_manifest(
             store,
             namespace_id,
-            &manifest,
+            manifest,
             Some(current_manifest.manifest.manifest_no),
             timer,
             publication_started_ms,
@@ -529,7 +529,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         let lost_to = match published {
             ManifestPublicationOutcome::Published(_) => {
                 return Ok(MetadataCompactionJobOutcome::Published {
-                    manifest_no: manifest.payload().manifest_no,
+                    manifest_no,
                     rows_read,
                     rows_written,
                     input_bytes,
@@ -994,11 +994,6 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         (family, row): KeptRow,
         writers: &mut BTreeMap<MetadataRowFamily, MetadataSegmentWriter<'_>>,
     ) -> Result<()> {
-        *self
-            .result
-            .rows_written_by_family
-            .entry(family)
-            .or_default() += 1;
         self.result.rows_written += 1;
         let writer = writers
             .get_mut(&family)

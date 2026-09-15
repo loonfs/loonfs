@@ -43,7 +43,7 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
             publish_manifest(
                 store,
                 namespace_id,
-                &manifest,
+                manifest,
                 Some(current.state.manifest.manifest_no),
                 &timer,
                 started_ms

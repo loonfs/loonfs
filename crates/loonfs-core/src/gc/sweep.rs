@@ -171,20 +171,15 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
     }
 
     async fn sweep_aged(&mut self, key: &str, grace_window_ms: u64) -> Result<bool> {
-        match grace_age(self.store, key, grace_window_ms, self.mutation.now_ms)
+        let age = grace_age(self.store, key, grace_window_ms, self.mutation.now_ms)
             .await
-            .map_err(|error| CoreError::store(key, &error))?
-        {
-            GraceAge::Gone => return Ok(false),
-            GraceAge::Young => {
-                self.report.retain(RetainedReason::WithinGraceWindow);
-                return Ok(false);
-            }
-            GraceAge::Unknown => {
-                self.report.retain(RetainedReason::NoProviderTimestamp);
-                return Ok(false);
-            }
-            GraceAge::Aged => {}
+            .map_err(|error| CoreError::store(key, &error))?;
+        if let Some(reason) = age.retained_reason() {
+            self.report.retain(reason);
+            return Ok(false);
+        }
+        if age == GraceAge::Gone {
+            return Ok(false);
         }
         self.delete_key(key).await?;
         Ok(true)

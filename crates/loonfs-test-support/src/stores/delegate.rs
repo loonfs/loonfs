@@ -1,34 +1,10 @@
 //! Forwarding macros for small object-store test doubles.
 
-/// Emits forwarding methods for an `ObjectStore` implementation.
-///
-/// The bare form forwards every trait method, including the ones the trait
-/// provides a default for, so a wrapper behaves exactly like its inner
-/// store. `except put` leaves every write method on the trait defaults,
-/// which route through the wrapper's own `put`.
+/// Forwards selected `ObjectStore` methods to an inner store.
+/// `except put` keeps write methods on the trait defaults so they route
+/// through the wrapper's `put`.
 #[macro_export]
 macro_rules! delegate_object_store {
-    ($receiver:ident => $inner:expr) => {
-        $crate::delegate_object_store!($receiver => $inner;
-            head,
-            head_stored_checksum,
-            create_multipart_upload,
-            complete_multipart_upload,
-            abort_multipart_upload,
-            get_with_metadata,
-            get,
-            put,
-            put_streamed,
-            put_overwrite,
-            put_if_absent,
-            put_immutable_verified,
-            compare_and_swap,
-            delete,
-            list_prefix_stream,
-            list_prefix_from_stream,
-            list_prefix,
-        );
-    };
     ($receiver:ident => $inner:expr; except get) => {
         $crate::delegate_object_store!($receiver => $inner;
             head,

@@ -1473,8 +1473,8 @@ impl NamespacePublisher {
             }
             input
         };
-        let context = match writer.identity.mutation_context() {
-            Ok(context) => context,
+        match writer.identity.mutation_context() {
+            Ok(_) => {}
             Err(error) => {
                 phase_event!(
                     self.read_core,
@@ -1494,7 +1494,6 @@ impl NamespacePublisher {
             Some(segment_cache.as_ref()),
             &self.namespace_id,
             input,
-            &context,
             self.timer.as_ref(),
         )
         .instrument(phase_span!(self.read_core, "wal_fold", self.namespace_id))
