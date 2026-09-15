@@ -481,13 +481,6 @@ async fn method_not_allowed() -> ApiResponseError {
     )
 }
 
-/// Opens the server's runtime handles inside the serving runtime.
-///
-/// The reader shares the writer's caches so read endpoints observe writes immediately;
-/// the `FsMaintenance` handle drives the explicit maintenance endpoints under its own
-/// actor identity, sharing the writer's decoded-block cache under the
-/// configured budget. All three share one provider client
-/// inside this one runtime ownership domain.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(

@@ -16,6 +16,14 @@ writer_id = "loonfs-server-local"
 # Defaults to 2.
 #max_concurrent_folds = 2
 
+# Minimum interval between publication starts per namespace; cold namespaces
+# publish immediately. Defaults to 1000 ms.
+#min_publish_interval_ms = 1000
+
+# Metadata and query request deadline; streamed content and long-running
+# operator work are exempt. Defaults to 60000 ms.
+#request_deadline_ms = 60000
+
 # Terminating TLS in this process. Uncomment the [tls] table at the bottom of
 # this file to turn it on. A non-loopback bind refuses to load without it,
 # because the wire carries the bearer token and the presigned object-store

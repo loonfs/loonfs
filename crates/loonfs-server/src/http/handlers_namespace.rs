@@ -464,7 +464,7 @@ pub(super) async fn create_snapshot(
         description = "Lists live snapshots in snapshot-id order. Deleted and expired snapshots are omitted.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
+            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque snapshot-list page cursor")
         ),
         responses(
@@ -681,7 +681,7 @@ pub(super) async fn create_checkpoint(
         description = "Lists existing pins in checkpoint-id order. Expired pins remain visible until collection deletes them after expiry plus grace. The cursor resumes a live listing.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
+            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque checkpoint-list page cursor")
         ),
         responses(

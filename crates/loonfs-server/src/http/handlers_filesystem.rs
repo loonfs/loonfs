@@ -13,7 +13,7 @@ use super::query_params::{
     required_query_param, resolve_page_limit,
 };
 #[cfg(feature = "openapi")]
-pub(super) use super::query_params::{
+use super::query_params::{
     OpenApiDefaultFalseBoolean, OpenApiDefaultTrueBoolean, OpenApiPageLimit,
 };
 use super::{acquire_download_permit, AppJson, AppQuery, AppState, NamespaceIdPath, NoQuery};

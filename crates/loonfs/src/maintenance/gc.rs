@@ -83,21 +83,15 @@ impl MaintenanceJob for GarbageCollectionJob {
         } else {
             None
         };
-        let mut report = gc_run_result(gc);
-        report.follow_up = follow_up;
-        Ok(report)
+        Ok(MaintenanceRunReport {
+            conclusion: gc_conclusion(&gc),
+            not_before_ms: gc.next_reclamation_at_ms,
+            follow_up,
+        })
     }
 
     async fn probe(&self, _namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
         Ok(MaintenanceProbe::Idle)
-    }
-}
-
-fn gc_run_result(gc: GcResponse) -> MaintenanceRunReport {
-    MaintenanceRunReport {
-        conclusion: gc_conclusion(&gc),
-        not_before_ms: gc.next_reclamation_at_ms,
-        follow_up: None,
     }
 }
 

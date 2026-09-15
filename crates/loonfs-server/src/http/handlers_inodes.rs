@@ -56,7 +56,7 @@ pub(super) struct StatInodeQuery {
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "Inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
+            ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
             ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the path state captured by this snapshot")
         ),
         responses(
@@ -118,9 +118,9 @@ pub(super) struct ListInodeChildrenQuery {
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "Directory inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
+            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory page cursor"),
-            ("include_attributes" = inline(Option<super::handlers_filesystem::OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
+            ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
             ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the directory state captured by this snapshot")
         ),
         responses(
@@ -181,7 +181,7 @@ pub(super) async fn list_inode_children(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("limit" = inline(Option<super::handlers_filesystem::OpenApiPageLimit>), Query, description = "Maximum page size"),
+            ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
         ),
         responses(

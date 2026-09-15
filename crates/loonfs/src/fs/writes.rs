@@ -809,7 +809,7 @@ pub(crate) async fn publish_batch_with_engine(
     writer: &Arc<WriterBits>,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
-    candidates: Vec<CommitCandidate>,
+    candidates: &[CommitCandidate],
 ) -> EnginePublishResult {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();

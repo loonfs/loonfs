@@ -177,8 +177,7 @@ pub use config::{
     DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_WRITER_SESSIONS,
 };
 pub use fs::{
-    ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
-    PathEntriesPager, SnapshotsPager, TrashPager,
+    CheckpointsPager, FsReadSnapshot, InodeChildrenPager, PathEntriesPager, SnapshotsPager,
 };
 pub use handle::{
     FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
@@ -192,12 +191,11 @@ pub use maintenance::{
     MaintenanceRunnerStats, MetadataCompactionJob, MetadataMaintenanceJob, NamespacePublication,
 };
 pub use options::{
-    gc_config_from_request, CommitOptions, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListChangesOptions,
-    ListInodeChildrenOptions, ListPathEntriesOptions, MetadataMaintenanceOptions, MoveOptions,
-    PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, StatPathOptions,
-    UndeleteOptions, UpdateAttributesOptions,
+    CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions,
+    ForkNamespaceOptions, ListChangesOptions, ListInodeChildrenOptions, ListPathEntriesOptions,
+    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
+    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState, WriterSessionStats};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};

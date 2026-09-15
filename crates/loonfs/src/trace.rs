@@ -97,10 +97,6 @@ macro_rules! phase_event {
 
 pub(crate) use phase_event;
 
-/// The `cache_path` trace label for a read served through the materialized
-/// metadata segments. The only value the label takes today.
-pub(crate) const CACHE_MATERIALIZED_SEGMENTS: &str = "materialized_segments";
-
 /// Classifies a payload size into the low-cardinality `small`, `medium`, or
 /// `large` trace label.
 pub fn payload_class(size_bytes: usize) -> &'static str {
@@ -113,7 +109,7 @@ pub fn payload_class(size_bytes: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{payload_class, TraceMode, TraceStoreKind, CACHE_MATERIALIZED_SEGMENTS};
+    use super::{payload_class, TraceMode, TraceStoreKind};
     use loonfs_objectstore::ConfiguredObjectStoreKind;
 
     #[test]
@@ -140,7 +136,6 @@ mod tests {
         assert_eq!(TraceStoreKind::Gcs.as_str(), "gcs");
         assert_eq!(TraceStoreKind::Abs.as_str(), "abs");
         assert_eq!(TraceStoreKind::Unknown.as_str(), "unknown");
-        assert_eq!(CACHE_MATERIALIZED_SEGMENTS, "materialized_segments");
     }
 
     #[test]

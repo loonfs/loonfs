@@ -162,7 +162,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
             .entries;
         assert_eq!(entries.len(), 1);
 
-        // Admin inspects the same namespace through its own handle.
+        // Maintenance inspects the same namespace through its own handle.
         let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
             .actor_id("handle-test-maintenance")
             .build()
@@ -174,7 +174,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
             .expect("namespace status");
         assert_eq!(status.namespace_id, namespace_id);
         assert_eq!(status.wal_tail_segments, 2);
-        // Admin-driven work is observable through the maintenance handle's own
+        // Maintenance work is observable through the maintenance handle's own
         // cache counters, like writer and reader work through theirs.
         let _ = maintenance.runtime_cache_stats();
 

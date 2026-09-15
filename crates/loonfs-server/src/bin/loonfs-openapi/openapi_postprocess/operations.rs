@@ -331,7 +331,7 @@ pub(crate) struct SdkName {
     pub(crate) request: Option<&'static str>,
 }
 
-pub(super) fn validate_operation_retry_classes(
+pub(crate) fn validate_operation_retry_classes(
     document: &Value,
 ) -> Result<(), OpenapiPostprocessError> {
     for (operation_id, operation) in operations(document)? {
@@ -349,7 +349,7 @@ pub(super) fn validate_operation_retry_classes(
 }
 
 /// Adds the Fern naming extensions to every operation and hides the excluded ones.
-pub(super) fn add_sdk_names(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
+pub(crate) fn add_sdk_names(document: &mut Value) -> Result<(), OpenapiPostprocessError> {
     let mut seen_operations = BTreeSet::new();
 
     for (operation_id, operation) in operations_mut(document)? {
@@ -406,7 +406,7 @@ pub(super) fn add_sdk_names(document: &mut Value) -> Result<(), OpenapiPostproce
     Ok(())
 }
 
-pub(super) fn validate_pagination_metadata(
+pub(crate) fn validate_pagination_metadata(
     document: &Value,
 ) -> Result<(), OpenapiPostprocessError> {
     let schemas = component_schemas(document)?;

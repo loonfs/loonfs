@@ -6,6 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "../../src/bin/loonfs-openapi/openapi_postprocess/mod.rs"]
 mod openapi_postprocess;
 
+use openapi_postprocess::operations::{
+    add_sdk_names, validate_operation_retry_classes, validate_pagination_metadata,
+    OPERATION_SDK_NAMES, SDK_EXCLUDED_OPERATIONS,
+};
+use openapi_postprocess::OpenapiPostprocessError;
+
 const OPENAPI_JSON_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/openapi.json");
 const PROXY_OPENAPI_JSON_PATH: &str = concat!(
@@ -22,6 +28,98 @@ const OPENAPI_PATH_SOURCES: &[&str] = &[
     include_str!("../../src/http/handlers_store.rs"),
     include_str!("../../src/http/handlers_uploads.rs"),
 ];
+
+#[test]
+fn missing_retry_classification_returns_a_named_error() {
+    let document = serde_json::json!({
+        "paths": {
+            "/future": {
+                "post": {"operationId": "future_operation"}
+            }
+        }
+    });
+
+    let error = validate_operation_retry_classes(&document)
+        .expect_err("unknown operation should fail generation");
+    assert!(matches!(
+        error,
+        OpenapiPostprocessError::MissingRetryClassification { operation_id }
+            if operation_id == "future_operation"
+    ));
+}
+
+#[test]
+fn missing_sdk_name_returns_a_named_error() {
+    let mut document = serde_json::json!({
+        "paths": {
+            "/future": {
+                "post": {"operationId": "future_operation"}
+            }
+        }
+    });
+
+    let error = add_sdk_names(&mut document).expect_err("unknown operation should fail generation");
+    assert!(matches!(
+        error,
+        OpenapiPostprocessError::MissingSdkName { operation_id }
+            if operation_id == "future_operation"
+    ));
+}
+
+#[test]
+fn sdk_name_tables_are_sorted_and_disjoint() {
+    let named = OPERATION_SDK_NAMES
+        .iter()
+        .map(|(operation_id, _)| *operation_id)
+        .collect::<Vec<_>>();
+    let excluded = SDK_EXCLUDED_OPERATIONS.to_vec();
+
+    let mut sorted_named = named.clone();
+    sorted_named.sort_unstable();
+    assert_eq!(named, sorted_named, "SDK name table must stay sorted");
+
+    let mut sorted_excluded = excluded.clone();
+    sorted_excluded.sort_unstable();
+    assert_eq!(
+        excluded, sorted_excluded,
+        "SDK exclusion table must stay sorted"
+    );
+
+    let named_set = named.iter().copied().collect::<BTreeSet<_>>();
+    let excluded_set = excluded.iter().copied().collect::<BTreeSet<_>>();
+    assert!(named_set.is_disjoint(&excluded_set));
+}
+
+#[test]
+fn sdk_method_names_are_unique_within_each_group() {
+    let methods = OPERATION_SDK_NAMES
+        .iter()
+        .map(|(_, sdk_name)| (sdk_name.group, sdk_name.method))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(methods.len(), OPERATION_SDK_NAMES.len());
+}
+
+#[test]
+fn unregistered_cursor_operation_returns_a_named_error() {
+    let document = serde_json::json!({
+        "components": {"schemas": {}},
+        "paths": {
+            "/future": {
+                "get": {
+                    "operationId": "future_list",
+                    "parameters": [{"name": "cursor", "in": "query"}]
+                }
+            }
+        }
+    });
+    let error = validate_pagination_metadata(&document)
+        .expect_err("unregistered cursor operation should fail generation");
+    assert!(matches!(
+        error,
+        OpenapiPostprocessError::MissingPaginationMetadata { operation_id }
+            if operation_id == "future_list"
+    ));
+}
 
 #[test]
 fn openapi_static_files_are_current() {
@@ -760,7 +858,7 @@ fn every_registered_operation_publishes_its_sdk_name() {
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
 
     for (operation_id, operation) in operations_by_id(&spec) {
-        if openapi_postprocess::SDK_EXCLUDED_OPERATIONS.contains(&operation_id) {
+        if SDK_EXCLUDED_OPERATIONS.contains(&operation_id) {
             assert_eq!(operation.get("x-fern-ignore"), Some(&json!(true)));
             for extension in [
                 "x-fern-sdk-group-name",
@@ -775,7 +873,7 @@ fn every_registered_operation_publishes_its_sdk_name() {
             continue;
         }
 
-        let sdk_name = openapi_postprocess::OPERATION_SDK_NAMES
+        let sdk_name = OPERATION_SDK_NAMES
             .iter()
             .find_map(|(candidate, sdk_name)| (*candidate == operation_id).then_some(sdk_name))
             .unwrap_or_else(|| panic!("operation `{operation_id}` has no SDK name"));
@@ -2109,10 +2207,10 @@ fn operations_by_id(spec: &Value) -> BTreeMap<&str, &Value> {
 }
 
 fn registered_operation_ids() -> BTreeSet<&'static str> {
-    openapi_postprocess::OPERATION_SDK_NAMES
+    OPERATION_SDK_NAMES
         .iter()
         .map(|(operation_id, _)| *operation_id)
-        .chain(openapi_postprocess::SDK_EXCLUDED_OPERATIONS.iter().copied())
+        .chain(SDK_EXCLUDED_OPERATIONS.iter().copied())
         .collect()
 }
 

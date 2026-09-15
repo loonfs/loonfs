@@ -1,9 +1,6 @@
 //! Registration and direct execution for maintenance jobs.
 
-use super::{
-    MaintenanceCancellation, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
-    MaintenanceRunReport,
-};
+use super::{MaintenanceCancellation, MaintenanceJob, MaintenanceJobId, MaintenanceRunReport};
 use crate::{NamespaceId, Result, RuntimeError};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -49,15 +46,6 @@ impl MaintenanceRegistry {
     /// Returns registered identifiers in sorted order.
     pub fn job_ids(&self) -> Vec<MaintenanceJobId> {
         self.lock().keys().copied().collect()
-    }
-
-    /// Probes one registered job.
-    pub async fn probe(
-        &self,
-        id: MaintenanceJobId,
-        namespace_id: &NamespaceId,
-    ) -> Result<MaintenanceProbe> {
-        self.require(id)?.probe(namespace_id).await
     }
 
     /// Runs one registered job with a fresh cancellation token.
