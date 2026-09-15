@@ -10,7 +10,6 @@ use crate::commit::{CommitValidationError, WalPublishError};
 use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::metadata::VisiblePathError;
-use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalSegmentError, WalTailLoadError};
@@ -53,8 +52,6 @@ pub enum CoreError {
     DurableContent(#[from] DurableContentValidationError),
     #[error("commit validation failed: {0}")]
     CommitValidation(#[from] CommitValidationError),
-    #[error("WAL build failed: {0}")]
-    WalBuild(#[from] WalSegmentError),
     #[error("WAL publication failed: {0}")]
     WalPublish(#[from] WalPublishError),
     #[error("failed to write WAL object `{object_key}`: {message}")]
@@ -326,20 +323,6 @@ impl MetadataProjectionLoadError {
     }
 }
 
-impl From<NamespaceCatalogLoadError> for MetadataProjectionLoadError {
-    fn from(value: NamespaceCatalogLoadError) -> Self {
-        match value {
-            NamespaceCatalogLoadError::LoadManifest(error) => Self::LoadHead(error),
-        }
-    }
-}
-
-impl From<NamespaceCatalogLoadError> for CoreError {
-    fn from(value: NamespaceCatalogLoadError) -> Self {
-        Self::MetadataProjection(value.into())
-    }
-}
-
 impl From<ImmutableWriteError> for CoreError {
     fn from(value: ImmutableWriteError) -> Self {
         let fallback_object_key = value.object_key().to_owned();
@@ -403,9 +386,7 @@ impl CoreError {
             CoreError::VisiblePath(error) => error.code(),
             CoreError::DurableContent(error) => error.code(),
             CoreError::CommitValidation(error) => error.code(),
-            CoreError::WalBuild(_) | CoreError::Codec { .. } | CoreError::Internal(_) => {
-                ErrorCode::ServerError
-            }
+            CoreError::Codec { .. } | CoreError::Internal(_) => ErrorCode::ServerError,
             CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
                 classify_store_failure(*class)
             }
@@ -507,7 +488,6 @@ impl CoreError {
             | CoreError::MetadataView(_)
             | CoreError::VisiblePath(_)
             | CoreError::CommitValidation(_)
-            | CoreError::WalBuild(_)
             | CoreError::InvalidPath(_)
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
@@ -740,12 +720,11 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataViewError,
-        StoreFailureClass, WriterFence,
+        CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
+        MetadataViewError, StoreFailureClass, WriterFence,
     };
     use crate::commit_engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
-    use crate::namespace::catalog::NamespaceCatalogLoadError;
     use crate::namespace::BootstrapNamespaceError;
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
@@ -995,7 +974,7 @@ mod tests {
 
         let core_wrappers = [
             CoreError::ControlObjectLoad(denied.clone()),
-            CoreError::from(NamespaceCatalogLoadError::LoadManifest(denied.clone())),
+            CoreError::from(MetadataProjectionLoadError::LoadHead(denied.clone())),
         ];
         for error in core_wrappers {
             assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);

@@ -80,7 +80,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     .await
     .expect("load publish projection");
 
-    let input = crate::WalFoldInput {
+    let input = crate::publish::WalFoldInput {
         head: projection.head.clone(),
         basis: projection.basis().clone(),
         retention_floor_seq: projection.retention_floor_seq,

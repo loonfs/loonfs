@@ -40,10 +40,19 @@ pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::
 
 pub type LoadedHint = LoadedControl<HintState>;
 
-pub async fn load_namespace_hint<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_namespace_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> crate::error::Result<LoadedHint> {
+    load_hint(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)
+}
+
+pub(crate) async fn load_hint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<LoadedHint, ControlObjectLoadError> {
     load_control_object(
         store,
         hint(namespace_id),
@@ -51,7 +60,6 @@ pub async fn load_namespace_hint<S: ObjectStore + ?Sized>(
         |state: &HintState| expect_namespace(namespace_id, &state.namespace_id),
     )
     .await
-    .map_err(CoreError::ControlObjectLoad)
 }
 
 /// Raises the hint to at least the given numbers and returns the hint as
@@ -124,14 +132,7 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
     let object_key = hint(namespace_id);
-    let hint = match load_control_object(
-        store,
-        object_key.clone(),
-        ControlObjectKind::Hint,
-        |state: &HintState| expect_namespace(namespace_id, &state.namespace_id),
-    )
-    .await
-    {
+    let hint = match load_hint(store, namespace_id).await {
         Ok(hint) => hint,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
         Err(error) => return Err(error),

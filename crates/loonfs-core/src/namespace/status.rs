@@ -3,6 +3,7 @@
 use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::{load_head_and_retention_floor, load_read_anchor};
 use crate::namespace::state::NamespaceReadState;
+use loonfs_api::wire::control::ForkBasis;
 use loonfs_api::{ActorId, ChangeSeq, ManifestNo, Namespace, NamespaceForkBasis, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
@@ -25,6 +26,33 @@ pub struct NamespaceStorageDiagnostics {
     pub retention_floor_seq: ChangeSeq,
     pub current_manifest_no: Option<ManifestNo>,
     pub wal_tail_segments: u64,
+}
+
+impl NamespaceStorageDiagnostics {
+    fn new(
+        head: NamespaceReadState,
+        retention_floor_seq: ChangeSeq,
+        current_manifest_no: Option<ManifestNo>,
+        wal_tail_segments: u64,
+    ) -> Self {
+        Self {
+            created_at_ms: head.created_at_ms,
+            created_by: head.created_by,
+            fork_basis: fork_basis(head.fork_basis),
+            namespace_id: head.namespace_id,
+            head_seq: head.seq,
+            retention_floor_seq,
+            current_manifest_no,
+            wal_tail_segments,
+        }
+    }
+}
+
+fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
+    basis.map(|basis| NamespaceForkBasis {
+        source_namespace_id: basis.manifest.owner_namespace_id,
+        source_head_seq: basis.manifest.manifest_head_seq,
+    })
 }
 
 /// Namespace head state needed for storage diagnostics.
@@ -66,10 +94,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     Ok(Namespace {
         created_at_ms: head.created_at_ms,
         created_by: head.created_by,
-        fork_basis: head.fork_basis.map(|basis| NamespaceForkBasis {
-            source_namespace_id: basis.manifest.owner_namespace_id,
-            source_head_seq: basis.manifest.manifest_head_seq,
-        }),
+        fork_basis: fork_basis(head.fork_basis),
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         retention_floor_seq,
@@ -82,19 +107,12 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
 ) -> Result<NamespaceStorageDiagnostics> {
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
     let wal_tail_segments = loaded.head.wal_no.0 - loaded.head.last_folded_wal_no.0;
-    Ok(NamespaceStorageDiagnostics {
-        created_at_ms: loaded.head.created_at_ms,
-        created_by: loaded.head.created_by,
-        fork_basis: loaded.head.fork_basis.map(|basis| NamespaceForkBasis {
-            source_namespace_id: basis.manifest.owner_namespace_id,
-            source_head_seq: basis.manifest.manifest_head_seq,
-        }),
-        namespace_id: loaded.head.namespace_id,
-        head_seq: loaded.head.seq,
-        retention_floor_seq: loaded.retention_floor_seq,
-        current_manifest_no: loaded.current_manifest_no,
+    Ok(NamespaceStorageDiagnostics::new(
+        loaded.head,
+        loaded.retention_floor_seq,
+        loaded.current_manifest_no,
         wal_tail_segments,
-    })
+    ))
 }
 
 pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
@@ -125,17 +143,10 @@ pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
             "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"
         )));
     }
-    Ok(NamespaceStorageDiagnostics {
-        created_at_ms: head.created_at_ms,
-        created_by: head.created_by,
-        fork_basis: head.fork_basis.map(|basis| NamespaceForkBasis {
-            source_namespace_id: basis.manifest.owner_namespace_id,
-            source_head_seq: basis.manifest.manifest_head_seq,
-        }),
-        namespace_id: head.namespace_id,
-        head_seq: head.seq,
+    Ok(NamespaceStorageDiagnostics::new(
+        head,
         retention_floor_seq,
-        current_manifest_no: None,
-        wal_tail_segments: 0,
-    })
+        None,
+        0,
+    ))
 }

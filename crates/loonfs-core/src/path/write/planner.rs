@@ -85,7 +85,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             };
             plan_operation(operation, &view, allocation)
                 .await
-                .map_err(|error| attribute(error, index))?
+                .map_err(|error| error.at_operation(index))?
         };
         let unit_ops = unit.ops;
         let validated_unit = validate_ops(
@@ -97,7 +97,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             committed_at_ms,
         )
         .await
-        .map_err(|error| attribute(error, index))?;
+        .map_err(|error| error.at_operation(index))?;
         validated_ops.extend(validated_unit);
     }
 
@@ -269,10 +269,6 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             .await
         }
     }
-}
-
-fn attribute(error: CoreError, index: usize) -> CoreError {
-    error.at_operation(index)
 }
 
 #[cfg(test)]

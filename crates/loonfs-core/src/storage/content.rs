@@ -25,7 +25,6 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Confirms that LoonFS durably stored the content described by this reference.
-// Test-support functions return this proof without exporting its type.
 #[allow(unreachable_pub)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContent {
@@ -35,7 +34,6 @@ pub struct StoredContent {
     content_ref: ContentRef,
 }
 
-// Test-support callers use these methods on an inferred return type.
 #[allow(dead_code, unreachable_pub)]
 impl StoredContent {
     pub fn content_ref(&self) -> &ContentRef {
@@ -144,7 +142,7 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
 /// Prepares content from an acknowledged LoonFS-managed durable write.
 ///
 /// Consuming [`StoredContent`] ties the proof to the successful return from
-/// [`store_bytes_as_content`] or [`store_bytes_as_content_with_store_id`]. The
+/// [`store_bytes_as_content`] or `store_bytes_as_content_with_store_id`. The
 /// verified catalog prevents pairing that acknowledgement with an unrelated
 /// namespace binding.
 #[cfg(any(test, feature = "test-support"))]
@@ -230,7 +228,7 @@ pub(crate) async fn create_content_multipart_upload<S: ObjectStore + ?Sized>(
     owner_namespace_id: &NamespaceId,
     content_id: &ContentId,
 ) -> crate::error::Result<String> {
-    let object_key = content_key_for_id(content_store_id, owner_namespace_id, content_id);
+    let object_key = content_blob(content_store_id, owner_namespace_id, content_id);
     store
         .create_multipart_upload(&object_key)
         .await
@@ -248,7 +246,7 @@ pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
     provider_upload_id: &str,
     parts: &[MultipartPart],
 ) -> crate::error::Result<MultipartCompletion> {
-    let object_key = content_key_for_id(
+    let object_key = content_blob(
         content_store_id,
         &expected.owner_namespace_id,
         &expected.content_id,
@@ -593,14 +591,6 @@ pub(crate) async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
     Ok(bytes)
 }
 
-pub(crate) fn content_key_for_id(
-    content_store_id: &ContentStoreId,
-    owner_namespace_id: &NamespaceId,
-    content_id: &ContentId,
-) -> String {
-    content_blob(content_store_id, owner_namespace_id, content_id)
-}
-
 pub(crate) fn content_object_key_for_ref(
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
@@ -684,7 +674,7 @@ async fn validate_content_size<S: ObjectStore + ?Sized>(
 }
 
 /// Plants durable content under a fresh identity, resolving the namespace's
-/// content store first. See [`store_bytes_as_content_with_store_id`] for
+/// content store first. See `store_bytes_as_content_with_store_id` for
 /// what this is for and what it is not.
 #[tracing::instrument(
     level = "debug",

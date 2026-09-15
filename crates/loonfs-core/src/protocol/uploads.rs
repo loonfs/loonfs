@@ -24,7 +24,7 @@ use crate::limits::{
 use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::namespace::control::load_current_manifest;
 use crate::storage::content::{
-    abort_unpublished_multipart_upload, complete_content_multipart_upload, content_key_for_id,
+    abort_unpublished_multipart_upload, complete_content_multipart_upload,
     create_content_multipart_upload, delete_unpublished_content_object, identify_streamed_payload,
     stage_bytes_under_content_id, stage_streamed_under_content_id, verify_durable_content_checksum,
     DurableContentValidationError, StreamedPayloadKind,
@@ -44,7 +44,7 @@ use loonfs_api::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId,
     NamespaceId, UploadId,
 };
-use loonfs_objectstore::keys::upload_session;
+use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
     ByteStream, MultipartCompletion, MultipartPart, ObjectMetadata, ObjectStore,
     PROVIDER_MULTIPART_PART_BYTES,
@@ -141,7 +141,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     ensure_upload_namespace_available(store, namespace_id).await?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
-    let object_key = content_key_for_id(&content_store_id, namespace_id, &content_id);
+    let object_key = content_blob(&content_store_id, namespace_id, &content_id);
     let session = create_upload_session(
         store,
         namespace_id,
@@ -171,7 +171,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_id = ContentId::generate();
-    let object_key = content_key_for_id(&content_store_id, namespace_id, &content_id);
+    let object_key = content_blob(&content_store_id, namespace_id, &content_id);
 
     let provider_upload_id =
         create_content_multipart_upload(store, &content_store_id, namespace_id, &content_id)
@@ -269,7 +269,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     }
 
     Ok(MultipartPartTargets {
-        object_key: content_key_for_id(
+        object_key: content_blob(
             &content_store_id,
             &session.namespace_id,
             &session.content_id,
@@ -994,7 +994,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         // replay, and it fails loudly.
         return Err(CoreError::Internal(format!(
             "content object `{}` already holds bytes under a freshly minted identity",
-            content_key_for_id(
+            content_blob(
                 catalog.content_store_id(),
                 &staged.content_ref.owner_namespace_id,
                 &staged.content_ref.content_id
@@ -1230,7 +1230,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     let direct_put_object_key = if matches!(loaded.status, UploadSessionRecordStatus::Open { .. })
         && matches!(loaded.mode, UploadSessionMode::DirectPut { .. })
     {
-        Some(content_key_for_id(
+        Some(content_blob(
             content_store_id,
             namespace_id,
             &loaded.content_id,
@@ -1608,7 +1608,6 @@ mod tests {
     use super::*;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use loonfs_api::wire::control::decode_control_object;
-    use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{

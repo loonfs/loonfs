@@ -9,7 +9,8 @@ use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::namespace::control::load_namespace_read_state;
 use crate::protocol::{
-    begin_upload, complete_upload, upload_content, CompletedUpload, ResolvedUploadCompletion,
+    begin_service_proxied_upload, complete_upload, upload_content, CompletedUpload,
+    ResolvedUploadCompletion,
 };
 use loonfs_api::{AbsolutePath, ContentStoreId, DestinationBehavior, WriterId};
 use loonfs_objectstore::keys::{content_blob, hint, wal_segment_prefix};
@@ -39,14 +40,9 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> (CompletedUpload, ContentStoreId) {
-    let upload = begin_upload(
-        store,
-        namespace_id,
-        loonfs_api::v0::CreateUploadBody::ServiceProxied {},
-        context,
-    )
-    .await
-    .expect("begin upload");
+    let upload = begin_service_proxied_upload(store, namespace_id, context)
+        .await
+        .expect("begin upload");
     upload_content(store, namespace_id, &upload.upload_id, b"completed content")
         .await
         .expect("stage upload");
