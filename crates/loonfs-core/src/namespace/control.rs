@@ -127,7 +127,23 @@ pub(crate) async fn load_current_manifest<S: ObjectStore + ?Sized>(
         })
 }
 
-pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
+/// Load the hint's validated starting manifest, without claiming it is current.
+/// Callers must discover its successor before returning an authoritative anchor.
+pub(crate) async fn load_hinted_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<LoadedManifest, ControlObjectLoadError> {
+    load_hinted_manifest_if_present(store, namespace_id)
+        .await?
+        .ok_or_else(|| ControlObjectLoadError::MissingObject {
+            object_key: loonfs_objectstore::keys::metadata_manifest_object(
+                namespace_id,
+                &loonfs_api::ManifestNo(1),
+            ),
+        })
+}
+
+async fn load_hinted_manifest_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
@@ -137,7 +153,7 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let mut manifest_no = hint.state.manifest_no;
+    let manifest_no = hint.state.manifest_no;
     if manifest_no == loonfs_api::ManifestNo(0) {
         return Err(ControlObjectLoadError::Codec {
             object_key,
@@ -154,41 +170,50 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
             message: format!("hinted manifest `{manifest_no}` is missing"),
         });
     }
-    while let Ok(next) = manifest_no.successor() {
-        let Some(manifest) = load_discovered_manifest(store, namespace_id, next).await? else {
-            break;
-        };
-        if let Some(previous) = &current {
-            previous
-                .envelope
-                .payload()
-                .ensure_successor_identity(manifest.envelope.payload())
-                .map_err(|error| ControlObjectLoadError::Codec {
-                    object_key: manifest.object_key.clone(),
-                    message: error.to_string(),
-                })?;
-            let before = previous.envelope.payload();
-            let after = manifest.envelope.payload();
-            if before.head_seq > after.head_seq
-                || before.retention_floor_seq > after.retention_floor_seq
-                || before.last_folded_wal_no > after.last_folded_wal_no
-                || before.retention_floor_wal_no > after.retention_floor_wal_no
-                || before.writer_epoch > after.writer_epoch
-            {
-                return Err(ControlObjectLoadError::Codec {
-                    object_key: manifest.object_key,
-                    message: "manifest lowers a predecessor counter".to_owned(),
-                });
-            }
-        }
-        current = Some(manifest);
-        manifest_no = next;
-    }
     if let Some(current) = &mut current {
         current.discovery_start_manifest_no = hint.state.manifest_no;
         current.hinted_wal_no = hint.state.wal_no;
     }
     Ok(current)
+}
+
+pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
+    let Some(mut current) = load_hinted_manifest_if_present(store, namespace_id).await? else {
+        return Ok(None);
+    };
+    while let Ok(next) = current.state.manifest.manifest_no.successor() {
+        let Some(mut manifest) = load_discovered_manifest(store, namespace_id, next).await? else {
+            break;
+        };
+        current
+            .envelope
+            .payload()
+            .ensure_successor_identity(manifest.envelope.payload())
+            .map_err(|error| ControlObjectLoadError::Codec {
+                object_key: manifest.object_key.clone(),
+                message: error.to_string(),
+            })?;
+        let before = current.envelope.payload();
+        let after = manifest.envelope.payload();
+        if before.head_seq > after.head_seq
+            || before.retention_floor_seq > after.retention_floor_seq
+            || before.last_folded_wal_no > after.last_folded_wal_no
+            || before.retention_floor_wal_no > after.retention_floor_wal_no
+            || before.writer_epoch > after.writer_epoch
+        {
+            return Err(ControlObjectLoadError::Codec {
+                object_key: manifest.object_key,
+                message: "manifest lowers a predecessor counter".to_owned(),
+            });
+        }
+        manifest.discovery_start_manifest_no = current.discovery_start_manifest_no;
+        manifest.hinted_wal_no = current.hinted_wal_no;
+        current = manifest;
+    }
+    Ok(Some(current))
 }
 
 pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(

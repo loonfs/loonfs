@@ -2,7 +2,7 @@
 
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control::{load_current_manifest, LoadedManifest};
+use crate::namespace::control::{load_current_manifest, load_hinted_manifest, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::discover_tip;
 use loonfs_api::{ChangeSeq, NamespaceId};
@@ -50,7 +50,9 @@ pub(crate) async fn load_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
-    let mut manifest = load_current_manifest(store, namespace_id).await?;
+    // The successor check below runs AFTER WAL discovery and also detects a
+    // stale starting hint. An earlier successor probe would be redundant.
+    let mut manifest = load_hinted_manifest(store, namespace_id).await?;
     loop {
         match discover_tip(store, namespace_id, &manifest).await {
             Ok(state) => {
