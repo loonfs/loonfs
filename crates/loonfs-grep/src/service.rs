@@ -982,9 +982,18 @@ async fn scan_candidate_inodes(
         walked_directories += 1;
         let mut cursor = None;
         loop {
-            let page = reads
+            let page = match reads
                 .list_path_page(&directory, cursor, SCAN_DIRECTORY_PAGE_ENTRIES)
-                .await?;
+                .await
+            {
+                Ok(page) => page,
+                Err(error)
+                    if matches!(error.code(), ErrorCode::PathNotFound | ErrorCode::Forbidden) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
             for entry in page.items {
                 match entry.inode_kind() {
                     InodeKind::Directory => directories.push(entry.path),

@@ -2562,4 +2562,21 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             expected
         );
     }
+    let mut scan = request("ee");
+    scan.allow_scan = true;
+    scan.path_prefix = Some(AbsolutePath::parse("/team").expect("path"));
+    let reads = NamespaceReads::new(&host.reader, &namespace_id).as_subject(subject("viewer"));
+    let scanned = host
+        .service
+        .query(&scan, default_page_limit(), &reads, &store)
+        .await
+        .expect("a scan skips the folder the subject cannot read");
+    assert_eq!(
+        scanned
+            .matches
+            .iter()
+            .map(|found| found.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/team/file"]
+    );
 }

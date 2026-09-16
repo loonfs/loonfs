@@ -2808,6 +2808,7 @@ If the source checkpoint cannot be renewed, the server returns
 ### 6.13 `GET /grep`
 
 Grep filters candidates the subject cannot read before reading their content, and those candidates still count against the page budget.
+A scan without the index skips every directory the subject cannot read; files under it are reachable only through the index.
 
 Representative request:
 
