@@ -45,7 +45,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     let current = load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    publish_manifest_against(
+    let outcome = publish_manifest_against(
         store,
         namespace_id,
         manifest,
@@ -54,12 +54,33 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         timer,
         started_ms,
     )
-    .await
+    .await?;
+    if let ManifestPublicationOutcome::Published(current) = &outcome {
+        if timer.monotonic_now_ms().saturating_sub(started_ms)
+            <= crate::limits::METADATA_PUBLICATION_BUDGET_MS
+        {
+            // Publication is already durable; a failed hint cannot undo it.
+            if let Err(error) = raise_hint(
+                store,
+                namespace_id,
+                current.manifest.manifest_no,
+                current.last_folded_wal_no,
+                None,
+            )
+            .await
+            {
+                tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
+            }
+        }
+    }
+    Ok(outcome)
 }
 
 /// Reuse a predecessor already observed during this bounded publication.
 /// Conditional creation still arbitrates races; conflicts and ambiguous writes
 /// rediscover through the same classification path as ordinary publication.
+/// Installs only the immutable record: callers own the best-effort hint update.
+/// Writer acquisition coalesces it with the first durable commit's hint raise.
 #[tracing::instrument(
     level = "debug",
     name = "loonfs.phase",
@@ -152,23 +173,6 @@ pub(crate) async fn publish_manifest_against<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(CoreError::store(&object_key, &error)),
     };
-    if matches!(outcome, ManifestPublicationOutcome::Published(_))
-        && timer.monotonic_now_ms().saturating_sub(started_ms)
-            <= crate::limits::METADATA_PUBLICATION_BUDGET_MS
-    {
-        // Publication is already durable; a failed hint update cannot undo it.
-        if let Err(error) = raise_hint(
-            store,
-            namespace_id,
-            candidate.manifest.manifest_no,
-            candidate.last_folded_wal_no,
-            None,
-        )
-        .await
-        {
-            tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
-        }
-    }
     Ok(outcome)
 }
 

@@ -70,22 +70,22 @@ async fn batches_write_only_the_wal_until_the_threshold_raise() {
         )
         .await
         .expect("create");
-    // The first batch acquires the writer: a manifest with the new epoch,
-    // whose publication raises the hint's manifest number, and a fence at
-    // WAL number 1. Batch k then lands at number k + 1.
+    // The first batch acquires a manifest and fence, then advertises both the
+    // manifest and its committed WAL tip in one hint. Batch k lands at k + 1.
     directory(&writer, &namespace_id, 0).await;
     let initial = hint(store.as_ref(), &namespace_id).await;
+    let next_raise = initial.wal_no.0 + HINT_RAISE_SEGMENTS;
     store.reset();
-    for index in 1..HINT_RAISE_SEGMENTS - 2 {
+    for index in 1..next_raise - 2 {
         directory(&writer, &namespace_id, index).await;
     }
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(hint(store.as_ref(), &namespace_id).await, initial);
-    directory(&writer, &namespace_id, HINT_RAISE_SEGMENTS - 2).await;
+    directory(&writer, &namespace_id, next_raise - 2).await;
     assert_eq!(store.counts().compare_and_swaps, 1);
     assert_eq!(
         hint(store.as_ref(), &namespace_id).await.wal_no,
-        WalNo(HINT_RAISE_SEGMENTS)
+        WalNo(next_raise)
     );
     writer.shutdown().await.expect("shutdown");
 }

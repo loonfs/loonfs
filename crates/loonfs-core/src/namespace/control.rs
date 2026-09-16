@@ -302,3 +302,19 @@ pub async fn raise_namespace_hint<S: ObjectStore + ?Sized>(
     )
     .await
 }
+
+/// Advertises an already published basis and WAL tip in one monotone hint update.
+pub async fn raise_namespace_hint_for_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    basis: &MetadataBasis,
+    wal_no: loonfs_api::WalNo,
+    known: Option<LoadedHint>,
+) -> crate::error::Result<LoadedHint> {
+    if basis.manifest().owner_namespace_id != *namespace_id {
+        return Err(CoreError::Internal(
+            "hint basis belongs to another namespace".into(),
+        ));
+    }
+    raise_hint(store, namespace_id, basis.manifest_no(), wal_no, known).await
+}

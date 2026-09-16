@@ -837,7 +837,7 @@ pub(crate) async fn publish_batch_with_engine(
     if let Some(state) = &publish.resulting_read_state {
         writer
             .hint_raise
-            .raise_if_due(core, namespace_id, state.head.wal_no)
+            .raise_if_due(core, namespace_id, &state.basis, state.head.wal_no)
             .await;
     }
     {
