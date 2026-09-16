@@ -167,7 +167,8 @@ pub use checkpoint::{ManifestLoadError, ManifestLoadFailureClass};
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{
-    NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, Writable,
+    NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, ResolvedFileContent,
+    Writable,
 };
 pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,

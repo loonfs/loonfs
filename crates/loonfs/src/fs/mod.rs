@@ -5,6 +5,7 @@ mod maintenance;
 mod namespaces;
 mod reads;
 mod snapshots;
+mod speculative_read;
 mod uploads;
 mod writes;
 
