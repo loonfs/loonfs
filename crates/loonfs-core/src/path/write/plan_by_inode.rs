@@ -96,7 +96,6 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let source = resolve_visible_inode(view, inode_id).await?;
-    check_binding_generation(view, &source, expected_binding_generation)?;
     view.authorize(
         source
             .parent_inode_id
@@ -105,6 +104,7 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
         Absence::Inode,
     )
     .await?;
+    check_binding_generation(view, &source, expected_binding_generation)?;
     let target_parent = resolve_visible_directory(view, to_parent_inode_id).await?;
     let destination_path = child_display_path(&target_parent.absolute_path, to_display_name);
     let occupant = resolve_visible_child(view, to_parent_inode_id, to_display_name).await?;
@@ -137,6 +137,8 @@ pub(super) async fn plan_delete_by_inode<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
-    check_binding_generation(view, &target, expected_binding_generation)?;
-    plan_delete(view, &target, behavior, Absence::Inode).await
+    plan_delete(view, &target, behavior, Absence::Inode, || {
+        check_binding_generation(view, &target, expected_binding_generation)
+    })
+    .await
 }

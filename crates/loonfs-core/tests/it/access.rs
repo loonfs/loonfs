@@ -460,6 +460,10 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
     let kept = resolve_path(&store, &namespace_id, "/team/kept")
         .await
         .expect("kept");
+    let deleted = resolve_path(&store, &namespace_id, "/team/delete")
+        .await
+        .expect("delete");
+    let wrong_inode = InodeId(kept.inode_id.0 + 1);
     for (principal, operation, expected) in [
         (
             "viewer",
@@ -484,6 +488,49 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
             FilesystemOperation::DeleteByInode {
                 inode_id: kept.inode_id,
                 expected_binding_generation: kept.binding_generation.expect("binding"),
+                behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
+            },
+            Some(ErrorCode::InodeNotFound),
+        ),
+        (
+            "stranger",
+            FilesystemOperation::DeletePath {
+                path: AbsolutePath::parse("/team/kept").expect("path"),
+                behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: Some(wrong_inode),
+            },
+            Some(ErrorCode::PathNotFound),
+        ),
+        (
+            "stranger",
+            FilesystemOperation::UpdateAttributes {
+                path: AbsolutePath::parse("/team/kept").expect("path"),
+                set: std::collections::BTreeMap::from([(
+                    loonfs_api::AttributeKey::parse("owner").expect("key"),
+                    loonfs_api::AttributeValue::parse("ada").expect("value"),
+                )]),
+                remove: Vec::new(),
+                expected_inode_id: Some(wrong_inode),
+                expected_attributes_revision_no: Some(loonfs_api::AttributeRevisionNo(0)),
+            },
+            Some(ErrorCode::PathNotFound),
+        ),
+        (
+            "stranger",
+            FilesystemOperation::UpdateAccess {
+                path: AbsolutePath::parse("/team/kept").expect("path"),
+                boundary: false,
+                grants: AccessGrants::default(),
+                expected_inode_id: Some(wrong_inode),
+                expected_access_revision_no: Some(AccessRevisionNo(0)),
+            },
+            Some(ErrorCode::PathNotFound),
+        ),
+        (
+            "stranger",
+            FilesystemOperation::DeleteByInode {
+                inode_id: kept.inode_id,
+                expected_binding_generation: deleted.binding_generation.expect("binding"),
                 behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
             },
             Some(ErrorCode::InodeNotFound),

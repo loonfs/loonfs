@@ -22,25 +22,25 @@ pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     let resolved = view.view.resolve_visible_path(absolute_path).await?;
-    ensure_expected_inode(
-        &resolved,
-        expected_inode_id,
-        &final_component(absolute_path)?,
-    )?;
+    let name = final_component(absolute_path)?;
     plan_delete(
         view,
         &resolved,
         behavior,
         Absence::Path(absolute_path.as_str()),
+        || ensure_expected_inode(&resolved, expected_inode_id, &name),
     )
     .await
 }
 
+/// `expectation` runs after authorization: its errors name the inode the
+/// caller found, which a subject without rights must not learn.
 pub(super) async fn plan_delete<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
     behavior: DeleteDirectoryBehavior,
     absence: Absence<'_>,
+    expectation: impl FnOnce() -> Result<()>,
 ) -> Result<CompiledFilesystemOperation> {
     view.authorize(
         resolved
@@ -50,6 +50,7 @@ pub(super) async fn plan_delete<S: ObjectStore + ?Sized>(
         absence,
     )
     .await?;
+    expectation()?;
     let recursive = behavior == DeleteDirectoryBehavior::Recursive;
     let source_binding = source_binding(view, resolved).await?;
     let op = match resolved.inode_kind {

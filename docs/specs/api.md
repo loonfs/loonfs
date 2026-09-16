@@ -617,6 +617,8 @@ Responses expose attribution through these fields:
 ### Subject and principals
 
 `Loonfs-Principals` carries comma-separated principal ids without whitespace.
+Principal, subject, and scope ids never contain a comma, so the list is
+unambiguous.
 `Loonfs-Subject` identifies the subject the request acts as and defaults to
 `Loonfs-Actor`. The principal count is capped by the advertised
 `access.max_principals` limit. An unrestricted namespace ignores both headers.
