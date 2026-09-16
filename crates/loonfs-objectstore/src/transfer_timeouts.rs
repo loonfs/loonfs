@@ -78,7 +78,16 @@ struct TransferTimeoutService {
 
 #[async_trait]
 impl HttpService for TransferTimeoutService {
+    // Diagnostic only: never log the URI query, headers, credentials or bodies.
+    #[tracing::instrument(
+        name = "provider.http_attempt",
+        target = "loonfs_http_diagnostic",
+        level = "debug",
+        skip_all,
+        fields(method = %req.method(), path = req.uri().path())
+    )]
     async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let started = std::time::Instant::now();
         let request_body_bytes = req.body().content_length() as u64;
         let bound = request_phase_bound(request_body_bytes);
         let response = request_phase_timeout(bound, self.inner.execute(req))
@@ -91,7 +100,14 @@ impl HttpService for TransferTimeoutService {
                         bound_secs: bound.as_secs(),
                     },
                 ))
-            })?;
+            });
+        tracing::debug!(target: "loonfs_http_diagnostic",
+            request_phase_us = started.elapsed().as_micros() as u64,
+            status = ?response.as_ref().ok().map(|response| response.status().as_u16()),
+            error_kind = ?response.as_ref().err().map(HttpError::kind),
+            "HTTP request phase finished; includes dispatch/connect/upload/headers"
+        );
+        let response = response?;
 
         let (parts, body) = response.into_parts();
         let body = IdleDeadlineBody::new(body, PROVIDER_ATTEMPT_TIMEOUT);
@@ -115,6 +131,7 @@ struct IdleDeadlineBody {
     idle_sleep: Pin<Box<tokio::time::Sleep>>,
     received_bytes: u64,
     timed_out: bool,
+    diagnostic: Option<(tracing::Span, std::time::Instant)>,
 }
 
 impl IdleDeadlineBody {
@@ -129,6 +146,24 @@ impl IdleDeadlineBody {
             idle_sleep: Box::pin(tokio::time::sleep(idle_bound)),
             received_bytes: 0,
             timed_out: false,
+            diagnostic: tracing::enabled!(target: "loonfs_http_diagnostic", tracing::Level::DEBUG)
+                .then(|| (tracing::Span::current(), std::time::Instant::now())),
+        }
+    }
+}
+
+impl Drop for IdleDeadlineBody {
+    fn drop(&mut self) {
+        if let Some((span, started)) = &self.diagnostic {
+            span.in_scope(|| {
+                tracing::debug!(target: "loonfs_http_diagnostic",
+                    body_lifetime_us = started.elapsed().as_micros() as u64,
+                    received_bytes = self.received_bytes,
+                    timed_out = self.timed_out,
+                    end_stream = self.inner.is_end_stream(),
+                    "HTTP body dropped; elapsed includes consumer scheduling, not only network"
+                );
+            });
         }
     }
 }
