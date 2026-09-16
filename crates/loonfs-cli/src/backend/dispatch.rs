@@ -65,8 +65,9 @@ impl ResolvedTarget {
     pub(crate) fn scope_to_subject(&mut self, subject: &Subject) {
         match self {
             Self::Embedded(target) => {
+                target.backend.subject = Some(subject.clone());
                 target.backend.writer = target.backend.writer.as_subject(subject.clone());
-                target.backend.reader = target.backend.reader.as_subject(subject.clone());
+                target.backend.reader = target.backend.service_reader.as_subject(subject.clone());
             }
             Self::Remote(target) => {
                 target.client = target.client.clone().with_subject(subject.clone());

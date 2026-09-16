@@ -286,6 +286,8 @@ impl EmbeddedTarget {
         runner.attach_hints(receiver);
         let backend = EmbeddedBackend {
             writer,
+            service_reader: reader.clone(),
+            subject: None,
             reader,
             maintenance,
             jobs,

@@ -49,6 +49,7 @@ async fn run_namespace_show(
         &loaded.config,
         explicit_profile,
         args.target.request.no_retry,
+        Some(&args.target.subject),
     )
     .await?;
     let explicit_namespace = args
@@ -81,6 +82,7 @@ async fn run_namespace_create(
         &loaded.config,
         explicit_profile,
         args.request.no_retry,
+        None,
     )
     .await?;
     let actor_id = resolve_actor(profile, args.actor.actor_id.as_deref())
@@ -140,8 +142,14 @@ async fn run_namespace_delete(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let context =
-        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let context = resolve_profile_context(
+        kind,
+        config_path,
+        explicit_profile,
+        args.request.no_retry,
+        Some(&args.subject),
+    )
+    .await?;
     let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| error.with_param("namespace_id"))
         .map_err(|error| context.fail(kind, error))?;
@@ -206,6 +214,7 @@ async fn run_namespace_fork(
         &loaded.config,
         explicit_profile,
         args.request.no_retry,
+        Some(&args.subject),
     )
     .await?;
     let actor_id = resolve_actor(profile, args.actor.actor_id.as_deref())
@@ -251,6 +260,7 @@ pub(crate) async fn run_namespace_use(
         &loaded.config,
         explicit_profile,
         args.request.no_retry,
+        None,
     )
     .await?;
     let namespace_id = parse_namespace_id(&args.namespace_id)

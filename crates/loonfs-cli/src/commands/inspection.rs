@@ -112,8 +112,14 @@ pub(crate) async fn run_capabilities(
     args: CapabilitiesArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let context =
-        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let context = resolve_profile_context(
+        kind,
+        config_path,
+        explicit_profile,
+        args.request.no_retry,
+        None,
+    )
+    .await?;
     let document = context
         .target
         .get_capabilities()

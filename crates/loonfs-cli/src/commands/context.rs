@@ -1,7 +1,7 @@
 //! Shared per-command context: target resolution and common helpers.
 
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use crate::args::{ActorSelectorArgs, CommandKind, TargetSelectorArgs};
+use crate::args::{ActorSelectorArgs, CommandKind, SubjectSelectorArgs, TargetSelectorArgs};
 use crate::config::{CliConfig, ConfigLocation, ConfigSource};
 use crate::error::CliError;
 use crate::resolve::{
@@ -131,12 +131,18 @@ pub(crate) async fn resolve_profile_context(
     config_path: &Path,
     explicit_profile: Option<&str>,
     no_retry: bool,
+    subject: Option<&SubjectSelectorArgs>,
 ) -> Result<CommandContext, CommandFailure> {
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let (context, _) =
-        resolve_profile_context_from_config(kind, &loaded.config, explicit_profile, no_retry)
-            .await?;
+    let (context, _) = resolve_profile_context_from_config(
+        kind,
+        &loaded.config,
+        explicit_profile,
+        no_retry,
+        subject,
+    )
+    .await?;
     Ok(context)
 }
 
@@ -145,20 +151,45 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
     config: &'a CliConfig,
     explicit_profile: Option<&'a str>,
     no_retry: bool,
+    subject: Option<&SubjectSelectorArgs>,
 ) -> Result<(CommandContext, &'a crate::config::ProfileConfig), CommandFailure> {
     let (profile_name, profile) = crate::profiles::resolve_profile(config, explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let target = ResolvedTarget::resolve(profile, no_retry)
+    let mut target = ResolvedTarget::resolve(profile, no_retry)
         .await
         .map_err(|error| fail(kind, Some(profile_name.to_owned()), None, error))?;
     let mode = target.mode_str().to_owned();
+    let subject = match subject {
+        Some(selector) => {
+            let attribute = |error| {
+                fail(
+                    kind,
+                    Some(profile_name.to_owned()),
+                    Some(mode.clone()),
+                    error,
+                )
+            };
+            let actor = resolve_actor(profile, None).map_err(&attribute)?;
+            resolve_subject(
+                profile,
+                &actor,
+                selector.subject_id.as_deref(),
+                selector.principals.as_deref(),
+            )
+            .map_err(attribute)?
+        }
+        None => None,
+    };
+    if let Some(subject) = &subject {
+        target.scope_to_subject(subject);
+    }
     Ok((
         CommandContext {
             profile_name: profile_name.to_owned(),
             mode,
             namespace: None,
             actor_id: None,
-            subject: None,
+            subject,
             target,
         },
         profile,

@@ -43,6 +43,41 @@ fn an_acl_namespace_is_created_shown_and_recovered() {
     assert_failure(&missing);
     assert_eq!(json_error(&missing)["code"], "invalid_request");
     assert_eq!(json_error(&missing)["param"], "Loonfs-Principals");
+    let fork = harness.run(&[
+        "--json",
+        "namespace",
+        "fork",
+        "demo",
+        "clone",
+        "--principals",
+        "nobody",
+    ]);
+    assert_failure(&fork);
+    assert_eq!(json_error(&fork)["code"], "forbidden");
+    let delete = harness.run(&[
+        "--json",
+        "namespace",
+        "delete",
+        "demo",
+        "--yes",
+        "--principals",
+        "nobody",
+    ]);
+    assert_failure(&delete);
+    assert_eq!(json_error(&delete)["code"], "forbidden");
+    let payload = harness.temp_dir.path().join("note.txt");
+    fs::write(&payload, b"needle\n").expect("payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/team/note.txt",
+        "--principals",
+        "prn_root",
+    ]));
+    assert_success(&harness.run(&["maintenance", "index", "enable"]));
+    let found = harness.run(&["--json", "grep", "needle", "--principals", "team"]);
+    assert_success(&found);
+    assert_eq!(json_data(&found)["matches"][0]["path"], "/team/note.txt");
 }
 
 #[test]

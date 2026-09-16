@@ -784,6 +784,8 @@ pub(crate) struct NamespaceCreateArgs {
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceDeleteArgs {
     #[command(flatten)]
+    pub subject: SubjectSelectorArgs,
+    #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
@@ -799,6 +801,8 @@ pub(crate) struct NamespaceDeleteArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceForkArgs {
+    #[command(flatten)]
+    pub subject: SubjectSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[command(flatten)]
@@ -1207,6 +1211,8 @@ pub(crate) enum SnapshotCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotTargetArgs {
+    #[command(flatten)]
+    pub subject: SubjectSelectorArgs,
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]

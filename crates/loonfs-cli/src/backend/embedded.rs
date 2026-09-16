@@ -49,6 +49,10 @@ use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, 
 pub(crate) struct EmbeddedBackend {
     pub(crate) writer: FsWriter,
     pub(crate) reader: FsReader,
+    /// The unscoped reader grep's index and change-feed reads keep using
+    /// when a subject scopes the others.
+    pub(crate) service_reader: FsReader,
+    pub(crate) subject: Option<loonfs_api::Subject>,
     pub(crate) maintenance: FsMaintenance,
     pub(crate) jobs: MaintenanceRegistry,
     pub(crate) runner: MaintenanceRunner,
@@ -253,7 +257,11 @@ impl EmbeddedBackend {
         limit: Option<u32>,
     ) -> Result<GrepResponse, CliError> {
         let store = self.writer.object_store();
-        let reads = NamespaceReads::new(&self.reader, namespace_id);
+        let reads = NamespaceReads::new(&self.service_reader, namespace_id);
+        let reads = match &self.subject {
+            Some(subject) => reads.as_subject(subject.clone()),
+            None => reads,
+        };
         self.grep
             .query(request, resolve_cli_page_limit(limit)?, &reads, &store)
             .await

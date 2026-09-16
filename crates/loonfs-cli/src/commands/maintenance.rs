@@ -317,8 +317,14 @@ async fn run_maintenance_loop(
     args: MaintenanceLoopArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let context =
-        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let context = resolve_profile_context(
+        kind,
+        config_path,
+        explicit_profile,
+        args.request.no_retry,
+        None,
+    )
+    .await?;
     let namespaces = args
         .namespaces
         .iter()
@@ -373,8 +379,14 @@ async fn run_maintenance_store_probe(
     args: MaintenanceStoreProbeArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let context =
-        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let context = resolve_profile_context(
+        kind,
+        config_path,
+        explicit_profile,
+        args.request.no_retry,
+        None,
+    )
+    .await?;
     let response = context
         .target
         .probe_store()
