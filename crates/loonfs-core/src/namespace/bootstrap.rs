@@ -2,7 +2,7 @@
 
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::metadata::{InodeRecord, MetadataState};
+use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::namespace::control::{
     load_current_manifest, load_current_manifest_if_present, load_discovered_manifest,
 };
@@ -15,8 +15,8 @@ use loonfs_api::wire::manifest::{
     encode_namespace_manifest_json, NamespaceAccess, NamespaceManifestPayload,
 };
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, ManifestNo, Namespace, NamespaceId, WalNo,
-    ROOT_INODE_ID,
+    AccessRevisionNo, ActorId, ChangeSeq, ContentStoreId, ErrorCode, InodeKind, ManifestNo,
+    Namespace, NamespaceId, WalNo, ROOT_INODE_ID,
 };
 use loonfs_objectstore::keys::{content_store, hint, metadata_manifest_object};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -189,7 +189,26 @@ pub(super) async fn install_namespace_manifest<
     }
 }
 
-pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
+pub(crate) fn bootstrap_metadata_state(
+    created_at_ms: u64,
+    access: &NamespaceAccess,
+) -> MetadataState {
+    let access_revisions = match access {
+        NamespaceAccess::Acl { root_grants, .. } if !root_grants.is_empty() => {
+            vec![AccessRevisionRecord {
+                inode_id: ROOT_INODE_ID,
+                access_revision_no: AccessRevisionNo(0),
+                committed_seq: ChangeSeq(0),
+                commit_id: loonfs_api::wire::control::genesis_commit_id(),
+                delta_index: 0,
+                updated_by: ActorId::loonfs(),
+                updated_at_ms: created_at_ms,
+                boundary: false,
+                grants: root_grants.clone(),
+            }]
+        }
+        _ => Vec::new(),
+    };
     MetadataState::from_rows(
         vec![InodeRecord {
             inode_id: ROOT_INODE_ID,
@@ -206,6 +225,6 @@ pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        Vec::new(),
+        access_revisions,
     )
 }

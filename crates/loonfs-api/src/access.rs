@@ -6,7 +6,7 @@
 
 use crate::ids::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use thiserror::Error;
 
@@ -151,6 +151,11 @@ pub struct AccessRights(u8);
 impl AccessRights {
     /// The set with no rights.
     pub const EMPTY: Self = Self(0);
+
+    /// Every right.
+    pub const ALL: Self = Self(((1_u16 << AccessRight::ALL.len()) - 1) as u8);
+    /// The set holding only `admin`.
+    pub const ADMIN: Self = Self(AccessRight::Admin.bit());
 
     /// Whether the set holds `right`.
     pub fn contains(self, right: AccessRight) -> bool {
@@ -321,6 +326,57 @@ pub enum AccessGrantsError {
     EmptyRights {
         /// The principal with the empty entry.
         principal_id: PrincipalId,
+    },
+}
+
+/// Most principals one request may act as.
+pub const MAX_SUBJECT_PRINCIPALS: usize = 64;
+
+/// The principals a request acts as: distinct ids, at most
+/// [`MAX_SUBJECT_PRINCIPALS`] of them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrincipalSet(BTreeSet<PrincipalId>);
+
+impl PrincipalSet {
+    /// Rejects sets larger than [`MAX_SUBJECT_PRINCIPALS`].
+    pub fn new(principals: BTreeSet<PrincipalId>) -> Result<Self, PrincipalSetError> {
+        if principals.len() > MAX_SUBJECT_PRINCIPALS {
+            return Err(PrincipalSetError::TooManyPrincipals {
+                principals: principals.len(),
+            });
+        }
+        Ok(Self(principals))
+    }
+
+    /// The ids in principal order.
+    pub fn iter(&self) -> impl Iterator<Item = &PrincipalId> {
+        self.0.iter()
+    }
+
+    /// Whether the request acts as `principal_id`.
+    pub fn contains(&self, principal_id: &PrincipalId) -> bool {
+        self.0.contains(principal_id)
+    }
+
+    /// Number of distinct identities the request acts as.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the request acts as no principal.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Why a request's principal set was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PrincipalSetError {
+    /// More identities than one request may act as.
+    #[error("principal set names {principals} principals, which exceeds the maximum of {MAX_SUBJECT_PRINCIPALS}")]
+    TooManyPrincipals {
+        /// Number of identities the rejected set held.
+        principals: usize,
     },
 }
 

@@ -73,8 +73,9 @@ pub mod wire {
 
 pub use access::{
     AccessGrants, AccessGrantsError, AccessRevisionNo, AccessRight, AccessRights, PrincipalId,
-    PrincipalIdValidationError, PrincipalScope, PrincipalScopeValidationError,
-    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES,
+    PrincipalIdValidationError, PrincipalScope, PrincipalScopeValidationError, PrincipalSet,
+    PrincipalSetError, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES,
+    MAX_SUBJECT_PRINCIPALS,
 };
 pub use actor::{ActorId, ActorIdValidationError};
 pub use attributes::{

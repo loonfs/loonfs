@@ -272,7 +272,10 @@ mod tests {
             retention_floor_seq: ChangeSeq(0),
             key,
             wal_tail_segments: 3,
-            tail_state: Arc::new(bootstrap_metadata_state(1_000)),
+            tail_state: Arc::new(bootstrap_metadata_state(
+                1_000,
+                &loonfs_api::NamespaceAccess::Unrestricted {},
+            )),
         }
     }
 

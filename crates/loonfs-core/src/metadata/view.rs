@@ -11,16 +11,16 @@ use crate::checkpoint::VerifiedMetadataSegments;
 use crate::error::CoreError;
 use crate::metadata::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record,
-    unbind_matches_binding, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, RecoverableDeletion,
-    ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
+    unbind_matches_binding, AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord,
+    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
+    RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{
-    AbsolutePath, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, InodeId, InodeKind,
-    NameKey, RevisionNo,
+    AbsolutePath, AccessRevisionNo, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, InodeId,
+    InodeKind, NameKey, RevisionNo,
 };
 #[cfg(test)]
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -268,7 +268,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ///
     /// `MetadataView` is `Copy`, so the adapter owns a copy instead of borrowing
     /// `self`.
-    fn reads(&self) -> MetadataViewReads<'a, 'store, S> {
+    pub(crate) fn reads(&self) -> MetadataViewReads<'a, 'store, S> {
         MetadataViewReads { view: *self }
     }
 
@@ -459,6 +459,30 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .into_iter()
             .chain(manifest_record)
             .max_by_key(attributes_order_key))
+    }
+
+    /// Access rows are whole state, not history, so both sources are filtered at the visible sequence.
+    pub(crate) async fn latest_access_revision(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<Option<AccessRevisionRecord>, CoreError> {
+        let row_record = self
+            .row_states()
+            .flat_map(|state| state.access_revisions())
+            .filter(|record| {
+                record.inode_id == inode_id && record.committed_seq <= self.visible_seq()
+            })
+            .max_by_key(|record| access_order_key(record))
+            .cloned();
+        let manifest_record = if let Some(segments) = self.manifest_segments() {
+            manifest_index::access_for_inode(segments, inode_id, self.visible_seq()).await?
+        } else {
+            None
+        };
+        Ok(row_record
+            .into_iter()
+            .chain(manifest_record)
+            .max_by_key(access_order_key))
     }
 
     /// The inode's attribute state at the visible sequence: the revision
@@ -925,7 +949,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 /// tail) and takes every composite rule from the provided trait methods, so
 /// the object-store-backed view decides visibility through the exact same
 /// bodies as the in-memory state.
-struct MetadataViewReads<'a, 'store, S: ObjectStore + ?Sized> {
+pub(crate) struct MetadataViewReads<'a, 'store, S: ObjectStore + ?Sized> {
     view: MetadataView<'a, 'store, S>,
 }
 
@@ -966,6 +990,13 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
     ) -> Result<bool, Self::Error> {
         self.view.is_direntry_unbound(direntry).await
     }
+
+    async fn find_access_row(
+        &mut self,
+        inode_id: InodeId,
+    ) -> Result<Option<AccessRevisionRecord>, Self::Error> {
+        self.view.latest_access_revision(inode_id).await
+    }
 }
 
 fn attributes_order_key(
@@ -973,6 +1004,14 @@ fn attributes_order_key(
 ) -> (AttributeRevisionNo, ChangeSeq, u32) {
     (
         record.attributes_revision_no,
+        record.committed_seq,
+        record.delta_index,
+    )
+}
+
+fn access_order_key(record: &AccessRevisionRecord) -> (AccessRevisionNo, ChangeSeq, u32) {
+    (
+        record.access_revision_no,
         record.committed_seq,
         record.delta_index,
     )

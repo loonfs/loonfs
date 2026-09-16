@@ -6,8 +6,9 @@
 
 use crate::error::CoreError;
 use crate::metadata::{
-    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
+    AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
+    ContentPublicationRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord,
+    RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::MetadataRow;
 
@@ -97,10 +98,9 @@ pub(crate) fn attributes_revision_from_manifest_row(
     }
 }
 
-#[cfg(test)]
 pub(crate) fn access_revision_from_manifest_row(
     row: MetadataRow,
-) -> Result<crate::metadata::AccessRevisionRecord, CoreError> {
+) -> Result<AccessRevisionRecord, CoreError> {
     match row {
         MetadataRow::AccessRevision(record) => Ok(record),
         other => Err(foreign_row("access_revision", &other)),

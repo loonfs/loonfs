@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::metadata::{AttributesRevisionRecord, MetadataStateBuilder, MetadataView};
-use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, RunNo};
+use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, Attributes};
 use std::collections::BTreeMap;
 
 fn attributes(entries: &[(&str, &str)]) -> Attributes {
@@ -279,51 +279,6 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
             .expect("read attributes"),
         (AttributeRevisionNo(0), Attributes::default())
     );
-}
-
-async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    manifest_no: ManifestNo,
-    head_seq: ChangeSeq,
-    segments: Vec<MetadataSegmentRef>,
-) -> ManifestNo {
-    let manifest_number = manifest_no;
-    let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
-        content_store_id: loonfs_api::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-            .expect("content store"),
-        created_at_ms: 1_000,
-        created_by: loonfs_test_support::test_actor(),
-        access: loonfs_api::NamespaceAccess::Unrestricted {},
-        fork_basis: None,
-        status: loonfs_api::wire::control::NamespaceStatus::Active {},
-        writer: None,
-        last_folded_wal_no: loonfs_api::WalNo(0),
-        retention_floor_wal_no: loonfs_api::WalNo(0),
-        compactor_epoch: 0,
-        namespace_id: namespace_id.clone(),
-        manifest_no,
-
-        head_seq,
-        head_commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("commit id"),
-        base_seq: head_seq,
-        writer_epoch: loonfs_api::WriterEpoch(1),
-        next_inode_id: InodeId(64),
-        next_run_no: RunNo(1),
-        retention_floor_seq: ChangeSeq(0),
-        runs: vec![MetadataRunRef {
-            run_no: RunNo(0),
-            run_seq: head_seq,
-            tier: RunTier::Base,
-            segments,
-        }],
-    })
-    .expect("manifest envelope")
-    .into_envelope();
-    write_namespace_manifest(store, manifest.payload().clone())
-        .await
-        .expect("write manifest");
-    manifest_number
 }
 
 #[tokio::test]
