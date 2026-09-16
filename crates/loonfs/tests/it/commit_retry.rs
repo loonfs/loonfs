@@ -374,6 +374,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
                 preconditions: Vec::new(),
                 commit_id: commit_id.clone(),
                 actor_id: loonfs_test_support::test_actor(),
+                subject: None,
                 message: None,
                 operations: vec![
                     FilesystemOperation::PutFile {

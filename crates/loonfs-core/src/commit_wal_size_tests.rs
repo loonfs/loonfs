@@ -106,6 +106,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         let request = CommitRequest {
             commit_id: CommitId::parse("c".repeat(MAX_ID_BYTES)).expect("commit"),
             actor_id: actor.clone(),
+            subject: None,
             message: Some("m".repeat(MAX_COMMIT_MESSAGE_BYTES)),
             preconditions: Vec::new(),
             operations: (0..operation_count)

@@ -301,7 +301,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
         session: status, ..
     } = block_on(
         fs.writer
-            .get_upload(&namespace_id, &begin.session.upload_id),
+            .get_upload(&namespace_id, &begin.session.upload_id, None),
     )
     .expect("get upload status");
     assert!(
@@ -493,11 +493,11 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
             let begin = fs
                 .writer
-                .create_upload(&namespace_id)
+                .create_upload(&namespace_id, None)
                 .await
                 .expect("begin upload");
             fs.writer
-                .put_upload_content(&namespace_id, &begin.upload_id, bytes)
+                .put_upload_content(&namespace_id, &begin.upload_id, None, bytes)
                 .await
                 .expect("upload content");
             let completed = fs
@@ -505,6 +505,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 .complete_upload(
                     &namespace_id,
                     &begin.upload_id,
+                    None,
                     ResolvedUploadCompletion::KnownContent,
                 )
                 .await

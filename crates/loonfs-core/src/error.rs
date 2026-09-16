@@ -237,6 +237,10 @@ pub enum CoreError {
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is unrestricted and holds no access rows")]
     NamespaceUnrestricted { namespace_id: NamespaceId },
+    #[error("namespace `{namespace_id}` requires a subject; send Loonfs-Principals")]
+    SubjectRequired { namespace_id: NamespaceId },
+    #[error("the subject lacks a right the operation needs on inode `{inode_id}`")]
+    Forbidden { inode_id: InodeId },
     /// A caller-supplied `expected_head_seq` did not match the current head.
     ///
     /// Unlike [`WalPublishError::StaleHead`], this error reports a failed
@@ -395,6 +399,7 @@ impl CoreError {
             CoreError::WalPublish(error) => error.code(),
             CoreError::InvalidPath(_)
             | CoreError::RootMutationForbidden
+            | CoreError::SubjectRequired { .. }
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
             | CoreError::InvalidCheckpointRequest(_)
@@ -419,6 +424,7 @@ impl CoreError {
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespaceUnrestricted { .. } => ErrorCode::NamespaceUnrestricted,
+            CoreError::Forbidden { .. } => ErrorCode::Forbidden,
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
             CoreError::BindingGenerationMismatch { .. } => ErrorCode::BindingGenerationMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
@@ -492,6 +498,7 @@ impl CoreError {
             | CoreError::VisiblePath(_)
             | CoreError::CommitValidation(_)
             | CoreError::InvalidPath(_)
+            | CoreError::SubjectRequired { .. }
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
             | CoreError::PathNotFound(_)
@@ -537,6 +544,7 @@ impl CoreError {
             | CoreError::Internal(_)
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
+            | CoreError::Forbidden { .. }
             | CoreError::NamespaceUnrestricted { .. }
             | CoreError::StaleHeadPrecondition { .. } => None,
             #[cfg(any(test, feature = "test-support"))]
@@ -552,6 +560,10 @@ impl CoreError {
     /// can match the typed variants directly instead.
     pub fn details(&self) -> Option<ErrorDetails> {
         match self {
+            CoreError::Forbidden { inode_id } => Some(ErrorDetails {
+                inode_id: Some(*inode_id),
+                ..ErrorDetails::default()
+            }),
             CoreError::WriterFenced(fence) => Some(ErrorDetails {
                 fenced_writer_epoch: Some(fence.fenced_epoch),
                 active_writer_epoch: Some(fence.active_epoch),

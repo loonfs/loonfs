@@ -4,7 +4,7 @@
 
 use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
-use super::extractors::ActorHeader;
+use super::extractors::{ActorHeader, SubjectHeaders};
 use super::handlers_uploads::{
     content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
 };
@@ -513,6 +513,7 @@ pub(super) async fn list_file_revisions(
 pub(super) async fn create_commit(
     State(state): State<AppState>,
     ActorHeader(actor_id): ActorHeader,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ApiCommitRequest>,
@@ -559,6 +560,7 @@ pub(super) async fn create_commit(
         preconditions,
         commit_id,
         actor_id,
+        subject,
         message,
         operations,
     };

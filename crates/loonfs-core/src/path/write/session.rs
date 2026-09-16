@@ -68,7 +68,13 @@ impl PublishPlanningSession {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
         let overlay = MetadataState::default();
         let pre_state = base_view.with_overlay(&overlay, &self.accepted_rows, self.head.seq);
-        evaluate_preconditions(&request.preconditions, &self.head, &pre_state).await?;
+        evaluate_preconditions(
+            &request.preconditions,
+            request.subject.as_ref(),
+            &self.head,
+            &pre_state,
+        )
+        .await?;
         prepare_commit_against_publish_view(
             request,
             semantic_identity,
@@ -190,6 +196,7 @@ mod tests {
             preconditions: Vec::new(),
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 FilesystemOperation::CreateDirectory {

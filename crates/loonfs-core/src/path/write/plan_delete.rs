@@ -1,14 +1,17 @@
 //! Publish plans that delete visible paths.
 
+use super::authorize::Absence;
 use super::ensure_expected_inode;
 use super::publish_path_planning::{
     source_binding, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::commit::CommitOp;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
-use loonfs_api::{AbsolutePath, DeleteDirectoryBehavior, InodeId, InodeKind};
+use loonfs_api::{
+    AbsolutePath, AccessRight, AccessRights, DeleteDirectoryBehavior, InodeId, InodeKind,
+};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
@@ -24,14 +27,29 @@ pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
         expected_inode_id,
         &final_component(absolute_path)?,
     )?;
-    plan_delete(view, &resolved, behavior).await
+    plan_delete(
+        view,
+        &resolved,
+        behavior,
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await
 }
 
 pub(super) async fn plan_delete<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
     behavior: DeleteDirectoryBehavior,
+    absence: Absence<'_>,
 ) -> Result<CompiledFilesystemOperation> {
+    view.authorize(
+        resolved
+            .parent_inode_id
+            .ok_or(CoreError::RootMutationForbidden)?,
+        AccessRights::from_iter([AccessRight::Remove]),
+        absence,
+    )
+    .await?;
     let recursive = behavior == DeleteDirectoryBehavior::Recursive;
     let source_binding = source_binding(view, resolved).await?;
     let op = match resolved.inode_kind {

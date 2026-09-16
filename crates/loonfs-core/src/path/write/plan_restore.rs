@@ -1,12 +1,13 @@
 //! Publish plans that restore an earlier file revision.
 
+use super::authorize::Absence;
 use super::publish_path_planning::{
     reject_tombstoned_path_ancestor, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::ensure_mutation_path;
-use loonfs_api::{AbsolutePath, InodeKind, RevisionNo};
+use loonfs_api::{AbsolutePath, AccessRight, AccessRights, InodeKind, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_restore_revision<S: ObjectStore + ?Sized>(
@@ -17,6 +18,12 @@ pub(super) async fn plan_restore_revision<S: ObjectStore + ?Sized>(
     ensure_mutation_path(absolute_path)?;
     reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view.view.resolve_visible_path(absolute_path).await?;
+    view.authorize(
+        target.inode_id,
+        AccessRights::from_iter([AccessRight::Write, AccessRight::History]),
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await?;
     if target.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             target: absolute_path.as_str().to_owned(),

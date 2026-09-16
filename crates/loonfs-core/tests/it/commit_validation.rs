@@ -227,9 +227,9 @@ async fn valid_content_admission_skips_durable_content_validation() {
     // A receipt exists only for a session the store already says completed,
     // so the token this test admits has to come from a real upload.
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload().await.expect("begin upload");
+    let upload = engine.begin_upload(None).await.expect("begin upload");
     engine
-        .upload_content(&upload.upload_id, b"admitted")
+        .upload_content(&upload.upload_id, None, b"admitted")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -239,6 +239,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .complete_upload(
             &catalog,
             &upload.upload_id,
+            None,
             ResolvedUploadCompletion::KnownContent,
         )
         .await
@@ -350,9 +351,9 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .await
         .expect("bootstrap");
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload().await.expect("begin upload");
+    let upload = engine.begin_upload(None).await.expect("begin upload");
     engine
-        .upload_content(&upload.upload_id, b"deadline")
+        .upload_content(&upload.upload_id, None, b"deadline")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -362,6 +363,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .complete_upload(
             &catalog,
             &upload.upload_id,
+            None,
             ResolvedUploadCompletion::KnownContent,
         )
         .await
@@ -551,6 +553,7 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
                 preconditions: Vec::new(),
                 commit_id: commit_id("discard-allocation"),
                 actor_id: loonfs_test_support::test_actor(),
+                subject: None,
                 message: None,
                 operations: vec![create_dir("/discarded"), delete_path("/missing")],
             },
@@ -802,6 +805,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
             preconditions: Vec::new(),
             commit_id: commit_id("reports-batch"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: Some("import reports".to_owned()),
             operations: vec![
                 create_dir("/reports"),
@@ -861,6 +865,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
             preconditions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 create_dir("/first"),
@@ -894,6 +899,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
             preconditions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![create_dir("/first"), create_dir("/third")],
         },
@@ -918,6 +924,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         preconditions: Vec::new(),
         commit_id: commit_id(commit),
         actor_id: loonfs_test_support::test_actor(),
+        subject: None,
         message: None,
         operations: vec![create_dir("/a"), create_dir("/b")],
     };
@@ -937,6 +944,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
             preconditions: Vec::new(),
             commit_id: commit_id("replayed-batch"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![create_dir("/a"), create_dir("/c")],
         },
@@ -964,6 +972,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
             preconditions: Vec::new(),
             commit_id: commit_id("one-operation"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![create_dir("/docs")],
         },
@@ -991,6 +1000,7 @@ async fn operation_order_decides_the_outcome() {
             preconditions: Vec::new(),
             commit_id: commit_id("create-then-delete"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![create_dir("/x"), delete_path("/x")],
         },
@@ -1009,6 +1019,7 @@ async fn operation_order_decides_the_outcome() {
             preconditions: Vec::new(),
             commit_id: commit_id("seed-y"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![create_dir("/y")],
         },
@@ -1023,6 +1034,7 @@ async fn operation_order_decides_the_outcome() {
             preconditions: Vec::new(),
             commit_id: commit_id("delete-then-create"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![delete_path("/y"), create_dir("/y")],
         },
@@ -1082,6 +1094,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
             preconditions: Vec::new(),
             commit_id: commit_id("with_preconditions-chain"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 replace(second.content_ref().clone(), 1),
@@ -1102,6 +1115,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
             preconditions: Vec::new(),
             commit_id: commit_id("stale-with_preconditions-chain"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 replace(second.into_content_ref(), 3),
@@ -1132,9 +1146,9 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .await
         .expect("bootstrap");
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload().await.expect("begin upload");
+    let upload = engine.begin_upload(None).await.expect("begin upload");
     let staged = engine
-        .upload_content(&upload.upload_id, b"re-minted")
+        .upload_content(&upload.upload_id, None, b"re-minted")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -1144,6 +1158,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .complete_upload(
             &catalog,
             &upload.upload_id,
+            None,
             ResolvedUploadCompletion::KnownContent,
         )
         .await
@@ -1170,7 +1185,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         receipt,
         ..
     } = engine
-        .get_upload_status(&upload.upload_id)
+        .get_upload_status(&upload.upload_id, None)
         .await
         .expect("get upload status");
     match status.status {

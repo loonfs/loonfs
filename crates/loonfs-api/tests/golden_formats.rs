@@ -684,6 +684,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             created_at_ms: 1_000,
+            subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Idle,
             },
@@ -702,6 +703,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             created_at_ms: 1_000,
+            subject_id: None,
             mode: UploadSessionMode::DirectPut {
                 checksum_algorithm: ChecksumAlgorithm::Sha256,
             },
@@ -723,6 +725,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_22222222222222222222222222222222"),
             created_at_ms: 1_000,
+            subject_id: None,
             mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload-id".to_owned(),
                 part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
@@ -744,6 +747,25 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             created_at_ms: 1_000,
+            subject_id: None,
+            mode: UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Staged(sample_content_ref()),
+            },
+            status: UploadSessionRecordStatus::Open {
+                expires_at_ms: 87_400_000,
+            },
+        },
+    );
+    check_control_golden(
+        "control_upload_session_subject.v1.json",
+        ControlObjectKind::UploadSession,
+        UploadSessionState {
+            namespace_id: namespace_id(),
+            upload_id: UploadId::parse("upl_33333333333333333333333333333333")
+                .expect("valid upload id"),
+            content_id: content_id("con_0123456789abcdef0123456789abcdef"),
+            created_at_ms: 1_000,
+            subject_id: Some(loonfs_api::SubjectId::parse("usr_ada").expect("subject id")),
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged(sample_content_ref()),
             },
@@ -761,6 +783,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_44444444444444444444444444444444"),
             created_at_ms: 1_000,
+            subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Claimed,
             },
@@ -778,6 +801,7 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             content_id: content_id("con_11111111111111111111111111111111"),
             created_at_ms: 1_000,
+            subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Idle,
             },
@@ -1182,6 +1206,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
                     .expect("valid upload id"),
                 content_id: content_id("con_11111111111111111111111111111111"),
                 created_at_ms: 1_000,
+                subject_id: None,
                 mode: UploadSessionMode::ServiceProxied {
                     staging: ProxiedStaging::Idle,
                 },

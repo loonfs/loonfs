@@ -1,6 +1,7 @@
 //! Commit fingerprinting and sequential resolution of a request's
 //! operations into one commit's operations.
 
+use super::authorize::Authorizer;
 use super::intent::{CommitRequest, FilesystemOperation};
 use super::plan_access::plan_update_access;
 use super::plan_attributes::plan_update_attributes;
@@ -38,6 +39,7 @@ pub(crate) fn commit_fingerprint(
     loonfs_api::semantic_commit_fingerprint(
         namespace_id,
         &request.actor_id,
+        request.subject.as_ref().map(|subject| &subject.subject_id),
         request.message.as_deref(),
         &request.operations,
         &request.preconditions,
@@ -74,6 +76,8 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             ))
         })?;
 
+    let authorizer =
+        Authorizer::for_request(&head.namespace_id, &head.access, request.subject.as_ref())?;
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
     let mut numbering = CommitNumbering::default();
     let mut validated_ops: Vec<ValidatedOp> = Vec::new();
@@ -83,6 +87,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             let view = PublishPathPlanningView {
                 namespace_id: &head.namespace_id,
                 access: &head.access,
+                authorizer: &authorizer,
                 view: &resolution_view,
             };
             plan_operation(operation, &view, allocation)
@@ -375,6 +380,7 @@ mod tests {
             preconditions: Vec::new(),
             commit_id,
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![create_dir("/docs")],
         };
@@ -569,6 +575,7 @@ mod tests {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-create-then-put").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
+                subject: None,
                 message: None,
                 operations: vec![
                     create_dir("/reports"),
@@ -633,6 +640,7 @@ mod tests {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-delete-then-create").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
+                subject: None,
                 message: None,
                 operations: vec![
                     FilesystemOperation::DeletePath {
@@ -671,6 +679,7 @@ mod tests {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("batch-with-a-bad-op").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
+                subject: None,
                 message: None,
                 operations: vec![
                     create_dir("/first"),

@@ -598,9 +598,9 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         context: &MutationContext,
     ) -> loonfs_api::ContentRef {
         let engine = namespace_engine(store, namespace_id, context);
-        let upload = engine.begin_upload().await.expect("begin upload");
+        let upload = engine.begin_upload(None).await.expect("begin upload");
         let staged = engine
-            .upload_content(&upload.upload_id, bytes)
+            .upload_content(&upload.upload_id, None, bytes)
             .await
             .expect("upload bytes");
         let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
@@ -610,6 +610,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .complete_upload(
                 &catalog,
                 &upload.upload_id,
+                None,
                 loonfs_core::ResolvedUploadCompletion::KnownContent,
             )
             .await

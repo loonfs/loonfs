@@ -1,5 +1,6 @@
 //! Plans inode-addressed mutations.
 
+use super::authorize::{Absence, Replacement};
 use super::plan_delete::plan_delete;
 use super::plan_transfer::plan_move;
 use super::publish_path_planning::{
@@ -10,8 +11,8 @@ use super::publish_path_planning::{
 use crate::commit::{CandidateAllocation, CommitOp};
 use crate::error::{CoreError, Result};
 use loonfs_api::{
-    BindingGeneration, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
-    ExpectedFileState, InodeId, InodeKind, RevisionNo,
+    AccessRight, AccessRights, BindingGeneration, ContentRef, DeleteDirectoryBehavior,
+    DestinationBehavior, DisplayName, ExpectedFileState, InodeId, InodeKind, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -28,6 +29,12 @@ pub(super) async fn plan_create_by_inode<S: ObjectStore + ?Sized>(
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
     let parent = resolve_visible_directory(view, parent_inode_id).await?;
+    view.authorize(
+        parent_inode_id,
+        AccessRights::from_iter([AccessRight::Create]),
+        Absence::Inode,
+    )
+    .await?;
     if let Some(existing) = resolve_visible_child(view, parent_inode_id, display_name).await? {
         return Err(CoreError::DestinationExists {
             path: child_display_path(&parent.absolute_path, display_name),
@@ -58,6 +65,12 @@ pub(super) async fn plan_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
+    view.authorize(
+        inode_id,
+        AccessRights::from_iter([AccessRight::Write]),
+        Absence::Inode,
+    )
+    .await?;
     if target.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             target: target.absolute_path,
@@ -84,9 +97,26 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     let source = resolve_visible_inode(view, inode_id).await?;
     check_binding_generation(view, &source, expected_binding_generation)?;
+    view.authorize(
+        source
+            .parent_inode_id
+            .ok_or(CoreError::RootMutationForbidden)?,
+        AccessRights::from_iter([AccessRight::Remove]),
+        Absence::Inode,
+    )
+    .await?;
     let target_parent = resolve_visible_directory(view, to_parent_inode_id).await?;
     let destination_path = child_display_path(&target_parent.absolute_path, to_display_name);
     let occupant = resolve_visible_child(view, to_parent_inode_id, to_display_name).await?;
+    view.authorize_destination(
+        occupant.as_ref(),
+        behavior,
+        Some(inode_id),
+        to_parent_inode_id,
+        Replacement::RemovesEntry,
+        Absence::Inode,
+    )
+    .await?;
     let replaced = classify_replace_destination(occupant, behavior, inode_id, &destination_path)?;
     plan_move(
         view,
@@ -108,5 +138,5 @@ pub(super) async fn plan_delete_by_inode<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
     check_binding_generation(view, &target, expected_binding_generation)?;
-    plan_delete(view, &target, behavior).await
+    plan_delete(view, &target, behavior, Absence::Inode).await
 }

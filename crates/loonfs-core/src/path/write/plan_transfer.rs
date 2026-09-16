@@ -1,18 +1,19 @@
 //! Publish plans that move or copy visible paths.
 
+use super::authorize::{Absence, Replacement};
 use super::ensure_expected_inode;
 use super::publish_path_planning::ReplaceDestination;
 use super::publish_path_planning::{
-    reject_tombstoned_path_ancestor, resolve_parent_directory, resolve_replace_destination,
-    source_binding, CompiledFilesystemOperation, PublishPathPlanningView,
+    classify_replace_destination, is_missing_visible_path, reject_tombstoned_path_ancestor,
+    resolve_parent_directory, source_binding, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
-    AbsolutePath, AttributeRevisionNo, DestinationBehavior, DisplayName, ExpectedFileState,
-    InodeId, InodeKind,
+    AbsolutePath, AccessRight, AccessRights, AttributeRevisionNo, DestinationBehavior, DisplayName,
+    ExpectedFileState, InodeId, InodeKind,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -28,6 +29,14 @@ pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
     reject_tombstoned_path_ancestor(view, from_path).await?;
     reject_tombstoned_path_ancestor(view, to_path).await?;
     let source = view.view.resolve_visible_path(from_path).await?;
+    view.authorize(
+        source
+            .parent_inode_id
+            .ok_or(CoreError::RootMutationForbidden)?,
+        AccessRights::from_iter([AccessRight::Remove]),
+        Absence::Path(from_path.as_str()),
+    )
+    .await?;
     let target_parent = resolve_parent_directory(view, to_path).await?;
     let target_name = final_component(to_path)?;
     // Replace compiles to an atomic delete-plus-rename: the destination
@@ -35,7 +44,22 @@ pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
     // rename's target-name check observes the in-commit unbind. Mirrors
     // put: only a file destination can be replaced, and a path never
     // replaces itself.
-    let replaced = resolve_replace_destination(view, to_path, behavior, source.inode_id).await?;
+    let occupant = match view.view.resolve_visible_path(to_path).await {
+        Ok(existing) => Some(existing),
+        Err(error) if is_missing_visible_path(&error) => None,
+        Err(error) => return Err(error),
+    };
+    view.authorize_destination(
+        occupant.as_ref(),
+        behavior,
+        Some(source.inode_id),
+        target_parent,
+        Replacement::RemovesEntry,
+        Absence::Path(to_path.as_str()),
+    )
+    .await?;
+    let replaced =
+        classify_replace_destination(occupant, behavior, source.inode_id, to_path.as_str())?;
     plan_move(
         view,
         &source,
@@ -59,6 +83,12 @@ pub(super) async fn plan_move<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     let mut ops = Vec::new();
     let current_source_binding = source_binding(view, source).await?;
+    view.authorize_relocation(
+        source.inode_id,
+        current_source_binding.parent_inode_id,
+        target_parent,
+    )
+    .await?;
     match &replaced {
         ReplaceDestination::Replaced(existing) => {
             ensure_expected_inode(
@@ -120,6 +150,12 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     reject_tombstoned_path_ancestor(view, to_path).await?;
 
     let source = view.view.resolve_visible_path(from_path).await?;
+    view.authorize(
+        source.inode_id,
+        AccessRights::from_iter([AccessRight::Read]),
+        Absence::Path(from_path.as_str()),
+    )
+    .await?;
     if source.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             target: from_path.as_str().to_owned(),
@@ -131,7 +167,23 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     // revision to the destination inode, keeping its identity and revision
     // history. Only a file destination can be replaced, and a path never
     // replaces itself.
-    let replaced = resolve_replace_destination(view, to_path, behavior, source.inode_id).await?;
+    let target_parent = resolve_parent_directory(view, to_path).await?;
+    let occupant = match view.view.resolve_visible_path(to_path).await {
+        Ok(existing) => Some(existing),
+        Err(error) if is_missing_visible_path(&error) => None,
+        Err(error) => return Err(error),
+    };
+    view.authorize_destination(
+        occupant.as_ref(),
+        behavior,
+        Some(source.inode_id),
+        target_parent,
+        Replacement::WritesFile,
+        Absence::Path(to_path.as_str()),
+    )
+    .await?;
+    let replaced =
+        classify_replace_destination(occupant, behavior, source.inode_id, to_path.as_str())?;
 
     let revision = view
         .view
@@ -139,7 +191,6 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| CoreError::PathNotFound(from_path.as_str().to_owned()))?;
 
-    let target_parent = resolve_parent_directory(view, to_path).await?;
     let target_name = final_component(to_path)?;
     let mut ops = Vec::new();
     match &replaced {

@@ -33,8 +33,8 @@ use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
     FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId, Namespace,
-    NamespaceId, Page, PageRequest, PathEntry, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
-    WriterId,
+    NamespaceId, Page, PageRequest, PathEntry, RevisionNo, SubjectId, TrashEntry, TrashPageCursor,
+    UploadId, WriterId,
 };
 use loonfs_api::{ContentStoreId, EffectiveLimit};
 use loonfs_objectstore::{ByteStream, ObjectStore};
@@ -627,10 +627,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Starts a service-proxied upload session. Direct transports use
     /// [`Self::begin_direct_put_upload_target`] or [`Self::begin_direct_multipart_upload_target`].
-    pub async fn begin_upload(&self) -> Result<UploadSession> {
+    pub async fn begin_upload(&self, subject_id: Option<&SubjectId>) -> Result<UploadSession> {
         crate::protocol::begin_service_proxied_upload(
             &self.store,
             &self.namespace_id,
+            subject_id,
             &self.mutation_context()?,
         )
         .await
@@ -639,11 +640,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Starts a direct PUT upload and assigns its content identity.
     pub async fn begin_direct_put_upload_target(
         &self,
+        subject_id: Option<&SubjectId>,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         crate::protocol::begin_direct_put_upload_target(
             &self.store,
             &self.namespace_id,
+            subject_id,
             checksum_algorithm,
             &self.mutation_context()?,
         )
@@ -655,11 +658,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// supplied when the upload is completed.
     pub async fn begin_direct_multipart_upload_target(
         &self,
+        subject_id: Option<&SubjectId>,
         options: DirectMultipartUploadOptions,
     ) -> Result<BeginDirectMultipartUploadTargetResponse> {
         crate::protocol::begin_direct_multipart_upload_target(
             &self.store,
             &self.namespace_id,
+            subject_id,
             options,
             &self.mutation_context()?,
         )
@@ -673,12 +678,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub async fn direct_multipart_part_targets(
         &self,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         requested: &[UploadPartChecksumClaim],
     ) -> Result<MultipartPartTargets> {
         crate::protocol::direct_multipart_part_targets(
             &self.store,
             &self.namespace_id,
             upload_id,
+            subject_id,
             requested,
         )
         .await
@@ -690,9 +697,17 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn upload_content(
         &self,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         bytes: &[u8],
     ) -> Result<UploadSession> {
-        crate::protocol::upload_content(&self.store, &self.namespace_id, upload_id, bytes).await
+        crate::protocol::upload_content(
+            &self.store,
+            &self.namespace_id,
+            upload_id,
+            subject_id,
+            bytes,
+        )
+        .await
     }
 
     /// Uploads content that arrives as a stream into an upload session,
@@ -700,10 +715,17 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn upload_streamed_content(
         &self,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         body: ByteStream,
     ) -> Result<UploadSession> {
-        crate::protocol::upload_streamed_content(&self.store, &self.namespace_id, upload_id, body)
-            .await
+        crate::protocol::upload_streamed_content(
+            &self.store,
+            &self.namespace_id,
+            upload_id,
+            subject_id,
+            body,
+        )
+        .await
     }
 
     /// Completes an upload session and returns time-bounded proof for later
@@ -713,6 +735,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
         let catalog = self.own_catalog(catalog)?;
@@ -721,6 +744,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             catalog.content_store_id(),
             upload_id,
+            subject_id,
             completion,
             &self.mutation_context()?,
         )
@@ -736,6 +760,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         resolve: F,
     ) -> Result<CompletedUpload>
     where
@@ -747,6 +772,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             catalog.content_store_id(),
             upload_id,
+            subject_id,
             resolve,
             &self.mutation_context()?,
         )
@@ -845,7 +871,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// Terminal and idempotent: repeating it succeeds, and it refuses a
     /// session that already completed, whose content may be published.
-    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
+    pub async fn abort_upload(
+        &self,
+        upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
+    ) -> Result<UploadSession> {
         let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
             &self.store,
             &self.namespace_id,
@@ -856,6 +886,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             &content_store_id,
             upload_id,
+            subject_id,
             &self.mutation_context()?,
         )
         .await
@@ -865,7 +896,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns an upload session. Completed uploads include a new receipt so
     /// the caller can retry publication without uploading the content again.
-    pub async fn get_upload_status(&self, upload_id: &UploadId) -> Result<UploadSessionView> {
+    pub async fn get_upload_status(
+        &self,
+        upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
+    ) -> Result<UploadSessionView> {
         let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
             &self.store,
             &self.namespace_id,
@@ -876,6 +911,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             &self.namespace_id,
             &content_store_id,
             upload_id,
+            subject_id,
             self.now_ms()?,
         )
         .await
@@ -1100,7 +1136,7 @@ mod tests {
             .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
             .await
             .expect("bootstrap namespace");
-        let begun = writer.begin_upload().await.expect("begin upload");
+        let begun = writer.begin_upload(None).await.expect("begin upload");
 
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("reader store"),
@@ -1111,7 +1147,7 @@ mod tests {
             receipt,
             ..
         } = reader
-            .get_upload_status(&begun.upload_id)
+            .get_upload_status(&begun.upload_id, None)
             .await
             .expect("reader engine reads upload status");
 

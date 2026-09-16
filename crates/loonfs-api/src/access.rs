@@ -22,6 +22,33 @@ validation_error!(
 );
 
 validation_error!(
+    SubjectIdValidationError,
+    "invalid subject_id {value:?}: {reason}"
+);
+
+string_id! {
+    /// The stable identity a request acts as, used for upload ownership
+    /// and commit replay. Same grammar as an actor id.
+    SubjectId,
+    error = SubjectIdValidationError,
+    validate = validate_subject_id,
+    schema(
+        description = "Stable opaque subject id containing 1 to 256 visible ASCII characters.",
+        pattern = r"^[\x21-\x7E]{1,256}$",
+        example = "usr_8f3c"
+    )
+}
+
+/// Who a request acts as: a stable id and the principals whose grants apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subject {
+    /// Stable identity for upload ownership and commit replay.
+    pub subject_id: SubjectId,
+    /// Principals whose grants apply to the request.
+    pub principals: PrincipalSet,
+}
+
+validation_error!(
     PrincipalScopeValidationError,
     "invalid principal_scope {value:?}: {reason}"
 );
@@ -78,6 +105,12 @@ fn visible_ascii_reason(value: &str) -> Option<&'static str> {
 fn validate_principal_id(value: &str) -> Result<(), PrincipalIdValidationError> {
     visible_ascii_reason(value).map_or(Ok(()), |reason| {
         Err(PrincipalIdValidationError::new(value, reason))
+    })
+}
+
+fn validate_subject_id(value: &str) -> Result<(), SubjectIdValidationError> {
+    visible_ascii_reason(value).map_or(Ok(()), |reason| {
+        Err(SubjectIdValidationError::new(value, reason))
     })
 }
 

@@ -32,7 +32,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_upload()
+        .begin_upload(None)
         .await
 }
 
@@ -43,7 +43,7 @@ async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_direct_put_upload_target(checksum_algorithm)
+        .begin_direct_put_upload_target(None, checksum_algorithm)
         .await
 }
 
@@ -55,7 +55,7 @@ async fn upload_content<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .upload_content(upload_id, bytes)
+        .upload_content(upload_id, None, bytes)
         .await
 }
 
@@ -67,7 +67,12 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
     let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?;
     namespace_engine(store, namespace_id, context)
-        .complete_upload(&catalog, upload_id, ResolvedUploadCompletion::KnownContent)
+        .complete_upload(
+            &catalog,
+            upload_id,
+            None,
+            ResolvedUploadCompletion::KnownContent,
+        )
         .await
         .map(|completed| completed.response)
 }
@@ -251,7 +256,7 @@ mod streamed_content {
         context: &MutationContext,
     ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .upload_streamed_content(upload_id, body(bytes))
+            .upload_streamed_content(upload_id, None, body(bytes))
             .await
     }
 
@@ -507,7 +512,7 @@ mod direct_multipart {
             .expect("bootstrap");
         let payload = PART.repeat(3);
         let begin = namespace_engine(store, &namespace_id, context)
-            .begin_direct_multipart_upload_target(DirectMultipartUploadOptions::default())
+            .begin_direct_multipart_upload_target(None, DirectMultipartUploadOptions::default())
             .await
             .expect("begin direct multipart");
         let state = session_state(store, &namespace_id, &begin.session.upload_id).await;
@@ -608,6 +613,7 @@ mod direct_multipart {
             .complete_upload(
                 &catalog,
                 upload_id,
+                None,
                 ResolvedUploadCompletion::Multipart(request.clone()),
             )
             .await
@@ -1095,18 +1101,24 @@ mod direct_multipart {
             .expect("bootstrap");
 
         let chosen = namespace_engine(&store, &namespace_id, &context)
-            .begin_direct_multipart_upload_target(DirectMultipartUploadOptions {
-                part_size_bytes: Some(16 * 1024 * 1024),
-            })
+            .begin_direct_multipart_upload_target(
+                None,
+                DirectMultipartUploadOptions {
+                    part_size_bytes: Some(16 * 1024 * 1024),
+                },
+            )
             .await
             .expect("a part size inside the bounds is honoured");
         assert_eq!(chosen.target.part_size_bytes, 16 * 1024 * 1024);
 
         for out_of_bounds in [5 * 1024 * 1024 - 1, 5 * 1024 * 1024 * 1024 + 1] {
             let error = namespace_engine(&store, &namespace_id, &context)
-                .begin_direct_multipart_upload_target(DirectMultipartUploadOptions {
-                    part_size_bytes: Some(out_of_bounds),
-                })
+                .begin_direct_multipart_upload_target(
+                    None,
+                    DirectMultipartUploadOptions {
+                        part_size_bytes: Some(out_of_bounds),
+                    },
+                )
                 .await
                 .expect_err("a part size no provider accepts is refused");
             assert_eq!(error.code(), ErrorCode::InvalidRequest);

@@ -1,5 +1,6 @@
 //! The publish plan for one access update.
 
+use super::authorize::Absence;
 use super::ensure_expected_inode;
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use crate::commit::{CommitOp, CommitValidationError};
@@ -56,12 +57,20 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
         ));
     }
 
-    let current = view
-        .view
-        .latest_access_revision(target.inode_id)
-        .await?
-        .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
-    let base_access_revision_no = expected_access_revision_no.unwrap_or(current);
+    let current = view.view.latest_access_revision(target.inode_id).await?;
+    let empty = AccessGrants::default();
+    view.authorize_access_update(
+        target.inode_id,
+        current
+            .as_ref()
+            .map_or((false, &empty), |row| (row.boundary, &row.grants)),
+        (boundary, grants),
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await?;
+    let current_revision_no =
+        current.map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
+    let base_access_revision_no = expected_access_revision_no.unwrap_or(current_revision_no);
     Ok(CompiledFilesystemOperation::new(vec![
         CommitOp::UpdateAccess {
             inode_id: target.inode_id,

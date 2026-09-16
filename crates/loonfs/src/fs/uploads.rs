@@ -21,7 +21,7 @@ use crate::{
 };
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::UploadPartChecksumClaim;
-use loonfs_api::UploadId;
+use loonfs_api::{SubjectId, UploadId};
 
 impl FsWriter {
     /// Plants the deadline a durable upload session just created.
@@ -82,9 +82,13 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_upload(&self, namespace_id: &NamespaceId) -> Result<UploadSession> {
+    pub async fn create_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        subject_id: Option<&SubjectId>,
+    ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
-        let response = self.engine(namespace_id).begin_upload().await?;
+        let response = self.engine(namespace_id).begin_upload(subject_id).await?;
         self.schedule_upload_session_reclamation(namespace_id);
         Ok(response)
     }
@@ -107,12 +111,13 @@ impl FsWriter {
     pub async fn create_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
+        subject_id: Option<&SubjectId>,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine(namespace_id)
-            .begin_direct_put_upload_target(checksum_algorithm)
+            .begin_direct_put_upload_target(subject_id, checksum_algorithm)
             .await?;
         self.schedule_upload_session_reclamation(namespace_id);
         Ok(response)
@@ -137,12 +142,13 @@ impl FsWriter {
     pub async fn create_direct_multipart_upload_target(
         &self,
         namespace_id: &NamespaceId,
+        subject_id: Option<&SubjectId>,
         options: DirectMultipartUploadOptions,
     ) -> Result<BeginDirectMultipartUploadTargetResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine(namespace_id)
-            .begin_direct_multipart_upload_target(options)
+            .begin_direct_multipart_upload_target(subject_id, options)
             .await?;
         self.schedule_upload_session_reclamation(namespace_id);
         Ok(response)
@@ -165,12 +171,13 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         requested: &[UploadPartChecksumClaim],
     ) -> Result<MultipartPartTargets> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
-            .direct_multipart_part_targets(upload_id, requested)
+            .direct_multipart_part_targets(upload_id, subject_id, requested)
             .await?)
     }
 
@@ -193,6 +200,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         bytes: &[u8],
     ) -> Result<UploadSession> {
         let span = tracing::Span::current();
@@ -200,7 +208,7 @@ impl FsWriter {
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         Ok(self
             .engine(namespace_id)
-            .upload_content(upload_id, bytes)
+            .upload_content(upload_id, subject_id, bytes)
             .await?)
     }
 
@@ -230,12 +238,13 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         body: ByteStream,
     ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
-            .upload_streamed_content(upload_id, body)
+            .upload_streamed_content(upload_id, subject_id, body)
             .await?)
     }
 
@@ -257,6 +266,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
         self.core.record_trace_context(&tracing::Span::current());
@@ -265,7 +275,7 @@ impl FsWriter {
             .await?;
         let completed = self
             .engine(namespace_id)
-            .complete_upload(&catalog, upload_id, completion)
+            .complete_upload(&catalog, upload_id, subject_id, completion)
             .await?;
         self.schedule_completed_upload_reclamation(namespace_id);
         Ok(completed)
@@ -289,6 +299,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
         resolve: F,
     ) -> Result<CompletedUpload>
     where
@@ -302,7 +313,7 @@ impl FsWriter {
             .await?;
         let completed = self
             .engine(namespace_id)
-            .complete_upload_for_mode(&catalog, upload_id, resolve)
+            .complete_upload_for_mode(&catalog, upload_id, subject_id, resolve)
             .await?;
         self.schedule_completed_upload_reclamation(namespace_id);
         Ok(completed)
@@ -325,9 +336,13 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
     ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(self.engine(namespace_id).abort_upload(upload_id).await?)
+        Ok(self
+            .engine(namespace_id)
+            .abort_upload(upload_id, subject_id)
+            .await?)
     }
 
     /// Returns an upload session and a new receipt when the upload is complete.
@@ -347,11 +362,12 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
+        subject_id: Option<&SubjectId>,
     ) -> Result<UploadSessionView> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
-            .get_upload_status(upload_id)
+            .get_upload_status(upload_id, subject_id)
             .await?)
     }
 }

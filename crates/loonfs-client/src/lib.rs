@@ -88,6 +88,7 @@ pub use uploads::staging::{
 /// cache.
 #[derive(Debug, Clone)]
 pub struct Client {
+    subject: Option<loonfs_api::Subject>,
     base_url: String,
     auth_token: Option<SecretString>,
     http: reqwest::Client,
@@ -108,6 +109,12 @@ pub struct Client {
 }
 
 impl Client {
+    /// Sets the subject attached to every server request.
+    pub fn with_subject(mut self, subject: loonfs_api::Subject) -> Self {
+        self.subject = Some(subject);
+        self
+    }
+
     /// The configured server URL, without a trailing slash.
     pub fn server_url(&self) -> &str {
         &self.base_url
@@ -133,6 +140,7 @@ impl Client {
             builder = builder.add_root_certificate(certificate);
         }
         Ok(Self {
+            subject: None,
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
             http: builder

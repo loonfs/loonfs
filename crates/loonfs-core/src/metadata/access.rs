@@ -2,14 +2,6 @@
 //! resolved from the inode's own access row and its ancestors' rows up to
 //! the nearest boundary.
 
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Commit authorization, the first production caller, arrives with the next change."
-    )
-)]
-
 use super::visibility::MetadataVisibilityReads;
 use loonfs_api::wire::manifest::{AccessRevisionRecord, TombstoneRowAction};
 use loonfs_api::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
@@ -29,6 +21,10 @@ pub(crate) struct AccessChain {
 }
 
 impl AccessChain {
+    pub(crate) fn rows(&self) -> &[AccessRevisionRecord] {
+        &self.rows
+    }
+
     /// Rights the principals hold through this chain. `admin` never
     /// inherits, so it is left out; see [`is_administrator`].
     pub(crate) fn rights_for(&self, principals: &PrincipalSet) -> AccessRights {

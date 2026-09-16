@@ -253,6 +253,7 @@ impl RuntimeError {
     /// Identifies a malformed commit field as a JSON Pointer for HTTP errors.
     pub fn invalid_request_param(&self) -> Option<String> {
         match self {
+            Self::Core(CoreError::SubjectRequired { .. }) => Some("Loonfs-Principals".to_owned()),
             Self::Core(CoreError::FailedOperation {
                 operation_index,
                 source,

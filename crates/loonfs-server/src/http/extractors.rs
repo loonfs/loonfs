@@ -11,7 +11,10 @@ use axum::Json;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
-use loonfs_api::{AbsolutePath, ActorId, NamespaceId};
+use loonfs_api::{
+    AbsolutePath, ActorId, NamespaceId, PrincipalId, PrincipalSet, Subject, SubjectId,
+};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -93,6 +96,48 @@ impl<S: Send + Sync> FromRequestParts<S> for ActorHeader {
 
 fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
     NamespaceId::parse(&value).map_err(ApiResponseError::invalid_namespace_id)
+}
+
+/// The subject a request acts as, from `Loonfs-Principals` and
+/// `Loonfs-Subject`, or `None` when no principals are sent.
+pub(super) struct SubjectHeaders(pub(super) Option<Subject>);
+
+impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
+    type Rejection = ApiResponseError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let invalid = |header: &str, message: String| {
+            ApiResponseError::new(ErrorCode::InvalidRequest, &message).with_param(header)
+        };
+        let Some(value) = parts.headers.get("Loonfs-Principals") else {
+            return Ok(Self(None));
+        };
+        let value = String::from_utf8_lossy(value.as_bytes());
+        let principals = value
+            .split(',')
+            .map(PrincipalId::parse)
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|error| invalid("Loonfs-Principals", error.to_string()))?;
+        let principals = PrincipalSet::new(principals)
+            .map_err(|error| invalid("Loonfs-Principals", error.to_string()))?;
+        let (header, value) = if let Some(value) = parts.headers.get("Loonfs-Subject") {
+            ("Loonfs-Subject", value)
+        } else if let Some(value) = parts.headers.get("Loonfs-Actor") {
+            ("Loonfs-Actor", value)
+        } else {
+            return Err(invalid(
+                "Loonfs-Subject",
+                "missing required header Loonfs-Subject".to_owned(),
+            ));
+        };
+        let value = String::from_utf8_lossy(value.as_bytes());
+        let subject_id =
+            SubjectId::parse(&value).map_err(|error| invalid(header, error.to_string()))?;
+        Ok(Self(Some(Subject {
+            subject_id,
+            principals,
+        })))
+    }
 }
 
 /// The `namespace_id` path segment shared by namespace-scoped routes.

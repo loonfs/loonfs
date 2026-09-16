@@ -24,6 +24,8 @@ class ProxyRouteContext:
 @dataclass(frozen=True)
 class ProxyAuthorization:
     actor_id: str | None = None
+    subject_id: str | None = None
+    principals: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,7 +105,16 @@ def _connection_headers(headers: list[tuple[bytes, bytes]]) -> set[bytes]:
 
 
 # Remove the browser-facing host and application cookies before forwarding.
-_REQUEST_EXCLUDED_HEADERS = frozenset({b"host", b"cookie", b"authorization", b"loonfs-actor"})
+_REQUEST_EXCLUDED_HEADERS = frozenset(
+    {
+        b"host",
+        b"cookie",
+        b"authorization",
+        b"loonfs-actor",
+        b"loonfs-subject",
+        b"loonfs-principals",
+    }
+)
 # Do not forward LoonFS cookies to the application.
 _RESPONSE_EXCLUDED_HEADERS = frozenset({b"set-cookie"})
 
@@ -177,6 +188,12 @@ class LoonFSProxy:
         headers.append((b"authorization", self._authorization))
         if authorization.actor_id is not None:
             headers.append((b"loonfs-actor", authorization.actor_id.encode("ascii")))
+        if authorization.subject_id is not None:
+            headers.append((b"loonfs-subject", authorization.subject_id.encode("ascii")))
+        if authorization.principals is not None:
+            headers.append(
+                (b"loonfs-principals", ",".join(authorization.principals).encode("ascii"))
+            )
         request = self._client.build_request(
             scope["method"],
             target,

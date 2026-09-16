@@ -5,7 +5,7 @@
 use crate::envelope::EnvelopeCodecError;
 use crate::{
     ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentStoreId,
-    ManifestNo, NamespaceId, UploadId,
+    ManifestNo, NamespaceId, SubjectId, UploadId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -439,6 +439,9 @@ pub struct UploadSessionState {
     pub content_id: ContentId,
     /// Unix-millisecond creation stamp.
     pub created_at_ms: u64,
+    /// The subject that opened the session, recorded in an ACL namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<SubjectId>,
     /// How the bytes reach object storage, settled when the session opened.
     pub mode: UploadSessionMode,
     /// The session's status, and the field every upload operation
@@ -499,6 +502,8 @@ struct StrictUploadSessionState {
     upload_id: UploadId,
     content_id: ContentId,
     created_at_ms: u64,
+    #[serde(default)]
+    subject_id: Option<SubjectId>,
     mode: StrictUploadSessionMode,
     status: StrictUploadSessionRecordStatus,
 }
@@ -607,6 +612,7 @@ impl<'de> Deserialize<'de> for UploadSessionState {
             upload_id: record.upload_id,
             content_id: record.content_id,
             created_at_ms: record.created_at_ms,
+            subject_id: record.subject_id,
             mode: record.mode.into(),
             status: record.status.into(),
         };
@@ -681,6 +687,7 @@ mod tests {
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef").expect("upload id"),
             content_id: content_ref.content_id.clone(),
             created_at_ms: 1_000,
+            subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged(staged),
             },
@@ -745,6 +752,7 @@ mod tests {
                         .expect("upload id"),
                     content_id: content_ref.content_id.clone(),
                     created_at_ms: 1_000,
+                    subject_id: None,
                     mode: mode.clone(),
                     status,
                 };

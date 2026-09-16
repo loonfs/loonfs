@@ -1,12 +1,14 @@
 //! The publish plan for one attribute update.
 
+use super::authorize::Absence;
 use super::ensure_expected_inode;
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
-    AbsolutePath, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, InodeId,
+    AbsolutePath, AccessRight, AccessRights, AttributeKey, AttributeRevisionNo, AttributeValue,
+    Attributes, InodeId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,6 +32,12 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
     // as a file; nothing here looks at the inode kind.
     let target = view.view.resolve_visible_path(absolute_path).await?;
     ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
+    view.authorize(
+        target.inode_id,
+        AccessRights::from_iter([AccessRight::Write]),
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await?;
 
     let (current_revision_no, current) =
         view.view.attributes_at_visible_seq(target.inode_id).await?;

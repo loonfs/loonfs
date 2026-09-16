@@ -14,6 +14,8 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		path        string
 		contentType string
 		actor       string
+		subject     string
+		principals  string
 	}
 	forwarded := make(chan forwardedRequest, 3)
 	upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,7 +23,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		if err != nil {
 			t.Errorf("read forwarded body: %v", err)
 		}
-		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor")}
+		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor"), r.Header.Get("Loonfs-Subject"), r.Header.Get("Loonfs-Principals")}
 		w.WriteHeader(http.StatusAccepted)
 	})}
 	refusal := &Refusal{Status: http.StatusForbidden, ContentType: "application/json", Body: []byte(`{"code":"unauthorized","message":"refused"}`)}
@@ -37,7 +39,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 			if r.Header.Get("X-Refuse") != "" {
 				return Authorization{}, refusal
 			}
-			return Authorization{ActorID: "proxy-actor"}, nil
+			return Authorization{ActorID: "proxy-actor", SubjectID: "proxy-subject", Principals: []string{"prn_ada", "prn_team"}}, nil
 		},
 	})
 	if err != nil {
@@ -58,6 +60,8 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/v0/namespace-aliases/team-files/commits", strings.NewReader(testCase.body))
 			request.Header.Set("Content-Type", "text/plain")
 			request.Header.Set("Loonfs-Actor", "browser-actor")
+			request.Header.Set("Loonfs-Subject", "browser-subject")
+			request.Header.Set("Loonfs-Principals", "prn_browser")
 			if testCase.refuse {
 				request.Header.Set("X-Refuse", "1")
 			}
@@ -75,7 +79,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		t.Fatalf("forwarded request count = %d, want 1", len(forwarded))
 	}
 	actual := <-forwarded
-	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" {
+	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" || actual.subject != "proxy-subject" || actual.principals != "prn_ada,prn_team" {
 		t.Errorf("forwarded request = %#v", actual)
 	}
 	if string(actual.body) != `{"expected_head_seq":9007199254740993}` {

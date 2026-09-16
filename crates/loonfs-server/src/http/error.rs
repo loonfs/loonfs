@@ -139,6 +139,7 @@ fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
     match kind {
         ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
         ErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorKind::Forbidden => StatusCode::FORBIDDEN,
         ErrorKind::ContentTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         // The backing object store rejected the deployment's storage
         // credentials, which is not a statement about the caller. 403 would

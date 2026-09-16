@@ -14,9 +14,10 @@ use loonfs_api::{
     PaginationPolicy, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
     FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
-    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
-    LIMIT_GC_MIN_GRACE_WINDOW_MS, PROTOCOL_VERSION,
+    LIMIT_ACCESS_MAX_PRINCIPALS, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
+    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
+    MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataSegmentCache, StoredMetadataBlockCache, WalTailProjectionCache,
@@ -248,6 +249,10 @@ impl ReadCore {
                 limits.insert(
                     LIMIT_GC_MIN_GRACE_WINDOW_MS.to_owned(),
                     loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
+                );
+                limits.insert(
+                    LIMIT_ACCESS_MAX_PRINCIPALS.to_owned(),
+                    MAX_SUBJECT_PRINCIPALS as u64,
                 );
                 // The commit ceilings are this crate's, enforced before
                 // planning on every transport, so a client can pre-validate a

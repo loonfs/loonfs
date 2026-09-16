@@ -10,6 +10,8 @@ pub enum ErrorKind {
     InvalidRequest,
     /// The request is unauthorized and needs different credentials.
     Unauthorized,
+    /// The subject is known but lacks a right the operation needs.
+    Forbidden,
     /// The request body exceeds the operation's size limit and must be smaller.
     ContentTooLarge,
     /// The object store rejected credentials that the operator must fix.
@@ -109,6 +111,7 @@ macro_rules! error_codes {
 error_codes! {
     InvalidRequest => "invalid_request",
     Unauthorized => "unauthorized",
+    Forbidden => "forbidden",
     StoragePermissionDenied => "storage_permission_denied",
     ContentTooLarge => "content_too_large",
     NotSupported => "not_supported",
@@ -169,6 +172,7 @@ impl ErrorCode {
             // into a capped scan.
             ErrorCode::InvalidRequest | ErrorCode::QueryUnindexable => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
+            ErrorCode::Forbidden => ErrorKind::Forbidden,
             // This is a deployment storage failure, not a caller
             // authorization failure.
             ErrorCode::StoragePermissionDenied => ErrorKind::StoragePermissionDenied,
@@ -240,6 +244,7 @@ impl ErrorCode {
             ErrorCode::CommitQueueFull | ErrorCode::ServerBusy | ErrorCode::ShuttingDown => true,
             ErrorCode::InvalidRequest
             | ErrorCode::Unauthorized
+            | ErrorCode::Forbidden
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
             | ErrorCode::NotSupported

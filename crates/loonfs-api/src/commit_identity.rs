@@ -13,7 +13,7 @@
 use crate::{
     AbsolutePath, AccessRevisionNo, AccessRight, ActorId, AttributeRevisionNo, ChangeSeq,
     CommitPrecondition, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-    FilesystemOperation, InodeId, NamespaceId, RevisionNo,
+    FilesystemOperation, InodeId, NamespaceId, RevisionNo, SubjectId,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -442,6 +442,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
 pub fn semantic_commit_fingerprint(
     namespace_id: &NamespaceId,
     actor: &ActorId,
+    subject_id: Option<&SubjectId>,
     message: Option<&str>,
     operations: &[FilesystemOperation],
     preconditions: &[CommitPrecondition],
@@ -449,6 +450,7 @@ pub fn semantic_commit_fingerprint(
     Ok(fingerprint_bytes(&canonical_commit_bytes(
         namespace_id,
         actor,
+        subject_id,
         message,
         operations,
         preconditions,
@@ -458,6 +460,7 @@ pub fn semantic_commit_fingerprint(
 fn canonical_commit_bytes(
     namespace_id: &NamespaceId,
     actor: &ActorId,
+    subject_id: Option<&SubjectId>,
     message: Option<&str>,
     operations: &[FilesystemOperation],
     preconditions: &[CommitPrecondition],
@@ -467,6 +470,7 @@ fn canonical_commit_bytes(
         domain: &'static str,
         namespace_id: &'a str,
         actor_id: &'a str,
+        subject_id: Option<&'a str>,
         operations: Vec<OperationFingerprintInput<'a>>,
         message: Option<&'a str>,
         preconditions: Vec<PreconditionFingerprintInput<'a>>,
@@ -476,6 +480,7 @@ fn canonical_commit_bytes(
         domain: COMMIT_FINGERPRINT_DOMAIN,
         namespace_id: namespace_id.as_str(),
         actor_id: actor.as_str(),
+        subject_id: subject_id.map(SubjectId::as_str),
         operations: operations.iter().map(operation_fingerprint_input).collect(),
         message,
         preconditions: preconditions
@@ -498,6 +503,8 @@ mod tests {
         #[derive(Serialize, serde::Deserialize)]
         struct Vector {
             name: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            subject_id: Option<SubjectId>,
             operation: FilesystemOperation,
             #[serde(default)]
             preconditions: Vec<crate::CommitPrecondition>,
@@ -517,6 +524,7 @@ mod tests {
             let bytes = canonical_commit_bytes(
                 &namespace,
                 &test_actor(),
+                vector.subject_id.as_ref(),
                 None,
                 &operations,
                 &vector.preconditions,
@@ -535,6 +543,7 @@ mod tests {
             let fingerprint = semantic_commit_fingerprint(
                 &namespace,
                 &test_actor(),
+                vector.subject_id.as_ref(),
                 None,
                 &operations,
                 &vector.preconditions,
@@ -570,6 +579,7 @@ mod tests {
         semantic_commit_fingerprint(
             &NamespaceId::parse("demo").expect("valid namespace id"),
             &test_actor(),
+            None,
             None,
             &[operation],
             &[],
@@ -612,9 +622,9 @@ mod tests {
         .expect("reversed operation");
 
         assert_eq!(
-            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[forward], &[])
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, None, &[forward], &[])
                 .expect("forward"),
-            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[reversed], &[])
+            semantic_commit_fingerprint(&namespace_id, &test_actor(), None, None, &[reversed], &[])
                 .expect("reversed")
         );
     }
@@ -626,6 +636,7 @@ mod tests {
             &namespace_id,
             &test_actor(),
             None,
+            None,
             &[update_attributes([], ["a", "b"], None, None)],
             &[],
         )
@@ -636,6 +647,7 @@ mod tests {
                 semantic_commit_fingerprint(
                     &namespace_id,
                     &test_actor(),
+                    None,
                     None,
                     &[update_attributes([], spelling, None, None)],
                     &[]
@@ -652,6 +664,7 @@ mod tests {
         let baseline = semantic_commit_fingerprint(
             &namespace_id,
             &test_actor(),
+            None,
             None,
             &[update_attributes(
                 [("owner", text("ada"))],
@@ -688,8 +701,15 @@ mod tests {
         ] {
             assert_ne!(
                 baseline,
-                semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[variant], &[])
-                    .expect("variant fingerprint"),
+                semantic_commit_fingerprint(
+                    &namespace_id,
+                    &test_actor(),
+                    None,
+                    None,
+                    &[variant],
+                    &[]
+                )
+                .expect("variant fingerprint"),
                 "a changed {label} must change the fingerprint"
             );
         }
@@ -747,6 +767,7 @@ mod tests {
                 &namespace_id,
                 &test_actor(),
                 None,
+                None,
                 &[operation(generation)],
                 &[],
             )
@@ -768,12 +789,34 @@ mod tests {
                 &namespace_id,
                 actor,
                 None,
+                None,
                 std::slice::from_ref(&operation),
                 &[],
             )
             .expect("fingerprint")
         };
         assert_ne!(fingerprint(&actor_x), fingerprint(&actor_y));
+    }
+
+    #[test]
+    fn changed_subject_id_changes_the_fingerprint() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let operation = create_dir("/docs");
+        let subject_x = SubjectId::parse("x").expect("subject id");
+        let subject_y = SubjectId::parse("y").expect("subject id");
+        let fingerprint = |subject_id| {
+            semantic_commit_fingerprint(
+                &namespace_id,
+                &test_actor(),
+                subject_id,
+                None,
+                std::slice::from_ref(&operation),
+                &[],
+            )
+            .expect("fingerprint")
+        };
+        assert_ne!(fingerprint(Some(&subject_x)), fingerprint(Some(&subject_y)));
+        assert_ne!(fingerprint(None), fingerprint(Some(&subject_x)));
     }
 
     #[test]
@@ -883,12 +926,13 @@ mod tests {
                     &namespace_id,
                     &test_actor(),
                     None,
+                    None,
                     &[put("/docs/report.txt", content_ref)],
                     &[],
                 )
                 .expect("retry fingerprint")
                 .as_str(),
-                "v1:sha256:33cebac1c0e63f97f902c3ef9e133adccd4682b8acbbe39c699473d4cd88fda1"
+                "v1:sha256:713de4c58dac816a19e7fb4439074b8103d1bf377f08176027cf39eaa7dc3d2d"
             );
         }
     }
@@ -930,6 +974,7 @@ mod tests {
                 &namespace_id,
                 &test_actor(),
                 None,
+                None,
                 &[put("/docs/report.txt", first)],
                 &[]
             )
@@ -937,6 +982,7 @@ mod tests {
             semantic_commit_fingerprint(
                 &namespace_id,
                 &test_actor(),
+                None,
                 None,
                 &[put("/docs/report.txt", second)],
                 &[]
@@ -955,6 +1001,7 @@ mod tests {
             &namespace_id,
             &test_actor(),
             None,
+            None,
             &[create_dir("/docs")],
             &[],
         )
@@ -962,6 +1009,7 @@ mod tests {
         let with = semantic_commit_fingerprint(
             &namespace_id,
             &test_actor(),
+            None,
             Some("import batch"),
             &[create_dir("/docs")],
             &[],
@@ -980,6 +1028,7 @@ mod tests {
                 &namespace_id,
                 &test_actor(),
                 None,
+                None,
                 &[create_dir("/a"), create_dir("/b")],
                 &[]
             )
@@ -987,6 +1036,7 @@ mod tests {
             semantic_commit_fingerprint(
                 &namespace_id,
                 &test_actor(),
+                None,
                 None,
                 &[create_dir("/b"), create_dir("/a")],
                 &[]
@@ -1011,6 +1061,7 @@ mod tests {
                 semantic_commit_fingerprint(
                     namespace_id,
                     &options.commit.actor_id,
+                    None,
                     options.commit.message.as_deref(),
                     &[FilesystemOperation::PutFile {
                         path: path.clone(),

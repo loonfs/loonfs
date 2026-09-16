@@ -1,24 +1,31 @@
 //! Request preconditions against the candidate pre-state.
 
+use super::authorize::{Absence, Authorizer};
 use super::publish_path_planning::{
-    check_binding_generation, is_missing_visible_path, resolve_visible_inode,
-    PublishPathPlanningView,
+    check_binding_generation, is_missing_visible_path, resolve_parent_directory,
+    resolve_visible_inode, PublishPathPlanningView,
 };
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::{AbsolutePath, AccessRevisionNo, BindingGeneration, CommitPrecondition, InodeId};
+use loonfs_api::{
+    AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingGeneration,
+    CommitPrecondition, InodeId, Subject,
+};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
     preconditions: &[CommitPrecondition],
+    subject: Option<&Subject>,
     head: &NamespaceReadState,
     pre_state: &MetadataView<'_, '_, S>,
 ) -> Result<()> {
+    let authorizer = Authorizer::for_request(&head.namespace_id, &head.access, subject)?;
     let view = PublishPathPlanningView {
         namespace_id: &head.namespace_id,
         access: &head.access,
+        authorizer: &authorizer,
         view: pre_state,
     };
     for (index, precondition) in preconditions.iter().enumerate() {
@@ -37,6 +44,12 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 expected_revision_no,
             } => {
+                view.authorize(
+                    *inode_id,
+                    AccessRights::from_iter([AccessRight::Read]),
+                    Absence::Inode,
+                )
+                .await?;
                 let actual = if inode_is_visible(&view, *inode_id).await? {
                     pre_state
                         .latest_revision_head(*inode_id)
@@ -70,12 +83,36 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 .await?;
             }
             CommitPrecondition::PathAbsence { path } => {
+                match resolve_parent_directory(&view, path).await {
+                    Ok(parent) => {
+                        view.authorize(
+                            parent,
+                            AccessRights::from_iter([AccessRight::Read]),
+                            Absence::Path(path.as_str()),
+                        )
+                        .await?;
+                    }
+                    Err(error) if is_missing_visible_path(&error) => continue,
+                    Err(
+                        CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
+                            ..
+                        })
+                        | CoreError::ExpectedDirectory { .. },
+                    ) => continue,
+                    Err(error) => return Err(error),
+                }
                 evaluate_binding(&view, path, None, None, precondition_index).await?;
             }
             CommitPrecondition::AttributesRevision {
                 inode_id,
                 expected_attributes_revision_no,
             } => {
+                view.authorize(
+                    *inode_id,
+                    AccessRights::from_iter([AccessRight::Read]),
+                    Absence::Inode,
+                )
+                .await?;
                 let actual = if inode_is_visible(&view, *inode_id).await? {
                     Some(pre_state.attributes_at_visible_seq(*inode_id).await?.0)
                 } else {
@@ -97,6 +134,12 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 expected_access_revision_no,
             } => {
+                view.authorize(
+                    *inode_id,
+                    AccessRights::from_iter([AccessRight::Read]),
+                    Absence::Inode,
+                )
+                .await?;
                 let actual = if inode_is_visible(&view, *inode_id).await? {
                     Some(
                         pre_state
@@ -141,7 +184,17 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
     precondition_index: Option<u32>,
 ) -> Result<()> {
     let actual = match view.view.resolve_visible_path(path).await {
-        Ok(binding) => Some(binding),
+        Ok(binding) => {
+            if expected_inode_id.is_some() {
+                view.authorize(
+                    binding.inode_id,
+                    AccessRights::from_iter([AccessRight::Read]),
+                    Absence::Path(path.as_str()),
+                )
+                .await?;
+            }
+            Some(binding)
+        }
         Err(error) if is_missing_visible_path(&error) => None,
         Err(CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory { .. })) => None,
         Err(error) => return Err(error),

@@ -101,6 +101,7 @@ async fn creates_entries_under_a_parent_inode() {
             preconditions: Vec::new(),
             commit_id: test_commit_id(Some("create-by-inode")),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 FilesystemOperation::CreateDirectoryByInode {
@@ -429,6 +430,7 @@ async fn earlier_move_makes_a_later_precondition_stale_and_rolls_back_the_commit
             preconditions: Vec::new(),
             commit_id: test_commit_id(Some("move-then-delete-with-old-generation")),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 FilesystemOperation::MoveByInode {
@@ -493,6 +495,7 @@ async fn content_write_preserves_the_precondition_for_a_later_move() {
             preconditions: Vec::new(),
             commit_id: test_commit_id(Some("write-then-move-with-same-generation")),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 put_revision_by_inode(
@@ -606,6 +609,7 @@ async fn inode_operation_observes_an_earlier_delete_in_the_same_commit() {
             preconditions: Vec::new(),
             commit_id: test_commit_id(Some("delete-then-write")),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 FilesystemOperation::DeletePath {

@@ -628,6 +628,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("same-commit-cycle").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
+                subject: None,
                 message: None,
                 operations: vec![
                     FilesystemOperation::DeletePath {
