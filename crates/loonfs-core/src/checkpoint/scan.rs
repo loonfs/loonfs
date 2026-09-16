@@ -309,8 +309,17 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 break;
             }
 
-            let chunk_end = (next_descriptor_index + MAX_MATERIALIZED_TABLE_LOADS)
-                .min(matching_descriptors.len());
+            // A bounded scan may finish in its first table (often cached by
+            // the path walk). Establish that page boundary before fetching
+            // later tables speculatively; keep later waves and point probes
+            // parallel when more data really is required.
+            let chunk_size =
+                if next_descriptor_index == 0 && limit != usize::MAX && filter_probe.is_none() {
+                    1
+                } else {
+                    MAX_MATERIALIZED_TABLE_LOADS
+                };
+            let chunk_end = (next_descriptor_index + chunk_size).min(matching_descriptors.len());
             let loaded_segments = try_join_all(
                 matching_descriptors[next_descriptor_index..chunk_end]
                     .iter()
