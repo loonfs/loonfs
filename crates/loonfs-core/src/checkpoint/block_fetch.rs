@@ -188,10 +188,10 @@ pub(super) fn segment_codec_error(
 /// Largest segment object fetched whole on first touch, in stored bytes.
 /// Below this, splitting the index and data reads into separate ranged GETs
 /// costs more round-trips than the whole object costs bytes; one GET
-/// publishes every section to the memo and shared cache. Sized to catch
-/// delta-run segments (one or two data blocks) while leaving base segments
-/// on the per-section path.
-const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 256 * 1024;
+/// publishes every section to the memo and shared cache. Includes modest
+/// base segments as well as delta segments; larger objects retain the
+/// per-section path.
+const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 1024 * 1024;
 
 /// A segment object's total stored length: the index block is the last
 /// section, so it ends the object.
