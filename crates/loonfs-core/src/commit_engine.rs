@@ -8,8 +8,9 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::read_anchor::LoadedNamespaceBasis;
 use crate::namespace::state::NamespaceReadState;
-use crate::namespace::writer_epoch::acquire_writer_epoch;
+use crate::namespace::writer_epoch::acquire_writer_epoch_with_basis;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
 use crate::protocol::{
@@ -389,7 +390,7 @@ impl NamespaceCommitEngine {
         &self,
         store: &S,
         context: &MutationContext,
-    ) -> Result<AcquiredWriter> {
+    ) -> Result<(AcquiredWriter, Option<LoadedNamespaceBasis>)> {
         let already_acquired = match &*self.lock_session() {
             WriterSessionState::Fenced(fence) => {
                 return Err(CoreError::WriterFenced(fence.clone()))
@@ -398,9 +399,10 @@ impl NamespaceCommitEngine {
             WriterSessionState::Unacquired => None,
         };
         if let Some(acquired_writer) = already_acquired {
-            return Ok(acquired_writer);
+            return Ok((acquired_writer, None));
         }
-        let acquired_writer = acquire_writer_epoch(store, &self.namespace_id, context).await?;
+        let (acquired_writer, basis) =
+            acquire_writer_epoch_with_basis(store, &self.namespace_id, context).await?;
         let mut session = self.lock_session();
         if let WriterSessionState::Fenced(fence) = &*session {
             // Another engine fenced the shared session while this engine was acquiring
@@ -408,7 +410,7 @@ impl NamespaceCommitEngine {
             return Err(CoreError::WriterFenced(fence.clone()));
         }
         *session = WriterSessionState::Acquired(acquired_writer.clone());
-        Ok(acquired_writer)
+        Ok((acquired_writer, Some(basis)))
     }
 
     /// Deletes the namespace using this writer session (format spec,
@@ -424,7 +426,7 @@ impl NamespaceCommitEngine {
         options: DeleteNamespaceOptions,
         context: &MutationContext,
     ) -> Result<DeleteNamespaceResponse> {
-        let acquired_writer = self.session_writer_epoch(store, context).await?;
+        let (acquired_writer, _) = self.session_writer_epoch(store, context).await?;
         let deleted = crate::namespace::delete::delete_namespace(
             store,
             &self.namespace_id,
@@ -483,7 +485,8 @@ impl NamespaceCommitEngine {
         }
 
         let candidate_count = candidates.len();
-        let acquired_writer = match self.session_writer_epoch(store, context).await {
+        let (acquired_writer, initial_basis) = match self.session_writer_epoch(store, context).await
+        {
             Ok(value) => value,
             Err(error) => {
                 return NamespaceCommitEnginePublishResult {
@@ -512,6 +515,7 @@ impl NamespaceCommitEngine {
             &self.namespace_id,
             acquired_writer,
             self.publish_tail_projection.as_ref(),
+            initial_basis,
             tail_options,
         )
         .await

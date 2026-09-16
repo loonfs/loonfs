@@ -3,19 +3,20 @@
 use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
-use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
+use crate::namespace::control::load_current_manifest;
+use crate::namespace::read_anchor::{load_head_and_metadata_basis, LoadedNamespaceBasis};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use crate::wal::{prepare_fence_segment, publish_segment};
+use crate::wal::{prepare_fence_segment, publish_segment, resulting_head_after};
 use loonfs_api::wire::control::{AcquiredWriter, WriterBlock};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
 
-pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
+pub(crate) async fn acquire_writer_epoch_with_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<AcquiredWriter> {
+) -> Result<(AcquiredWriter, LoadedNamespaceBasis)> {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     let acquired = loop {
@@ -55,18 +56,37 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         }
     };
     loop {
-        let head = load_namespace_read_state(store, namespace_id).await?;
-        ensure_writer_not_fenced(&head, &acquired)?;
-        super::control::ensure_namespace_live(&head)?;
-        let fence = prepare_fence_segment(namespace_id.clone(), acquired.writer_epoch, &head)
+        let mut basis = load_head_and_metadata_basis(store, namespace_id).await?;
+        let head = &basis.head;
+        ensure_writer_not_fenced(head, &acquired)?;
+        super::control::ensure_namespace_live(head)?;
+        let fence = prepare_fence_segment(namespace_id.clone(), acquired.writer_epoch, head)
             .map_err(|error| CoreError::Internal(format!("WAL fence build failed: {error}")))?;
         crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
         match publish_segment(store, &fence).await {
-            Ok(()) => return Ok(acquired),
+            Ok(()) => {
+                // The fence adds no rows. Carry the already validated anchor
+                // into this session's first publication, advancing only its WAL
+                // position. A later competing fence still collides at the next
+                // immutable WAL number; retries rediscover normally.
+                basis.head = resulting_head_after(&fence, head, head.head_commit_id.clone());
+                return Ok((acquired, basis));
+            }
             Err(CoreError::WalPublish(crate::commit::WalPublishError::StaleHead)) => {}
             Err(error) => return Err(error),
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<AcquiredWriter> {
+    acquire_writer_epoch_with_basis(store, namespace_id, context)
+        .await
+        .map(|(writer, _)| writer)
 }
 
 pub(crate) fn ensure_writer_not_fenced(

@@ -145,6 +145,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     acquired_writer: AcquiredWriter,
     cached_projection: Option<&PublishTailProjection>,
+    initial_basis: Option<crate::namespace::read_anchor::LoadedNamespaceBasis>,
     options: &PublishTailOptions,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
     let loaded = if let Some(cached) = cached_projection {
@@ -153,6 +154,8 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             basis: cached.basis().clone(),
             retention_floor_seq: cached.retention_floor_seq,
         }
+    } else if let Some(basis) = initial_basis {
+        basis
     } else {
         load_head_and_metadata_basis(store, namespace_id)
             .await

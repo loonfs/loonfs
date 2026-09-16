@@ -75,6 +75,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         &namespace_id,
         acquired_writer,
         None,
+        None,
         &PublishTailOptions::default(),
     )
     .await
