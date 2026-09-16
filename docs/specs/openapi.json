@@ -3455,13 +3455,13 @@
         "type": "object"
       },
       "PrincipalId": {
-        "description": "Stable opaque principal id containing 1 to 256 visible ASCII characters.",
+        "description": "Stable opaque principal id containing 1 to 256 visible ASCII characters other than the comma.",
         "example": "prn_8f3c",
         "pattern": "^[\\x21-\\x7E]{1,256}$",
         "type": "string"
       },
       "PrincipalScope": {
-        "description": "Opaque identity-domain id containing 1 to 256 visible ASCII characters.",
+        "description": "Opaque identity-domain id containing 1 to 256 visible ASCII characters other than the comma.",
         "example": "org_acme",
         "pattern": "^[\\x21-\\x7E]{1,256}$",
         "type": "string"
