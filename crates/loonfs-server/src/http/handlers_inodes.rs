@@ -2,6 +2,7 @@
 
 use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
+use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::{parse_optional_snapshot_id, pin_requested_snapshot, PageQuery};
 use super::query_params::{
     decode_optional_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
@@ -71,17 +72,20 @@ pub(super) struct StatInodeQuery {
 )]
 pub(super) async fn get_inode(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<StatInodeQuery>,
 ) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
+    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
+    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = StatPathOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
     let entry = target
         .get_inode(inode_id, options)
         .await
@@ -136,17 +140,20 @@ pub(super) struct ListInodeChildrenQuery {
 )]
 pub(super) async fn list_inode_children(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<ListInodeChildrenQuery>,
 ) -> Result<Json<loonfs_api::ListInodeChildrenResponse>, ApiResponseError> {
+    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
+    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = ListInodeChildrenOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(&state, &namespace_id, snapshot_id).await?;
+    let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
     let listing = target
         .list_inode_children_page(
             inode_id,
@@ -197,13 +204,15 @@ pub(super) async fn list_inode_children(
 )]
 pub(super) async fn list_file_revisions_by_inode(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
+    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
+    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let response = state
-        .reader
+    let response = reader
         .list_file_revisions_by_inode_page(
             &namespace_id,
             inode_id,
@@ -246,15 +255,17 @@ pub(super) async fn list_file_revisions_by_inode(
 )]
 pub(super) async fn get_file_revision_bytes_by_inode(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Response, ApiResponseError> {
+    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
+    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let permit = acquire_download_permit(&state)?;
-    let stream = state
-        .reader
+    let stream = reader
         .read_file_revision_stream_by_inode(&namespace_id, inode_id, revision_no)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;

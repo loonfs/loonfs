@@ -64,7 +64,7 @@ impl ApiResponseError {
 
     /// Sets `param` only for an `invalid_request` error.
     pub(super) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
-        if self.body.code == ErrorCode::InvalidRequest.as_str() {
+        if self.body.code == ErrorCode::InvalidRequest.as_str() && self.body.param.is_none() {
             self.with_param(param)
         } else {
             self

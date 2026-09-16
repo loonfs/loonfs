@@ -988,7 +988,7 @@ An extension must remain rebuildable from authoritative core state. Its absence 
 
 The current inode kinds are `file` and `dir`. Mount creation and traversal are not defined by this version; no standard operation creates a mount.
 
-Access rows and the namespace access mode are stored as section 1.8 defines. Commits and upload sessions are authorized against access rows as the API specification defines. Reads do not evaluate access rows in this version. Access changes publish in commit order and appear in the change feed as `access_changed` events.
+Access rows and the namespace access mode are stored as section 1.8 defines. Commits and upload sessions are authorized against access rows as the API specification defines. Reads evaluate access rows as the API specification defines. Access changes publish in commit order and appear in the change feed as `access_changed` events.
 
 ## Appendix A. Durable records and byte encodings
 

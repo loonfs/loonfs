@@ -22,6 +22,7 @@ use loonfs_grep::manifest::{
     encode_grep_hint, load_current_grep_manifest, publish_grep_manifest, GrepHint, GrepIndexState,
     GrepIndexStatus, GrepManifestState,
 };
+use loonfs_grep::NamespaceReads;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
     GrepWorker, GREP_GC_GRACE_WINDOW_MS,
@@ -2429,4 +2430,136 @@ async fn gc_preserves_discovery_and_applies_successor_and_segment_age_rules() {
             .namespace_reaped
     );
     writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn grep_filters_candidates_the_subject_cannot_read() {
+    use loonfs::publish::{CommitRequest, FilesystemOperation};
+    use loonfs_api::{
+        AccessGrants, AccessRight, AccessRights, CommitId, NamespaceAccess, PrincipalId,
+        PrincipalScope, PrincipalSet, Subject, SubjectId,
+    };
+    let subject = |principal: &str| Subject {
+        subject_id: SubjectId::parse(principal).expect("subject"),
+        principals: PrincipalSet::new(std::collections::BTreeSet::from([PrincipalId::parse(
+            principal,
+        )
+        .expect("principal")]))
+        .expect("principals"),
+    };
+    let grants = |principal: &str, rights: &[AccessRight]| {
+        AccessGrants::new(std::collections::BTreeMap::from([(
+            PrincipalId::parse(principal).expect("principal"),
+            AccessRights::from_iter(rights.iter().copied()),
+        )]))
+        .expect("grants")
+    };
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grep-access")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = NamespaceId::parse("grep-access").expect("namespace");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions {
+                access: NamespaceAccess::Acl {
+                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
+                    root_grants: grants("prn_root", &[AccessRight::Admin]),
+                },
+                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+            },
+        )
+        .await
+        .expect("namespace");
+    let host = GrepHost::new(&store, "grep-access").await;
+    for operation in [
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/team").expect("path"),
+            parents: false,
+        },
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/team/secret").expect("path"),
+            parents: false,
+        },
+        FilesystemOperation::UpdateAccess {
+            path: AbsolutePath::parse("/team").expect("path"),
+            boundary: false,
+            grants: grants("viewer", &[AccessRight::Read]),
+            expected_inode_id: None,
+            expected_access_revision_no: None,
+        },
+        FilesystemOperation::UpdateAccess {
+            path: AbsolutePath::parse("/team/secret").expect("path"),
+            boundary: true,
+            grants: grants("finance", &[AccessRight::Read, AccessRight::History]),
+            expected_inode_id: None,
+            expected_access_revision_no: None,
+        },
+    ] {
+        writer
+            .create_commit(
+                &namespace_id,
+                CommitRequest::single(
+                    CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    operation,
+                )
+                .with_subject(subject("prn_root")),
+            )
+            .await
+            .expect("seed");
+    }
+    for path in ["/team/file", "/team/secret/file"] {
+        let content = writer
+            .prepare_file_bytes(&namespace_id, b"needle\n")
+            .await
+            .expect("content");
+        writer
+            .commit_prepared(
+                &namespace_id,
+                CommitRequest::single(
+                    CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse(path).expect("path"),
+                        content_ref: content.content_ref().clone(),
+                        behavior: loonfs::DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                )
+                .with_subject(subject("prn_root")),
+                vec![content],
+            )
+            .await
+            .expect("put");
+    }
+    host.enable_grep_index(&namespace_id).await.expect("index");
+    for (principal, expected) in [
+        ("viewer", vec!["/team/file"]),
+        ("finance", vec!["/team/secret/file"]),
+        ("prn_root", vec!["/team/file", "/team/secret/file"]),
+    ] {
+        let reads = NamespaceReads::new(&host.reader, &namespace_id).as_subject(subject(principal));
+        let response = host
+            .service
+            .query(&request("needle"), default_page_limit(), &reads, &store)
+            .await
+            .expect("grep");
+        assert_eq!(
+            response
+                .matches
+                .iter()
+                .map(|found| found.path.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }

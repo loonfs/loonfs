@@ -3,6 +3,7 @@
 
 use super::current_files::resolve_visible_inode;
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
+use crate::authorize::{Absence, ReadAccess};
 use crate::checkpoint::{
     load_basis_metadata_segments, MetadataSegmentCache, VerifiedMetadataSegments,
     WalTailProjectionCache, WalTailProjectionCacheKey,
@@ -24,10 +25,10 @@ use crate::storage::content::{content_object_key_for_ref, get_durable_content_by
 use crate::wal::load_replayed_wal_tail;
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::{
-    AbsolutePath, AttributeInclusion, AttributesProjection, ChangeSeq, ContentRef, ContentStoreId,
-    DirectoryPageCursor, DisplayName, FileBytes, FileRevision, FileRevisionsPageCursor, InodeId,
-    InodeKind, ManifestNo, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo,
-    TrashEntry, TrashPageCursor,
+    AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
+    ContentRef, ContentStoreId, DirectoryPageCursor, DisplayName, FileBytes, FileRevision,
+    FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo, NamespaceId, Page, PageRequest,
+    PathEntry, PathEntryKind, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -73,6 +74,10 @@ struct ReadAnchor {
     manifest_no: ManifestNo,
     manifest_head_seq: ChangeSeq,
 }
+
+/// Rows one filtered trash page examines before it answers short with a
+/// cursor.
+const MAX_TRASH_ROWS_SCANNED_PER_PAGE: usize = 256;
 
 pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
@@ -239,6 +244,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         attributes: AttributeInclusion,
+        access: &ReadAccess<'_, S>,
     ) -> Result<PathEntry> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         // One session serves the resolution and the entry build: the walk's
@@ -247,6 +253,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let mut session = self.metadata_view().session();
         let resolved = session
             .resolve_visible_path(&absolute_path, LeafRevisionPrefetch::Prefetch)
+            .await?;
+        access
+            .require(
+                &mut session,
+                resolved.inode_id,
+                AccessRights::from_iter([AccessRight::Read]),
+                Absence::Path(absolute_path.as_str()),
+            )
             .await?;
         self.build_authoritative_path_entry_with_session(&mut session, &resolved, attributes)
             .await
@@ -258,12 +272,21 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         inode_id: InodeId,
         attributes: AttributeInclusion,
+        access: &ReadAccess<'_, S>,
     ) -> Result<PathEntry> {
         let mut session = self.metadata_view().session();
         let mut ancestor_paths = HashMap::new();
         let resolved = resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
             .await?
             .ok_or(CoreError::InodeNotFound(inode_id))?;
+        access
+            .require(
+                &mut session,
+                inode_id,
+                AccessRights::from_iter([AccessRight::Read]),
+                Absence::Inode,
+            )
+            .await?;
         self.build_authoritative_path_entry_with_session(&mut session, &resolved, attributes)
             .await
     }
@@ -273,8 +296,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         absolute_path: &str,
         max_content_bytes: Option<u64>,
+        access: &ReadAccess<'_, S>,
     ) -> Result<FileBytes> {
-        let (entry, content_ref) = self.resolve_file_content(absolute_path, None).await?;
+        let (entry, content_ref) = self
+            .resolve_file_content(absolute_path, None, access)
+            .await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let bytes = get_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
         Ok(FileBytes { entry, bytes })
@@ -288,9 +314,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
+        access: &ReadAccess<'_, S>,
     ) -> Result<(PathEntry, ContentRef)> {
         let mut entry = self
-            .resolve_path(absolute_path, AttributeInclusion::Omit)
+            .resolve_path(absolute_path, AttributeInclusion::Omit, access)
             .await?;
         let content_ref = match &entry.kind {
             PathEntryKind::File { content_ref, .. } => content_ref.clone(),
@@ -302,6 +329,17 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
         };
         if let Some(revision_no) = revision_no {
+            if !matches!(entry.kind, PathEntryKind::File { revision_no: current, .. } if current == revision_no)
+            {
+                access
+                    .require(
+                        &mut self.metadata_view().session(),
+                        entry.inode_id,
+                        AccessRights::from_iter([AccessRight::History]),
+                        Absence::Path(absolute_path),
+                    )
+                    .await?;
+            }
             let revision = self.revision_for_inode(entry.inode_id, revision_no).await?;
             entry.kind = PathEntryKind::File {
                 revision_no: revision.revision_no,
@@ -333,9 +371,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
+        access: &ReadAccess<'_, S>,
     ) -> Result<DirectDownloadTarget> {
         let entry = self
-            .resolve_path(absolute_path, AttributeInclusion::Omit)
+            .resolve_path(absolute_path, AttributeInclusion::Omit, access)
             .await?;
         let current_revision = match &entry.kind {
             PathEntryKind::File {
@@ -352,6 +391,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
         let (revision_no, content_ref) = match revision_no {
             Some(requested) => {
+                if requested != current_revision.0 {
+                    access
+                        .require(
+                            &mut self.metadata_view().session(),
+                            entry.inode_id,
+                            AccessRights::from_iter([AccessRight::History]),
+                            Absence::Path(absolute_path),
+                        )
+                        .await?;
+                }
                 let revision = self.revision_for_inode(entry.inode_id, requested).await?;
                 (revision.revision_no, revision.content_ref)
             }
@@ -372,7 +421,33 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
+        access: &ReadAccess<'_, S>,
     ) -> Result<DirectDownloadByInodeTarget> {
+        let mut session = self.metadata_view().session();
+        access
+            .require(
+                &mut session,
+                inode_id,
+                AccessRights::from_iter([AccessRight::Read]),
+                Absence::Inode,
+            )
+            .await?;
+        if !access.is_unrestricted()
+            && self
+                .metadata_view()
+                .latest_revision_head(inode_id)
+                .await?
+                .is_none_or(|current| current.revision_no != revision_no)
+        {
+            access
+                .require(
+                    &mut session,
+                    inode_id,
+                    AccessRights::from_iter([AccessRight::History]),
+                    Absence::Inode,
+                )
+                .await?;
+        }
         let revision = self.revision_for_inode(inode_id, revision_no).await?;
         let object_key = content_object_key_for_ref(&self.content_store_id, &revision.content_ref)?;
         Ok(DirectDownloadByInodeTarget {
@@ -387,9 +462,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
+        access: &ReadAccess<'_, S>,
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let entry = self
-            .resolve_path(absolute_path, AttributeInclusion::Omit)
+            .resolve_path(absolute_path, AttributeInclusion::Omit, access)
             .await?;
         if matches!(entry.kind, PathEntryKind::Directory {}) {
             return Err(CoreError::ExpectedFile {
@@ -397,7 +473,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 kind: InodeKind::Directory,
             });
         }
-        self.list_file_revisions_for_inode_page(entry.inode_id, request)
+        access
+            .require(
+                &mut self.metadata_view().session(),
+                entry.inode_id,
+                AccessRights::from_iter([AccessRight::History]),
+                Absence::Path(absolute_path),
+            )
+            .await?;
+        self.list_file_revisions_for_inode_page(entry.inode_id, request, access)
             .await
     }
 
@@ -413,6 +497,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) async fn list_trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
+        access: &ReadAccess<'_, S>,
     ) -> Result<Page<TrashEntry, TrashPageCursor>> {
         if let Some(cursor) = request.cursor.as_ref() {
             if cursor.head_seq > self.head.seq {
@@ -427,18 +512,50 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .cursor
             .as_ref()
             .map(|cursor| (cursor.last_deletion_seq, cursor.last_root_inode_id));
-        let mut deletions = self
-            .metadata_view()
-            .session()
-            .active_deletions_page(start_after, request.limit.limit_plus_one())
-            .await?;
-        let next_cursor = request
-            .limit
-            .finish_page(&mut deletions, |last| TrashPageCursor {
-                head_seq: self.head.seq,
-                last_deletion_seq: last.deletion_seq,
-                last_root_inode_id: last.root_inode_id,
+        let mut session = self.metadata_view().session();
+        let cursor = |seq: ChangeSeq, inode_id: InodeId| TrashPageCursor {
+            head_seq: self.head.seq,
+            last_deletion_seq: seq,
+            last_root_inode_id: inode_id,
+        };
+        let (deletions, next_cursor) = if access.is_unrestricted() {
+            let mut deletions = session
+                .active_deletions_page(start_after, request.limit.limit_plus_one())
+                .await?;
+            let next_cursor = request.limit.finish_page(&mut deletions, |last| {
+                cursor(last.deletion_seq, last.root_inode_id)
             });
+            (deletions, next_cursor)
+        } else {
+            let limit = request.limit.as_usize();
+            let mut start_after = start_after;
+            let mut kept = Vec::new();
+            let mut scanned = 0;
+            let mut last_scanned = None;
+            let mut exhausted = false;
+            while !exhausted && kept.len() < limit && scanned < MAX_TRASH_ROWS_SCANNED_PER_PAGE {
+                let wanted = (limit - kept.len()).min(MAX_TRASH_ROWS_SCANNED_PER_PAGE - scanned);
+                let batch = session.active_deletions_page(start_after, wanted).await?;
+                exhausted = batch.len() < wanted;
+                for deletion in batch {
+                    scanned += 1;
+                    last_scanned = Some((deletion.deletion_seq, deletion.root_inode_id));
+                    if access
+                        .can_read(&mut session, deletion.deleted_direntry.parent_inode_id)
+                        .await?
+                    {
+                        kept.push(deletion);
+                    }
+                }
+                start_after = last_scanned;
+            }
+            let next_cursor = if exhausted {
+                None
+            } else {
+                last_scanned.map(|(seq, inode_id)| cursor(seq, inode_id))
+            };
+            (kept, next_cursor)
+        };
         // Convert the durable binding into its public API shape.
         let entries = deletions
             .into_iter()
@@ -465,7 +582,25 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
+        access: &ReadAccess<'_, S>,
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
+        let mut session = self.metadata_view().session();
+        access
+            .require(
+                &mut session,
+                inode_id,
+                AccessRights::from_iter([AccessRight::Read]),
+                Absence::Inode,
+            )
+            .await?;
+        access
+            .require(
+                &mut session,
+                inode_id,
+                AccessRights::from_iter([AccessRight::History]),
+                Absence::Inode,
+            )
+            .await?;
         let inode = self
             .metadata_view()
             .inode_at_seq(inode_id)
@@ -528,9 +663,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
+        access: &ReadAccess<'_, S>,
     ) -> Result<FileBytes> {
         let (entry, content_ref) = self
-            .resolve_file_content(absolute_path, Some(revision_no))
+            .resolve_file_content(absolute_path, Some(revision_no), access)
             .await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let bytes = get_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
@@ -543,7 +679,33 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
+        access: &ReadAccess<'_, S>,
     ) -> Result<Vec<u8>> {
+        let mut session = self.metadata_view().session();
+        access
+            .require(
+                &mut session,
+                inode_id,
+                AccessRights::from_iter([AccessRight::Read]),
+                Absence::Inode,
+            )
+            .await?;
+        if !access.is_unrestricted()
+            && self
+                .metadata_view()
+                .latest_revision_head(inode_id)
+                .await?
+                .is_none_or(|current| current.revision_no != revision_no)
+        {
+            access
+                .require(
+                    &mut session,
+                    inode_id,
+                    AccessRights::from_iter([AccessRight::History]),
+                    Absence::Inode,
+                )
+                .await?;
+        }
         let revision = self.revision_for_inode(inode_id, revision_no).await?;
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         Ok(get_durable_content_bytes(store, &self.content_store_id, &revision.content_ref).await?)
@@ -566,6 +728,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
         attributes: AttributeInclusion,
+        access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
 
@@ -573,6 +736,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let mut session = self.metadata_view().session();
         let resolved = session
             .resolve_visible_path(&absolute_path, LeafRevisionPrefetch::Skip)
+            .await?;
+        access
+            .require(
+                &mut session,
+                resolved.inode_id,
+                AccessRights::from_iter([AccessRight::Read]),
+                Absence::Path(absolute_path.as_str()),
+            )
             .await?;
         if let Some(cursor) = request.cursor.as_ref() {
             validate_directory_cursor(cursor, &resolved)?;
@@ -595,7 +766,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             InodeKind::Directory => {}
         }
 
-        self.directory_children_page(&mut session, &resolved, request, attributes)
+        self.directory_children_page(&mut session, &resolved, request, attributes, access)
             .await
     }
 
@@ -610,6 +781,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
         attributes: AttributeInclusion,
+        access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
 
@@ -618,6 +790,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let resolved = resolve_visible_inode(&mut session, &mut ancestor_paths, inode_id)
             .await?
             .ok_or(CoreError::InodeNotFound(inode_id))?;
+        access
+            .require(
+                &mut session,
+                inode_id,
+                AccessRights::from_iter([AccessRight::Read]),
+                Absence::Inode,
+            )
+            .await?;
         if resolved.inode_kind != InodeKind::Directory {
             return Err(CoreError::ExpectedDirectory {
                 target: resolved.absolute_path.clone(),
@@ -627,7 +807,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         if let Some(cursor) = request.cursor.as_ref() {
             validate_directory_cursor(cursor, &resolved)?;
         }
-        self.directory_children_page(&mut session, &resolved, request, attributes)
+        self.directory_children_page(&mut session, &resolved, request, attributes, access)
             .await
     }
 
@@ -640,6 +820,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         resolved: &ResolvedVisiblePath,
         request: PageRequest<DirectoryPageCursor>,
         attributes: AttributeInclusion,
+        access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let start_after = request
             .cursor
@@ -669,6 +850,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 last_name_key: last.binding.name_key.clone(),
             });
 
+        let mut readable = vec![true; children.len()];
+        if !access.is_unrestricted() {
+            for (child, readable) in children.iter().zip(&mut readable) {
+                *readable = access
+                    .can_read(session, child.binding.child_inode_id)
+                    .await?;
+            }
+        }
+
         let build_span = tracing::debug_span!(
             "loonfs.phase",
             phase = "list_page_build_entries",
@@ -693,12 +883,20 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             if attributes == AttributeInclusion::Include {
                 let child_inode_ids: Vec<InodeId> = children
                     .iter()
-                    .map(|child| child.binding.child_inode_id)
+                    .zip(&readable)
+                    .filter_map(|(child, readable)| {
+                        readable.then_some(child.binding.child_inode_id)
+                    })
                     .collect();
                 session.preload_attributes(&child_inode_ids).await?;
             }
             let mut entries = Vec::with_capacity(children.len());
-            for child in children {
+            for (child, readable) in children.into_iter().zip(readable) {
+                let attributes = if readable {
+                    attributes
+                } else {
+                    AttributeInclusion::Omit
+                };
                 entries.push(
                     self.build_authoritative_path_entry_from_visible_child(
                         session, resolved, child, attributes,
@@ -1035,7 +1233,11 @@ mod tests {
             .expect("load view");
 
         let annotated = view
-            .resolve_path("/docs/annotated", AttributeInclusion::Include)
+            .resolve_path(
+                "/docs/annotated",
+                AttributeInclusion::Include,
+                &ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
             .await
             .expect("stat annotated");
         assert_eq!(
@@ -1055,7 +1257,11 @@ mod tests {
         );
 
         let bare = view
-            .resolve_path("/docs/bare", AttributeInclusion::Include)
+            .resolve_path(
+                "/docs/bare",
+                AttributeInclusion::Include,
+                &ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
             .await
             .expect("stat bare");
         assert_eq!(
@@ -1069,7 +1275,11 @@ mod tests {
         );
 
         let omitted = view
-            .resolve_path("/docs/annotated", AttributeInclusion::Omit)
+            .resolve_path(
+                "/docs/annotated",
+                AttributeInclusion::Omit,
+                &ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
             .await
             .expect("stat without attributes");
         assert!(omitted.attributes.is_none());

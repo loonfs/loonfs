@@ -279,10 +279,13 @@ async fn trash_page<S: ObjectStore + ?Sized>(
     let view = load_current_metadata_view(store, namespace_id)
         .await
         .expect("load read view");
-    view.list_trash_page(PageRequest {
-        cursor,
-        limit: EffectiveLimit::new(NonZeroU32::new(limit).expect("non-zero limit")),
-    })
+    view.list_trash_page(
+        PageRequest {
+            cursor,
+            limit: EffectiveLimit::new(NonZeroU32::new(limit).expect("non-zero limit")),
+        },
+        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+    )
     .await
     .expect("list trash page")
 }
@@ -296,7 +299,11 @@ async fn inode_id_of<S: ObjectStore + ?Sized>(
     load_current_metadata_view(store, namespace_id)
         .await
         .expect("load read view")
-        .resolve_path(absolute_path, AttributeInclusion::Omit)
+        .resolve_path(
+            absolute_path,
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
         .await
         .expect("resolve path")
         .inode_id

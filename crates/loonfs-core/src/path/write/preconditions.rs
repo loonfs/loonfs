@@ -1,10 +1,10 @@
 //! Request preconditions against the candidate pre-state.
 
-use super::authorize::{Absence, Authorizer};
 use super::publish_path_planning::{
     check_binding_generation, is_missing_visible_path, resolve_parent_directory,
     resolve_visible_inode, PublishPathPlanningView,
 };
+use crate::authorize::{Absence, Authorizer};
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, VisiblePathError};

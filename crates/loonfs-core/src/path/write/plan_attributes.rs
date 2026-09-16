@@ -1,8 +1,8 @@
 //! The publish plan for one attribute update.
 
-use super::authorize::Absence;
 use super::ensure_expected_inode;
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
+use crate::authorize::Absence;
 use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};

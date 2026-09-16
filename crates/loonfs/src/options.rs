@@ -115,6 +115,8 @@ pub struct CreateSnapshotOptions {
 pub struct CreateNamespaceOptions {
     /// Application-supplied actor creating the namespace.
     pub actor_id: loonfs_api::ActorId,
+    /// Access mode installed for the namespace.
+    pub access: loonfs_api::NamespaceAccess,
     /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
 }
@@ -124,6 +126,7 @@ impl CreateNamespaceOptions {
     pub fn new(actor_id: loonfs_api::ActorId) -> Self {
         Self {
             actor_id,
+            access: loonfs_api::NamespaceAccess::Unrestricted {},
             allow_existing: false,
         }
     }

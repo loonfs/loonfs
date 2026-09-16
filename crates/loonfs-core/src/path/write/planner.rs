@@ -1,7 +1,6 @@
 //! Commit fingerprinting and sequential resolution of a request's
 //! operations into one commit's operations.
 
-use super::authorize::Authorizer;
 use super::intent::{CommitRequest, FilesystemOperation};
 use super::plan_access::plan_update_access;
 use super::plan_attributes::plan_update_attributes;
@@ -14,6 +13,7 @@ use super::plan_delete::plan_delete_path;
 use super::plan_restore::plan_restore_revision;
 use super::plan_transfer::{plan_copy_file_path, plan_move_path};
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
+use crate::authorize::Authorizer;
 use crate::commit::{
     validate_ops, CandidateAllocation, CommitFingerprint, CommitNumbering, PublishValidationView,
     ValidatedCommitPlan, ValidatedOp,

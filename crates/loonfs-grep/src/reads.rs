@@ -12,7 +12,7 @@ use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
     decode_cursor, AbsolutePath, ChangeSeq, CheckpointId, ContentRef, DirectoryPageCursor,
     EffectiveLimit, InodeId, LimitError, NamespaceId, Page, PageRequest, PaginationPolicy,
-    PathEntry, RevisionNo,
+    PathEntry, RevisionNo, Subject,
 };
 
 /// Filesystem reads for one namespace.
@@ -22,6 +22,7 @@ use loonfs_api::{
 /// metadata phase in one response uses the same head.
 pub struct NamespaceReads<'a> {
     reader: &'a FsReader,
+    subject_reader: Option<FsReader>,
     namespace_id: &'a NamespaceId,
 }
 
@@ -30,8 +31,16 @@ impl<'a> NamespaceReads<'a> {
     pub fn new(reader: &'a FsReader, namespace_id: &'a NamespaceId) -> Self {
         Self {
             reader,
+            subject_reader: None,
             namespace_id,
         }
+    }
+
+    /// Verifies candidates and reads their content as `subject`. The index
+    /// and the change feed still read as the service.
+    pub fn as_subject(mut self, subject: Subject) -> Self {
+        self.subject_reader = Some(self.reader.as_subject(subject));
+        self
     }
 
     /// Returns the namespace used by this reader.
@@ -41,9 +50,12 @@ impl<'a> NamespaceReads<'a> {
 
     /// Pins one metadata view for a query.
     pub(crate) async fn pin(&self) -> Result<PinnedNamespaceReads<'a>> {
+        let reader = self.subject_reader.as_ref().unwrap_or(self.reader);
+        let snapshot = reader.pin_namespace(self.namespace_id).await?;
+        snapshot.require_subject()?;
         Ok(PinnedNamespaceReads {
             reader: self.reader,
-            snapshot: self.reader.pin_namespace(self.namespace_id).await?,
+            snapshot,
         })
     }
 
@@ -231,15 +243,16 @@ impl PinnedNamespaceReads<'_> {
         })
     }
 
-    /// Reads one immutable content object selected from the pinned view.
-    pub(crate) async fn read_content_ref(
+    /// Reads an authorized inode revision from the pinned view.
+    pub(crate) async fn read_revision_content(
         &self,
-        content_ref: &ContentRef,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         Ok(self
             .snapshot
-            .read_content_ref(content_ref, max_bytes)
+            .read_revision_content(inode_id, revision_no, max_bytes)
             .await?)
     }
 }

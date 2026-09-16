@@ -739,7 +739,11 @@ async fn candidate_content(
     }
     CandidateContent::Fetched(
         reads
-            .read_content_ref(content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
+            .read_revision_content(
+                candidate.inode_id,
+                candidate.revision_no,
+                INDEX_GRAMS_MAX_FILE_BYTES,
+            )
             .await,
     )
 }
@@ -857,6 +861,10 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
                 break;
             }
             self.verified_files += 1;
+            if !state.readable {
+                self.rejected_frontier = Some(inode_id);
+                continue;
+            }
             candidates.push(GrepContentCandidate {
                 inode_id,
                 revision_no,

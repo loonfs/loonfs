@@ -1,12 +1,17 @@
 //! Access updates, structural rules, and revision continuity after a flush.
 
-use crate::common::commit_split_support::{bootstrap_namespace, resolve_path, submit_commit};
-use crate::common::namespace_engine;
+use crate::common::commit_split_support::{bootstrap_namespace, submit_commit};
+use crate::common::{namespace_engine, read_context};
+use loonfs_api::options::{ListPathEntriesOptions, StatPathOptions};
 use loonfs_api::v0::FilesystemChange;
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
     DestinationBehavior, ErrorCode, InodeId, NamespaceAccess, NamespaceId, PrincipalId,
     PrincipalScope, ROOT_INODE_ID,
+};
+use loonfs_api::{
+    AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, PaginationPolicy, RevisionNo,
+    TrashEntry, TrashPageCursor,
 };
 use loonfs_core::publish::{CommitRequest, FilesystemOperation};
 use loonfs_core::{BootstrapOptions, MutationContext};
@@ -853,4 +858,452 @@ async fn submit_operation(
         context,
     )
     .await
+}
+
+fn read_engine<'a>(
+    store: &'a LocalFsStore,
+    namespace_id: &NamespaceId,
+    principal: &str,
+) -> loonfs_core::NamespaceReaderEngine<&'a LocalFsStore> {
+    loonfs_core::NamespaceReaderEngine::reader(store, namespace_id.clone())
+        .with_subject(subject(principal, &[principal]))
+}
+
+async fn resolve_path(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    path: &str,
+) -> Result<loonfs_api::PathEntry, loonfs_core::Error> {
+    read_engine(store, namespace_id, "prn_root")
+        .resolve_path(
+            path,
+            StatPathOptions::default(),
+            &read_context(store, namespace_id).await,
+        )
+        .await
+}
+
+fn read_page<C>(limit: u32) -> PageRequest<C> {
+    PageRequest {
+        limit: PaginationPolicy::default()
+            .resolve_limit(Some(limit))
+            .expect("limit"),
+        cursor: None,
+    }
+}
+
+async fn read_fixture() -> (
+    tempfile::TempDir,
+    LocalFsStore,
+    NamespaceId,
+    MutationContext,
+    ContentRef,
+) {
+    use AccessRight::{Create, History, Read, Remove, Write};
+    let (temp_dir, store, namespace_id, context) = setup().await;
+    let content = loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"body")
+        .await
+        .expect("content")
+        .into_content_ref();
+    seed(
+        &store,
+        &namespace_id,
+        &context,
+        vec![
+            create_directory("/team"),
+            create_directory("/team/secret"),
+            create_directory("/inbox"),
+            update_access(
+                "/team",
+                false,
+                access_grants(&[
+                    ("team", &[Read, Write, Create, Remove]),
+                    ("viewer", &[Read]),
+                    ("historian", &[Read, History]),
+                ]),
+            ),
+            update_access("/team/secret", true, grants("finance", &[Read, History])),
+            update_access("/inbox", false, grants("uploader", &[Create])),
+            put("/team/file", &content),
+            put("/team/kept", &content),
+            put("/team/secret/file", &content),
+            put("/inbox/file", &content),
+        ],
+    )
+    .await;
+    (temp_dir, store, namespace_id, context, content)
+}
+
+#[tokio::test]
+async fn reads_require_read_and_absence_hides_the_inode() {
+    let (_temp_dir, store, namespace_id, _, _) = read_fixture().await;
+    let context = read_context(&store, &namespace_id).await;
+    let viewer = read_engine(&store, &namespace_id, "viewer");
+    let entry = viewer
+        .resolve_path("/team/file", StatPathOptions::default(), &context)
+        .await
+        .expect("stat");
+    assert_eq!(
+        viewer
+            .get_file("/team/file", &context, None)
+            .await
+            .expect("content")
+            .bytes,
+        b"body"
+    );
+    let listing = viewer
+        .list_path_page(
+            "/team",
+            read_page(10),
+            ListPathEntriesOptions {
+                include_attributes: AttributeInclusion::Include,
+                ..Default::default()
+            },
+            &context,
+        )
+        .await
+        .expect("list");
+    assert_eq!(listing.items.len(), 3);
+    for entry in listing.items {
+        assert_eq!(
+            entry.attributes.is_some(),
+            entry.path.as_str() != "/team/secret"
+        );
+    }
+    let stranger = read_engine(&store, &namespace_id, "stranger");
+    assert_eq!(
+        stranger
+            .resolve_path("/team/file", StatPathOptions::default(), &context)
+            .await
+            .expect_err("hidden path")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        stranger
+            .list_path_page(
+                "/team",
+                read_page(10),
+                ListPathEntriesOptions::default(),
+                &context
+            )
+            .await
+            .expect_err("hidden directory")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        stranger
+            .get_file("/team/file", &context, None)
+            .await
+            .expect_err("hidden content")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        stranger
+            .stat_inode(entry.inode_id, StatPathOptions::default(), &context)
+            .await
+            .expect_err("hidden inode")
+            .code(),
+        ErrorCode::InodeNotFound
+    );
+    assert_eq!(
+        read_engine(&store, &namespace_id, "uploader")
+            .resolve_path("/inbox", StatPathOptions::default(), &context)
+            .await
+            .expect_err("create is not read")
+            .code(),
+        ErrorCode::Forbidden
+    );
+}
+
+#[tokio::test]
+async fn history_needs_the_history_right() {
+    let (_temp_dir, store, namespace_id, mutation, content) = read_fixture().await;
+    seed(
+        &store,
+        &namespace_id,
+        &mutation,
+        vec![FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/team/file").expect("path"),
+            content_ref: content,
+            behavior: DestinationBehavior::Replace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        }],
+    )
+    .await;
+    let context = read_context(&store, &namespace_id).await;
+    let inode_id = resolve_path(&store, &namespace_id, "/team/file")
+        .await
+        .expect("file")
+        .inode_id;
+    for (principal, history) in [("viewer", false), ("historian", true)] {
+        let engine = read_engine(&store, &namespace_id, principal);
+        for revision in [RevisionNo(1), RevisionNo(2)] {
+            let expected = if history || revision == RevisionNo(2) {
+                Ok(())
+            } else {
+                Err(ErrorCode::Forbidden)
+            };
+            assert_eq!(
+                engine
+                    .get_file_revision("/team/file", revision, &context, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.code()),
+                expected
+            );
+            assert_eq!(
+                engine
+                    .get_file_revision_for_inode(inode_id, revision, &context, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.code()),
+                expected
+            );
+            assert_eq!(
+                engine
+                    .direct_download_target("/team/file", Some(revision), &context)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.code()),
+                expected
+            );
+            assert_eq!(
+                engine
+                    .direct_download_target_by_inode(inode_id, revision, &context)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.code()),
+                expected
+            );
+        }
+        let expected = if history {
+            Ok(2)
+        } else {
+            Err(ErrorCode::Forbidden)
+        };
+        assert_eq!(
+            engine
+                .list_file_revisions_page("/team/file", read_page(10), &context)
+                .await
+                .map(|page| page.items.len())
+                .map_err(|error| error.code()),
+            expected
+        );
+        assert_eq!(
+            engine
+                .list_file_revisions_for_inode_page(inode_id, read_page(10), &context)
+                .await
+                .map(|page| page.items.len())
+                .map_err(|error| error.code()),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn snapshot_reads_authorize_the_historical_inode_at_head() {
+    let (_temp_dir, store, namespace_id, mutation, _) = read_fixture().await;
+    let snapshot = read_context(&store, &namespace_id).await;
+    seed(
+        &store,
+        &namespace_id,
+        &mutation,
+        vec![move_path("/team/file", "/team/secret/moved")],
+    )
+    .await;
+    let head = read_context(&store, &namespace_id).await;
+    let viewer = read_engine(&store, &namespace_id, "viewer").with_authorization_head(head.clone());
+    assert_eq!(
+        viewer
+            .get_file("/team/file", &snapshot, None)
+            .await
+            .expect_err("moved historical inode is hidden")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        viewer
+            .get_file("/team/kept", &snapshot, None)
+            .await
+            .expect_err("snapshot needs history")
+            .code(),
+        ErrorCode::Forbidden
+    );
+    let finance =
+        read_engine(&store, &namespace_id, "finance").with_authorization_head(head.clone());
+    assert_eq!(
+        finance
+            .get_file("/team/file", &snapshot, None)
+            .await
+            .expect("historical inode")
+            .bytes,
+        b"body"
+    );
+    let historian = read_engine(&store, &namespace_id, "historian").with_authorization_head(head);
+    let listing = historian
+        .list_path_page(
+            "/team",
+            read_page(10),
+            ListPathEntriesOptions::default(),
+            &snapshot,
+        )
+        .await
+        .expect("historical names");
+    assert_eq!(listing.items.len(), 3);
+}
+
+async fn trash_page(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    principal: &str,
+    limit: u32,
+    cursor: Option<TrashPageCursor>,
+) -> Page<TrashEntry, TrashPageCursor> {
+    let mut request = read_page(limit);
+    request.cursor = cursor;
+    read_engine(store, namespace_id, principal)
+        .list_trash_page(request, &read_context(store, namespace_id).await)
+        .await
+        .expect("trash page")
+}
+
+fn deleted_names(page: &Page<TrashEntry, TrashPageCursor>) -> Vec<String> {
+    page.items
+        .iter()
+        .map(|entry| entry.deleted_binding.display_name.to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn trash_lists_entries_whose_original_parent_is_readable() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    seed(
+        &store,
+        &namespace_id,
+        &context,
+        vec![delete("/team/kept"), delete("/team/secret/file")],
+    )
+    .await;
+    assert_eq!(
+        deleted_names(&trash_page(&store, &namespace_id, "viewer", 10, None).await),
+        ["kept"]
+    );
+    assert_eq!(
+        deleted_names(&trash_page(&store, &namespace_id, "finance", 10, None).await),
+        ["file"]
+    );
+    assert_eq!(
+        trash_page(&store, &namespace_id, "prn_root", 10, None)
+            .await
+            .items
+            .len(),
+        2
+    );
+    let first = trash_page(&store, &namespace_id, "viewer", 1, None).await;
+    assert_eq!(deleted_names(&first), ["kept"]);
+    let cursor = first.next_cursor.expect("a filtered page keeps its cursor");
+    let last = trash_page(&store, &namespace_id, "viewer", 1, Some(cursor)).await;
+    assert!(last.items.is_empty());
+    assert!(last.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
+    let (_temp_dir, store, namespace_id, _, content) = read_fixture().await;
+    let context = read_context(&store, &namespace_id).await;
+    let viewer = read_engine(&store, &namespace_id, "viewer");
+    assert_eq!(
+        viewer
+            .require_administrator(&context)
+            .await
+            .expect_err("feed requires administrator")
+            .code(),
+        ErrorCode::Forbidden
+    );
+    assert_eq!(
+        viewer
+            .read_content_ref(&content, 100, &context)
+            .await
+            .expect_err("bare content requires administrator")
+            .code(),
+        ErrorCode::Forbidden
+    );
+    for engine in [
+        read_engine(&store, &namespace_id, "prn_root"),
+        loonfs_core::NamespaceReaderEngine::reader(&store, namespace_id.clone()),
+    ] {
+        engine
+            .require_administrator(&context)
+            .await
+            .expect("feed authorized");
+        assert!(!engine
+            .list_changes_after(ChangeSeq(0), read_page::<()>(100).limit)
+            .await
+            .expect("feed")
+            .changes
+            .is_empty());
+        assert_eq!(
+            engine
+                .read_content_ref(&content, 100, &context)
+                .await
+                .expect("content"),
+            b"body"
+        );
+    }
+    let engine = loonfs_core::NamespaceReaderEngine::reader(&store, namespace_id);
+    let error = engine
+        .resolve_path("/team/file", StatPathOptions::default(), &context)
+        .await
+        .expect_err("subject required");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert!(matches!(error, loonfs_core::Error::SubjectRequired { .. }));
+}
+
+#[tokio::test]
+async fn a_revocation_is_visible_to_the_next_read() {
+    let (_temp_dir, store, namespace_id, mutation, _) = read_fixture().await;
+    let viewer = read_engine(&store, &namespace_id, "viewer");
+    viewer
+        .resolve_path(
+            "/team/file",
+            StatPathOptions::default(),
+            &read_context(&store, &namespace_id).await,
+        )
+        .await
+        .expect("before revocation");
+    seed(
+        &store,
+        &namespace_id,
+        &mutation,
+        vec![update_access(
+            "/team",
+            false,
+            grants("team", &[AccessRight::Read]),
+        )],
+    )
+    .await;
+    for flush in [false, true] {
+        if flush {
+            namespace_engine(&store, &namespace_id, &mutation)
+                .flush_wal()
+                .await
+                .expect("flush");
+        }
+        assert_eq!(
+            viewer
+                .resolve_path(
+                    "/team/file",
+                    StatPathOptions::default(),
+                    &read_context(&store, &namespace_id).await
+                )
+                .await
+                .expect_err("revoked")
+                .code(),
+            ErrorCode::PathNotFound
+        );
+    }
 }

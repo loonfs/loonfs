@@ -3,6 +3,7 @@
 //! Stale or unknown IDs are returned as not visible rather than rejected.
 
 use super::materialized_view::LoadedMetadataView;
+use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
 use crate::metadata::{binding_generation, MetadataViewSession, ResolvedVisiblePath};
 use loonfs_api::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
@@ -19,6 +20,8 @@ pub struct CurrentFileState {
     pub inode_id: InodeId,
     /// Whether the inode exists and has a visible path from the root.
     pub visible: bool,
+    /// Whether the subject can read this inode.
+    pub readable: bool,
     /// Current revision number for a visible file.
     pub current_revision_no: Option<RevisionNo>,
     /// Current path when visible.
@@ -44,13 +47,14 @@ pub(crate) fn ensure_resolve_batch_within_cap(requested: usize) -> Result<()> {
 pub(crate) async fn resolve_current_files<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     inode_ids: &[InodeId],
+    access: &ReadAccess<'_, S>,
 ) -> Result<Vec<CurrentFileState>> {
     ensure_resolve_batch_within_cap(inode_ids.len())?;
     let mut session = view.metadata_view().session();
     let mut ancestor_paths = HashMap::new();
     let mut states = Vec::with_capacity(inode_ids.len());
     for &inode_id in inode_ids {
-        states.push(resolve_one(&mut session, &mut ancestor_paths, inode_id).await?);
+        states.push(resolve_one(&mut session, &mut ancestor_paths, inode_id, access).await?);
     }
     Ok(states)
 }
@@ -59,9 +63,10 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
     ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
     inode_id: InodeId,
+    access: &ReadAccess<'_, S>,
 ) -> Result<CurrentFileState> {
     let Some(resolved) = resolve_visible_inode(session, ancestor_paths, inode_id).await? else {
-        return Ok(missing(inode_id));
+        return Ok(missing(inode_id, access.is_unrestricted()));
     };
     let current_revision_no = if resolved.inode_kind == InodeKind::File {
         session
@@ -74,6 +79,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     Ok(CurrentFileState {
         inode_id,
         visible: true,
+        readable: access.can_read(session, inode_id).await?,
         current_revision_no,
         current_path: Some(
             AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {
@@ -123,10 +129,11 @@ pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
     }))
 }
 
-fn missing(inode_id: InodeId) -> CurrentFileState {
+fn missing(inode_id: InodeId, readable: bool) -> CurrentFileState {
     CurrentFileState {
         inode_id,
         visible: false,
+        readable,
         current_revision_no: None,
         current_path: None,
     }

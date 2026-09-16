@@ -422,7 +422,7 @@ impl ReadCore {
             checkpoint_id,
         )
         .await?;
-        Ok(self.pinned_read_at_basis(namespace_id, pinned))
+        Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
     }
 
     /// Pins a snapshot-owned checkpoint while enforcing its live lease.
@@ -444,13 +444,14 @@ impl ReadCore {
             now_ms,
         )
         .await?;
-        Ok(self.pinned_read_at_basis(namespace_id, pinned))
+        Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
     }
 
     fn pinned_read_at_basis(
         &self,
         namespace_id: &NamespaceId,
         pinned: CheckpointReadBasis,
+        live: &CachedNamespaceAnchor,
     ) -> (
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
@@ -463,7 +464,11 @@ impl ReadCore {
             validation: Arc::default(),
             validated_generation: 0,
         });
-        (self.reader_engine(namespace_id), read_context)
+        (
+            self.reader_engine(namespace_id)
+                .with_authorization_head(self.runtime_read_context(live)),
+            read_context,
+        )
     }
 
     /// Pins the latest metadata view and records the read in cache metrics.

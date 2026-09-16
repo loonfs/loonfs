@@ -100,7 +100,11 @@ async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     load_current_metadata_view(store, namespace_id)
         .await
         .expect("load latest view")
-        .resolve_path("/", AttributeInclusion::Omit)
+        .resolve_path(
+            "/",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
         .await
         .expect("resolve root");
 }
@@ -445,7 +449,11 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("load clone view");
     clone_view
-        .resolve_path("/docs/shared.txt", AttributeInclusion::Omit)
+        .resolve_path(
+            "/docs/shared.txt",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
         .await
         .expect("clone reads through the deleted source");
 
@@ -1454,9 +1462,13 @@ async fn gc_never_deletes_the_live_replay_tail() {
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("load view");
-    view.resolve_path("/docs/two.txt", AttributeInclusion::Omit)
-        .await
-        .expect("tail commit stays readable");
+    view.resolve_path(
+        "/docs/two.txt",
+        AttributeInclusion::Omit,
+        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+    )
+    .await
+    .expect("tail commit stays readable");
 }
 
 async fn assert_basis_reaped(
@@ -1619,9 +1631,13 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("load view");
     for round in 0..3 {
-        view.resolve_path(&format!("/docs/file-{round}.txt"), AttributeInclusion::Omit)
-            .await
-            .expect("file readable after sweep");
+        view.resolve_path(
+            &format!("/docs/file-{round}.txt"),
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("file readable after sweep");
     }
 }
 
@@ -2039,7 +2055,11 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     load_current_metadata_view(&store, &clone)
         .await
         .expect("target readable after every pass")
-        .resolve_path("/docs/one.txt", AttributeInclusion::Omit)
+        .resolve_path(
+            "/docs/one.txt",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
         .await
         .expect("forked file readable");
 }
@@ -2122,7 +2142,11 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     load_current_metadata_view(&store, &clone)
         .await
         .expect("target readable after retry and collection")
-        .resolve_path("/docs/one.txt", AttributeInclusion::Omit)
+        .resolve_path(
+            "/docs/one.txt",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
         .await
         .expect("forked file readable");
 }

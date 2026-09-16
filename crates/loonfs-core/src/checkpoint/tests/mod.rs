@@ -433,9 +433,13 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     let view = load_current_metadata_view(store, namespace_id)
         .await
         .expect("load the read view");
-    resolve_current_files(&view, &inode_ids)
-        .await
-        .expect("resolve every inode the namespace knows")
+    resolve_current_files(
+        &view,
+        &inode_ids,
+        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+    )
+    .await
+    .expect("resolve every inode the namespace knows")
 }
 
 /// Rebuilds one family group through a streaming compaction and publishes the
