@@ -15,16 +15,16 @@ use loonfs_api::{
         ListSnapshotsResponse, SnapshotSummary, StoreProbeRequest, StoreProbeResponse,
         UploadSession,
     },
-    AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Commit, ContentRef,
-    CreateCheckpointRequest, DeleteCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
-    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    AbsolutePath, ActorId, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Commit,
+    ContentRef, CreateCheckpointRequest, DeleteCheckpointResponse, DeleteNamespaceResponse,
+    GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceId, PathEntry, RevisionNo,
-    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotId, UploadId,
+    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotId, Subject, UploadId,
 };
 use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, DownloadOptions,
     ListChangesOptions, ListPathEntriesOptions, MoveOptions, NamespacePath, PutFileOptions,
-    ReadFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions,
+    ReadFileOptions, RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAccessOptions,
     UpdateAttributesOptions,
 };
 use std::sync::Arc;
@@ -39,6 +39,10 @@ fn upload_sessions_need_a_remote_profile() -> CliError {
         loonfs_api::ErrorCode::NotSupported.as_str(),
         "upload sessions belong to a server; an embedded profile stages content itself",
     )
+}
+
+fn default_actor() -> ActorId {
+    ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid")
 }
 
 fn maintenance_host_needs_an_embedded_profile() -> CliError {
@@ -56,6 +60,20 @@ fn maintenance_host_needs_an_embedded_profile() -> CliError {
 /// target requires handling both transports. Both paths normalize failures to
 /// the same error-code registry, which keeps command output consistent.
 impl ResolvedTarget {
+    /// Reads, namespace operations, and snapshots act as `subject` from here
+    /// on. Commits carry it through their options.
+    pub(crate) fn scope_to_subject(&mut self, subject: &Subject) {
+        match self {
+            Self::Embedded(target) => {
+                target.backend.writer = target.backend.writer.as_subject(subject.clone());
+                target.backend.reader = target.backend.reader.as_subject(subject.clone());
+            }
+            Self::Remote(target) => {
+                target.client = target.client.clone().with_subject(subject.clone());
+            }
+        }
+    }
+
     /// Returns the capabilities reported by the selected deployment.
     pub(crate) async fn get_capabilities(&self) -> Result<CapabilityDocument, CliError> {
         match self {
@@ -91,21 +109,18 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         actor_id: &loonfs_api::ActorId,
+        access: loonfs_api::NamespaceAccess,
     ) -> Result<Namespace, CliError> {
         match self {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .create_namespace(namespace_id, actor_id)
+                    .create_namespace(namespace_id, actor_id, access)
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .create_namespace(
-                    namespace_id,
-                    actor_id,
-                    loonfs_api::NamespaceAccess::unrestricted(),
-                )
+                .create_namespace(namespace_id, actor_id, access)
                 .await?),
         }
     }
@@ -630,6 +645,26 @@ impl ResolvedTarget {
         }
     }
 
+    pub(crate) async fn update_access(
+        &self,
+        spec: &NamespacePath,
+        options: &UpdateAccessOptions,
+    ) -> Result<Commit, CliError> {
+        match self {
+            Self::Embedded(target) => target
+                .backend
+                .writer
+                .update_access(
+                    spec.namespace(),
+                    spec.absolute_path().as_str(),
+                    options.clone(),
+                )
+                .await
+                .scoped(spec.namespace()),
+            Self::Remote(target) => Ok(target.client.update_access(spec, options).await?),
+        }
+    }
+
     /// Moves a path within a namespace.
     pub(crate) async fn move_path(
         &self,
@@ -865,12 +900,26 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         request: RunMaintenanceRequest,
+        actor_id: Option<&ActorId>,
     ) -> Result<RunMaintenanceResponse, CliError> {
         match self {
-            Self::Embedded(target) => target.backend.run_maintenance(namespace_id, request).await,
+            Self::Embedded(target) => match request {
+                RunMaintenanceRequest::RecoverAdministrator(request) => target
+                    .backend
+                    .writer
+                    .recover_administrator(
+                        namespace_id,
+                        &request.principal_id,
+                        actor_id.cloned().unwrap_or_else(default_actor),
+                    )
+                    .await
+                    .map(RunMaintenanceResponse::RecoverAdministrator)
+                    .scoped(namespace_id),
+                request => target.backend.run_maintenance(namespace_id, request).await,
+            },
             Self::Remote(target) => Ok(target
                 .client
-                .run_maintenance(namespace_id, &request)
+                .run_maintenance(namespace_id, &request, actor_id)
                 .await?),
         }
     }

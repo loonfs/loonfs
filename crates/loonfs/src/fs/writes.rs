@@ -16,13 +16,17 @@ use loonfs_core::NamespaceWriterEngine;
 use std::sync::Arc;
 
 fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> CommitRequest {
-    CommitRequest::single(
+    let request = CommitRequest::single(
         commit.commit_id.clone().unwrap_or_else(CommitId::generate),
         commit.actor_id.clone(),
         commit.message.clone(),
         operation,
     )
-    .preconditions(commit.preconditions.clone())
+    .preconditions(commit.preconditions.clone());
+    match &commit.subject {
+        Some(subject) => request.with_subject(subject.clone()),
+        None => request,
+    }
 }
 
 impl FsWriter {

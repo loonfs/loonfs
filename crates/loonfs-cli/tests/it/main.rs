@@ -1,5 +1,6 @@
 #![allow(clippy::panic)]
 
+mod access;
 mod common;
 mod completions;
 mod filesystem;

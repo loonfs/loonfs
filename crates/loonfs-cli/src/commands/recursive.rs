@@ -233,6 +233,7 @@ async fn create_remote_directory(
             &spec,
             &CreateDirectoryOptions {
                 commit: CommitOptions {
+                    subject: context.subject.clone(),
                     preconditions: Vec::new(),
                     actor_id: context.actor().clone(),
                     commit_id: None,
@@ -320,6 +321,7 @@ pub(crate) async fn run_put_tree(
                 &PutFileOptions {
                     behavior,
                     commit: CommitOptions {
+                        subject: context.subject.clone(),
                         preconditions: Vec::new(),
                         actor_id: context.actor().clone(),
                         commit_id: None,
@@ -507,6 +509,7 @@ pub(crate) async fn run_copy_tree(
                     &loonfs_client::CopyOptions {
                         behavior,
                         commit: CommitOptions {
+                            subject: context.subject.clone(),
                             preconditions: Vec::new(),
                             actor_id: context.actor().clone(),
                             commit_id: None,
@@ -617,12 +620,17 @@ mod tests {
             profile_name: "default".to_owned(),
             mode: "embedded".to_owned(),
             namespace: Some(namespace.clone()),
+            subject: None,
             actor_id: Some(loonfs_test_support::test_actor()),
             target: ResolvedTarget::Embedded(Box::new(target)),
         };
         context
             .target
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         (context, watched)

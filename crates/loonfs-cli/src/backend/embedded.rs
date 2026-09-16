@@ -140,13 +140,14 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
         actor_id: &loonfs_api::ActorId,
+        access: loonfs_api::NamespaceAccess,
     ) -> Result<Namespace, CliError> {
         let result = self
             .writer
             .create_namespace(
                 namespace_id,
                 CreateNamespaceOptions {
-                    access: loonfs_api::NamespaceAccess::unrestricted(),
+                    access,
                     ..CreateNamespaceOptions::new(actor_id.clone())
                 },
             )
@@ -1332,7 +1333,11 @@ mod tests {
             .expect("build embedded target");
         target
             .backend
-            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace_id("demo"),
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
 
@@ -1401,7 +1406,11 @@ mod tests {
             .expect("build embedded target");
         target
             .backend
-            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace_id("demo"),
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
 
@@ -1492,7 +1501,11 @@ mod tests {
             .expect("build first embedded target");
         first
             .backend
-            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace_id("demo"),
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         first

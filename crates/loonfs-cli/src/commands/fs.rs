@@ -34,7 +34,7 @@ use loonfs_api::SnapshotId;
 use loonfs_api::{
     AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, Commit,
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, ListPathEntriesResponse,
-    NamespaceId, RevisionNo,
+    NamespaceId, RevisionNo, Subject,
 };
 use loonfs_client::{
     CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
@@ -59,8 +59,13 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
         .transpose()
 }
 
-fn commit_options(actor: &ActorId, args: &CommitArgs) -> Result<CommitOptions, CliError> {
+pub(crate) fn commit_options(
+    actor: &ActorId,
+    subject: Option<&Subject>,
+    args: &CommitArgs,
+) -> Result<CommitOptions, CliError> {
     Ok(CommitOptions {
+        subject: subject.cloned(),
         preconditions: Vec::new(),
         actor_id: actor.clone(),
         commit_id: parse_commit_id_arg(args.commit_id.as_deref())?,
@@ -268,6 +273,7 @@ struct AttributeUpdateJson {
 fn update_attributes_options(
     args: &FilesystemAnnotateArgs,
     actor: &ActorId,
+    subject: Option<&Subject>,
 ) -> Result<UpdateAttributesOptions, CliError> {
     let (set, remove) = match args.attributes_json.as_deref() {
         Some(document) => {
@@ -293,7 +299,7 @@ fn update_attributes_options(
     Ok(UpdateAttributesOptions {
         set,
         remove,
-        commit: commit_options(actor, &args.commit)?,
+        commit: commit_options(actor, subject, &args.commit)?,
         expected_inode_id: args.expected_inode_id,
         expected_attributes_revision_no: args
             .expected_attributes_revision
@@ -317,7 +323,7 @@ pub(crate) async fn run_filesystem_annotate(
     let allow_root = true;
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let options = update_attributes_options(&args, context.actor())
+    let options = update_attributes_options(&args, context.actor(), context.subject.as_ref())
         .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
@@ -926,8 +932,8 @@ pub(crate) async fn run_filesystem_put(
     .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let payload = LocalPayload::file(&local_path, metadata.len());
-    let options =
-        put_file_options(&args, context.actor()).map_err(|error| context.fail(kind, error))?;
+    let options = put_file_options(&args, context.actor(), context.subject.as_ref())
+        .map_err(|error| context.fail(kind, error))?;
     commit_put(
         kind,
         &context,
@@ -971,8 +977,8 @@ async fn run_filesystem_put_stdin(
     let remote_path = parse_user_path_arg("remote_path", remote_path, false)
         .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
-    let options =
-        put_file_options(&args, context.actor()).map_err(|error| context.fail(kind, error))?;
+    let options = put_file_options(&args, context.actor(), context.subject.as_ref())
+        .map_err(|error| context.fail(kind, error))?;
     // A pipe cannot say how long it is, so there is a byte count but never a
     // total, a percentage, or an estimate.
     commit_put(
@@ -1166,7 +1172,11 @@ fn acknowledge_committed_upload(
     })
 }
 
-fn put_file_options(args: &FilesystemPutArgs, actor: &ActorId) -> Result<PutFileOptions, CliError> {
+fn put_file_options(
+    args: &FilesystemPutArgs,
+    actor: &ActorId,
+    subject: Option<&Subject>,
+) -> Result<PutFileOptions, CliError> {
     let expected_revision_no = args
         .expected_revision
         .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
@@ -1179,7 +1189,7 @@ fn put_file_options(args: &FilesystemPutArgs, actor: &ActorId) -> Result<PutFile
         };
     Ok(PutFileOptions {
         behavior,
-        commit: commit_options(actor, &args.commit)?,
+        commit: commit_options(actor, subject, &args.commit)?,
         expected_inode_id: args.expected_inode_id,
         expected_revision_no,
     })
@@ -1194,8 +1204,8 @@ pub(crate) async fn run_filesystem_rm(
     let allow_root = false;
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit =
-        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
+        .map_err(|error| context.fail(kind, error))?;
     // Resolve the inode before deleting: the id is half of the recovery
     // handle `loonfs undelete` needs. The delete then carries it as an
     // expectation, so a rebinding racing this command fails the delete
@@ -1251,8 +1261,8 @@ pub(crate) async fn run_filesystem_restore(
     let allow_root = false;
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit =
-        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
+        .map_err(|error| context.fail(kind, error))?;
     let revision_no = parse_public_ordinal_arg("--revision", args.revision, RevisionNo::parse)
         .map_err(|error| context.fail(kind, error))?;
     let result = context
@@ -1292,8 +1302,8 @@ pub(crate) async fn run_filesystem_undelete(
         .map(|path| namespace_path(context.namespace(), "destination_path", path, allow_root))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let commit =
-        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
+        .map_err(|error| context.fail(kind, error))?;
     let deletion_seq =
         parse_public_ordinal_arg("--deletion-seq", args.deletion_seq, ChangeSeq::parse)
             .map_err(|error| context.fail(kind, error))?;
@@ -1334,8 +1344,8 @@ pub(crate) async fn run_filesystem_mkdir(
     let allow_root = false;
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit =
-        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
+        .map_err(|error| context.fail(kind, error))?;
     let options = CreateDirectoryOptions {
         parents: args.parents,
         commit,
@@ -1492,8 +1502,8 @@ async fn run_filesystem_transfer(
             .map_err(|error| context.fail(kind, error))?
     };
 
-    let commit =
-        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
+    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
+        .map_err(|error| context.fail(kind, error))?;
     let expected_destination_revision_no = args
         .expected_destination_revision
         .map(|value| {

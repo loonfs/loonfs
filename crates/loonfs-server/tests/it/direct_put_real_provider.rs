@@ -1187,6 +1187,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    subject: None,
                     preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
@@ -1206,6 +1207,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
+                    subject: None,
                     preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
@@ -1295,6 +1297,7 @@ fn put_options(commit_id: &str) -> loonfs_client::PutFileOptions {
     loonfs_client::PutFileOptions {
         behavior: DestinationBehavior::NoReplace,
         commit: loonfs_api::options::CommitOptions {
+            subject: None,
             preconditions: Vec::new(),
             actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(CommitId::parse(commit_id).expect("valid commit id")),

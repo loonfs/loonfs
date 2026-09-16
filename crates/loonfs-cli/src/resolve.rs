@@ -5,7 +5,7 @@ use crate::backend::EmbeddedBackend;
 use crate::backend_error::map_runtime_error;
 use crate::config::{
     load_config, non_empty_env, remote_client_config, CliConfig, ProfileConfig, StoreConfig,
-    ACTOR_ID_ENV, NAMESPACE_ENV,
+    ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, SUBJECT_ID_ENV,
 };
 use crate::error::CliError;
 use crate::profiles::default_namespace;
@@ -14,12 +14,15 @@ use loonfs::{
     MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
     SharedObjectStore, TraceStoreKind,
 };
-use loonfs_api::{ActorId, NamespaceId, SecretString};
+use loonfs_api::{
+    ActorId, NamespaceId, PrincipalId, PrincipalSet, SecretString, Subject, SubjectId,
+};
 use loonfs_client::Client;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub(crate) struct LoadedConfig {
@@ -75,6 +78,67 @@ pub(crate) fn resolve_actor(
     Ok(profile
         .actor_id()
         .unwrap_or_else(|| ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid")))
+}
+
+/// The subject the command acts as. Principals come from the flag, the
+/// environment, or the profile; the subject id defaults to the actor id
+/// the same way the server's header does. No principals means the token
+/// holder.
+pub(crate) fn resolve_subject(
+    profile: &ProfileConfig,
+    actor_id: &ActorId,
+    explicit_subject_id: Option<&str>,
+    explicit_principals: Option<&str>,
+) -> Result<Option<Subject>, CliError> {
+    let environment_principals = non_empty_env(PRINCIPALS_ENV);
+    let (name, principals) = if let Some(value) = explicit_principals {
+        ("--principals", Some(value))
+    } else {
+        (PRINCIPALS_ENV, environment_principals.as_deref())
+    };
+    let (name, principals) = match principals {
+        Some(value) => (
+            name,
+            value
+                .split(',')
+                .map(|value| {
+                    PrincipalId::parse(value).map_err(|error| {
+                        named_cli_input_error(name, format!("invalid {name}: {error}"))
+                    })
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?,
+        ),
+        None => (
+            "principals",
+            profile
+                .principals()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        ),
+    };
+    let principals = PrincipalSet::new(principals)
+        .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))?;
+    let environment_subject_id = non_empty_env(SUBJECT_ID_ENV);
+    let (name, subject_id) = if let Some(value) = explicit_subject_id {
+        ("--subject-id", Some(value))
+    } else {
+        (SUBJECT_ID_ENV, environment_subject_id.as_deref())
+    };
+    let subject_id = match subject_id {
+        Some(value) => SubjectId::parse(value)
+            .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))?,
+        None => match profile.subject_id() {
+            Some(subject_id) => subject_id,
+            None => SubjectId::parse(actor_id.as_str()).map_err(|error| {
+                named_cli_input_error("subject_id", format!("invalid subject_id: {error}"))
+            })?,
+        },
+    };
+    Ok((!principals.is_empty()).then_some(Subject {
+        subject_id,
+        principals,
+    }))
 }
 
 fn parse_actor_id(name: &str, value: &str) -> Result<ActorId, CliError> {
