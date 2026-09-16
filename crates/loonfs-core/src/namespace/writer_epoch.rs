@@ -7,7 +7,8 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use crate::namespace::read_anchor::{
-    load_read_anchor, load_read_anchor_from_manifest, LoadedNamespaceBasis,
+    load_head_and_metadata_basis, load_read_anchor, load_read_anchor_from_manifest,
+    LoadedNamespaceBasis,
 };
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
@@ -77,11 +78,23 @@ pub(crate) async fn acquire_writer_epoch_with_basis<S: ObjectStore + ?Sized>(
         crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
         match publish_segment(store, &fence).await {
             Ok(()) => {
-                // The fence adds no rows. Carry the already validated anchor
-                // into this session's first publication, advancing only its WAL
-                // position. A later competing fence still collides at the next
-                // immutable WAL number; retries rediscover normally.
+                // The fence adds no rows, but a fold may replace this basis
+                // while its response is in flight. Recheck after acknowledgement
+                // before carrying references into the first publication: GC may
+                // already have reclaimed WAL needed by the previous basis.
                 basis.head = resulting_head_after(&fence, head, head.head_commit_id.clone());
+                if let Ok(next) = basis.basis.manifest_no().successor() {
+                    let key =
+                        loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &next);
+                    if store
+                        .head(&key)
+                        .await
+                        .map_err(|error| CoreError::store(&key, &error))?
+                        .is_some()
+                    {
+                        basis = load_head_and_metadata_basis(store, namespace_id).await?;
+                    }
+                }
                 return Ok((acquired, basis));
             }
             Err(CoreError::WalPublish(crate::commit::WalPublishError::StaleHead)) => {
