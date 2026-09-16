@@ -29,6 +29,35 @@ pub struct LoadedManifest {
     pub envelope: loonfs_api::wire::manifest::NamespaceManifestEnvelope,
 }
 
+impl LoadedManifest {
+    /// Construct from an envelope already validated by decoding or encoding.
+    pub(crate) fn from_envelope(
+        envelope: loonfs_api::wire::manifest::NamespaceManifestEnvelope,
+    ) -> Self {
+        let payload = envelope.payload();
+        Self {
+            object_key: loonfs_objectstore::keys::metadata_manifest_object(
+                &payload.namespace_id,
+                &payload.manifest_no,
+            ),
+            discovery_start_manifest_no: payload.manifest_no,
+            hinted_wal_no: loonfs_api::WalNo(0),
+            state: CurrentManifest {
+                manifest: ManifestRef {
+                    owner_namespace_id: payload.namespace_id.clone(),
+                    manifest_no: payload.manifest_no,
+                    manifest_head_seq: payload.head_seq,
+                    manifest_payload_checksum: envelope.payload_checksum().to_owned(),
+                },
+                retention_floor_seq: payload.retention_floor_seq,
+                last_folded_wal_no: payload.last_folded_wal_no,
+                compactor_epoch: payload.compactor_epoch,
+            },
+            envelope,
+        }
+    }
+}
+
 pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::Result<()> {
     if head.status.is_deleted() {
         return Err(CoreError::NamespaceDeleted {
@@ -215,23 +244,7 @@ pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
             object_key: object_key.clone(),
             message: error.to_string(),
         })?;
-    Ok(envelope.map(|envelope| LoadedManifest {
-        object_key,
-        discovery_start_manifest_no: manifest_no,
-        hinted_wal_no: loonfs_api::WalNo(0),
-        state: CurrentManifest {
-            manifest: ManifestRef {
-                owner_namespace_id: namespace_id.clone(),
-                manifest_no,
-                manifest_head_seq: envelope.payload().head_seq,
-                manifest_payload_checksum: envelope.payload_checksum().to_owned(),
-            },
-            retention_floor_seq: envelope.payload().retention_floor_seq,
-            last_folded_wal_no: envelope.payload().last_folded_wal_no,
-            compactor_epoch: envelope.payload().compactor_epoch,
-        },
-        envelope,
-    }))
+    Ok(envelope.map(LoadedManifest::from_envelope))
 }
 
 pub async fn load_namespace_read_state<S: ObjectStore + ?Sized>(

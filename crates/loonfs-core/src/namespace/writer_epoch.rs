@@ -5,8 +5,10 @@ use crate::checkpoint::publish::{
 };
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
-use crate::namespace::control::load_current_manifest;
-use crate::namespace::read_anchor::{load_head_and_metadata_basis, LoadedNamespaceBasis};
+use crate::namespace::control::{load_current_manifest, LoadedManifest};
+use crate::namespace::read_anchor::{
+    load_read_anchor, load_read_anchor_from_manifest, LoadedNamespaceBasis,
+};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{prepare_fence_segment, publish_segment, resulting_head_after};
@@ -21,7 +23,7 @@ pub(crate) async fn acquire_writer_epoch_with_basis<S: ObjectStore + ?Sized>(
 ) -> Result<(AcquiredWriter, LoadedNamespaceBasis)> {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
-    let acquired = loop {
+    let (acquired, published_manifest) = loop {
         let current = load_current_manifest(store, namespace_id).await?;
         let mut payload = current.envelope.payload().clone();
         super::control::ensure_namespace_live(&NamespaceReadState::from(&payload))?;
@@ -42,6 +44,11 @@ pub(crate) async fn acquire_writer_epoch_with_basis<S: ObjectStore + ?Sized>(
             writer_epoch: payload.writer_epoch,
         };
         let manifest = encode_manifest(payload)?;
+        let mut published = LoadedManifest::from_envelope(manifest.envelope().clone());
+        // Preserve the previously observed hint as a lower bound. Discovery
+        // still validates its WAL chain and rechecks the manifest successor.
+        published.discovery_start_manifest_no = current.discovery_start_manifest_no;
+        published.hinted_wal_no = current.hinted_wal_no;
         if matches!(
             publish_manifest_against(
                 store,
@@ -55,11 +62,13 @@ pub(crate) async fn acquire_writer_epoch_with_basis<S: ObjectStore + ?Sized>(
             .await?,
             ManifestPublicationOutcome::Published(_)
         ) {
-            break acquired;
+            break (acquired, published);
         }
     };
+    let mut anchor =
+        load_read_anchor_from_manifest(store, namespace_id, published_manifest).await?;
     loop {
-        let mut basis = load_head_and_metadata_basis(store, namespace_id).await?;
+        let mut basis = anchor.into_loaded_basis();
         let head = &basis.head;
         ensure_writer_not_fenced(head, &acquired)?;
         super::control::ensure_namespace_live(head)?;
@@ -75,7 +84,9 @@ pub(crate) async fn acquire_writer_epoch_with_basis<S: ObjectStore + ?Sized>(
                 basis.head = resulting_head_after(&fence, head, head.head_commit_id.clone());
                 return Ok((acquired, basis));
             }
-            Err(CoreError::WalPublish(crate::commit::WalPublishError::StaleHead)) => {}
+            Err(CoreError::WalPublish(crate::commit::WalPublishError::StaleHead)) => {
+                anchor = load_read_anchor(store, namespace_id).await?;
+            }
             Err(error) => return Err(error),
         }
     }

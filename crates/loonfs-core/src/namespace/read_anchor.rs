@@ -18,6 +18,14 @@ impl NamespaceReadAnchor {
     pub(crate) fn basis(&self) -> MetadataBasis {
         MetadataBasis(self.manifest.state.manifest.clone())
     }
+
+    pub(crate) fn into_loaded_basis(self) -> LoadedNamespaceBasis {
+        LoadedNamespaceBasis {
+            basis: self.basis(),
+            retention_floor_seq: self.retention_floor_seq,
+            head: self.read_state,
+        }
+    }
 }
 
 pub(crate) struct LoadedNamespaceBasis {
@@ -38,19 +46,26 @@ pub(crate) async fn load_head_and_metadata_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceBasis, ControlObjectLoadError> {
-    let anchor = load_read_anchor(store, namespace_id).await?;
-    Ok(LoadedNamespaceBasis {
-        basis: anchor.basis(),
-        retention_floor_seq: anchor.retention_floor_seq,
-        head: anchor.read_state,
-    })
+    Ok(load_read_anchor(store, namespace_id)
+        .await?
+        .into_loaded_basis())
 }
 
 pub(crate) async fn load_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
-    let mut manifest = load_current_manifest(store, namespace_id).await?;
+    let manifest = load_current_manifest(store, namespace_id).await?;
+    load_read_anchor_from_manifest(store, namespace_id, manifest).await
+}
+
+/// A just-published manifest is usable evidence, but still needs WAL discovery
+/// and the same successor recheck that protects an ordinary read anchor.
+pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    mut manifest: LoadedManifest,
+) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
     loop {
         match discover_tip(store, namespace_id, &manifest).await {
             Ok(state) => {
