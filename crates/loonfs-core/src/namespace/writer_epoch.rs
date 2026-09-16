@@ -1,6 +1,8 @@
 //! Writer acquisition through a manifest epoch and a numbered fence segment.
 
-use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
+use crate::checkpoint::publish::{
+    encode_manifest, publish_manifest_against, ManifestPublicationOutcome,
+};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::namespace::control::load_current_manifest;
@@ -41,11 +43,12 @@ pub(crate) async fn acquire_writer_epoch_with_basis<S: ObjectStore + ?Sized>(
         };
         let manifest = encode_manifest(payload)?;
         if matches!(
-            publish_manifest(
+            publish_manifest_against(
                 store,
                 namespace_id,
                 manifest,
                 Some(current.state.manifest.manifest_no),
+                Some(current),
                 &timer,
                 started_ms
             )

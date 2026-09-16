@@ -2,7 +2,9 @@
 
 use crate::control_update::{settle_control_write, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::{load_current_manifest_if_present, raise_hint, CurrentManifest};
+use crate::namespace::control::{
+    load_current_manifest_if_present, raise_hint, CurrentManifest, LoadedManifest,
+};
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::ManifestRef;
@@ -47,15 +49,39 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     timer: &dyn MonotonicTimer,
     started_ms: u64,
 ) -> Result<ManifestPublicationOutcome> {
+    let current = load_current_manifest_if_present(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    publish_manifest_against(
+        store,
+        namespace_id,
+        manifest,
+        expected_predecessor,
+        current,
+        timer,
+        started_ms,
+    )
+    .await
+}
+
+/// Reuse a predecessor already observed during this bounded publication.
+/// Conditional creation still arbitrates races; conflicts and ambiguous writes
+/// rediscover through the same classification path as ordinary publication.
+pub(crate) async fn publish_manifest_against<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest: EncodedEnvelope<NamespaceManifestPayload>,
+    expected_predecessor: Option<ManifestNo>,
+    current: Option<LoadedManifest>,
+    timer: &dyn MonotonicTimer,
+    started_ms: u64,
+) -> Result<ManifestPublicationOutcome> {
     let candidate = CurrentManifest {
         manifest: manifest_ref_for(namespace_id, manifest.envelope()),
         retention_floor_seq: manifest.envelope().payload().retention_floor_seq,
         last_folded_wal_no: manifest.envelope().payload().last_folded_wal_no,
         compactor_epoch: manifest.envelope().payload().compactor_epoch,
     };
-    let current = load_current_manifest_if_present(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
     if let Some(current) = &current {
         if manifest.envelope().payload().writer_epoch < current.envelope.payload().writer_epoch {
             return Ok(ManifestPublicationOutcome::PredecessorChanged(
