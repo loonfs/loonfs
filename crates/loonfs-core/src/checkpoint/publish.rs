@@ -34,13 +34,6 @@ pub(crate) fn encode_manifest(
     })
 }
 
-#[tracing::instrument(
-    level = "debug",
-    name = "loonfs.phase",
-    err(level = "warn"),
-    skip_all,
-    fields(phase = "publish_manifest", key_class = "namespace_manifest")
-)]
 pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -67,6 +60,13 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
 /// Reuse a predecessor already observed during this bounded publication.
 /// Conditional creation still arbitrates races; conflicts and ambiguous writes
 /// rediscover through the same classification path as ordinary publication.
+#[tracing::instrument(
+    level = "debug",
+    name = "loonfs.phase",
+    err(level = "warn"),
+    skip_all,
+    fields(phase = "publish_manifest", key_class = "namespace_manifest")
+)]
 pub(crate) async fn publish_manifest_against<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
