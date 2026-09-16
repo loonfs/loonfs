@@ -130,6 +130,8 @@ error_codes! {
     StaleHead => "stale_head",
     StaleRevision => "stale_revision",
     StaleAttributes => "stale_attributes",
+    StaleAccess => "stale_access",
+    NamespaceUnrestricted => "namespace_unrestricted",
     BindingGenerationMismatch => "binding_generation_mismatch",
     NotDeleted => "not_deleted",
     WriterFenced => "writer_fenced",
@@ -208,6 +210,10 @@ impl ErrorCode {
             // revision than the one it wrote from, whether the caller stated
             // that revision or the update's own precondition observed it.
             | ErrorCode::StaleAttributes
+            // An access update was decided against a different access revision than the one it wrote from.
+            | ErrorCode::StaleAccess
+            // The namespace's access mode is unrestricted, so it holds no access rows.
+            | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingGenerationMismatch
             // Undelete's target is not the root of a live deletion: a
             // state conflict, resolved by re-reading namespace state.
@@ -255,6 +261,8 @@ impl ErrorCode {
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
             | ErrorCode::StaleAttributes
+            | ErrorCode::StaleAccess
+            | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingGenerationMismatch
             | ErrorCode::NotDeleted
             | ErrorCode::WriterFenced

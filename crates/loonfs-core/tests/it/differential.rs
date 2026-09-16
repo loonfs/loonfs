@@ -3,8 +3,9 @@
 use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, CommitId,
-    ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue,
+    Attributes, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind,
+    NameKey, RevisionNo,
 };
 use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, TombstoneRowAction as CoreTombstoneAction,
@@ -24,6 +25,7 @@ type NormalizedMetadata = (
     NormalizedRevisions,
     NormalizedTombstones,
     NormalizedAttributes,
+    Vec<NormalizedAccessRevision>,
 );
 
 /// One attribute revision, whole: the position, the counter, and every entry
@@ -40,6 +42,19 @@ struct NormalizedAttributeRevision {
     updated_by: ActorId,
     updated_at_ms: u64,
     entries: Vec<(String, String)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedAccessRevision {
+    inode_id: u64,
+    revision: u64,
+    committed_seq: u64,
+    commit_id: CommitId,
+    delta_index: u32,
+    updated_by: ActorId,
+    updated_at_ms: u64,
+    boundary: bool,
+    grants: Vec<(String, Vec<String>)>,
 }
 
 /// One tombstone event, whole: the generation, what the event did, and the
@@ -207,6 +222,22 @@ fn update_attributes(
         inode_id,
         attributes_revision_no: AttributeRevisionNo(revision),
         attributes,
+    }]
+}
+
+fn update_access(
+    delta_index: u32,
+    inode_id: InodeId,
+    revision: u64,
+    boundary: bool,
+    grants: AccessGrants,
+) -> Vec<WalDelta> {
+    vec![WalDelta::AppendAccessRevision {
+        delta_index,
+        inode_id,
+        access_revision_no: AccessRevisionNo(revision),
+        boundary,
+        grants,
     }]
 }
 
@@ -386,6 +417,21 @@ fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
         ),
         // A directory carries attributes too.
         update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "hopper")])),
+    ]);
+}
+
+#[test]
+fn metadata_apply_matches_model_for_access_updates() {
+    let first =
+        serde_json::from_value(serde_json::json!({"prn_ada": ["read", "write"]})).expect("grants");
+    let second = serde_json::from_value(serde_json::json!({"prn_team": ["read", "history"]}))
+        .expect("grants");
+    assert_states_match(&[
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
+        create_directory(0, InodeId(3), InodeId(1), "other"),
+        update_access(0, InodeId(2), 1, true, first),
+        update_access(0, InodeId(2), 2, false, second),
+        update_access(0, InodeId(3), 1, false, AccessGrants::default()),
     ]);
 }
 
@@ -603,6 +649,33 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     .collect(),
             })
             .collect(),
+        state
+            .access_revisions()
+            .iter()
+            .map(|record| NormalizedAccessRevision {
+                inode_id: record.inode_id.0,
+                revision: record.access_revision_no.0,
+                committed_seq: record.committed_seq.0,
+                commit_id: record.commit_id.clone(),
+                delta_index: record.delta_index,
+                updated_by: record.updated_by.clone(),
+                updated_at_ms: record.updated_at_ms,
+                boundary: record.boundary,
+                grants: record
+                    .grants
+                    .iter()
+                    .map(|(principal, rights)| {
+                        (
+                            principal.as_str().to_owned(),
+                            rights
+                                .iter()
+                                .map(|right| right.as_str().to_owned())
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
     )
 }
 
@@ -696,6 +769,25 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     .entries
                     .iter()
                     .map(|entry| (entry.key.clone(), entry.value.clone()))
+                    .collect(),
+            })
+            .collect(),
+        state
+            .access_revisions
+            .iter()
+            .map(|record| NormalizedAccessRevision {
+                inode_id: record.inode_id.0,
+                revision: record.revision_no,
+                committed_seq: record.committed_seq.0,
+                commit_id: record.commit_id.clone(),
+                delta_index: record.delta_index,
+                updated_by: record.updated_by.clone(),
+                updated_at_ms: record.updated_at_ms,
+                boundary: record.boundary,
+                grants: record
+                    .grants
+                    .iter()
+                    .map(|entry| (entry.principal_id.clone(), entry.rights.clone()))
                     .collect(),
             })
             .collect(),

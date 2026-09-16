@@ -1076,6 +1076,13 @@ pub enum NamespaceAccess {
     },
 }
 
+impl NamespaceAccess {
+    /// Whether every caller holding the deployment credential may do everything.
+    pub const fn is_unrestricted(&self) -> bool {
+        matches!(self, Self::Unrestricted {})
+    }
+}
+
 /// Carries one complete namespace file-set description inside a manifest envelope.
 ///
 /// See [manifest publication](../../../docs/specs/format.md#72-publishing-a-materialized-file-set).

@@ -247,6 +247,7 @@ The codes that populate it:
 | `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `precondition_index` for a failed request precondition |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `precondition_index` for a failed request precondition |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
+| `stale_access` | `inode_id`, `expected_access_revision_no` (absent when the caller stated no expectation), `actual_access_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
 | `binding_generation_mismatch` | `inode_id`, `expected_binding_generation` (the request's token as supplied), `actual_binding_generation` (the current binding's token, absent for the root); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
@@ -287,6 +288,8 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` no longer matches the head; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision precondition every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
+| `stale_access` | 409 | The inode's access revision moved while the update was being decided. Re-read the access row and retry. |
+| `namespace_unrestricted` | 409 | The namespace's access mode is unrestricted, so it holds no access rows. |
 | `binding_generation_mismatch` | 409 | The binding generation supplied for an inode move or delete is no longer current. Re-read the entry before retrying. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
@@ -566,6 +569,11 @@ Absence of `/` fails with actual inode `ino_1`.
 `attributes_revision` requires a visible `inode_id` whose attribute revision equals `expected_attributes_revision_no`.
 Any attribute update invalidates it, as does deletion. Content-only rewrites do not.
 Failure returns `stale_attributes`; `actual_attributes_revision_no` is absent when the inode is not visible.
+
+`access_revision` requires a visible `inode_id` whose access revision
+equals `expected_access_revision_no`. Any access update invalidates it.
+Failure returns `stale_access`; `actual_access_revision_no` is absent when
+the inode is not visible.
 
 Receipt resolution comes first: an identical landed request returns its receipt even when its precondition is now stale.
 Reusing that commit ID with different preconditions returns `commit_id_reuse_conflict`.
@@ -1847,7 +1855,8 @@ header is required. The body contains one `commit_id`, an optional `message`,
 optional `preconditions`, and `operations` — an ordered,
 non-empty array of path operations. An empty array is `invalid_request`.
 
-The root path `/` is readable but never a mutation target. An operation that
+The root path `/` is readable but, with one exception, never a mutation
+target: `update_access` replaces its access row. Any other operation that
 names it — as its own path, or as either end of a move or copy — is
 `invalid_request`. The rejection belongs to the operation rather than to the
 request, so it is attributed like every other failure: inside a batch it
@@ -2155,6 +2164,49 @@ rebinding cannot land attributes on the wrong inode. A stale
 revision precondition does not make the write a merge: every update carries the
 revision it read as its own precondition, so a concurrent update still answers
 `stale_attributes` with the expected and actual revisions in the details.
+
+`update_access` replaces the access row of the inode a path resolves to.
+The root path is a valid target; its row is where administrators are named.
+
+`Loonfs-Actor: usr_8f3c`
+
+```json
+{
+  "commit_id": "c_7f8091a2b3c4d5e6f70812345678901a",
+  "operations": [
+    {
+      "kind": "update_access",
+      "path": "/docs/secret",
+      "boundary": true,
+      "grants": {
+        "prn_finance": ["read", "history"],
+        "prn_ada": ["read", "history", "write", "create", "remove", "share", "manage"]
+      },
+      "expected_inode_id": "ino_9",
+      "expected_access_revision_no": 2
+    }
+  ]
+}
+```
+
+`boundary` and `grants` are both required and replace the row whole: an
+update that names no principals clears every direct grant, and one with
+`boundary` false resumes inheritance. Grants are a map from principal id to
+a list of distinct right names; the format specification gives the rights,
+the size limits, and the rule that no entry has an empty list. Two rules
+answer `invalid_request`: `admin` is valid only on the root inode, and a
+boundary applies only to a directory.
+
+An unrestricted namespace holds no access rows and answers
+`namespace_unrestricted`. Every accepted update advances the inode's access
+revision and produces an `access_changed` event carrying the complete new
+state.
+
+`expected_inode_id` and `expected_access_revision_no` follow the attribute
+rules exactly: both are part of the commit's semantic identity, the revision
+precondition requires its inode precondition, a wrong inode answers
+`path_conflict`, and a stale revision answers `stale_access` whether the
+caller stated the revision or the update's own precondition observed it.
 
 ### 6.9 Upload transport
 
@@ -2543,6 +2595,7 @@ Event kinds:
 | `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
 | `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
+| `access_changed` | An inode's access row was replaced. `grants` is the complete direct grant map after the update. | `inode_id`, `access_revision_no`, `boundary`, `grants`. |
 
 Directory and file creation use separate event shapes. A file creation always
 includes its first revision and content reference:

@@ -8,7 +8,8 @@ use crate::FsWriter;
 use crate::{
     ChangeSeq, Commit, CommitId, CommitOptions, ContentRef, CopyOptions, CreateDirectoryOptions,
     DeleteOptions, InodeId, MoveOptions, NamespaceId, NamespacePublication, PutFileOptions,
-    RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAttributesOptions,
+    RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions,
+    UpdateAttributesOptions,
 };
 use crate::{Result, RuntimeError};
 use loonfs_core::NamespaceWriterEngine;
@@ -632,6 +633,42 @@ impl FsWriter {
                 remove: options.remove,
                 expected_inode_id: options.expected_inode_id,
                 expected_attributes_revision_no: options.expected_attributes_revision_no,
+            },
+        )
+        .await
+    }
+
+    /// Replaces a visible inode's access row, including the root, under optional inode and revision preconditions.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.apply_commit",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "apply_commit",
+            method = "update_access",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn update_access(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: UpdateAccessOptions,
+    ) -> Result<Commit> {
+        self.core.record_trace_context(&tracing::Span::current());
+        self.commit_one(
+            namespace_id,
+            &options.commit,
+            FilesystemOperation::UpdateAccess {
+                path: loonfs_api::AbsolutePath::parse(absolute_path)
+                    .map_err(|error| loonfs_core::Error::InvalidPath(error.to_string()))?,
+                boundary: options.boundary,
+                grants: options.grants,
+                expected_inode_id: options.expected_inode_id,
+                expected_access_revision_no: options.expected_access_revision_no,
             },
         )
         .await

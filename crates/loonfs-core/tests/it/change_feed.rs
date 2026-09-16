@@ -30,6 +30,7 @@ fn event_kind(event: &FilesystemChange) -> &'static str {
         FilesystemChange::Deleted { .. } => "deleted",
         FilesystemChange::Undeleted { .. } => "undeleted",
         FilesystemChange::AttributesChanged { .. } => "attributes_changed",
+        FilesystemChange::AccessChanged { .. } => "access_changed",
     }
 }
 

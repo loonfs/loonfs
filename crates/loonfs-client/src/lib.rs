@@ -70,7 +70,7 @@ pub use loonfs_api::options::{
     CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
     DirectMultipartUploadOptions, ForkNamespaceOptions, ListInodeChildrenOptions,
     ListPathEntriesOptions, MoveOptions, PutFileOptions, RestoreRevisionOptions, StatPathOptions,
-    UndeleteOptions, UpdateAttributesOptions,
+    UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.

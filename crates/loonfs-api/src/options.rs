@@ -2,8 +2,9 @@
 
 use crate::SnapshotId;
 use crate::{
-    ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, CommitId, CommitPrecondition,
-    DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
+    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue,
+    CommitId, CommitPrecondition, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    RevisionNo,
 };
 use std::collections::BTreeMap;
 
@@ -114,6 +115,34 @@ impl UpdateAttributesOptions {
             commit: CommitOptions::new(actor),
             expected_inode_id: None,
             expected_attributes_revision_no: None,
+        }
+    }
+}
+
+/// Options for replacing an inode's access row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAccessOptions {
+    /// Whether the directory stops inheritance from its ancestors.
+    pub boundary: bool,
+    /// The complete direct grants after the update.
+    pub grants: AccessGrants,
+    /// Actor, commit ID, and message.
+    pub commit: CommitOptions,
+    /// The inode that the path must still resolve to before the update.
+    pub expected_inode_id: Option<InodeId>,
+    /// With an inode precondition, the access revision that must still be current.
+    pub expected_access_revision_no: Option<AccessRevisionNo>,
+}
+
+impl UpdateAccessOptions {
+    /// An update that replaces the grants and clears the boundary.
+    pub fn new(actor: ActorId, grants: AccessGrants) -> Self {
+        Self {
+            boundary: false,
+            grants,
+            commit: CommitOptions::new(actor),
+            expected_inode_id: None,
+            expected_access_revision_no: None,
         }
     }
 }

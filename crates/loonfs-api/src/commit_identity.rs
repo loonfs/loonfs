@@ -11,9 +11,9 @@
 //! receipt.
 
 use crate::{
-    AbsolutePath, ActorId, AttributeRevisionNo, ChangeSeq, CommitPrecondition, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
-    RevisionNo,
+    AbsolutePath, AccessRevisionNo, AccessRight, ActorId, AttributeRevisionNo, ChangeSeq,
+    CommitPrecondition, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+    FilesystemOperation, InodeId, NamespaceId, RevisionNo,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -153,6 +153,13 @@ enum OperationFingerprintInput<'a> {
         expected_inode_id: Option<InodeId>,
         expected_attributes_revision_no: Option<AttributeRevisionNo>,
     },
+    UpdateAccess {
+        path: &'a str,
+        boundary: bool,
+        grants: BTreeMap<&'a str, Vec<&'static str>>,
+        expected_inode_id: Option<InodeId>,
+        expected_access_revision_no: Option<AccessRevisionNo>,
+    },
 }
 
 #[derive(Serialize)]
@@ -176,6 +183,10 @@ enum PreconditionFingerprintInput<'a> {
     AttributesRevision {
         inode_id: InodeId,
         expected_attributes_revision_no: AttributeRevisionNo,
+    },
+    AccessRevision {
+        inode_id: InodeId,
+        expected_access_revision_no: AccessRevisionNo,
     },
 }
 
@@ -215,6 +226,13 @@ fn precondition_fingerprint_input(
         } => PreconditionFingerprintInput::AttributesRevision {
             inode_id: *inode_id,
             expected_attributes_revision_no: *expected_attributes_revision_no,
+        },
+        CommitPrecondition::AccessRevision {
+            inode_id,
+            expected_access_revision_no,
+        } => PreconditionFingerprintInput::AccessRevision {
+            inode_id: *inode_id,
+            expected_access_revision_no: *expected_access_revision_no,
         },
     }
 }
@@ -392,6 +410,28 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
                 expected_attributes_revision_no: *expected_attributes_revision_no,
             }
         }
+        FilesystemOperation::UpdateAccess {
+            path,
+            boundary,
+            grants,
+            expected_inode_id,
+            expected_access_revision_no,
+        } => OperationFingerprintInput::UpdateAccess {
+            path: path.as_str(),
+            boundary: *boundary,
+            grants: grants
+                .as_map()
+                .iter()
+                .map(|(principal, rights)| {
+                    (
+                        principal.as_str(),
+                        rights.iter().map(AccessRight::as_str).collect(),
+                    )
+                })
+                .collect(),
+            expected_inode_id: *expected_inode_id,
+            expected_access_revision_no: *expected_access_revision_no,
+        },
     }
 }
 
@@ -651,6 +691,35 @@ mod tests {
                 semantic_commit_fingerprint(&namespace_id, &test_actor(), None, &[variant], &[])
                     .expect("variant fingerprint"),
                 "a changed {label} must change the fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn access_update_fingerprint_changes_with_every_request_field() {
+        let baseline = serde_json::json!({
+            "kind": "update_access",
+            "path": "/docs/secret",
+            "boundary": true,
+            "grants": {"prn_ada": ["read", "write"]},
+            "expected_inode_id": "ino_9",
+            "expected_access_revision_no": 2
+        });
+        let baseline_fingerprint =
+            fingerprint(serde_json::from_value(baseline.clone()).expect("operation"));
+        for (field, value) in [
+            ("path", serde_json::json!("/docs/other")),
+            ("boundary", serde_json::json!(false)),
+            ("grants", serde_json::json!({"prn_ada": ["read"]})),
+            ("expected_inode_id", serde_json::json!("ino_10")),
+            ("expected_access_revision_no", serde_json::json!(3)),
+        ] {
+            let mut variant = baseline.clone();
+            variant[field] = value;
+            assert_ne!(
+                baseline_fingerprint,
+                fingerprint(serde_json::from_value(variant).expect("variant")),
+                "a changed {field} must change the fingerprint"
             );
         }
     }

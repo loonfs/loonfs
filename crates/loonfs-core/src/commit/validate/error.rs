@@ -2,8 +2,8 @@
 //! validation.
 
 use loonfs_api::{
-    AttributeRevisionNo, ChangeSeq, ErrorCode, ErrorDetails, InodeId, InodeKind, NameKey,
-    RevisionNo,
+    AccessRevisionNo, AttributeRevisionNo, ChangeSeq, ErrorCode, ErrorDetails, InodeId, InodeKind,
+    NameKey, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -19,6 +19,7 @@ pub enum CommitOperand {
     DeleteTarget,
     SubtreeRoot,
     AttributeTarget,
+    AccessTarget,
     UndeleteTarget,
     EmptyDirectoryTarget,
 }
@@ -34,6 +35,7 @@ impl fmt::Display for CommitOperand {
             Self::DeleteTarget => "delete target",
             Self::SubtreeRoot => "delete subtree root",
             Self::AttributeTarget => "attribute update target",
+            Self::AccessTarget => "access update target",
             Self::UndeleteTarget => "undelete target",
             Self::EmptyDirectoryTarget => "empty directory target",
         })
@@ -161,6 +163,22 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         base_attributes_revision_no: AttributeRevisionNo,
     },
+    #[error(
+        "access base revision mismatch for inode `{inode_id}`: {}", revision_mismatch(.expected, .actual)
+    )]
+    UpdateAccessBaseRevisionMismatch {
+        inode_id: InodeId,
+        expected: AccessRevisionNo,
+        actual: Option<AccessRevisionNo>,
+        precondition_index: Option<u32>,
+    },
+    #[error(
+        "cannot update access for inode `{inode_id}` because revision `{base_access_revision_no}` is already at the maximum 9007199254740991"
+    )]
+    UpdateAccessRevisionOverflow {
+        inode_id: InodeId,
+        base_access_revision_no: AccessRevisionNo,
+    },
     #[error("op index overflow")]
     OpIndexOverflow,
     #[error("delta index overflow")]
@@ -175,6 +193,8 @@ impl CommitValidationError {
             Self::TargetUnderSubtreeTombstone { .. } => ErrorCode::NamespaceCorrupt,
             Self::UpdateAttributesBaseRevisionMismatch { .. } => ErrorCode::StaleAttributes,
             Self::UpdateAttributesRevisionOverflow { .. } => ErrorCode::ServerError,
+            Self::UpdateAccessBaseRevisionMismatch { .. } => ErrorCode::StaleAccess,
+            Self::UpdateAccessRevisionOverflow { .. } => ErrorCode::ServerError,
             Self::NameTaken { .. }
             | Self::InodeWrongKind { .. }
             | Self::BindingPreconditionMissing { .. }
@@ -255,8 +275,20 @@ impl CommitValidationError {
                 actual_attributes_revision_no: *actual,
                 ..ErrorDetails::default()
             }),
+            Self::UpdateAccessBaseRevisionMismatch {
+                inode_id,
+                expected,
+                actual,
+                precondition_index,
+            } => Some(ErrorDetails {
+                precondition_index: *precondition_index,
+                inode_id: Some(*inode_id),
+                expected_access_revision_no: Some(*expected),
+                actual_access_revision_no: *actual,
+                ..ErrorDetails::default()
+            }),
             Self::InodeMissing {
-                operand: CommitOperand::AttributeTarget,
+                operand: CommitOperand::AttributeTarget | CommitOperand::AccessTarget,
                 inode_id,
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),

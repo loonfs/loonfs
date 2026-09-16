@@ -3,7 +3,8 @@
 use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::{
-    ActorId, ChangeSeq, CommitId, ContentStoreId, InodeId, NamespaceId, WalNo, WriterEpoch,
+    ActorId, ChangeSeq, CommitId, ContentStoreId, InodeId, NamespaceAccess, NamespaceId, WalNo,
+    WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,7 @@ pub struct NamespaceReadState {
     pub content_store_id: ContentStoreId,
     pub created_at_ms: u64,
     pub created_by: ActorId,
+    pub access: NamespaceAccess,
     pub fork_basis: Option<ForkBasis>,
     pub status: NamespaceStatus,
     pub writer_epoch: WriterEpoch,
@@ -39,6 +41,7 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             content_store_id: manifest.content_store_id.clone(),
             created_at_ms: manifest.created_at_ms,
             created_by: manifest.created_by.clone(),
+            access: manifest.access.clone(),
             fork_basis: manifest.fork_basis.clone(),
             status: manifest.status,
             writer_epoch: manifest.writer_epoch,

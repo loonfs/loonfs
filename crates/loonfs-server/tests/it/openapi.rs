@@ -1289,6 +1289,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemChangeDeleted",
                 "FilesystemChangeUndeleted",
                 "FilesystemChangeAttributesChanged",
+                "FilesystemChangeAccessChanged",
             ][..],
         ),
         (
@@ -1307,6 +1308,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemOperationUndelete",
                 "FilesystemOperationRestoreRevision",
                 "FilesystemOperationUpdateAttributes",
+                "FilesystemOperationUpdateAccess",
             ][..],
         ),
         (

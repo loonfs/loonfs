@@ -6,8 +6,8 @@ use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::{
-    next_public_ordinal, ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentRef,
-    DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    next_public_ordinal, AccessGrants, AccessRevisionNo, ActorId, AttributeRevisionNo, Attributes,
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -177,6 +177,23 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     *inode_id,
                     *base_attributes_revision_no,
                     attributes,
+                )
+                .await?
+            }
+            CommitOp::UpdateAccess {
+                inode_id,
+                base_access_revision_no,
+                boundary,
+                grants,
+            } => {
+                validate_update_access(
+                    view,
+                    numbering,
+                    op_index,
+                    *inode_id,
+                    *base_access_revision_no,
+                    *boundary,
+                    grants,
                 )
                 .await?
             }
@@ -459,6 +476,41 @@ async fn validate_update_attributes<S: ObjectStore + ?Sized>(
     })
 }
 
+async fn validate_update_access<S: ObjectStore + ?Sized>(
+    view: &PublishValidationView<'_, S>,
+    numbering: &mut CommitNumbering,
+    op_index: u32,
+    inode_id: InodeId,
+    base_access_revision_no: AccessRevisionNo,
+    boundary: bool,
+    grants: &AccessGrants,
+) -> Result<ValidatedOp, CoreError> {
+    validate_access_target_visible(view, inode_id).await?;
+    validate_inode_access_revision_is(view, inode_id, base_access_revision_no).await?;
+    let access_revision_no = next_access_revision_no(inode_id, base_access_revision_no)?;
+    validate_not_covered_by_tombstone(view, inode_id, CommitOperand::AccessTarget).await?;
+    Ok(ValidatedOp::UpdateAccess {
+        op_index,
+        inode_id,
+        access_revision_no,
+        boundary,
+        grants: grants.clone(),
+        access_delta_index: numbering.reserve_delta_index()?,
+    })
+}
+
+fn next_access_revision_no(
+    inode_id: InodeId,
+    base_access_revision_no: AccessRevisionNo,
+) -> Result<AccessRevisionNo, CommitValidationError> {
+    next_public_ordinal(base_access_revision_no.0)
+        .map(AccessRevisionNo)
+        .ok_or(CommitValidationError::UpdateAccessRevisionOverflow {
+            inode_id,
+            base_access_revision_no,
+        })
+}
+
 fn next_revision_no(
     inode_id: InodeId,
     base_revision_no: RevisionNo,
@@ -548,6 +600,42 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
         );
     }
     Ok(attributes)
+}
+
+async fn validate_access_target_visible<S: ObjectStore + ?Sized>(
+    view: &PublishValidationView<'_, S>,
+    inode_id: InodeId,
+) -> Result<(), CoreError> {
+    if view.view().visible_inode(inode_id).await?.is_none() {
+        return Err(CommitValidationError::InodeMissing {
+            operand: CommitOperand::AccessTarget,
+            inode_id,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+async fn validate_inode_access_revision_is<S: ObjectStore + ?Sized>(
+    view: &PublishValidationView<'_, S>,
+    inode_id: InodeId,
+    expected: AccessRevisionNo,
+) -> Result<(), CoreError> {
+    let actual = view
+        .view()
+        .latest_access_revision(inode_id)
+        .await?
+        .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
+    if actual != expected {
+        return Err(CommitValidationError::UpdateAccessBaseRevisionMismatch {
+            inode_id,
+            expected,
+            actual: Some(actual),
+            precondition_index: None,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 async fn validate_inode_kind<S: ObjectStore + ?Sized>(

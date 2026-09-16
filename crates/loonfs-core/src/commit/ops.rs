@@ -7,7 +7,8 @@
 //! outside this crate constructs them.
 
 use loonfs_api::{
-    AttributeRevisionNo, Attributes, ChangeSeq, ContentRef, DisplayName, InodeId, RevisionNo,
+    AccessGrants, AccessRevisionNo, AttributeRevisionNo, Attributes, ChangeSeq, ContentRef,
+    DisplayName, InodeId, RevisionNo,
 };
 
 use super::ResolvedBinding;
@@ -120,5 +121,14 @@ pub(crate) enum CommitOp {
         base_attributes_revision_no: AttributeRevisionNo,
         /// The inode's complete attribute map after the update.
         attributes: Attributes,
+    },
+    /// Replace an inode's access row. The op carries the complete resulting
+    /// state and the revision it was planned against; validation derives the
+    /// revision it publishes.
+    UpdateAccess {
+        inode_id: InodeId,
+        base_access_revision_no: AccessRevisionNo,
+        boundary: bool,
+        grants: AccessGrants,
     },
 }
