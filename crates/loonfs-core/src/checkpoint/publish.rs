@@ -162,7 +162,7 @@ pub(crate) async fn publish_manifest_against<S: ObjectStore + ?Sized>(
             namespace_id,
             candidate.manifest.manifest_no,
             candidate.last_folded_wal_no,
-            None,
+            current.and_then(|current| current.discovery_hint),
         )
         .await
         {

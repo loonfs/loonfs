@@ -47,8 +47,7 @@ pub(crate) async fn acquire_writer_epoch_with_basis<S: ObjectStore + ?Sized>(
         let mut published = LoadedManifest::from_envelope(manifest.envelope().clone());
         // Preserve the previously observed hint as a lower bound. Discovery
         // still validates its WAL chain and rechecks the manifest successor.
-        published.discovery_start_manifest_no = current.discovery_start_manifest_no;
-        published.hinted_wal_no = current.hinted_wal_no;
+        published.discovery_hint = current.discovery_hint.clone();
         if matches!(
             publish_manifest_against(
                 store,

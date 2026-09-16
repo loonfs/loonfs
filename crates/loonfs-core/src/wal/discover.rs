@@ -22,7 +22,7 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
     if state.status.is_deleted() {
         return Ok(state);
     }
-    let start = manifest.hinted_wal_no.max(state.last_folded_wal_no);
+    let start = manifest.hinted_wal_no().max(state.last_folded_wal_no);
     let mut previous_epoch = WriterEpoch(0);
     let mut last_record = None;
     if start > state.last_folded_wal_no {

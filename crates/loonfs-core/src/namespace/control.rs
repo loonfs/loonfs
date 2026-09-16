@@ -23,13 +23,26 @@ pub struct CurrentManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedManifest {
     pub object_key: String,
-    pub discovery_start_manifest_no: loonfs_api::ManifestNo,
     pub state: CurrentManifest,
-    pub hinted_wal_no: loonfs_api::WalNo,
+    pub(crate) discovery_hint: Option<LoadedHint>,
     pub envelope: loonfs_api::wire::manifest::NamespaceManifestEnvelope,
 }
 
 impl LoadedManifest {
+    pub fn discovery_start_manifest_no(&self) -> loonfs_api::ManifestNo {
+        self.discovery_hint
+            .as_ref()
+            .map_or(self.state.manifest.manifest_no, |hint| {
+                hint.state.manifest_no
+            })
+    }
+
+    pub(crate) fn hinted_wal_no(&self) -> loonfs_api::WalNo {
+        self.discovery_hint
+            .as_ref()
+            .map_or(loonfs_api::WalNo(0), |hint| hint.state.wal_no)
+    }
+
     /// Construct from an envelope already validated by decoding or encoding.
     pub(crate) fn from_envelope(
         envelope: loonfs_api::wire::manifest::NamespaceManifestEnvelope,
@@ -40,8 +53,7 @@ impl LoadedManifest {
                 &payload.namespace_id,
                 &payload.manifest_no,
             ),
-            discovery_start_manifest_no: payload.manifest_no,
-            hinted_wal_no: loonfs_api::WalNo(0),
+            discovery_hint: None,
             state: CurrentManifest {
                 manifest: ManifestRef {
                     owner_namespace_id: payload.namespace_id.clone(),
@@ -214,8 +226,7 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
         manifest_no = next;
     }
     if let Some(current) = &mut current {
-        current.discovery_start_manifest_no = hint.state.manifest_no;
-        current.hinted_wal_no = hint.state.wal_no;
+        current.discovery_hint = Some(hint);
     }
     Ok(current)
 }

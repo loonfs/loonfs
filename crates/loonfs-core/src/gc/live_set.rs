@@ -33,7 +33,7 @@ impl LiveSet {
             content_store_id: head.content_store_id.clone(),
             namespace_deleted: head.status.is_deleted(),
             reclaim_after_ms: head.status.reclaim_after_ms(),
-            discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no,
+            discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no(),
             objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
             required_wal_from: required_from(head),
         };
