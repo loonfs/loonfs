@@ -1172,6 +1172,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
         loonfs_api::ContentStoreId::generate(),
         1_000,
         loonfs_test_support::test_actor(),
+        loonfs_api::NamespaceAccess::Unrestricted {},
     );
     let foreign_bytes = loonfs_api::wire::manifest::encode_namespace_manifest_json(foreign.clone())
         .map(|encoded| encoded.into_bytes())

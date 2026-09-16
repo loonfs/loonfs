@@ -5,8 +5,9 @@ use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{DeletedDirentry, TombstoneGeneration};
 use crate::{
-    AttributeRevisionNo, Attributes, ChangeSeq, CommitFingerprint, CommitId, ContentRef,
-    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo, WriterEpoch,
+    AccessGrants, AccessRevisionNo, AttributeRevisionNo, Attributes, ChangeSeq, CommitFingerprint,
+    CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo,
+    WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -167,6 +168,24 @@ pub enum WalDelta {
         attributes_revision_no: AttributeRevisionNo,
         /// The inode's complete attribute map after this update.
         attributes: Attributes,
+    },
+    /// Publishes the next access revision of one inode, as complete state.
+    ///
+    /// Like an attribute revision, the delta carries the whole resulting
+    /// state. A row with no boundary and no grants is a real revision: it is
+    /// the cleared state, and it hides every earlier row.
+    AppendAccessRevision {
+        /// Stable position of this access delta within its commit.
+        delta_index: u32,
+        /// Inode whose access state this revision replaces.
+        inode_id: InodeId,
+        /// Monotonic per-inode access revision, exactly one past the
+        /// revision the update was validated against.
+        access_revision_no: AccessRevisionNo,
+        /// Whether the directory stops inheritance after this update.
+        boundary: bool,
+        /// The inode's complete direct grants after this update.
+        grants: AccessGrants,
     },
 }
 

@@ -154,11 +154,22 @@ Commits also record a timestamp and optional message. An actor is a required, ap
 | File revision and commit receipt | `committed_by`, `committed_at_ms` |
 | Tombstone event and listed active deletion | `deleted_by`, `deleted_at_ms` |
 | Attribute revision | `updated_by`, `updated_at_ms` |
+| Access revision | `updated_by`, `updated_at_ms` |
 | Bind and unbind | Neither actor nor timestamp |
 
 The root inode in a newly created namespace is attributed to the actor id `loonfs`. A fork inherits the root inode from its source basis; the target manifest's creation time is the creation time of the namespace, not a rewrite of inherited inode timestamps.
 
 These event timestamps are informational. Sequences determine order. Renaming an inode does not change its creation or content timestamps, and directories have no general modification timestamp. Lease and reclamation deadlines have a different role and are covered separately.
+
+### 1.8 Access rows
+
+An inode can carry an access row: a boundary flag and a map from principal to rights. A principal is an application-assigned identity such as a user, a group, or a public audience, named by an opaque id of 1 to 256 visible ASCII characters. LoonFS stores principal ids and never resolves them.
+
+The rights are `read`, `history`, `write`, `create`, `remove`, `share`, `manage`, and `admin`. A set of rights is stored as a sorted list of distinct names. A map holds at most 1,000 principals and at most 65,536 bytes of principal ids, and no entry has an empty set of rights. Invalid durable maps are rejected, not truncated.
+
+An inode begins at access revision `0` with no boundary and no grants; that initial state has no persisted access row. Each accepted update increments `access_revision_no` by one and stores the complete resulting state. A row with no boundary and no grants is a real revision, distinguishable from an inode whose access was never changed.
+
+Each namespace records an access mode in its manifest, fixed at creation: `unrestricted`, or `acl` with a `principal_scope` naming the identity domain of its principal ids and the `root_grants` the root inode holds at genesis, normally `admin` for each initial administrator. No standard operation writes an access row in this version, and no read evaluates one.
 
 ## 2. Objects and references
 
@@ -517,7 +528,7 @@ The default destination behavior for puts, moves, and copies is `no_replace`. De
 
 A replacing move deletes the destination file and rebinds the source within the same logical commit. Only a file destination can be replaced; moving a path onto itself is not a replacement. An undelete can use the deleted binding's original parent and name or the caller's replacement path, subject to normal validation.
 
-The WAL stores the resulting metadata changes, not the original request bodies or validation inputs. The delta kinds are `create_inode`, `bind_direntry`, `unbind_direntry`, `append_file_revision`, `tombstone_subtree`, `revoke_subtree_tombstone`, and `append_attributes_revision`.
+The WAL stores the resulting metadata changes, not the original request bodies or validation inputs. The delta kinds are `create_inode`, `bind_direntry`, `unbind_direntry`, `append_file_revision`, `tombstone_subtree`, `revoke_subtree_tombstone`, `append_attributes_revision`, and `append_access_revision`.
 
 Each delta has a `delta_index`, and its wrapper has a `semantic_op_index` identifying the request operation that produced it. Actor and timestamp are recorded once per commit and copied into the appropriate rows during materialization. The complete stored fields appear in Appendix A.
 
@@ -746,10 +757,11 @@ The following rules apply only when the selected inputs include the group's olde
 | `commit_receipts` | Remove receipts strictly below the floor. |
 | `content_publications` | Retain all publication evidence, regardless of floor. |
 | `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
+| `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 
-An empty attribute map is retained when it is the state at the floor. Removing it could expose an older non-empty map and restore attributes that had been cleared. Attribute rows are not removed merely because the inode is deleted, so undelete can restore the same attribute state.
+An empty attribute map, or an access row with no boundary and no grants, is retained when it is the state at the floor. Removing it could expose an older row and restore state that had been cleared. Attribute and access rows are not removed merely because the inode is deleted, so undelete can restore the same state.
 
-A rewrite must refuse an ambiguous attribute history in which two rows for one inode have the same revision number at or below the floor. It cannot choose an arbitrary row and discard the other.
+A rewrite must refuse an ambiguous attribute or access history in which two rows for one inode have the same revision number at or below the floor. It cannot choose an arbitrary row and discard the other.
 
 The active-deletion family is a current-state index, not an independent historical trash log. Its removal marker sorts before the corresponding listed entry. Bottom-anchored compaction can remove the pair without leaving an older entry that would reappear in a subsequent read.
 
@@ -972,7 +984,7 @@ An extension must remain rebuildable from authoritative core state. Its absence 
 
 The current inode kinds are `file` and `dir`. Mount creation and traversal are not defined by this version; no standard operation creates a mount.
 
-This format version does not define ACL or sharing records, inheritance, or authorization-change semantics. The ordering, history, and notification behavior of future authorization changes are unspecified.
+Access rows and the namespace access mode are stored as section 1.8 defines. No operation writes them and no read evaluates them in this version. Inheritance, authorization, and the ordering and notification behavior of access changes are unspecified.
 
 ## Appendix A. Durable records and byte encodings
 
@@ -1076,6 +1088,7 @@ A namespace manifest contains:
 | `content_store_id` | Immutable content-domain identity. |
 | `created_at_ms` | Immutable namespace creation time. |
 | `created_by` | Immutable application-supplied actor that created or forked the namespace. |
+| `access` | Immutable access mode: `{"kind":"unrestricted"}`, or `{"kind":"acl"}` with `principal_scope` and `root_grants`. |
 | `fork_basis?` | Immutable source reference and pin identity. |
 | `status` | Active or terminal deleted state. |
 | `writer?` | Diagnostic writer block. |
@@ -1127,8 +1140,9 @@ Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_finger
 | `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_direntry` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
+| `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
-A delta's own commit sequence is implicit in its containing commit. A tombstone target is `{seq, delta_index}`. A deleted directory entry is `{parent_inode_id, name_key, display_name}`. Attribute deltas contain the complete resulting map, including an empty map after a clear.
+A delta's own commit sequence is implicit in its containing commit. A tombstone target is `{seq, delta_index}`. A deleted directory entry is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
 
 WAL replay applies these normalized records in sequence and delta order. It does not re-run the original request's preconditions or reinterpret the request under a newer planner.
 
@@ -1147,6 +1161,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `commit_receipt` | `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_seq`, `committed_at_ms`, `message?` |
 | `content_publication` | `content_id`, `committed_seq`, `delta_index` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `updated_by`, `updated_at_ms`, `attributes` |
+| `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `updated_by`, `updated_at_ms`, `boundary`, `grants` |
 
 For a tombstone, `generation` is `{seq, delta_index}`. A set action is `{"kind":"set","deleted_direntry":...}`. A revoke action is `{"kind":"revoke","target":...}`. The event actor and timestamp describe that event, including when the action is a revoke, despite the field names `deleted_by` and `deleted_at_ms`.
 
@@ -1168,8 +1183,9 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
 | `content_publications` | `content-publication-{content_id}-{committed_seq:020}` |
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
+| `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
-Ascending byte order therefore scans an inode's file revisions and attributes newest-first. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry. The stored widths are still ten digits.
+Ascending byte order therefore scans an inode's file revisions, attributes, and access rows newest-first. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry. The stored widths are still ten digits.
 
 Bloom filters use the following keys, which are not always full row keys:
 
@@ -1185,6 +1201,7 @@ Bloom filters use the following keys, which are not always full row keys:
 | `commit_receipts` | `commit-receipt-{commit_id_hex}` |
 | `content_publications` | `content-publication-{content_id}` |
 | `attributes` | `attribute-{inode_id:020}` |
+| `access` | `access-{inode_id:020}` |
 
 Every delta that appends a file revision also produces a content-publication row. Repeated references to the same content within one commit share one row with the first publishing delta index. These rows survive every base rebuild, regardless of retention floor.
 
@@ -1200,6 +1217,7 @@ The family groups are fixed:
 | `commit_receipts` | `commit_receipts` |
 | `content_publications` | `content_publications` |
 | `attributes` | `attributes` |
+| `access` | `access` |
 
 ### A.7 Block-segment encoding
 

@@ -5,7 +5,7 @@
 //! commits through both implementations and compare their results. Merging
 //! the implementations would remove the independence those tests require.
 //!
-//! Inodes, file revisions, tombstones, and stored attribute revisions copy
+//! Inodes, file revisions, tombstones, and stored attribute and access revisions copy
 //! the commit ID, actor, and timestamp from the WAL. Directory bindings do
 //! not store attribution. The initial root inode uses
 //! `ActorId::loonfs()`, and the initial empty attribute state has no
@@ -23,6 +23,7 @@ pub struct MetadataState {
     pub content_publications: Vec<ContentPublicationRecord>,
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     pub attribute_revisions: Vec<AttributeRevisionRecord>,
+    pub access_revisions: Vec<AccessRevisionRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +113,30 @@ pub struct AttributeRevisionRecord {
 pub struct AttributeEntry {
     pub key: String,
     pub value: String,
+}
+
+/// Complete access state for one inode revision, represented with this
+/// model's independent field types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRevisionRecord {
+    pub inode_id: InodeId,
+    pub revision_no: u64,
+    pub committed_seq: ChangeSeq,
+    pub commit_id: CommitId,
+    pub delta_index: u32,
+    pub updated_by: ActorId,
+    pub updated_at_ms: u64,
+    pub boundary: bool,
+    /// The grants after the update, in principal order. An empty list with
+    /// `boundary` false is the cleared state, not a missing record.
+    pub grants: Vec<GrantEntry>,
+}
+
+/// One principal and its right names inside a grant map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantEntry {
+    pub principal_id: String,
+    pub rights: Vec<String>,
 }
 
 /// Commit position of a deletion event. A revoke uses this value to identify
@@ -301,6 +326,34 @@ impl MetadataState {
                                 })
                                 .collect(),
                         });
+                }
+                WalDelta::AppendAccessRevision {
+                    delta_index,
+                    inode_id,
+                    access_revision_no,
+                    boundary,
+                    grants,
+                } => {
+                    metadata_state.access_revisions.push(AccessRevisionRecord {
+                        inode_id: *inode_id,
+                        revision_no: access_revision_no.0,
+                        committed_seq,
+                        commit_id: commit_id.clone(),
+                        delta_index: *delta_index,
+                        updated_by: actor.clone(),
+                        updated_at_ms: committed_at_ms,
+                        boundary: *boundary,
+                        grants: grants
+                            .iter()
+                            .map(|(principal_id, rights)| GrantEntry {
+                                principal_id: principal_id.as_str().to_owned(),
+                                rights: rights
+                                    .iter()
+                                    .map(|right| right.as_str().to_owned())
+                                    .collect(),
+                            })
+                            .collect(),
+                    });
                 }
             }
         }

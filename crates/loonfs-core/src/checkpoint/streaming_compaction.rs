@@ -678,7 +678,12 @@ const ACTIVE_DELETION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
 const ATTRIBUTE_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataRowFamily::Attributes],
     locality: LocalityGrouping::LeadingKeyComponents(1),
-    rule: RetentionRule::Attributes,
+    rule: RetentionRule::WholeState,
+}];
+const ACCESS_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
+    families: &[MetadataRowFamily::Access],
+    locality: LocalityGrouping::LeadingKeyComponents(1),
+    rule: RetentionRule::WholeState,
 }];
 
 pub(super) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [RetentionCluster] {
@@ -691,6 +696,7 @@ pub(super) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
         MetadataFamilyGroup::CommitReceipts => &RECEIPT_CLUSTERS,
         MetadataFamilyGroup::ContentPublications => &PUBLICATION_CLUSTERS,
         MetadataFamilyGroup::Attributes => &ATTRIBUTE_CLUSTERS,
+        MetadataFamilyGroup::Access => &ACCESS_CLUSTERS,
     }
 }
 
@@ -1188,7 +1194,8 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
         | MetadataFamilyGroup::ActiveDeletions
         | MetadataFamilyGroup::CommitReceipts
         | MetadataFamilyGroup::ContentPublications
-        | MetadataFamilyGroup::Attributes => None,
+        | MetadataFamilyGroup::Attributes
+        | MetadataFamilyGroup::Access => None,
     }
 }
 

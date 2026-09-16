@@ -112,6 +112,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -171,6 +172,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -262,6 +264,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -366,6 +369,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -442,6 +446,7 @@ async fn retained_receipt_minting_stops_at_the_upload_issuance_deadline() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await

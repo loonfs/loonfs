@@ -87,6 +87,7 @@ pub(crate) mod commit_split_support {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(BootstrapOptions {
                 actor_id: loonfs_test_support::test_actor(),
+                access: loonfs_api::NamespaceAccess::Unrestricted {},
                 allow_existing: false,
             })
             .await
@@ -100,6 +101,7 @@ pub(crate) mod commit_split_support {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(BootstrapOptions {
                 actor_id: loonfs_test_support::test_actor(),
+                access: loonfs_api::NamespaceAccess::Unrestricted {},
                 allow_existing: true,
             })
             .await

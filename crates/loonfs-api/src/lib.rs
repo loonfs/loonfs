@@ -6,6 +6,7 @@
 
 #![warn(missing_docs)]
 
+mod access;
 mod actor;
 mod attributes;
 mod capability;
@@ -70,6 +71,11 @@ pub mod wire {
     }
 }
 
+pub use access::{
+    AccessGrants, AccessGrantsError, AccessRevisionNo, AccessRight, AccessRights, PrincipalId,
+    PrincipalIdValidationError, PrincipalScope, PrincipalScopeValidationError,
+    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES,
+};
 pub use actor::{ActorId, ActorIdValidationError};
 pub use attributes::{
     AttributeKey, AttributeKeyValidationError, AttributeRevisionNo, AttributeValue,
@@ -112,7 +118,7 @@ pub use ids::{
     FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER,
     ROOT_INODE_ID,
 };
-pub use manifest::MetadataFamilyGroup;
+pub use manifest::{MetadataFamilyGroup, NamespaceAccess};
 pub use name_policy::name_key_for_display_name;
 pub use options::AttributeInclusion;
 pub use pagination::{

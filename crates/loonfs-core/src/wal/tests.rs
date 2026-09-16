@@ -40,6 +40,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
         &namespace_id,
         &context(1_000),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -96,6 +97,7 @@ async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence(
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -174,6 +176,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -240,6 +243,7 @@ async fn a_number_collision_replans_and_commits_the_next_number_without_a_swap()
         &namespace_id,
         &context(1_000),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -287,6 +291,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         &namespace_id,
         &context(1_000),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -339,6 +344,7 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
         &namespace_id,
         &context(1_000),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -396,6 +402,7 @@ async fn a_bounded_tail_load_names_the_missing_segment() {
         &namespace_id,
         &context(1_000),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -464,6 +471,7 @@ async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number()
         &namespace_id,
         &context(1_000),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await

@@ -27,17 +27,18 @@ use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
     DeletedDirentry, MetadataRow, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
-    NamespaceManifestPayload, RunTier, TombstoneGeneration, TombstoneRowAction,
+    NamespaceAccess, NamespaceManifestPayload, RunTier, TombstoneGeneration, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
     WalCommitPayload, WalDelta, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
-    ChangeSeq, CheckpointId, Checksum, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
-    ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
-    NamespaceId, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
+    sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
+    AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, CheckpointId, Checksum,
+    ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind, ContentStoreId, InodeId,
+    InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PrincipalId, PrincipalScope,
+    RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -215,6 +216,22 @@ fn sample_attributes() -> Attributes {
     .expect("valid attribute map")
 }
 
+fn sample_grants() -> AccessGrants {
+    AccessGrants::new(std::collections::BTreeMap::from([
+        (
+            PrincipalId::parse("prn_ada").expect("principal"),
+            [AccessRight::Read, AccessRight::Write]
+                .into_iter()
+                .collect(),
+        ),
+        (
+            PrincipalId::parse("prn_eng").expect("principal"),
+            [AccessRight::Read].into_iter().collect(),
+        ),
+    ]))
+    .expect("grants")
+}
+
 fn sample_wal_payload() -> WalSegmentPayload {
     let deltas = vec![
         WalCommitDelta {
@@ -279,6 +296,16 @@ fn sample_wal_payload() -> WalSegmentPayload {
                 attributes: sample_attributes(),
             },
         },
+        WalCommitDelta {
+            semantic_op_index: 5,
+            delta: WalDelta::AppendAccessRevision {
+                delta_index: 6,
+                inode_id: InodeId(5),
+                access_revision_no: AccessRevisionNo(1),
+                boundary: true,
+                grants: sample_grants(),
+            },
+        },
     ];
     WalSegmentPayload {
         namespace_id: namespace_id(),
@@ -308,6 +335,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         content_store_id: content_store_id(),
         created_at_ms: 1_000,
         created_by: loonfs_api::ActorId::parse("test").expect("actor"),
+        access: NamespaceAccess::Unrestricted {},
         fork_basis: None,
         status: NamespaceStatus::Active {},
         writer: Some(WriterBlock {
@@ -378,6 +406,20 @@ fn sample_manifest_ref(number: u64) -> ManifestRef {
         manifest_head_seq: ChangeSeq(number),
         manifest_payload_checksum:
             "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+    }
+}
+
+fn sample_acl_manifest() -> NamespaceManifestPayload {
+    NamespaceManifestPayload {
+        access: NamespaceAccess::Acl {
+            principal_scope: PrincipalScope::parse("org_test").expect("scope"),
+            root_grants: AccessGrants::new(std::collections::BTreeMap::from([(
+                PrincipalId::parse("prn_root").expect("principal"),
+                [AccessRight::Admin].into_iter().collect(),
+            )]))
+            .expect("grants"),
+        },
+        ..sample_manifest_payload()
     }
 }
 
@@ -1183,6 +1225,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
         MetadataRowFamily::CommitReceipts,
         MetadataRowFamily::ContentPublications,
         MetadataRowFamily::Attributes,
+        MetadataRowFamily::Access,
     ]
     .iter()
     .map(|family| serde_json::to_string(family).expect("family tag"))
@@ -1200,6 +1243,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"commit_receipts\"",
             "\"content_publications\"",
             "\"attributes\"",
+            "\"access\"",
         ],
         "family tags are durable bytes in every manifest descriptor"
     );
@@ -1538,6 +1582,7 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
         .into_bytes();
     for path in [
         "",
+        "/access",
         "/runs/0",
         "/runs/0/segments/0",
         "/runs/0/segments/0/index_block",
@@ -1666,6 +1711,16 @@ fn wal_delta_wire_tags_match_spec_names() {
             }),
             "append_attributes_revision",
         ),
+        (
+            serde_json::to_value(WalDelta::AppendAccessRevision {
+                delta_index: 0,
+                inode_id: InodeId(2),
+                access_revision_no: AccessRevisionNo(1),
+                boundary: false,
+                grants: AccessGrants::default(),
+            }),
+            "append_access_revision",
+        ),
     ];
     for (value, expected_tag) in cases {
         let value = value.expect("serialize delta");
@@ -1779,6 +1834,34 @@ fn sample_populated_attributes_row() -> MetadataRow {
         updated_by: actor(),
         updated_at_ms: 5_000,
         attributes: sample_attributes(),
+    })
+}
+
+fn sample_cleared_access_row() -> MetadataRow {
+    MetadataRow::AccessRevision(loonfs_api::wire::manifest::AccessRevisionRecord {
+        inode_id: InodeId(2),
+        access_revision_no: AccessRevisionNo(3),
+        committed_seq: ChangeSeq(7),
+        commit_id: commit_id(),
+        delta_index: 1,
+        updated_by: actor(),
+        updated_at_ms: 7_000,
+        boundary: true,
+        grants: AccessGrants::default(),
+    })
+}
+
+fn sample_populated_access_row() -> MetadataRow {
+    MetadataRow::AccessRevision(loonfs_api::wire::manifest::AccessRevisionRecord {
+        inode_id: InodeId(5),
+        access_revision_no: AccessRevisionNo(2),
+        committed_seq: ChangeSeq(5),
+        commit_id: commit_id(),
+        delta_index: 0,
+        updated_by: actor(),
+        updated_at_ms: 5_000,
+        boundary: false,
+        grants: sample_grants(),
     })
 }
 
@@ -2077,6 +2160,23 @@ fn sst_block_data_attribute_golden_decodes_to_sample_rows() {
             sample_cleared_attributes_row(),
             sample_populated_attributes_row(),
         ],
+    );
+}
+
+#[test]
+fn sst_block_data_access_rows_match_golden_bytes() {
+    assert_rows_match_single_block_golden(
+        "sst_block_data_access.v1.bin",
+        &[sample_cleared_access_row(), sample_populated_access_row()],
+    );
+}
+
+#[test]
+fn sst_block_data_access_golden_decodes_to_sample_rows() {
+    let block = decode_golden_data_block("sst_block_data_access.v1.bin");
+    assert_eq!(
+        block.rows,
+        [sample_cleared_access_row(), sample_populated_access_row(),],
     );
 }
 
@@ -2640,6 +2740,7 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
         ),
         ("namespace_manifest.retired.v1.json", retired),
         ("namespace_manifest.fork.v1.json", sample_fork_manifest()),
+        ("namespace_manifest.acl.v1.json", sample_acl_manifest()),
     ] {
         let encoded = encode_namespace_manifest_json(payload.clone())
             .expect("manifest")

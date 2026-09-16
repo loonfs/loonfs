@@ -192,7 +192,7 @@ fn the_fold_refuses_to_compact_repeated_revision_numbers() {
         matches!(&error, CoreError::NamespaceCorrupt(_)),
         "{error:?}"
     );
-    assert!(error.to_string().contains("two attribute rows"), "{error}");
+    assert!(error.to_string().contains("two attributes rows"), "{error}");
 }
 
 #[tokio::test]
@@ -294,6 +294,7 @@ async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
             .expect("content store"),
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
+        access: loonfs_api::NamespaceAccess::Unrestricted {},
         fork_basis: None,
         status: loonfs_api::wire::control::NamespaceStatus::Active {},
         writer: None,

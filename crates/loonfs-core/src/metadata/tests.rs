@@ -6,8 +6,9 @@ use loonfs_api::wire::manifest::DeletedDirentry;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::ContentId;
 use loonfs_api::{
-    AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes,
-    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
+    AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo,
+    AttributeValue, Attributes, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
+    RevisionNo,
 };
 
 fn actor() -> ActorId {
@@ -64,6 +65,13 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             attributes_revision_no: AttributeRevisionNo(1),
             attributes: Attributes::default(),
         },
+        WalDelta::AppendAccessRevision {
+            delta_index: 4,
+            inode_id: InodeId(7),
+            access_revision_no: AccessRevisionNo(1),
+            boundary: false,
+            grants: AccessGrants::default(),
+        },
     ]
     .into_iter()
     .enumerate()
@@ -89,6 +97,15 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
     assert_eq!(state.revisions()[0].commit_id, owning_commit_id);
     assert_eq!(state.subtree_tombstones()[0].commit_id, owning_commit_id);
     assert_eq!(state.attributes_revisions()[0].commit_id, owning_commit_id);
+    assert!(matches!(
+        state.access_revisions(),
+        [AccessRevisionRecord {
+            inode_id: InodeId(7),
+            access_revision_no: AccessRevisionNo(1),
+            committed_seq: ChangeSeq(9),
+            ..
+        }]
+    ));
 }
 
 #[test]
@@ -143,6 +160,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -207,6 +225,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 bind_delta_index: 0,
             },
         ],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -364,6 +383,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert_eq!(
@@ -411,6 +431,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -466,6 +487,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
                 message: Some("new message".to_owned()),
             },
         ],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
     );
@@ -821,6 +843,7 @@ fn churned_binding_state_rebuilt() -> MetadataState {
         incremental.commit_receipts().to_vec(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -937,6 +960,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
     let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(2));
     assert!(
@@ -962,6 +986,7 @@ fn has_visible_children_sees_through_unbinds() {
             unbind_seq: ChangeSeq(3),
             unbind_delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

@@ -268,6 +268,7 @@ async fn fork_owned_checkpoints_reject_user_release() {
         &source,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -327,6 +328,7 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await

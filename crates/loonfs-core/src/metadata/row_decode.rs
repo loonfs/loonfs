@@ -98,6 +98,16 @@ pub(crate) fn attributes_revision_from_manifest_row(
 }
 
 #[cfg(test)]
+pub(crate) fn access_revision_from_manifest_row(
+    row: MetadataRow,
+) -> Result<crate::metadata::AccessRevisionRecord, CoreError> {
+    match row {
+        MetadataRow::AccessRevision(record) => Ok(record),
+        other => Err(foreign_row("access_revision", &other)),
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use loonfs_api::wire::manifest::{TombstoneGeneration, TombstoneRowAction};

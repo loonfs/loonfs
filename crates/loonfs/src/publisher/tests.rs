@@ -342,6 +342,7 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
         .writer_engine(&runtime.bits.identity, namespace_id)
         .bootstrap_namespace(loonfs_core::BootstrapOptions {
             actor_id: loonfs_test_support::test_actor(),
+            access: loonfs_api::NamespaceAccess::Unrestricted {},
             allow_existing: false,
         })
         .await

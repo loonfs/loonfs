@@ -66,6 +66,7 @@ impl NamespaceReadState {
             content_store_id,
             created_at_ms,
             created_by,
+            loonfs_api::NamespaceAccess::Unrestricted {},
         ))
     }
 }

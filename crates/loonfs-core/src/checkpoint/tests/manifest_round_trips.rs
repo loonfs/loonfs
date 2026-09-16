@@ -252,6 +252,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         &namespace_id,
         &context,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -815,6 +816,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             .expect("content store"),
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
+        access: loonfs_api::NamespaceAccess::Unrestricted {},
         fork_basis: None,
         status: loonfs_api::wire::control::NamespaceStatus::Active {},
         writer: None,

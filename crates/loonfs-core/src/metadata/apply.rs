@@ -2,9 +2,9 @@
 //! [`MetadataState`] rows.
 
 use super::{
-    AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord, DirentryBindRecord,
-    DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
+    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
@@ -190,6 +190,25 @@ impl MetadataState {
                     updated_by: actor.clone(),
                     updated_at_ms: committed_at_ms,
                     attributes: attributes.clone(),
+                });
+            }
+            WalDelta::AppendAccessRevision {
+                delta_index,
+                inode_id,
+                access_revision_no,
+                boundary,
+                grants,
+            } => {
+                self.push_access_revision_record(AccessRevisionRecord {
+                    inode_id: *inode_id,
+                    access_revision_no: *access_revision_no,
+                    committed_seq,
+                    commit_id: commit_id.clone(),
+                    delta_index: *delta_index,
+                    updated_by: actor.clone(),
+                    updated_at_ms: committed_at_ms,
+                    boundary: *boundary,
+                    grants: grants.clone(),
                 });
             }
         }

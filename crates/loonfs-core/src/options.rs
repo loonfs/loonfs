@@ -7,6 +7,8 @@ use loonfs_api::ChangeSeq;
 pub struct BootstrapOptions {
     /// Application-supplied actor creating the namespace.
     pub actor_id: loonfs_api::ActorId,
+    /// Access mode the namespace is created with.
+    pub access: loonfs_api::NamespaceAccess,
     /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
 }
@@ -16,6 +18,7 @@ impl BootstrapOptions {
     pub fn new(actor_id: loonfs_api::ActorId) -> Self {
         Self {
             actor_id,
+            access: loonfs_api::NamespaceAccess::Unrestricted {},
             allow_existing: false,
         }
     }

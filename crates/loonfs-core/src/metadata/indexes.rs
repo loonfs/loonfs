@@ -3,9 +3,9 @@
 
 use super::visibility::{same_binding, unbind_matches_binding, BindingIdentity};
 use super::{
-    AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord, DirentryBindRecord,
-    DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
+    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
 use std::collections::{HashMap, HashSet};
@@ -108,6 +108,10 @@ impl MetadataIndexes {
 
         for attributes_revision in &state.attributes_revisions {
             indexes.record_attributes_revision(attributes_revision);
+        }
+
+        for access_revision in &state.access_revisions {
+            indexes.record_access_revision(access_revision);
         }
 
         indexes
@@ -309,6 +313,13 @@ impl MetadataIndexes {
     /// attribute lookups scan the rows, which stay tail-sized in memory
     /// because the manifest segments answer the bulk.
     pub(super) fn record_attributes_revision(&mut self, record: &AttributesRevisionRecord) {
+        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
+    }
+
+    /// Access revisions contribute only the seq watermark, like revisions:
+    /// access lookups scan the rows, which stay tail-sized in memory
+    /// because the manifest segments answer the bulk.
+    pub(super) fn record_access_revision(&mut self, record: &AccessRevisionRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }
 }

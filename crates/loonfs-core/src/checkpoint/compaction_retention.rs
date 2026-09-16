@@ -7,7 +7,7 @@
 use super::frozen_floor::{bind_survives_frozen_floor, BindingIdentity};
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_api::{AttributeRevisionNo, ChangeSeq};
+use loonfs_api::{ChangeSeq, InodeId};
 use std::collections::BTreeSet;
 
 /// One row a retention operator kept, and the family it belongs to.
@@ -22,7 +22,7 @@ pub(super) enum RetentionRule {
     Receipts,
     /// Every revision above the floor, plus the newest at or below it, per
     /// inode.
-    Attributes,
+    WholeState,
     /// Retain active deletions and remove completed deletion pairs.
     ActiveDeletions,
     /// A bind and the unbinds of its own generation, decided together.
@@ -37,7 +37,7 @@ impl RetentionRule {
         match self {
             Self::KeepEveryRow => RetentionOperator::KeepEveryRow,
             Self::Receipts => RetentionOperator::Receipts,
-            Self::Attributes => RetentionOperator::Attributes(AttributeRetention::default()),
+            Self::WholeState => RetentionOperator::WholeState(WholeStateRetention::default()),
             Self::ActiveDeletions => {
                 RetentionOperator::ActiveDeletions(ActiveDeletionRetention::default())
             }
@@ -54,7 +54,7 @@ impl RetentionRule {
 pub(super) enum RetentionOperator {
     KeepEveryRow,
     Receipts,
-    Attributes(AttributeRetention),
+    WholeState(WholeStateRetention),
     ActiveDeletions(ActiveDeletionRetention),
     ForwardBindings(Box<BindingRetention>),
 }
@@ -71,7 +71,7 @@ impl RetentionOperator {
         let kept = match self {
             Self::KeepEveryRow => Some(row),
             Self::Receipts => keep_receipt(row, floor_seq),
-            Self::Attributes(state) => state.push(row, floor_seq)?,
+            Self::WholeState(state) => state.push(family, row, floor_seq)?,
             Self::ActiveDeletions(state) => state.push(row),
             Self::ForwardBindings(state) => state.push(row, floor_seq),
         };
@@ -82,7 +82,7 @@ impl RetentionOperator {
     pub(super) fn close_group(&mut self, floor_seq: ChangeSeq) -> Result<Option<KeptRow>> {
         match self {
             Self::KeepEveryRow | Self::Receipts => Ok(None),
-            Self::Attributes(state) => {
+            Self::WholeState(state) => {
                 state.close_group();
                 Ok(None)
             }
@@ -101,7 +101,7 @@ impl RetentionOperator {
         match self {
             Self::KeepEveryRow
             | Self::Receipts
-            | Self::Attributes(_)
+            | Self::WholeState(_)
             | Self::ActiveDeletions(_) => 0,
             Self::ForwardBindings(state) => usize::from(state.held_bind.is_some()),
         }
@@ -122,52 +122,51 @@ fn keep_receipt(row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
     }
 }
 
-/// Retains all attribute revisions above the floor and the newest revision at
+/// Retains all whole-state rows above the floor and the newest revision at
 /// or below the floor for each inode.
 ///
-/// Attribute row keys sort each inode's revisions newest first. The first row
-/// at or below the floor represents current state, including an empty map that
-/// records cleared attributes. Older revisions cannot be observed and may be
-/// removed. Deleted inodes keep their attribute rows so an undelete restores
-/// the prior attributes. The operator processes this order without retaining
-/// the complete history.
+/// Whole-state row keys sort each inode's revisions newest first. The first row
+/// at or below the floor represents current state, including a cleared state.
+/// Older revisions cannot be observed and may be removed. Deleted inodes keep
+/// their whole-state rows so an undelete restores the prior state. The operator
+/// processes this order without retaining the complete history.
 #[derive(Debug, Default)]
-pub(super) struct AttributeRetention {
+pub(super) struct WholeStateRetention {
     /// Whether this inode has already kept its newest row at or below the
     /// floor.
     kept_at_floor: bool,
     /// The revision of the previous row at or below the floor, which is what
     /// catches two rows sharing one revision number. Descending revision
     /// order puts any such pair next to each other, so one field sees them.
-    previous_at_floor: Option<AttributeRevisionNo>,
+    previous_at_floor: Option<u64>,
 }
 
-impl AttributeRetention {
-    fn push(&mut self, row: MetadataRow, floor_seq: ChangeSeq) -> Result<Option<MetadataRow>> {
-        let MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
-            inode_id,
-            attributes_revision_no,
-            committed_seq,
-            ..
-        }) = &row
-        else {
+impl WholeStateRetention {
+    fn push(
+        &mut self,
+        family: MetadataRowFamily,
+        row: MetadataRow,
+        floor_seq: ChangeSeq,
+    ) -> Result<Option<MetadataRow>> {
+        let Some((inode_id, revision, committed_seq)) = whole_state_revision(&row) else {
             return Ok(Some(row));
         };
-        if *committed_seq > floor_seq {
+        if committed_seq > floor_seq {
             return Ok(Some(row));
         }
-        // Writer invariant: one inode's attribute revisions are numbered
+        // Writer invariant: one inode's whole-state rows are numbered
         // without gaps or repeats, so "the newest at or below the floor"
         // names exactly one row. Two rows sharing a number would make the
         // choice arbitrary and the drop unsafe; refuse to compact state that
         // violates it.
-        if self.previous_at_floor == Some(*attributes_revision_no) {
+        if self.previous_at_floor == Some(revision) {
+            let family = family.as_str();
             return Err(CoreError::NamespaceCorrupt(format!(
-                "inode `{inode_id}` has two attribute rows at revision \
-                 `{attributes_revision_no}` at or below the retention floor; refusing to drop rows"
+                "inode `{inode_id}` has two {family} rows at revision \
+                 `{revision}` at or below the retention floor; refusing to drop rows"
             )));
         }
-        self.previous_at_floor = Some(*attributes_revision_no);
+        self.previous_at_floor = Some(revision);
         if self.kept_at_floor {
             return Ok(None);
         }
@@ -178,6 +177,22 @@ impl AttributeRetention {
     fn close_group(&mut self) {
         self.kept_at_floor = false;
         self.previous_at_floor = None;
+    }
+}
+
+fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, ChangeSeq)> {
+    match row {
+        MetadataRow::AttributesRevision(record) => Some((
+            record.inode_id,
+            record.attributes_revision_no.0,
+            record.committed_seq,
+        )),
+        MetadataRow::AccessRevision(record) => Some((
+            record.inode_id,
+            record.access_revision_no.0,
+            record.committed_seq,
+        )),
+        _ => None,
     }
 }
 
@@ -338,24 +353,44 @@ impl BindingRetention {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::{DisplayName, InodeId, NameKey};
+    use loonfs_api::{AccessRevisionNo, AttributeRevisionNo, DisplayName, InodeId, NameKey};
 
     fn floor() -> ChangeSeq {
         ChangeSeq(100)
     }
 
-    fn attribute_row(inode: u64, revision: u64, committed_seq: u64) -> MetadataRow {
-        MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
-            inode_id: InodeId(inode),
-            attributes_revision_no: AttributeRevisionNo(revision),
-            committed_seq: ChangeSeq(committed_seq),
-            commit_id: loonfs_api::CommitId::parse(format!("c_attribute_{committed_seq}"))
-                .expect("commit id"),
-            delta_index: 0,
-            updated_by: loonfs_api::ActorId::loonfs(),
-            updated_at_ms: 1_000 + committed_seq,
-            attributes: Default::default(),
-        })
+    fn whole_state_row(
+        family: MetadataRowFamily,
+        inode: u64,
+        revision: u64,
+        committed_seq: u64,
+    ) -> MetadataRow {
+        let commit_id =
+            loonfs_api::CommitId::parse(format!("c_row_{committed_seq}")).expect("commit id");
+        if family == MetadataRowFamily::Access {
+            MetadataRow::AccessRevision(crate::metadata::AccessRevisionRecord {
+                inode_id: InodeId(inode),
+                access_revision_no: AccessRevisionNo(revision),
+                committed_seq: ChangeSeq(committed_seq),
+                commit_id,
+                delta_index: 0,
+                updated_by: loonfs_api::ActorId::loonfs(),
+                updated_at_ms: 1_000 + committed_seq,
+                boundary: false,
+                grants: Default::default(),
+            })
+        } else {
+            MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
+                inode_id: InodeId(inode),
+                attributes_revision_no: AttributeRevisionNo(revision),
+                committed_seq: ChangeSeq(committed_seq),
+                commit_id,
+                delta_index: 0,
+                updated_by: loonfs_api::ActorId::loonfs(),
+                updated_at_ms: 1_000 + committed_seq,
+                attributes: Default::default(),
+            })
+        }
     }
 
     fn bind_row(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
@@ -384,56 +419,50 @@ mod tests {
 
     #[test]
     fn one_inode_keeps_the_newest_row_at_the_floor_and_holds_nothing() {
-        let mut operator = RetentionRule::Attributes.operator();
-        let mut kept = Vec::new();
-        // Newest first: two above the floor, then a hundred thousand below.
-        for (revision, committed_seq) in [(100_002u64, 102u64), (100_001, 101)] {
-            if let Some((_, row)) = operator
-                .push(
-                    MetadataRowFamily::Attributes,
-                    attribute_row(7, revision, committed_seq),
-                    floor(),
-                )
-                .expect("push")
-            {
-                kept.push(row);
+        for family in [MetadataRowFamily::Attributes, MetadataRowFamily::Access] {
+            let mut operator = RetentionRule::WholeState.operator();
+            let mut kept = Vec::new();
+            // Newest first: two above the floor, then a hundred thousand below.
+            for (revision, committed_seq) in [(100_002u64, 102u64), (100_001, 101)] {
+                if let Some((_, row)) = operator
+                    .push(
+                        family,
+                        whole_state_row(family, 7, revision, committed_seq),
+                        floor(),
+                    )
+                    .expect("push")
+                {
+                    kept.push(row);
+                }
             }
-        }
-        for revision in (1..=100_000u64).rev() {
-            let pushed = operator
-                .push(
-                    MetadataRowFamily::Attributes,
-                    attribute_row(7, revision, 50),
-                    floor(),
-                )
-                .expect("push");
-            if let Some((_, row)) = pushed {
-                kept.push(row);
+            for revision in (1..=100_000u64).rev() {
+                let pushed = operator
+                    .push(family, whole_state_row(family, 7, revision, 50), floor())
+                    .expect("push");
+                if let Some((_, row)) = pushed {
+                    kept.push(row);
+                }
+                assert_eq!(operator.held_rows(), 0);
             }
-            assert_eq!(operator.held_rows(), 0);
+            assert_eq!(kept.len(), 3, "two above the floor and the newest below it");
+            assert_eq!(kept[2], whole_state_row(family, 7, 100_000, 50));
         }
-        assert_eq!(kept.len(), 3, "two above the floor and the newest below it");
-        assert_eq!(kept[2], attribute_row(7, 100_000, 50));
     }
 
     #[test]
-    fn two_attribute_rows_at_one_revision_below_the_floor_are_refused() {
-        let mut operator = RetentionRule::Attributes.operator();
-        operator
-            .push(
-                MetadataRowFamily::Attributes,
-                attribute_row(7, 5, 50),
-                floor(),
-            )
-            .expect("the first row at the floor is kept");
-        let error = operator
-            .push(
-                MetadataRowFamily::Attributes,
-                attribute_row(7, 5, 49),
-                floor(),
-            )
-            .expect_err("a repeated revision at the floor is refused");
-        assert!(error.to_string().contains("two attribute rows at revision"));
+    fn two_whole_state_rows_at_one_revision_below_the_floor_are_refused() {
+        for family in [MetadataRowFamily::Attributes, MetadataRowFamily::Access] {
+            let mut operator = RetentionRule::WholeState.operator();
+            operator
+                .push(family, whole_state_row(family, 7, 5, 50), floor())
+                .expect("the first row at the floor is kept");
+            let error = operator
+                .push(family, whole_state_row(family, 7, 5, 49), floor())
+                .expect_err("a repeated revision at the floor is refused");
+            assert!(error
+                .to_string()
+                .contains(&format!("two {} rows at revision", family.as_str())));
+        }
     }
 
     #[test]
