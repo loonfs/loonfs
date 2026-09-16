@@ -51,6 +51,14 @@ pub struct FsWriter {
 }
 
 impl FsWriter {
+    /// Clones this writer with the subject used for namespace administration and reads.
+    pub fn as_subject(&self, subject: loonfs_api::Subject) -> Self {
+        Self {
+            core: self.core.as_subject(subject),
+            ..self.clone()
+        }
+    }
+
     /// Starts a writer builder that constructs its object-store client from
     /// configuration inside this handle's runtime ownership domain.
     pub fn builder(store_config: StoreConfig) -> FsWriterBuilder {

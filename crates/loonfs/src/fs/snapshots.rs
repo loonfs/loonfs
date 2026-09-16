@@ -60,6 +60,10 @@ impl FsReader {
         namespace_id: &NamespaceId,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListSnapshotsResponse> {
+        if self.core.subject.is_some() {
+            let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+            engine.require_administrator(&context).await?;
+        }
         self.core.record_trace_context(&tracing::Span::current());
         let now_ms = loonfs_core::time::current_time_ms()?;
         let requested = request.limit.as_usize();
@@ -119,6 +123,7 @@ impl FsWriter {
         options: CreateSnapshotOptions,
     ) -> Result<Checkpoint> {
         self.core.record_trace_context(&tracing::Span::current());
+        self.require_administrator(namespace_id).await?;
         let result = self
             .core
             .writer_engine(&self.bits.identity, namespace_id)
@@ -139,6 +144,7 @@ impl FsWriter {
         now_ms: u64,
         max_live: usize,
     ) -> Result<Checkpoint> {
+        self.require_administrator(namespace_id).await?;
         let checkpoint = self.create_snapshot(namespace_id, options).await?;
         if let Err(error) = self
             .ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 0)
@@ -217,6 +223,7 @@ impl FsWriter {
         requested_expires_at_ms: u64,
         max_lifetime_ms: u64,
     ) -> Result<SnapshotSummary> {
+        self.require_administrator(namespace_id).await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
@@ -257,6 +264,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
+        self.require_administrator(namespace_id).await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core

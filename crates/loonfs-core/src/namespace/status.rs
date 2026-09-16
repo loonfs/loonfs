@@ -92,6 +92,7 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     super::control::ensure_namespace_live(&head)?;
     Ok(Namespace {
+        access: (&head.access).into(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by,
         fork_basis: fork_basis(head.fork_basis),

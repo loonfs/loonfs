@@ -47,7 +47,11 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
 

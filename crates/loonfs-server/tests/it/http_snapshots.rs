@@ -126,7 +126,11 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
     let namespace = namespace_id("lifecycle");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
 
@@ -231,7 +235,11 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
     let namespace = namespace_id("validation");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
 
@@ -284,7 +292,11 @@ async fn http_snapshots_enforce_quota_and_delete_frees_a_slot() {
     let namespace = namespace_id("quota");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
 
@@ -320,7 +332,11 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
     let namespace = namespace_id("separation");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let snapshot = create_snapshot(&harness.server_url, namespace.as_str(), "brief", 60_000)
@@ -404,7 +420,11 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
     let namespace = NamespaceId::parse("demo").expect("namespace id");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
 
@@ -460,7 +480,11 @@ async fn snapshot_file_read_returns_the_captured_state() {
     let path = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     harness

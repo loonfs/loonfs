@@ -131,6 +131,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "manifest_no",
     "max_wal_tail_segments",
     "metadata_compaction",
+    "recover_administrator",
     "metadata_segments",
     "move_by_inode",
     "move_path",
@@ -171,6 +172,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "revision_committed_at_ms",
     "revision_committed_by",
     "revision_no",
+    "root_grants",
     "run_id",
     "serve_and_maintain",
     "serve_only",
@@ -1082,7 +1084,11 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     })
     .expect("valid client config");
     client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace over http");
 
@@ -1665,7 +1671,11 @@ async fn http_created_state_is_readable_through_runtime() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace through http");
     let target = NamespacePath::parse("demo", "/notes/from-http.txt").expect("target");
@@ -4131,7 +4141,11 @@ mod direct_download {
 
         let namespace = namespace_id("direct-download");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/big.bin").expect("target");
@@ -4210,7 +4224,11 @@ mod direct_download {
 
         let namespace = namespace_id("grant-pins");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/pinned.bin").expect("target");
@@ -4262,7 +4280,11 @@ mod direct_download {
 
         let namespace = namespace_id("no-issuer");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/small.txt").expect("target");
@@ -4374,7 +4396,11 @@ mod direct_download {
         let namespace_id =
             NamespaceId::parse("direct-put-completion-shape").expect("valid namespace id");
         client
-            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace_id,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         let begin = client
@@ -4455,7 +4481,11 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-crc32c-put");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
@@ -4510,7 +4540,11 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-direct-put");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
@@ -4561,7 +4595,11 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-too-large");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/enormous.bin").expect("target");

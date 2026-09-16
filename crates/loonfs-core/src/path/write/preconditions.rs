@@ -4,24 +4,24 @@ use super::publish_path_planning::{
     check_binding_generation, is_missing_visible_path, resolve_parent_directory,
     resolve_visible_inode, PublishPathPlanningView,
 };
-use crate::authorize::{Absence, Authorizer};
+use crate::authorize::{Absence, Authorizer, CommitAuthority};
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{
     AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingGeneration,
-    CommitPrecondition, InodeId, Subject,
+    CommitPrecondition, InodeId,
 };
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
     preconditions: &[CommitPrecondition],
-    subject: Option<&Subject>,
+    authority: CommitAuthority<'_>,
     head: &NamespaceReadState,
     pre_state: &MetadataView<'_, '_, S>,
 ) -> Result<()> {
-    let authorizer = Authorizer::for_request(&head.namespace_id, &head.access, subject)?;
+    let authorizer = Authorizer::for_request(&head.namespace_id, &head.access, authority)?;
     let view = PublishPathPlanningView {
         namespace_id: &head.namespace_id,
         access: &head.access,

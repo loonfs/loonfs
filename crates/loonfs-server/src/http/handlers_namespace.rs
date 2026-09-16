@@ -2,7 +2,7 @@
 //! handlers.
 
 use super::error::ApiResponseError;
-use super::extractors::ActorHeader;
+use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
 use super::query_params::{parse_path_id, parse_public_ordinal, resolve_page_limit};
 use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -14,19 +14,20 @@ use loonfs::{
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    decode_namespace_cursor, CapabilityDocument, Checkpoint, CheckpointId, CreateCheckpointRequest,
-    CreateNamespaceRequest, CreateSnapshotRequest, DeleteCheckpointResponse,
-    DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest, ForkNamespaceRequest,
-    ListCheckpointsResponse, ListSnapshotsResponse, PageRequest, PaginationPolicy,
-    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_SNAPSHOT_MAX_LIFETIME_MS,
-    LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE, LIMIT_SNAPSHOT_MAX_TTL_MS,
-    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    decode_namespace_cursor, AccessRight, CapabilityDocument, Checkpoint, CheckpointId,
+    CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,
+    DeleteCheckpointResponse, DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest,
+    ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess,
+    PageRequest, PaginationPolicy, RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
+    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -213,9 +214,27 @@ pub(super) async fn create_namespace(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
+    if let NamespaceAccess::Acl { root_grants, .. } = &request.access {
+        if !root_grants
+            .iter()
+            .any(|(_, rights)| rights.contains(AccessRight::Admin))
+        {
+            return Err(ApiResponseError::new(
+                ErrorCode::InvalidRequest,
+                "an ACL namespace needs at least one administrator in root_grants",
+            )
+            .with_param("/access/root_grants"));
+        }
+    }
     let namespace = state
         .writer
-        .create_namespace(&request.namespace_id, CreateNamespaceOptions::new(actor_id))
+        .create_namespace(
+            &request.namespace_id,
+            CreateNamespaceOptions {
+                access: request.access,
+                ..CreateNamespaceOptions::new(actor_id)
+            },
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(namespace))
@@ -319,9 +338,12 @@ pub(super) async fn get_namespace_diagnostics(
 )]
 pub(super) async fn delete_namespace(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
 ) -> Result<Json<loonfs_api::DeleteNamespaceResponse>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let options = DeleteNamespaceOptions {
         expected_head_seq: query
             .expected_head_seq
@@ -329,8 +351,7 @@ pub(super) async fn delete_namespace(
             .map(parse_expected_head_seq)
             .transpose()?,
     };
-    let response = state
-        .writer
+    let response = writer
         .delete_namespace(&namespace_id, options)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -370,13 +391,15 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
 )]
 pub(super) async fn fork_namespace(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     ActorHeader(actor_id): ActorHeader,
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
-    let namespace = state
-        .writer
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
+    let namespace = writer
         .fork_namespace_with(
             &source_namespace_id,
             &request.new_namespace_id,
@@ -418,14 +441,16 @@ pub(super) async fn fork_namespace(
 )]
 pub(super) async fn create_snapshot(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let now_ms = super::handlers_uploads::current_unix_ms()?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
-    let checkpoint = state
-        .writer
+    let checkpoint = writer
         .create_snapshot_with_quota(
             &namespace_id,
             CreateSnapshotOptions {
@@ -478,12 +503,14 @@ pub(super) async fn create_snapshot(
 )]
 pub(super) async fn list_snapshots(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
+    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
+    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
-    let response = state
-        .reader
+    let response = reader
         .list_snapshots_page(
             &namespace_id,
             PageRequest {
@@ -523,16 +550,18 @@ pub(super) async fn list_snapshots(
 )]
 pub(super) async fn extend_snapshot(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
     let now_ms = super::handlers_uploads::current_unix_ms()?;
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
-    let response = state
-        .writer
+    let response = writer
         .extend_snapshot(
             &namespace_id,
             &snapshot_id,
@@ -569,13 +598,15 @@ pub(super) async fn extend_snapshot(
 )]
 pub(super) async fn delete_snapshot(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<DeleteSnapshotResponse>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let response = state
-        .writer
+    let response = writer
         .delete_snapshot(&namespace_id, &snapshot_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -796,10 +827,22 @@ fn decode_checkpoint_cursor(
 )]
 pub(super) async fn run_maintenance(
     State(state): State<AppState>,
+    OptionalActorHeader(actor_id): OptionalActorHeader,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunMaintenanceRequest>,
 ) -> Result<Json<RunMaintenanceResponse>, ApiResponseError> {
+    if let RunMaintenanceRequest::RecoverAdministrator(request) = request {
+        let actor_id = actor_id.ok_or_else(missing_actor)?;
+        let recovered = state
+            .writer
+            .recover_administrator(&namespace_id, &request.principal_id, actor_id)
+            .await
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        return Ok(Json(RunMaintenanceResponse::RecoverAdministrator(
+            recovered,
+        )));
+    }
     let result = state
         .maintenance
         .run_maintenance(&namespace_id, request)

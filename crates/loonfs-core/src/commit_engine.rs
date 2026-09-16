@@ -2,6 +2,7 @@
 //! candidates as one numbered WAL put, then returns
 //! one result per candidate.
 
+use crate::authorize::CommitAuthority;
 use crate::checkpoint::MetadataSegmentCache;
 use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
@@ -32,6 +33,7 @@ use thiserror::Error;
 pub struct CommitCandidate {
     request: CommitRequest,
     content: ContentPreparation,
+    maintenance: bool,
 }
 
 /// The result of preparing external content referenced by a mutation.
@@ -65,11 +67,29 @@ fn rejected_token_reasons(rejections: &[(ContentId, ContentTokenError)]) -> Stri
 }
 
 impl CommitCandidate {
+    /// A commit no subject check applies to. Only maintenance builds one.
+    pub fn maintenance(request: CommitRequest) -> Self {
+        Self {
+            request,
+            content: ContentPreparation::Ready(Vec::new()),
+            maintenance: true,
+        }
+    }
+
+    pub(crate) fn authority(&self) -> CommitAuthority<'_> {
+        if self.maintenance {
+            CommitAuthority::Maintenance
+        } else {
+            CommitAuthority::Subject(self.request.subject.as_ref())
+        }
+    }
+
     /// Wraps a mutation request with no attached content proofs.
     pub fn new(request: CommitRequest) -> Self {
         Self {
             request,
             content: ContentPreparation::Ready(Vec::new()),
+            maintenance: false,
         }
     }
 
@@ -78,6 +98,7 @@ impl CommitCandidate {
         Self {
             request,
             content: ContentPreparation::Ready(content),
+            maintenance: false,
         }
     }
 
@@ -86,6 +107,7 @@ impl CommitCandidate {
         Self {
             request,
             content: ContentPreparation::Rejected(error),
+            maintenance: false,
         }
     }
 

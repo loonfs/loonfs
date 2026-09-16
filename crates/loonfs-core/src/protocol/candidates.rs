@@ -139,7 +139,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     let mut allocation = session.begin_candidate();
     match session
         .prepare_commit(
-            mutation,
+            candidate,
             semantic_identity,
             view.metadata_view(),
             committed_at_ms,

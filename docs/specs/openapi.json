@@ -898,6 +898,10 @@
         "additionalProperties": false,
         "description": "Request to create a namespace.",
         "properties": {
+          "access": {
+            "$ref": "#/components/schemas/NamespaceAccess",
+            "description": "The access mode, fixed for the namespace's life. Defaults to\nunrestricted."
+          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id to create."
@@ -2951,6 +2955,10 @@
       "Namespace": {
         "description": "Current state for one namespace.",
         "properties": {
+          "access": {
+            "$ref": "#/components/schemas/NamespaceAccessMode",
+            "description": "The namespace's access mode."
+          },
           "created_at_ms": {
             "description": "Time the namespace was created, in Unix milliseconds.",
             "format": "int64",
@@ -2979,11 +2987,123 @@
           }
         },
         "required": [
+          "access",
           "namespace_id",
           "created_at_ms",
           "created_by",
           "head_seq",
           "retention_floor_seq"
+        ],
+        "type": "object"
+      },
+      "NamespaceAccess": {
+        "description": "A namespace's access mode, fixed at creation.",
+        "discriminator": {
+          "mapping": {
+            "acl": "#/components/schemas/NamespaceAccessAcl",
+            "unrestricted": "#/components/schemas/NamespaceAccessUnrestricted"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/NamespaceAccessUnrestricted"
+          },
+          {
+            "$ref": "#/components/schemas/NamespaceAccessAcl"
+          }
+        ]
+      },
+      "NamespaceAccessAcl": {
+        "description": "Access rows govern every operation.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "acl"
+            ],
+            "type": "string"
+          },
+          "principal_scope": {
+            "$ref": "#/components/schemas/PrincipalScope",
+            "description": "Identity domain the namespace's principal ids belong to."
+          },
+          "root_grants": {
+            "$ref": "#/components/schemas/AccessGrants",
+            "description": "The root inode's grants at genesis, normally `admin` for each\ninitial administrator."
+          }
+        },
+        "required": [
+          "principal_scope",
+          "root_grants",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "NamespaceAccessMode": {
+        "description": "A namespace's access mode as reported, without its genesis grants.",
+        "discriminator": {
+          "mapping": {
+            "acl": "#/components/schemas/NamespaceAccessModeAcl",
+            "unrestricted": "#/components/schemas/NamespaceAccessModeUnrestricted"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/NamespaceAccessModeUnrestricted"
+          },
+          {
+            "$ref": "#/components/schemas/NamespaceAccessModeAcl"
+          }
+        ]
+      },
+      "NamespaceAccessModeAcl": {
+        "description": "Access rows govern operations in this identity domain.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "acl"
+            ],
+            "type": "string"
+          },
+          "principal_scope": {
+            "$ref": "#/components/schemas/PrincipalScope",
+            "description": "Identity domain the namespace's principal ids belong to."
+          }
+        },
+        "required": [
+          "principal_scope",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "NamespaceAccessModeUnrestricted": {
+        "description": "Every caller holding the deployment credential may do everything.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "unrestricted"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "NamespaceAccessUnrestricted": {
+        "description": "Every caller holding the deployment credential may do everything.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "unrestricted"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
         ],
         "type": "object"
       },
@@ -3334,6 +3454,18 @@
         ],
         "type": "object"
       },
+      "PrincipalId": {
+        "description": "Stable opaque principal id containing 1 to 256 visible ASCII characters.",
+        "example": "prn_8f3c",
+        "pattern": "^[\\x21-\\x7E]{1,256}$",
+        "type": "string"
+      },
+      "PrincipalScope": {
+        "description": "Opaque identity-domain id containing 1 to 256 visible ASCII characters.",
+        "example": "org_acme",
+        "pattern": "^[\\x21-\\x7E]{1,256}$",
+        "type": "string"
+      },
       "ReorganizeStepOutcome": {
         "description": "The outcome of the metadata-reorganization part of a maintenance pass.",
         "discriminator": {
@@ -3510,6 +3642,7 @@
             "gc": "#/components/schemas/RunMaintenanceRequestGc",
             "metadata": "#/components/schemas/RunMaintenanceRequestMetadata",
             "metadata_compaction": "#/components/schemas/RunMaintenanceRequestMetadataCompaction",
+            "recover_administrator": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator",
             "retention": "#/components/schemas/RunMaintenanceRequestRetention"
           },
           "propertyName": "kind"
@@ -3526,6 +3659,9 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceRequestRetention"
+          },
+          {
+            "$ref": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator"
           }
         ]
       },
@@ -3586,6 +3722,26 @@
         ],
         "type": "object"
       },
+      "RunMaintenanceRequestRecoverAdministrator": {
+        "description": "Restores a root administrator.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "recover_administrator"
+            ],
+            "type": "string"
+          },
+          "principal_id": {
+            "$ref": "#/components/schemas/PrincipalId",
+            "description": "Principal receiving administrator rights."
+          }
+        },
+        "required": [
+          "principal_id",
+          "kind"
+        ],
+        "type": "object"
+      },
       "RunMaintenanceRequestRetention": {
         "description": "Advances the retention floor to the flushed manifest head.",
         "properties": {
@@ -3608,6 +3764,7 @@
             "gc": "#/components/schemas/RunMaintenanceResponseGc",
             "metadata": "#/components/schemas/RunMaintenanceResponseMetadata",
             "metadata_compaction": "#/components/schemas/RunMaintenanceResponseMetadataCompaction",
+            "recover_administrator": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator",
             "retention": "#/components/schemas/RunMaintenanceResponseRetention"
           },
           "propertyName": "kind"
@@ -3624,6 +3781,9 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseRetention"
+          },
+          {
+            "$ref": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator"
           }
         ]
       },
@@ -3725,6 +3885,41 @@
         "required": [
           "namespace_id",
           "compaction",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RunMaintenanceResponseRecoverAdministrator": {
+        "description": "The committed administrator recovery.",
+        "properties": {
+          "access_revision_no": {
+            "$ref": "#/components/schemas/AccessRevisionNo",
+            "description": "Root access revision after recovery."
+          },
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Recovery commit id."
+          },
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence assigned to the recovery commit."
+          },
+          "kind": {
+            "enum": [
+              "recover_administrator"
+            ],
+            "type": "string"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose root grants changed."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "commit_id",
+          "committed_seq",
+          "access_revision_no",
           "kind"
         ],
         "type": "object"

@@ -22,7 +22,11 @@ async fn http_stat_omits_the_root_name_and_carries_named_child_names() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     harness
@@ -66,7 +70,11 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let source = NamespacePath::parse("demo", "/docs/hello.txt").expect("source");
@@ -155,7 +163,11 @@ async fn http_name_collision_reports_readable_error_message() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     harness
@@ -217,7 +229,11 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let child = NamespacePath::parse("demo", "/docs/child.txt").expect("child path");

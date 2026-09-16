@@ -1270,6 +1270,34 @@ fn openapi_names_tagged_one_of_alternatives() {
         .expect("openapi schemas object");
 
     for (schema_name, expected_names) in [
+        (
+            "NamespaceAccess",
+            &["NamespaceAccessUnrestricted", "NamespaceAccessAcl"][..],
+        ),
+        (
+            "NamespaceAccessMode",
+            &["NamespaceAccessModeUnrestricted", "NamespaceAccessModeAcl"][..],
+        ),
+        (
+            "RunMaintenanceRequest",
+            &[
+                "RunMaintenanceRequestMetadata",
+                "RunMaintenanceRequestMetadataCompaction",
+                "RunMaintenanceRequestGc",
+                "RunMaintenanceRequestRetention",
+                "RunMaintenanceRequestRecoverAdministrator",
+            ][..],
+        ),
+        (
+            "RunMaintenanceResponse",
+            &[
+                "RunMaintenanceResponseMetadata",
+                "RunMaintenanceResponseMetadataCompaction",
+                "RunMaintenanceResponseGc",
+                "RunMaintenanceResponseRetention",
+                "RunMaintenanceResponseRecoverAdministrator",
+            ][..],
+        ),
         ("PathEntry", &["PathEntryDirectory", "PathEntryFile"][..]),
         (
             "CreateUploadBody",

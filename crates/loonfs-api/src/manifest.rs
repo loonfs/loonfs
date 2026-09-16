@@ -1062,6 +1062,7 @@ pub mod lookup_keys {
 
 /// A namespace's access mode, fixed at creation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NamespaceAccess {
     /// Every caller holding the deployment credential may do everything.
@@ -1077,6 +1078,11 @@ pub enum NamespaceAccess {
 }
 
 impl NamespaceAccess {
+    /// The unrestricted access mode.
+    pub fn unrestricted() -> Self {
+        Self::Unrestricted {}
+    }
+
     /// Whether every caller holding the deployment credential may do everything.
     pub const fn is_unrestricted(&self) -> bool {
         matches!(self, Self::Unrestricted {})

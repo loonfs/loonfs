@@ -5,6 +5,7 @@
 //! each declared type; it never searches a document for unions or guesses tags.
 
 use super::*;
+use crate::NamespaceAccess;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use utoipa::openapi::{schema::Schema, RefOr};
@@ -22,6 +23,8 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<FilesystemChange>("kind");
     named.tagged::<FilesystemOperation>("kind");
     named.tagged::<MetadataCompactionOutcome>("outcome");
+    named.tagged::<NamespaceAccess>("kind");
+    named.tagged::<NamespaceAccessMode>("kind");
     named.tagged::<ObjectTransferAccess>("kind");
     named.tagged::<ReorganizeStepOutcome>("outcome");
     named.tagged::<RunMaintenanceRequest>("kind");

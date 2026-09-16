@@ -1157,7 +1157,9 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
         json_data(&fork),
         serde_json::json!({
             "kind": "namespace_status",
+            "access": {"kind": "unrestricted"},
             "namespace_id": "clone",
+            "access": {"kind": "unrestricted"},
             "created_at_ms": json_data(&fork)["created_at_ms"],
             "created_by": "loonfs-cli",
             "fork_basis": {"source_namespace_id": "demo", "source_head_seq": 1},
