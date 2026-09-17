@@ -24,7 +24,7 @@ Inline was faster in 24 of 24 rounds. These timings cover store requests only, n
 | Read of a recently written small file | Freshness probe, then content GET | Freshness probe; bytes come from the replayed tail |
 | Read after the next fold | Freshness probe, then content GET | Unchanged |
 | Content references, revision rows, change feed | A visible reference names an existing object | Fields unchanged. A reference in the unfolded tail may name an object the next fold has yet to write |
-| Retry identity of a put that supplies bytes | The content ID, so a repeated upload conflicts | The payload's digest and length, so a repeated request replays |
+| Retry identity of a put | Which content object it names | Unchanged for uploaded objects. Content a commit carries inline is identified by its bytes |
 | Checkpoints, snapshots, forks | | Unchanged |
 | Garbage collection | | No new candidate family. Existing rules hold under the fold invariant |
 | Large files, direct transfers, and the download contract | | Unchanged |
@@ -39,37 +39,38 @@ This keeps one identity for one piece of content over its whole life. Revision r
 
 The meaning of a reference changes in one way. Today a visible reference implies that its object exists. With inline content, a reference in the unfolded tail may name an object that the next fold has yet to write. Every reader resolves a reference through the rule in [Reading](#reading), and none builds an object key directly. The rule that content is durable before publication becomes: content is durable no later than publication.
 
-The content ID is drawn at random when the write is prepared, as it is for staged content today. It is recorded in the reference and in the inline entry before publication. Every fold reads the ID from the log. Racing folds, a restarted fold, and a batch re-planned at a later WAL number all write the same key, and nothing has to derive it.
+The content ID is drawn at random by the writer before publication, as it is for staged content today. It is recorded in the reference and in the inline entry. Every fold reads the ID from the log. Racing folds, a restarted fold, and a batch re-planned at a later WAL number all write the same key, and nothing has to derive it.
 
 Two rules follow.
 
 **One content ID, one lifecycle.** A content ID belongs to exactly one staged upload or one committed inline value. A later attempt never reuses the ID of an earlier one, even for the same bytes. Two facts make this necessary. The store's verified immutable write is safe to retry only because every writer that can name a key supplies identical bytes. And an expired open upload session deletes its content without checking for publication, so an ID shared between a staged attempt and an inline attempt could be deleted after it was committed.
 
-**The content ID is not the retry identity.** Each attempt draws a new ID, so a retry is recognized by its payload instead.
+**An inline value's content ID is not its retry identity.** The server draws the ID for a hosted write, and a write that falls back to staging draws another. Inline content is recognized by its bytes instead.
 
 ## Retry identity
 
-A commit fingerprint represents a put's content as the reference's kind, content ID, and length (format specification, Appendix B.2). The checksum is left out because a fresh ID already pins the bytes. This works when the caller holds the reference: a retry sends the same reference and replays.
+A put is identified by which content object it names, never by what the bytes are. The fingerprint represents the content as the reference's kind, content ID, and length (format specification, Appendix B.2). A fresh upload under a used commit ID is a different request and conflicts. A retry resends the same reference, which a caller does by preparing content once and publishing the prepared value on every attempt. That rule was chosen deliberately, it is one rule, and it stays as it is for every uploaded object.
 
-A request that supplies bytes has no reference to resend. Today `put_file_bytes` conflicts when it is retried under the same commit ID, and its documentation sends callers to the two-step prepare API. A hosted client that retries a request carrying inline bytes would have no such option.
-
-A put that supplies bytes is fingerprinted by its payload. This form takes the place of the reference form in the operation's preimage:
+Inline content has no object to name. For a hosted write the server draws the content ID, so a client that loses the response has nothing stable to resend except the bytes. For an embedded write a fallback to staging draws a second ID, so a fingerprint built on the ID would turn a valid retry into a conflict. Content that a commit carries inline is therefore identified by its bytes. This form takes the place of the reference form in the operation's preimage:
 
 ```json
 {"kind":"payload_v1","sha256":"<64 lowercase hex>","size_bytes":15}
 ```
 
-Everything else in the fingerprint is unchanged. The rules:
+Everything else in the fingerprint is unchanged. The rule is the same one stated at a higher level: a put is identified by what its request names, an uploaded object or the bytes themselves.
 
-- The form follows how the request named its content, never where the bytes were stored. A request that supplies bytes uses the payload form whether the write went inline or fell back to staging. A request that supplies a prepared reference keeps the reference form.
-- While the receipt is retained, a retry with the same payload replays the original commit and returns the original reference. The retry's own content ID is discarded. If the retry staged content before it found the receipt, that content is unpublished and its session reclaims it.
+Identity is fixed when content is prepared. Preparing content at or under the writer's threshold makes an inline prepared value: the bytes and their digest, with no store request. Preparing larger content stages an object as today. The rules:
+
+- An inline prepared value uses the payload form whether it is published inline or falls back to staging. The form never depends on where the bytes were stored.
+- A staged prepared value and a hosted content reference keep the reference form. Nothing about uploaded objects changes.
+- While the receipt is retained, a retry with the same payload replays the original commit and returns the original reference. If the retry staged content before it found the receipt, that content is unpublished and its session reclaims it.
 - A retry with a different payload returns `commit_id_reuse_conflict`, including when the length is equal.
 - After the receipt is reclaimed, the same request executes as a new commit with a new content ID. It cannot collide with the content of the earlier commit, whose revision is kept.
-- The same bytes sent once as a payload and once as a prepared reference, under one commit ID, conflict. They are different requests.
+- The same bytes sent once inline and once as an uploaded object, under one commit ID, conflict. They are different requests. A writer whose threshold changed between two attempts can meet this case.
 
-The digest is SHA-256. The fingerprint scheme fixes it, independent of the reference's checksum algorithm. Embedded byte and stream writes already compute it for the reference. A fingerprint is computed once, when the commit is planned, and stored in the WAL record and the receipt. Replay never recomputes it, so replay does not change.
+One consequence is visible to callers. `put_file_bytes` prepares and then publishes, so its rerun under the same commit ID replays for content small enough to be inline and conflicts for larger content. The failure direction is safe: a conflict, never a replay of the wrong bytes. The advice is the same at every size and on both Rust interfaces: retry with the prepared content.
 
-This extends the fingerprint contract and does not depend on the rest of this proposal. It makes `put_file_bytes` and `put_file_stream` safe to retry on the staged path too, so it can land first.
+The digest is SHA-256. The fingerprint scheme fixes it, independent of the reference's checksum algorithm. Embedded byte and stream writes already compute it for the reference. A fingerprint is computed once, when the commit is planned, and stored in the WAL record and the receipt. Replay never recomputes it, so replay does not change. The form has no caller until inline writes exist, so it lands with the writer.
 
 ## The WAL record
 
@@ -92,11 +93,11 @@ Inline bytes sit inside the WAL payload, so the envelope's existing validation c
 
 ## Writing
 
-**Embedded.** `put_file_bytes` and `put_file_stream` choose the inline path when the content is at or under the writer's threshold and the budgets below have room. Empty files qualify. A stream is buffered up to the threshold to decide. The write draws a content ID, builds the reference, attaches the bytes to the commit candidate, and skips staging. No upload session is written and no admission proof is needed, because no content exists outside the commit. `prepare_file_bytes` keeps its meaning: it makes content durable before publication and returns evidence, so it keeps the staged path.
+**Embedded.** Preparation decides. `prepare_file_bytes` and `prepare_file_stream` make an inline prepared value when the content is at or under the writer's threshold. Empty files qualify. A stream is buffered up to the threshold to decide. Larger content stages as today. `put_file_prepared` publishes either kind, and `put_file_bytes` and `put_file_stream` remain preparation followed by publication. An inline publication draws a content ID, builds the reference, attaches the bytes to the commit candidate, and skips staging. No upload session is written and no admission proof is needed, because no content exists outside the commit. A prepared value has never outlived the process that made it, because the proof it carries is held in memory. An inline prepared value keeps that contract.
 
-**Hosted.** A `put_file` operation in a commit request names exactly one content source: a content reference with its token, as today, or `inline_content`. For inline content the server checks the size, computes the checksum and digest, draws the content ID, and publishes. A small hosted write becomes one request and one store write. It shares batching, preconditions, and the commit response with every other operation. The 2 MiB JSON request limit already bounds a commit's inline bytes, to about 1.5 MiB of content after base64 encoding.
+**Hosted.** A `put_file` operation in a commit request names exactly one content source: a content reference with its token, as today, or `inline_content`. For inline content the server checks the size, computes the checksum and digest, draws the content ID, and publishes. A small hosted write becomes one request and one store write. It shares batching, preconditions, and the commit response with every other operation. The server advertises its inline limit in the capability document, and the Rust HTTP client prepares content at or under it as an inline value, as the embedded runtime does. The 2 MiB JSON request limit already bounds a commit's inline bytes, to about 1.5 MiB of content after base64 encoding.
 
-**Falling back is always allowed.** Every inline limit is a preference. When a limit is reached the writer uses the staged path for that content, and no inline limit produces a write error. A write that falls back stages through an upload session exactly as today, under a content ID of its own, with the completion and abort rules unchanged. The payload fingerprint is the same either way, so a retry can take a different path from the attempt before it.
+**Falling back is always allowed.** Every inline limit is a preference. When a limit is reached the writer uses the staged path for that content, and no inline limit produces a write error. A write that falls back stages through an upload session exactly as today, under a content ID of its own, with the completion and abort rules unchanged. Its fingerprint keeps the payload form, so a retry can take a different path from the attempt before it.
 
 **Where the choice is made.** Content is never staged inside the publication loop.
 
@@ -171,7 +172,9 @@ The WAL is retained until the retention floor advances, and advancing it is opt-
 
 Checkpoints, snapshots, and forks pin a manifest and never replay a later tail. Every reference reachable from a manifest is materialized by the invariant, so none of them can observe tail content.
 
-A copy or restore within the unfolded tail records the same content reference in a new revision. It adds no bytes, and the fold writes the object once. An import into another namespace reads the source bytes through the resolver and writes them under a target-owned identity, as it does today.
+A copy or restore within the unfolded tail records the same content reference in a new revision. It adds no bytes, and the fold writes the object once.
+
+An import reads a reference owned by another namespace and writes the bytes under a target-owned identity, as it does today. It reads the source by object key. If the source content is still in its owner's unfolded tail, no object exists yet, so the import resolves the reference through the owner namespace's view.
 
 ## Resource bounds
 
@@ -207,7 +210,7 @@ The threshold starts low on purpose. The evidence so far is a request sequence f
 - Inline bytes pass through WAL compression and CBOR encoding on the commit path.
 - Retained WAL objects hold a second copy of small content, by default for the life of the namespace.
 - The first direct download of a small file written since the last fold costs one extra content write.
-- The fingerprint contract gains a second content form, with its own pinned test vectors.
+- The fingerprint contract gains a second content form, with its own pinned test vectors. A rerun of `put_file_bytes` replays for inline content and conflicts for uploaded content.
 - Every reader, writer, and folder of a namespace must understand the record field before any writer uses it.
 - A deployment that must keep file bytes out of its metadata store could not use inline content. None exists today. Inlining is writer policy, so such a deployment would turn it off.
 
@@ -218,6 +221,10 @@ The threshold starts low on purpose. The evidence so far is a request sequence f
 **A new content reference kind.** One revision would have two references over time: an inline kind in the log and `blob_v1` in segments. Fingerprints, retries, the change feed, and content equality would all need to treat them as equal. Naming logical content and resolving its location avoids this.
 
 **Deriving the content ID from the commit ID and operation index.** An earlier draft did this so that a retry would build the same reference. It is unsound. The fingerprint leaves out the checksum because a fresh ID pins the bytes. With a derived ID, a second request under the same commit ID, with different bytes of the same length, has an equal fingerprint and replays the first receipt. A commit ID can also be reused after its receipt is reclaimed, while the revision it wrote is kept forever, so one immutable key could be asked to hold two different contents. Adding the payload digest to the derivation repairs both cases. It still lets a staged attempt and an inline attempt share one object, and that object then has two cleanup lifecycles.
+
+**Payload identity for every put that supplies bytes.** This would make a rerun of `put_file_bytes` replay at any size. It reverses the rule that a put is identified by its content object, for a benefit that is small: a rerun of a large write uploads everything again before it finds its receipt, and prepared content already avoids that. It would also split the two Rust interfaces, because the server never sees the bytes of a direct upload and could not fingerprint a hosted large write the same way.
+
+**Content IDs drawn by the client for hosted inline writes.** A resent request would carry the same ID, so the reference form could stay the only form. But the server could not check that the ID is unused by an open upload session, so one content ID having one lifecycle would depend on every client being correct. A wrong ID can stop a fold or let an expired session delete committed content.
 
 **A separate payload section in the WAL object,** readable by range so that metadata readers skip it. This removes the cold-replay, read-amplification, and change-feed costs. It needs a second framing layer and its own integrity check. It is a compatible later step.
 
@@ -231,13 +238,11 @@ Durable formats are at version 1 and carry no compatibility paths before the sta
 
 Suggested order:
 
-1. One resolver for content location, keyed by owner namespace and content ID. No behavior change.
-2. The payload form of the commit fingerprint for puts that supply bytes. It stands alone.
-3. The read side, with writers disabled: the record field and its format limits, replay validation, the tail content cache, reads from the tail including a reclaimed WAL object, fold materialization with its deletion rule, on-demand materialization for direct downloads, and the byte-based fold trigger.
-4. Admission accounting, then the embedded inline policy with its fallback. The lab sweep runs here.
-5. `inline_content` on hosted commit operations.
+1. The read side, with writers disabled, in slices: the record field with its format limits and validation; the content location resolver, keyed by owner namespace and content ID, with the tail content cache and reads from the tail including a reclaimed WAL object; fold materialization with its deletion rule; on-demand materialization for direct downloads and the byte-based fold trigger.
+2. The embedded writer: inline prepared content with its payload fingerprint form, admission accounting, and the inline policy with its fallback. The lab sweep runs here.
+3. `inline_content` on hosted commit operations, with the limit in the capability document.
 
-Writers are enabled only when the identity, fallback, materialization, deletion, and resource rules are all in place. Download behavior, the fold trigger, and admission accounting are part of the first usable version, not later tuning.
+The resolver is not a step of its own. With one location it would be an abstraction without a second case. Writers are enabled only when the identity, fallback, materialization, deletion, and resource rules are all in place. Download behavior, the fold trigger, and admission accounting are part of the first usable version, not later tuning.
 
 ## Verification
 
@@ -257,7 +262,9 @@ Adversarial cases:
 | --- | --- |
 | Same commit ID, different payload of the same length | Conflict while the receipt is retained. Never a replay of the wrong bytes |
 | Commit ID reused after its receipt is reclaimed | A new content ID. No collision with the earlier content |
-| Retry that goes inline after a staged attempt, and the reverse | The same fingerprint. No content ID is reused |
+| An inline prepared value retried after it fell back to staging, and the reverse | The same fingerprint. No content ID is reused |
+| `put_file_bytes` rerun under the same commit ID | Inline content replays the original commit. Uploaded content conflicts, as today |
+| The same bytes sent inline and then as an uploaded object under one commit ID | Conflict |
 | An earlier attempt's session expires after a later attempt commits | Cleanup removes only the earlier attempt's content |
 | Deletion or retirement during materialization | Materialization stops within one step. Late writes are covered by the repeated owner sweep |
 | Old view, bytes evicted, WAL object folded and reclaimed | Verified bytes from the content object |
@@ -274,7 +281,7 @@ Lab repository, `analysis/steady-state-floors-experiments-20260916.md`, section 
 
 1. Which threshold does the sweep support, and is it cold replay, fold throughput, or the shared WAL object that sets it?
 2. Should the direct-download response later gain an inline access kind for small content, to save the second request? `access` is already kind-tagged. It would need a capability so older clients are not surprised.
-3. Does any consumer depend on a content object existing as soon as a commit is visible?
-4. Should hosted inline writes have a limit per namespace as well as the runtime budget, to protect the shared publisher?
-5. Should the payload section be separately ranged from the start? Read amplification on tail values that are not resident makes this more pressing than cold replay alone.
-6. Should the payload fingerprint cover large streamed writes? A retry of one must stage the whole stream again before it can find its receipt.
+3. Should hosted inline writes have a limit per namespace as well as the runtime budget, to protect the shared publisher?
+4. Should the payload section be separately ranged? Read amplification on tail values that are not resident makes this more pressing than cold replay alone. The plan is to build the simple layout, measure both costs in the sweep, and decide before the format is frozen.
+
+Settled: nothing outside the repository reads content objects by key, and inside it one module builds content keys, so no consumer depends on an object existing as soon as a commit is visible.
