@@ -135,6 +135,13 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         })));
     }
 
+    // Inline content is not materialized yet, so a covering manifest would
+    // let collection delete the only copy.
+    if projection.wal_tail_inline_bytes != 0 {
+        return Err(CoreError::Internal(
+            "cannot flush a WAL tail with inline content before materialization".to_owned(),
+        ));
+    }
     let manifest_no = next_manifest_no_after(basis_manifest_no)?;
     let manifest =
         build_namespace_manifest_for_projection(store, namespace_id, projection, manifest_no)
@@ -217,6 +224,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         floor_seq: input.retention_floor_seq,
         manifest_segments: loaded_basis.segments,
         tail_state: input.tail_state,
+        wal_tail_inline_bytes: input.wal_tail_inline_bytes,
     };
     // A fold publishes metadata without updating the namespace head.
     match try_flush_wal_projection(store, namespace_id, &manifest_projection, timer).await? {
@@ -239,6 +247,7 @@ pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     pub(super) basis: MetadataBasis,
     pub(super) floor_seq: ChangeSeq,
+    pub(super) wal_tail_inline_bytes: u64,
     pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
@@ -309,6 +318,7 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
         floor_seq,
         manifest_segments,
         tail_state: Arc::new(replayed.resulting_metadata_state),
+        wal_tail_inline_bytes: replayed.wal_tail_inline_bytes,
     })
 }
 

@@ -104,6 +104,7 @@ pub(crate) struct PublishTailProjection {
     pub(crate) head: NamespaceReadState,
     pub(crate) retention_floor_seq: ChangeSeq,
     pub(crate) wal_tail_segments: u64,
+    pub(crate) wal_tail_inline_bytes: u64,
     pub(crate) tail_state: Arc<MetadataState>,
 }
 
@@ -223,6 +224,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         head: head.clone(),
         retention_floor_seq,
         wal_tail_segments,
+        wal_tail_inline_bytes: replayed.wal_tail_inline_bytes,
         tail_state: Arc::new(replayed.resulting_metadata_state),
     };
     Ok(projection)
@@ -272,6 +274,7 @@ mod tests {
             retention_floor_seq: ChangeSeq(0),
             key,
             wal_tail_segments: 3,
+            wal_tail_inline_bytes: 0,
             tail_state: Arc::new(bootstrap_metadata_state(
                 1_000,
                 &loonfs_api::NamespaceAccess::Unrestricted {},

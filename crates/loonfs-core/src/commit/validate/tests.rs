@@ -728,7 +728,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("replace then restore in same request should validate");
-    let materialized = materialize_commit(plan, 4_200);
+    let materialized = materialize_commit(plan, 4_200, &[]);
     assert!(matches!(
         &materialized.deltas[1].wal_delta,
         WalDelta::AppendFileRevision {
@@ -771,7 +771,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("restore then restore in same request should validate");
-    let materialized = materialize_commit(plan, 4_200);
+    let materialized = materialize_commit(plan, 4_200, &[]);
     assert!(matches!(
         &materialized.deltas[0].wal_delta,
         WalDelta::AppendFileRevision {

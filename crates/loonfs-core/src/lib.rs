@@ -154,6 +154,7 @@ pub mod publish {
     pub use crate::path::write::{CommitRequest, FilesystemOperation};
     pub use crate::protocol::{PublishTailOptions, PublishTailWeight};
     pub use crate::storage::content_admission::PreparedContent;
+    pub use crate::storage::inline_content::InlineContent;
 }
 
 // Crate-root re-exports used by `loonfs` or required by public return types.

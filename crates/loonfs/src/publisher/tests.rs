@@ -635,6 +635,89 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
     }
 }
 
+#[tokio::test]
+async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() {
+    use loonfs_api::wire::wal::{
+        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES,
+    };
+    use loonfs_core::publish::InlineContent;
+
+    for extra_values in [0, 1] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("inline-batches").expect("namespace");
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        ));
+        let runtime = test_runtime(store.clone());
+        create_namespace(&runtime, &namespace_id).await;
+        let mut publisher = standalone_publisher(&namespace_id, &runtime);
+        publisher.min_publish_interval = Duration::ZERO;
+        recv_commit(
+            admit_commit(
+                &publisher,
+                &namespace_id,
+                create_directory_request("warmup", "warmup"),
+            ),
+            "warmup",
+        )
+        .await;
+        store.reset();
+        let half = MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES / 2;
+        let mut responses = Vec::new();
+        for (name, count) in [("first", half), ("second", half + extra_values)] {
+            let values: Vec<_> = (0..count)
+                .map(|_| {
+                    InlineContent::new(
+                        namespace_id.clone(),
+                        loonfs_api::ContentId::generate(),
+                        Bytes::from(vec![1; MAX_WAL_INLINE_CONTENT_BYTES]),
+                    )
+                })
+                .collect();
+            let request = CommitRequest {
+                commit_id: CommitId::parse(name).expect("commit"),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                preconditions: Vec::new(),
+                operations: values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse(format!("/{name}-{index}")).expect("path"),
+                        content_ref: value.content_ref().clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    })
+                    .collect(),
+            };
+            responses.push(
+                try_admit_candidate(
+                    &publisher,
+                    &namespace_id,
+                    CommitCandidate::with_inline_content(request, Vec::new(), values),
+                )
+                .expect("admit"),
+            );
+        }
+        let expected_batches = if extra_values == 0 { 1 } else { 2 };
+        assert_eq!(publisher_state(&publisher).queue.len(), expected_batches);
+        for (response, expected_seq) in responses.into_iter().zip([ChangeSeq(2), ChangeSeq(3)]) {
+            assert_eq!(
+                recv_commit(response, "inline commit").await.committed_seq,
+                expected_seq
+            );
+        }
+        assert_eq!(
+            store.count(OperationClass::PutCreateIfAbsent),
+            expected_batches
+        );
+        publisher.wait_for_worker().await;
+    }
+}
+
 #[test]
 fn publisher_trace_labels_are_low_cardinality() {
     // A result label says only whether the publication succeeded. The error

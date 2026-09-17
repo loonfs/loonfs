@@ -18,9 +18,11 @@ use crate::protocol::{
     PublishViewEffect,
 };
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
+use crate::storage::inline_content::InlineContent;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
+use loonfs_api::wire::wal::{MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES};
 use loonfs_api::{ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
@@ -34,6 +36,7 @@ pub struct CommitCandidate {
     request: CommitRequest,
     content: ContentPreparation,
     maintenance: bool,
+    inline_content: Vec<InlineContent>,
 }
 
 /// The result of preparing external content referenced by a mutation.
@@ -73,6 +76,7 @@ impl CommitCandidate {
             request,
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: true,
+            inline_content: Vec::new(),
         }
     }
 
@@ -90,6 +94,7 @@ impl CommitCandidate {
             request,
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: false,
+            inline_content: Vec::new(),
         }
     }
 
@@ -99,6 +104,7 @@ impl CommitCandidate {
             request,
             content: ContentPreparation::Ready(content),
             maintenance: false,
+            inline_content: Vec::new(),
         }
     }
 
@@ -108,7 +114,32 @@ impl CommitCandidate {
             request,
             content: ContentPreparation::Rejected(error),
             maintenance: false,
+            inline_content: Vec::new(),
         }
+    }
+
+    /// Takes `inline_content` as the content bytes carried by the commit.
+    pub fn with_inline_content(
+        request: CommitRequest,
+        content: Vec<PreparedContent>,
+        inline_content: Vec<InlineContent>,
+    ) -> Self {
+        Self {
+            request,
+            content: ContentPreparation::Ready(content),
+            maintenance: false,
+            inline_content,
+        }
+    }
+
+    pub(crate) fn inline_content(&self) -> &[InlineContent] {
+        &self.inline_content
+    }
+
+    pub fn inline_content_bytes(&self) -> usize {
+        self.inline_content.iter().fold(0usize, |total, value| {
+            total.saturating_add(value.bytes().len())
+        })
     }
 
     pub(crate) fn request(&self) -> &CommitRequest {
@@ -124,10 +155,17 @@ impl CommitCandidate {
         &self.request.commit_id
     }
 
-    /// Computes semantic identity from the request alone, without applying
-    /// current operational request limits.
+    /// Computes semantic identity without applying current operational request limits.
     pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> Result<CommitFingerprint> {
-        commit_fingerprint(namespace_id, &self.request)
+        commit_fingerprint(
+            namespace_id,
+            &self.request,
+            &self
+                .inline_content
+                .iter()
+                .map(|value| value.content_ref().content_id.clone())
+                .collect(),
+        )
     }
 
     /// Estimates retained request data and prepared proofs for publication
@@ -177,13 +215,21 @@ impl CommitCandidate {
                 bytes.0 = bytes.0.saturating_add(content_id.as_str().len());
             }
         }
+        bytes.0 = bytes
+            .0
+            .saturating_add(std::mem::size_of_val(self.inline_content.as_slice()));
+        for value in &self.inline_content {
+            bytes.0 = bytes.0.saturating_add(value.bytes().len());
+            serde_json::to_writer(&mut bytes, value.content_ref())
+                .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
+        }
         Ok(bytes.0)
     }
 
     /// Bounds the bytes this request adds to an encoded WAL document, excluding
     /// the document envelope.
     pub fn wal_record_bytes_upper_bound(&self) -> usize {
-        crate::commit_wal_size::estimated_wal_record_bytes(&self.request)
+        crate::commit_wal_size::estimated_wal_record_bytes(&self.request, &self.inline_content)
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
@@ -212,6 +258,23 @@ impl CommitCandidate {
                     crate::limits::MAX_COMMIT_MESSAGE_BYTES
                 )));
             }
+        }
+        for value in &self.inline_content {
+            let size_bytes = value.bytes().len();
+            if size_bytes > MAX_WAL_INLINE_CONTENT_BYTES {
+                let content_id = &value.content_ref().content_id;
+                return Err(CoreError::InvalidCommitRequest(format!(
+                    "inline content `{content_id}` is {size_bytes} bytes; maximum is {}",
+                    MAX_WAL_INLINE_CONTENT_BYTES
+                )));
+            }
+        }
+        let inline_bytes = self.inline_content_bytes();
+        if inline_bytes > MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "mutation has {inline_bytes} inline content bytes; maximum is {}",
+                MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES
+            )));
         }
         let prepared_count = match &self.content {
             ContentPreparation::Ready(content) => content.len(),
@@ -283,6 +346,7 @@ pub struct WalFoldInput {
     pub retention_floor_seq: ChangeSeq,
     pub tail_state: Arc<MetadataState>,
     pub wal_tail_segments: u64,
+    pub wal_tail_inline_bytes: u64,
 }
 
 /// A read anchor plus the projected WAL tail as of one landed publish.
@@ -401,6 +465,7 @@ impl NamespaceCommitEngine {
                 retention_floor_seq: projection.retention_floor_seq,
                 tail_state: Arc::clone(&projection.tail_state),
                 wal_tail_segments: projection.wal_tail_segments,
+                wal_tail_inline_bytes: projection.wal_tail_inline_bytes,
             })
     }
 
@@ -593,6 +658,11 @@ impl NamespaceCommitEngine {
                 projection.wal_tail_segments += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
                 for record in &records {
+                    projection.wal_tail_inline_bytes += record
+                        .inline_content
+                        .iter()
+                        .map(|value| value.bytes.len() as u64)
+                        .sum::<u64>();
                     tail_state.apply_committed_wal_record_mut(record);
                 }
                 projection.reanchor(head.clone());
@@ -648,6 +718,10 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 #[path = "commit_engine_content_tests.rs"]
 mod content_tests;
+
+#[cfg(test)]
+#[path = "commit_engine_inline_tests.rs"]
+mod inline_tests;
 
 #[cfg(test)]
 mod tests {

@@ -86,6 +86,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         retention_floor_seq: projection.retention_floor_seq,
         tail_state: Arc::clone(&projection.tail_state),
         wal_tail_segments: projection.wal_tail_segments,
+        wal_tail_inline_bytes: projection.wal_tail_inline_bytes,
     };
     let response = flush::fold_wal_tail(
         &store,

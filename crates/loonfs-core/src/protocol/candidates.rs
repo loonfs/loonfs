@@ -11,10 +11,11 @@ use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
+use crate::storage::inline_content::InlineContent;
 use loonfs_api::v0::Commit;
 use loonfs_api::{CommitId, ContentId, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) struct PreparedCandidateCommit {
     pub(super) validated: ValidatedCommitPlan,
@@ -168,6 +169,7 @@ pub(super) fn validate_candidate_content_references(
         ContentPreparation::Ready(admissions) => validate_commit_content_references(
             candidate.request(),
             admissions,
+            candidate.inline_content(),
             namespace_id,
             content_store_id,
             now_ms,
@@ -241,14 +243,43 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     Ok(change)
 }
 
-/// Checks that each put has a matching content preparation proof.
+/// Checks that each put's content is covered by a staged proof or an equal inline value.
 fn validate_commit_content_references(
     request: &CommitRequest,
     admissions: &[PreparedContent],
+    inline_content: &[InlineContent],
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     now_ms: u64,
 ) -> Result<()> {
+    let references: HashSet<_> = request
+        .operations
+        .iter()
+        .filter_map(FilesystemOperation::content_ref)
+        .collect();
+    let mut inline_by_content_id = HashMap::new();
+    for value in inline_content {
+        let reference = value.content_ref();
+        let content_id = &reference.content_id;
+        if !references.contains(reference) {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "inline content `{content_id}` is not referenced by an operation"
+            )));
+        }
+        if inline_by_content_id
+            .insert(&reference.content_id, reference)
+            .is_some()
+        {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "inline content `{content_id}` appears more than once"
+            )));
+        }
+        if reference.owner_namespace_id != *namespace_id {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "inline content `{content_id}` is not owned by the committing namespace"
+            )));
+        }
+    }
     let mut admissions_by_content_id: HashMap<&ContentId, Vec<&PreparedContent>> =
         HashMap::with_capacity(admissions.len());
     for admission in admissions {
@@ -262,6 +293,15 @@ fn validate_commit_content_references(
         .iter()
         .filter_map(FilesystemOperation::content_ref)
     {
+        let content_id = &content_ref.content_id;
+        if let Some(inline_reference) = inline_by_content_id.get(content_id) {
+            if *inline_reference != content_ref {
+                return Err(CoreError::InvalidCommitRequest(format!(
+                    "inline content `{content_id}` does not match every reference"
+                )));
+            }
+            continue;
+        }
         let admitted = admissions_by_content_id
             .get(&content_ref.content_id)
             .is_some_and(|candidates| {

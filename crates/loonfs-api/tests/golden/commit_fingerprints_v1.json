@@ -483,5 +483,77 @@
     "preconditions": [],
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":\"usr_root\",\"operations\":[{\"kind\":\"update_access\",\"path\":\"/\",\"boundary\":false,\"grants\":{\"prn_root\":[\"admin\"],\"prn_team\":[\"read\",\"write\"]},\"expected_inode_id\":null,\"expected_access_revision_no\":null}],\"message\":null,\"preconditions\":[]}",
     "fingerprint": "v1:sha256:767424449b13b5a5b46c778a2da55e7f16f7dfa55470f52ebb5f05b0a3906c21"
+  },
+  {
+    "name": "put_file_inline",
+    "operation": {
+      "kind": "put_file",
+      "path": "/docs/report.txt",
+      "content_ref": {
+        "kind": "blob_v1",
+        "owner_namespace_id": "demo",
+        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "size_bytes": 16,
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+        }
+      },
+      "behavior": "no_replace"
+    },
+    "preconditions": [],
+    "inline_content_ids": [
+      "con_0123456789abcdef0123456789abcdef"
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file\",\"path\":\"/docs/report.txt\",\"behavior\":\"no_replace\",\"content_ref\":{\"kind\":\"inline_v1\",\"sha256\":\"b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6\",\"size_bytes\":16},\"expected_inode_id\":null,\"expected_revision_no\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:64d40d4323f1123d27cbe9eb825346aada8ce11aa6b99997552191c1cfc869bf"
+  },
+  {
+    "name": "create_file_by_inode_inline",
+    "operation": {
+      "kind": "create_file_by_inode",
+      "parent_inode_id": "ino_7",
+      "display_name": "report.txt",
+      "content_ref": {
+        "kind": "blob_v1",
+        "owner_namespace_id": "demo",
+        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "size_bytes": 16,
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+        }
+      }
+    },
+    "preconditions": [],
+    "inline_content_ids": [
+      "con_0123456789abcdef0123456789abcdef"
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"create_file_by_inode\",\"parent_inode_id\":7,\"display_name\":\"report.txt\",\"content_ref\":{\"kind\":\"inline_v1\",\"sha256\":\"b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6\",\"size_bytes\":16}}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:58331aee7ced47c702c4d13d0acbb3cabcd3e7d4b3fbdaa52ef5f4281d44d69b"
+  },
+  {
+    "name": "put_file_revision_by_inode_inline",
+    "operation": {
+      "kind": "put_file_revision_by_inode",
+      "inode_id": "ino_42",
+      "content_ref": {
+        "kind": "blob_v1",
+        "owner_namespace_id": "demo",
+        "content_id": "con_0123456789abcdef0123456789abcdef",
+        "size_bytes": 16,
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+        }
+      },
+      "expected_revision_no": 3
+    },
+    "preconditions": [],
+    "inline_content_ids": [
+      "con_0123456789abcdef0123456789abcdef"
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file_revision_by_inode\",\"inode_id\":42,\"content_ref\":{\"kind\":\"inline_v1\",\"sha256\":\"b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6\",\"size_bytes\":16},\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:d8df3f042a42c45809fc3fe6100b002c0d0d52d58bfc2ad7754f816b1cec4fa5"
   }
 ]

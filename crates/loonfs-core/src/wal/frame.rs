@@ -3,7 +3,7 @@
 
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::{
-    WalCommitDelta, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
+    WalCommitDelta, WalCommitPayload, WalInlineContent, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,7 @@ pub(crate) struct DecodedWalRecord<'a> {
     pub(crate) semantic_commit_fingerprint: &'a loonfs_api::CommitFingerprint,
     pub(crate) message: Option<&'a str>,
     pub(crate) deltas: Cow<'a, [WalCommitDelta]>,
+    pub(crate) inline_content: &'a [WalInlineContent],
 }
 
 impl ValidatedWalSegment {
@@ -114,6 +115,7 @@ impl ValidatedWalSegment {
                 semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
                 message: record.message.as_deref(),
                 deltas: Cow::Borrowed(&record.deltas),
+                inline_content: &record.inline_content,
             })
     }
 }
@@ -177,4 +179,5 @@ impl WalTailLoadError {
 pub(crate) struct ReplayedWalTail {
     pub resulting_head: NamespaceReadState,
     pub resulting_metadata_state: crate::metadata::MetadataState,
+    pub wal_tail_inline_bytes: u64,
 }

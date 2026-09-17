@@ -23,10 +23,11 @@ use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{
-    next_public_ordinal, ChangeSeq, DestinationPrecondition, NamespaceId, PreconditionFields,
-    MAX_PUBLIC_INTEGER,
+    next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, NamespaceId,
+    PreconditionFields, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
+use std::collections::BTreeSet;
 
 /// Computes the semantic fingerprint of a mutation request.
 ///
@@ -36,6 +37,7 @@ use loonfs_objectstore::ObjectStore;
 pub(crate) fn commit_fingerprint(
     namespace_id: &NamespaceId,
     request: &CommitRequest,
+    inline_content_ids: &BTreeSet<ContentId>,
 ) -> Result<CommitFingerprint> {
     loonfs_api::semantic_commit_fingerprint(
         namespace_id,
@@ -44,8 +46,14 @@ pub(crate) fn commit_fingerprint(
         request.message.as_deref(),
         &request.operations,
         &request.preconditions,
+        inline_content_ids,
     )
-    .map_err(|err| CoreError::Internal(format!("failed to fingerprint mutation: {err}")))
+    .map_err(|error| match error {
+        loonfs_api::SemanticFingerprintError::InlineChecksumAlgorithm { .. } => {
+            CoreError::InvalidCommitRequest(error.to_string())
+        }
+        error => CoreError::Internal(format!("failed to fingerprint mutation: {error}")),
+    })
 }
 
 /// Compiles and validates a mutation request into one commit in a single
@@ -352,6 +360,7 @@ mod tests {
                 None,
                 create_dir("/docs/a"),
             ),
+            &BTreeSet::new(),
         )
         .expect("left fingerprint");
         let right = commit_fingerprint(
@@ -362,6 +371,7 @@ mod tests {
                 None,
                 create_dir("/docs/a"),
             ),
+            &BTreeSet::new(),
         )
         .expect("right fingerprint");
 
@@ -388,8 +398,9 @@ mod tests {
         };
 
         assert_eq!(
-            commit_fingerprint(&namespace_id, &convenience).expect("convenience fingerprint"),
-            commit_fingerprint(&namespace_id, &batch).expect("batch fingerprint")
+            commit_fingerprint(&namespace_id, &convenience, &BTreeSet::new())
+                .expect("convenience fingerprint"),
+            commit_fingerprint(&namespace_id, &batch, &BTreeSet::new()).expect("batch fingerprint")
         );
     }
 

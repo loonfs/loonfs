@@ -120,6 +120,7 @@ mod tests {
     use crate::storage::content_admission::PreparedContent;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use std::collections::BTreeSet;
     use tempfile::tempdir;
 
     fn test_context() -> MutationContext {
@@ -258,7 +259,8 @@ mod tests {
             let plan = session
                 .prepare_commit(
                     &CommitCandidate::new(request.clone()),
-                    commit_fingerprint(&namespace_id, &request).expect("fingerprint"),
+                    commit_fingerprint(&namespace_id, &request, &BTreeSet::new())
+                        .expect("fingerprint"),
                     view.projected_metadata_view(),
                     1,
                     &mut allocation,
@@ -269,6 +271,7 @@ mod tests {
             payloads.push(wal_payload_from_materialized_commit(&materialize_commit(
                 plan.finish(next_inode_id),
                 1,
+                &[],
             )));
         }
         assert_ne!(
