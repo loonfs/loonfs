@@ -82,7 +82,7 @@ A view already replays the unfolded WAL tail. While it does, it records which co
 
 Replayed bytes are kept in a byte-budgeted cache next to the tail projection. A value that is not resident costs one GET of its WAL object, the same as a content object read. About a dozen call sites turn a reference into a key or bytes today, in `engine.rs`, `path/read/materialized_view.rs`, and `storage/content.rs`. The first implementation step routes them through one resolver without changing behavior.
 
-A small file read shortly after it was written needs no content request. With the speculative read path proposed in #966, the candidate's bytes are already available, so the read finishes when validation does.
+A small file read shortly after it was written needs no content request. With the speculative read path (#966), the candidate's bytes are already available, so the read finishes when validation does.
 
 ## Direct downloads
 
@@ -136,7 +136,7 @@ A copy or restore within the unfolded tail records the same content reference in
 
 | Bound | Proposed | Purpose |
 | --- | ---: | --- |
-| Inline limit per value | 64 KiB | Small-object PUT latency is flat to this size; matches the speculative read cap proposed in #966 |
+| Inline limit per value | 64 KiB | Small-object PUT latency is flat to this size; matches the speculative read cap (#966) |
 | Inline bytes per WAL object | 4 MiB | Bounds publisher memory, WAL object size, and one replay step |
 | Tail inline bytes that make a fold due | 32 MiB | Bounds what a cold reader downloads |
 | Tail inline bytes beyond which writes use the staged path | 64 MiB | Hard ceiling when folding falls behind |
