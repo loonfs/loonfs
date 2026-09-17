@@ -397,14 +397,29 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<ResolvedFileContent> {
+        let head_view = self.authorization_head_view().await?;
+        let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        let (entry, content_ref) = view.resolve_file_content(path.as_ref(), None).await?;
+        let (entry, content_ref) = view
+            .resolve_file_content(path.as_ref(), None, &access)
+            .await?;
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         Ok(ResolvedFileContent {
             entry,
             content_ref,
             content_store_id: view.content_store_id().clone(),
         })
+    }
+
+    /// Fetches and verifies content after `resolve_file_content` authorizes it.
+    /// A cached target must first be validated against the current view.
+    pub async fn get_resolved_file_content(&self, target: &ResolvedFileContent) -> Result<Vec<u8>> {
+        Ok(crate::storage::content::get_durable_content_bytes(
+            &self.store,
+            &target.content_store_id,
+            &target.content_ref,
+        )
+        .await?)
     }
 
     /// Verifies at most 64 KiB of speculative content, plus an overflow byte.

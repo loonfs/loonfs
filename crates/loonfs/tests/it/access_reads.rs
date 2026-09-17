@@ -1,7 +1,7 @@
 //! Subject reads observe access changes through the runtime cache.
 
 use loonfs::publish::{CommitRequest, FilesystemOperation};
-use loonfs::{CreateNamespaceOptions, FsWriter, StatPathOptions};
+use loonfs::{CreateNamespaceOptions, DestinationBehavior, FsReader, FsWriter, StatPathOptions};
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ErrorCode, NamespaceAccess,
     PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -31,9 +31,15 @@ fn grants(principal: &str, right: AccessRight) -> AccessGrants {
 
 #[tokio::test]
 async fn a_warmed_reader_sees_a_revocation_on_its_next_read() {
+    for content_size in [0, 5, 64 * 1024, 64 * 1024 + 1] {
+        check_buffered_read_access(content_size).await;
+    }
+}
+
+async fn check_buffered_read_access(content_size: usize) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = FsWriter::builder_with_store(store)
+    let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("access-reads")
         .min_publish_interval_ms(0)
         .build()
@@ -53,7 +59,12 @@ async fn a_warmed_reader_sees_a_revocation_on_its_next_read() {
         )
         .await
         .expect("namespace");
-    let reader = writer.reader().as_subject(subject("viewer"));
+    // Keep the reader's cache independent so a write cannot invalidate it.
+    let reader = FsReader::builder_with_store(store)
+        .build()
+        .await
+        .expect("reader")
+        .as_subject(subject("viewer"));
     for operation in [
         FilesystemOperation::CreateDirectory {
             path: AbsolutePath::parse("/team").expect("path"),
@@ -85,6 +96,49 @@ async fn a_warmed_reader_sees_a_revocation_on_its_next_read() {
         .get_path_entry(&namespace_id, "/team", StatPathOptions::default())
         .await
         .expect("warm read");
+    for byte in [b'a', b'b'] {
+        let bytes = vec![byte; content_size];
+        let prepared = writer
+            .prepare_file_bytes(&namespace_id, &bytes)
+            .await
+            .expect("prepare file");
+        writer
+            .commit_prepared(
+                &namespace_id,
+                CommitRequest::single(
+                    CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse("/team/file").expect("path"),
+                        content_ref: prepared.content_ref().clone(),
+                        behavior: DestinationBehavior::Replace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                )
+                .with_subject(subject("prn_root")),
+                vec![prepared],
+            )
+            .await
+            .expect("publish file");
+        for _ in 0..2 {
+            let read = reader
+                .get_file_bytes(&namespace_id, "/team/file")
+                .await
+                .expect("read with changed or unchanged metadata");
+            assert_eq!(read.bytes, bytes);
+        }
+        assert_eq!(
+            reader
+                .as_subject(subject("stranger"))
+                .get_file_bytes(&namespace_id, "/team/file")
+                .await
+                .expect_err("a shared cache does not grant another subject access")
+                .code(),
+            ErrorCode::PathNotFound
+        );
+    }
     writer
         .create_commit(
             &namespace_id,
@@ -104,6 +158,14 @@ async fn a_warmed_reader_sees_a_revocation_on_its_next_read() {
         )
         .await
         .expect("revoke");
+    assert_eq!(
+        reader
+            .get_file_bytes(&namespace_id, "/team/file")
+            .await
+            .expect_err("cached content cannot bypass revocation")
+            .code(),
+        ErrorCode::PathNotFound
+    );
     assert_eq!(
         reader
             .get_path_entry(&namespace_id, "/team", StatPathOptions::default())
