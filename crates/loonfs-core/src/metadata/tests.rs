@@ -88,6 +88,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         committed_at_ms: 4_200,
         message: None,
         deltas,
+        inline_content: Vec::new(),
     };
 
     let mut state = MetadataState::default();

@@ -1133,7 +1133,7 @@ A WAL segment's payload contains `namespace_id`, `wal_no`, `next_inode_id`, `wri
 
 For a data segment, `records` covers the sequence interval contiguously; the first commit follows `base_head_seq`. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list, equal base/start/end sequences, and an unchanged allocator. Fences participate in WAL numbering and epoch validation but produce no logical changes.
 
-Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, and `deltas`. A delta wrapper contains `semantic_op_index` and `delta`. The latter is a kind-tagged object with these fields:
+Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_op_index` and `delta`. The latter is a kind-tagged object with these fields:
 
 | Delta kind | Fields after `kind` |
 | --- | --- |
@@ -1147,6 +1147,18 @@ Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_finger
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
 A delta's own commit sequence is implicit in its containing commit. A tombstone target is `{seq, delta_index}`. A deleted directory entry is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
+
+`inline_content` is a list of `{content_id, bytes}`, where `bytes` is a CBOR byte string; the field is omitted when empty and defaults to an empty list when absent. This field is part of the version 1 format, and the reference it accompanies is an ordinary `blob_v1` reference.
+
+Encoding and decoding enforce these rules using only the WAL segment:
+
+1. Every entry's `content_id` is named by at least one `append_file_revision` delta in the same commit whose `content_ref.owner_namespace_id` equals the segment's `namespace_id`.
+2. The entry's length equals the `size_bytes` of every such reference. A zero-length entry is valid.
+3. A content ID appears at most once in a commit's `inline_content`.
+4. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES`: 256 KiB (262,144 bytes).
+5. The sum of all entry lengths in one WAL segment is at most `MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES`: 4 MiB (4,194,304 bytes).
+
+These are reader limits; writer thresholds are policy at or below them. `MAX_WAL_SEGMENT_BYTES` still limits the complete decompressed document. A delta may name content with no inline entry. Replay does not hash inline bytes against the reference's checksum; the envelope's `payload_checksum` covers the stored payload bytes.
 
 WAL replay applies these normalized records in sequence and delta order. It does not re-run the original request's preconditions or reinterpret the request under a newer planner.
 
