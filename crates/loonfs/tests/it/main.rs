@@ -31,6 +31,7 @@ mod read_snapshot;
 mod request_accounting;
 mod runtime_config;
 mod snapshots;
+mod speculative_reads;
 mod staged_content_reclamation;
 mod standalone_maintenance;
 mod streamed_put;

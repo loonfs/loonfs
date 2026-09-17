@@ -58,7 +58,7 @@ pub struct RuntimeReadContext {
 
 /// Owned metadata for one buffered read, without retaining its metadata view.
 /// The runtime must validate the current path before using speculative bytes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolvedFileContent {
     /// Entry from the resolved view; old entries cannot authorize current reads.
     pub entry: PathEntry,
