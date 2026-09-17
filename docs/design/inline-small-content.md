@@ -13,36 +13,63 @@ Measured on real S3 by replaying each protocol's request sequence, 24 interleave
 | Current: session, content, completion, WAL | 4 | 289.1 | 428.8 |
 | Inline: WAL only | 1 | 58.8 | 69.9 |
 
-Inline was faster in 24 of 24 rounds. These timings cover store requests only, not writer authority, freshness, or WAL encoding.
+Inline was faster in 24 of 24 rounds. These timings cover store requests only, not writer authority, freshness, WAL encoding, or folding. They show what the request sequence allows, not what the product will deliver.
 
 ## What changes and what does not
 
-| | Today | Proposed for content at or under the inline limit |
+| | Today | Proposed for content at or under the inline threshold |
 | --- | --- | --- |
 | Embedded small write | Upload session, content, completion, WAL | WAL |
 | Hosted small write | Three or more HTTP requests; four to six store writes | One HTTP request; one store write |
 | Read of a recently written small file | Freshness probe, then content GET | Freshness probe; bytes come from the replayed tail |
 | Read after the next fold | Freshness probe, then content GET | Unchanged |
-| Content references, revision rows, change feed | | Unchanged |
+| Content references, revision rows, change feed | A visible reference names an existing object | Fields unchanged. A reference in the unfolded tail may name an object the next fold has yet to write |
+| Retry identity of a put that supplies bytes | The content ID, so a repeated upload conflicts | The payload's digest and length, so a repeated request replays |
 | Checkpoints, snapshots, forks | | Unchanged |
-| Garbage collection rules | | Unchanged |
+| Garbage collection | | No new candidate family. Existing rules hold under the fold invariant |
 | Large files, direct transfers, and the download contract | | Unchanged |
 
 Three other systems built on object storage put payload bytes in their log and reorganize them later: SlateDB keeps values in WAL and SST objects, turbopuffer commits documents to its WAL and indexes them asynchronously, and Cursor's Git storage writes each push's packfile as a WAL entry and compacts in the background. LoonFS is the exception because it needs an independently addressable object for large and direct transfers. This proposal keeps that object and removes the wait for it.
 
 ## A reference names content, not a location
 
-The content reference does not change. A commit that carries inline bytes records the same `append_file_revision` delta it records today, with an ordinary `blob_v1` reference: content ID, size, and checksum. The reference names the object the fold will write. Until then the WAL record holds the authoritative copy.
+The content reference keeps its fields. A commit that carries inline bytes records the same `append_file_revision` delta it records today, with an ordinary `blob_v1` reference: owner, content ID, size, and checksum. The reference names the object the fold will write. Until then the WAL record holds the authoritative copy.
 
-This keeps one identity for one piece of content over its whole life. Revision rows, commit fingerprints, the change feed, retained receipts, and equality checks such as the speculative read's same-content test never see two different references for the same bytes.
+This keeps one identity for one piece of content over its whole life. Revision rows, the change feed, retained receipts, and equality checks such as the speculative read's same-content test never see two different references for the same bytes.
 
-The content ID must be the same on every attempt of the same commit, because the commit fingerprint includes it and because folds must agree on where to write. It is derived rather than drawn:
+The meaning of a reference changes in one way. Today a visible reference implies that its object exists. With inline content, a reference in the unfolded tail may name an object that the next fold has yet to write. Every reader resolves a reference through the rule in [Reading](#reading), and none builds an object key directly. The rule that content is durable before publication becomes: content is durable no later than publication.
 
-```text
-content_id = "con_" + hex(first 128 bits of SHA-256(commit_id, semantic_op_index))
+The content ID is drawn at random when the write is prepared, as it is for staged content today. It is recorded in the reference and in the inline entry before publication. Every fold reads the ID from the log. Racing folds, a restarted fold, and a batch re-planned at a later WAL number all write the same key, and nothing has to derive it.
+
+Two rules follow.
+
+**One content ID, one lifecycle.** A content ID belongs to exactly one staged upload or one committed inline value. A later attempt never reuses the ID of an earlier one, even for the same bytes. Two facts make this necessary. The store's verified immutable write is safe to retry only because every writer that can name a key supplies identical bytes. And an expired open upload session deletes its content without checking for publication, so an ID shared between a staged attempt and an inline attempt could be deleted after it was committed.
+
+**The content ID is not the retry identity.** Each attempt draws a new ID, so a retry is recognized by its payload instead.
+
+## Retry identity
+
+A commit fingerprint represents a put's content as the reference's kind, content ID, and length (format specification, Appendix B.2). The checksum is left out because a fresh ID already pins the bytes. This works when the caller holds the reference: a retry sends the same reference and replays.
+
+A request that supplies bytes has no reference to resend. Today `put_file_bytes` conflicts when it is retried under the same commit ID, and its documentation sends callers to the two-step prepare API. A hosted client that retries a request carrying inline bytes would have no such option.
+
+A put that supplies bytes is fingerprinted by its payload. This form takes the place of the reference form in the operation's preimage:
+
+```json
+{"kind":"payload_v1","sha256":"<64 lowercase hex>","size_bytes":15}
 ```
 
-The ID keeps its current shape and still shards uniformly. It still says which object, never what the object contains, and it has no clock component. A retried request, a batch re-planned at a later WAL number, and two folds racing over the same log all arrive at the same key.
+Everything else in the fingerprint is unchanged. The rules:
+
+- The form follows how the request named its content, never where the bytes were stored. A request that supplies bytes uses the payload form whether the write went inline or fell back to staging. A request that supplies a prepared reference keeps the reference form.
+- While the receipt is retained, a retry with the same payload replays the original commit and returns the original reference. The retry's own content ID is discarded. If the retry staged content before it found the receipt, that content is unpublished and its session reclaims it.
+- A retry with a different payload returns `commit_id_reuse_conflict`, including when the length is equal.
+- After the receipt is reclaimed, the same request executes as a new commit with a new content ID. It cannot collide with the content of the earlier commit, whose revision is kept.
+- The same bytes sent once as a payload and once as a prepared reference, under one commit ID, conflict. They are different requests.
+
+The digest is SHA-256. The fingerprint scheme fixes it, independent of the reference's checksum algorithm. Embedded byte and stream writes already compute it for the reference. A fingerprint is computed once, when the commit is planned, and stored in the WAL record and the receipt. Replay never recomputes it, so replay does not change.
+
+This extends the fingerprint contract and does not depend on the rest of this proposal. It makes `put_file_bytes` and `put_file_stream` safe to retry on the staged path too, so it can land first.
 
 ## The WAL record
 
@@ -54,47 +81,59 @@ A commit record gains one optional field:
 
 Replay validation adds these rules:
 
-- Every entry's `content_id` is named by an `append_file_revision` delta in the same commit.
-- An entry's length equals that reference's `size_bytes` and is at most the inline limit.
+- Every entry's `content_id` is named by an `append_file_revision` delta in the same commit, and that reference's owner is the namespace whose log this is.
+- An entry's length equals that reference's `size_bytes`. A zero-length entry is valid.
 - A content ID appears at most once per commit.
-- The segment's inline total is within the per-segment budget.
+- Each entry and the object's inline total are within the format limits in [Resource bounds](#resource-bounds).
+
+Those limits are part of the format. A writer's thresholds are policy and may be lower. Lowering a threshold never makes an existing record invalid.
 
 Inline bytes sit inside the WAL payload, so the envelope's existing validation covers them. Each value is also checked against its reference's size and checksum when it is read and when it is materialized, as content objects are today. Replay does not hash payloads.
 
 ## Writing
 
-**Embedded.** `put_file_bytes` and `put_file_stream` choose the inline path when the content is nonempty, at or under the inline limit, and the budgets below have room. They build the reference, attach the bytes to the commit candidate, and skip staging. No upload session is written and no admission proof is needed, because no content exists outside the commit. `prepare_file_bytes` keeps its meaning: it makes content durable before publication and returns evidence, so it keeps the staged path.
+**Embedded.** `put_file_bytes` and `put_file_stream` choose the inline path when the content is at or under the writer's threshold and the budgets below have room. Empty files qualify. A stream is buffered up to the threshold to decide. The write draws a content ID, builds the reference, attaches the bytes to the commit candidate, and skips staging. No upload session is written and no admission proof is needed, because no content exists outside the commit. `prepare_file_bytes` keeps its meaning: it makes content durable before publication and returns evidence, so it keeps the staged path.
 
-**Hosted.** A `put_file` operation in a commit request may carry `inline_content` instead of a content reference and token. The server checks the size, computes the checksum, derives the content ID, and publishes. A small hosted write becomes one request and one store write. The 2 MiB JSON request limit already bounds a commit's inline bytes, to about 1.5 MiB of content after base64 encoding.
+**Hosted.** A `put_file` operation in a commit request names exactly one content source: a content reference with its token, as today, or `inline_content`. For inline content the server checks the size, computes the checksum and digest, draws the content ID, and publishes. A small hosted write becomes one request and one store write. It shares batching, preconditions, and the commit response with every other operation. The 2 MiB JSON request limit already bounds a commit's inline bytes, to about 1.5 MiB of content after base64 encoding.
 
-**Falling back is always allowed.** Every inline limit is a preference. When a value is too large, a segment's inline budget is full, or the unfolded tail already holds too many inline bytes, the writer uses the staged path for that content. No inline limit produces a write error.
+**Falling back is always allowed.** Every inline limit is a preference. When a limit is reached the writer uses the staged path for that content, and no inline limit produces a write error. A write that falls back stages through an upload session exactly as today, under a content ID of its own, with the completion and abort rules unchanged. The payload fingerprint is the same either way, so a retry can take a different path from the attempt before it.
 
-The model in the API specification has three stages: make content durable, make metadata visible, observe changes. Inline content merges the first two. Durability and visibility arrive in the same conditional write, which is strictly stronger than today's ordering.
+**Where the choice is made.** Content is never staged inside the publication loop.
+
+- *When the candidate is built.* The value threshold and the commit's own inline total are known here. A commit must fit in one WAL object. A commit whose inline total would pass the per-object budget keeps values inline in operation order until the budget is reached and stages the rest. The commit stays atomic.
+- *At admission.* The tail ceiling is checked against the unfolded inline bytes, plus every admitted commit not yet published, plus this commit. The writer reserves its bytes before it submits, so concurrent writes cannot pass the ceiling together. The writer owns the tail, so its count is exact.
+- *In the publisher.* A WAL object whose inline budget is full closes, and the next commit starts the next object. Independent commits are split between objects. One commit is never split.
+
+The model in the API specification has three stages: make content durable, make metadata visible, observe changes. Inline content merges the first two. Durability and visibility arrive in the same conditional write.
 
 ## Reading
 
-A view already replays the unfolded WAL tail. While it does, it records which content IDs the tail carries inline. Resolving a reference then has two answers:
+A view already replays the unfolded WAL tail. While it does, it records which content the tail carries inline, keyed by owner namespace and content ID. Only a reference owned by this namespace can resolve to the tail. Content inherited through a fork is always in an object. Resolving a reference then has two answers:
 
 | Location | Condition | Source of bytes |
 | --- | --- | --- |
-| Tail | The view's tail carries this content ID | The replayed bytes, or a GET of the WAL object that holds them |
+| Tail | The view's tail carries this content | The replayed bytes, or a GET of the WAL object that holds them |
 | Object | Otherwise | The content object, as today |
 
-Replayed bytes are kept in a byte-budgeted cache next to the tail projection. A value that is not resident costs one GET of its WAL object, the same as a content object read. About a dozen call sites turn a reference into a key or bytes today, in `engine.rs`, `path/read/materialized_view.rs`, and `storage/content.rs`. The first implementation step routes them through one resolver without changing behavior.
+Replayed bytes are kept in a byte-budgeted cache next to the tail projection. A value that is not resident costs one GET of its WAL object. That object can hold up to the per-object budget of other payloads, so a small read can download and decode far more than it returns. The per-object budget bounds this, and a separately ranged payload section would remove it.
+
+**A reclaimed WAL object.** A long-lived view can outlast its tail. Its bytes are evicted, a later fold publishes, retention advances, and collection deletes the WAL object. A reader that finds the WAL object missing reads the content object instead. The fold invariant guarantees that it exists, because collection deletes a WAL object only at or below `last_folded_wal_no`. If both are missing, the read fails as missing content does today.
+
+About a dozen call sites turn a reference into a key or bytes today, in `engine.rs`, `path/read/materialized_view.rs`, and `storage/content.rs`. The first implementation step routes them through one resolver without changing behavior.
 
 A small file read shortly after it was written needs no content request. With the speculative read path (#966), the candidate's bytes are already available, so the read finishes when validation does.
 
 ## Direct downloads
 
-The download contract does not change. `POST …/filesystem/downloads` exists so a deployment can serve back content larger than its proxied read limit. It returns a presigned URL for the content object. Inline content is at most the inline limit, so the ordinary proxied read always serves it, in one request instead of two.
+The download contract does not change. `POST …/filesystem/downloads` exists so a deployment can serve back content larger than its proxied read limit. It returns a presigned URL for the content object. Inline content is small, so the ordinary proxied read always serves it, in one request instead of two.
 
 A client may still ask for a direct download of a small file that has not been folded. It cannot know whether a fold has happened, and it does not need to. The service materializes the object on demand and then signs the URL:
 
 1. Resolve the reference. If its location is the tail, take the verified bytes from the tail.
-2. Write the content object at its derived key with a create-only verified write.
+2. Write the content object at the key the reference names, with a verified immutable write.
 3. Issue the presigned URL as today.
 
-This is one step of the fold done early. The key is the one the fold would use, so a later fold finds the object present, and a concurrent fold writes identical bytes. The object is published content, so collection never removes it from a live namespace. A crash after the write leaves nothing to clean up. The cost is one content write on the first direct download of a small file written since the last fold. The response shape, the capability, and client code are unchanged.
+This is one step of the fold done early. The fold reads the same ID from the same log, so a later fold finds the object present, and a concurrent fold writes identical bytes. The object is published content, so collection never removes it from a live namespace. A crash after the write leaves nothing to clean up. The write follows the fold's rules for verification and for a namespace that is being deleted. The cost is one content write on the first direct download of a small file written since the last fold. The response shape, the capability, and client code are unchanged.
 
 A deployment that cannot write content objects, such as a read-only replica, serves tail content through proxied reads. Its direct endpoint answers that the content is not yet materialized, which clears at the next fold.
 
@@ -104,27 +143,29 @@ The embedded `DirectDownloadTarget` follows the same rule: a handle with write a
 
 A fold turns the WAL after `last_folded_wal_no` into segments and publishes the next manifest. That manifest is what allows garbage collection to delete the folded WAL objects, so it is where inline bytes must leave the log:
 
-1. For each inline value in the range being folded, write the content object at its derived key with a create-only verified write. Run these with bounded concurrency.
+1. For each inline value in the range being folded, write the content object at the key its reference names, with a verified immutable write. Run these with bounded concurrency.
 2. Only after every write succeeds, build segments and publish the manifest as today.
 
 The invariant is: **a manifest whose `last_folded_wal_no` is `n` implies a content object exists for every inline value in WAL objects up to `n`.** WAL collection already requires a WAL number to be at or below `last_folded_wal_no`, so that rule stays safe without modification.
 
-Step 1 runs before the metadata publication budget starts. That budget exists because unpublished segments are garbage that must not outlive its grace. Materialized content is never garbage: each object corresponds to a committed revision, so it is referenced whether or not this fold publishes. A fold that crashes, exceeds its budget, or loses the manifest race leaves objects the next fold finds already present. There is no orphan to discover and no cleanup state to persist.
+An object already present at the key must hold the same bytes, and the verified write checks this. A mismatch, or a value that fails its own checksum, stops the fold without publishing. The bytes are inside a validated WAL payload, so this indicates the same class of fault as a corrupt WAL record, which already stops replay.
+
+Step 1 runs before the metadata publication budget starts. That budget exists because unpublished segments are garbage that must not outlive its grace. In a live namespace, materialized content is never garbage: each object corresponds to a committed revision, and revisions are retained, so it is referenced whether or not this fold publishes. A fold that crashes, exceeds its budget, or loses the manifest race leaves objects the next fold finds already present. There is no orphan to discover and no cleanup state to persist.
+
+**Deletion during a fold.** A fold can pause between reading a tail and writing its content, and the namespace can be deleted and swept in between. The materializer therefore works in steps bounded by count and by elapsed time. It observes the namespace again between steps, stops when it sees deletion, and bounds each write by the store's operation deadline. A write that still lands late is caught the way a late upload is: the retired-owner sweep keeps listing on later passes (format specification, "Sweeping a retired owner's content"). This needs no lease, journal, or new collection family.
 
 A fold becomes due when the unfolded tail reaches 32 segments, as today, or when its inline bytes reach the tail threshold. The second trigger bounds what any reader must download to replay a tail.
 
-If a value fails verification during materialization, the fold stops without publishing. The bytes are inside a validated WAL payload, so this indicates the same class of fault as a corrupt WAL record, which already stops replay.
-
 ## Collection
 
-No family, rule, or clock assumption is added.
+No candidate family is added. The existing deletion rules remain, provided the invariants in this document hold: publication records the content ID, the fold materializes before it publishes, one content ID has one lifecycle, and materialization stops at deletion.
 
 - **WAL objects** keep their rule: at or below both `last_folded_wal_no` and the WAL retention floor, and old enough. The fold invariant makes the first condition sufficient for inline bytes.
 - **Content objects** written by a fold are published content. They produce the same permanent `content_publications` rows. A live namespace's content prefix is still never enumerated.
-- **Upload sessions** are not involved. Unpublished inline content cannot exist, so the ownership question that sessions answer does not arise on this path.
-- **Deleted namespaces** sweep WAL objects and the owner's content prefix as today. Inline bytes that were never folded are removed with their WAL object.
+- **Upload sessions** are not involved in an inline write. Unpublished inline content cannot exist, so the ownership question that sessions answer does not arise. A write that falls back uses a session as today.
+- **Deleted namespaces** sweep WAL objects and the owner's content prefix as today. Inline bytes that were never folded are removed with their WAL object. No object was written for them, and nothing needs one.
 
-Because the WAL is retained until the retention floor advances, inline bytes remain in folded WAL objects beside their content objects. This costs storage, bounded by the per-segment budget, and makes change-feed reads larger.
+The WAL is retained until the retention floor advances, and advancing it is opt-in. By default, then, every inline value is stored twice for as long as the namespace lives: once in its WAL object and once in its content object. The per-object budget bounds one WAL object, not how many are retained. Ten million 4 KiB files duplicate about 38 GiB. Inline bytes also make change-feed reads larger.
 
 ## Pins, forks, copies, and imports
 
@@ -134,25 +175,41 @@ A copy or restore within the unfolded tail records the same content reference in
 
 ## Resource bounds
 
-| Bound | Proposed | Purpose |
+**Format limits.** Every reader accepts a record within these limits. They are part of the durable format and are set well above the writer's defaults, so that raising a default is never a format change.
+
+| Limit | Proposed |
+| --- | ---: |
+| Largest inline value | 256 KiB |
+| Largest inline total in one WAL object | 4 MiB |
+
+**Writer policy.** These are runtime settings at or below the format limits.
+
+| Setting | Proposed | Purpose |
 | --- | ---: | --- |
-| Inline limit per value | 64 KiB | Small-object PUT latency is flat to this size; matches the speculative read cap (#966) |
-| Inline bytes per WAL object | 4 MiB | Bounds publisher memory, WAL object size, and one replay step |
-| Tail inline bytes that make a fold due | 32 MiB | Bounds what a cold reader downloads |
-| Tail inline bytes beyond which writes use the staged path | 64 MiB | Hard ceiling when folding falls behind |
+| Inline threshold per value | 4 KiB to start | The lab sweeps 4, 16, and 64 KiB before the default rises |
+| Inline budget per WAL object | 1 MiB | Every commit in a batch waits for the object's PUT, including commits with no content |
+| Tail inline bytes that make a fold due | 8 MiB | Bounds what a cold reader downloads |
+| Tail inline bytes beyond which writes use the staged path | 32 MiB | Hard ceiling when folding falls behind; checked at admission, counting this commit |
+| Inline bytes in flight per runtime | Byte budget | Charges queued payloads, encoding copies, and materialization buffers. A write that cannot reserve uses the staged path |
 | Tail content cache | Byte budget shared by the runtime | Bounds resident inline bytes |
 | Materialization concurrency | 32 | Matches WAL prefetch concurrency |
+
+The threshold starts low on purpose. The evidence so far is a request sequence for a 1 KiB value. It says nothing about cold replay, fold throughput, or how larger values slow a shared WAL object. 64 KiB is the top of the sweep because small-object PUT latency is flat to about that size and it is the speculative read cap (#966).
 
 `MAX_WAL_SEGMENT_BYTES` remains a document-size limit. It is not a working-memory budget and is not the inline bound.
 
 ## Costs
 
-- A cold reader replays a tail that can now hold tens of MiB rather than tens of KiB. The byte trigger bounds it; a separately ranged payload section would remove it.
-- A fold does more work: up to thousands of small writes, off the commit path. Request cost falls overall, from four writes per small file to two.
+- A cold reader replays a tail that can now hold MiB rather than tens of KiB. Metadata-only operations pay this too: a cold stat or list replays the same tail. The byte trigger bounds it; a separately ranged payload section would remove it.
+- A read of a tail value that is not resident downloads and decodes its whole WAL object.
+- Commits share WAL objects. Inline bytes make an object larger and its PUT slower, and every commit in the batch waits, including commits with no content. The per-object budget is small for this reason.
+- A fold does more work: up to thousands of small writes, off the commit path. Sustained fold throughput decides how fast small writes can arrive before they fall back to staging. Request cost falls overall, from four writes per small file to two.
 - Inline bytes pass through WAL compression and CBOR encoding on the commit path.
-- Retained WAL objects hold a second copy of small content until retention advances.
+- Retained WAL objects hold a second copy of small content, by default for the life of the namespace.
 - The first direct download of a small file written since the last fold costs one extra content write.
+- The fingerprint contract gains a second content form, with its own pinned test vectors.
 - Every reader, writer, and folder of a namespace must understand the record field before any writer uses it.
+- A deployment that must keep file bytes out of its metadata store could not use inline content. None exists today. Inlining is writer policy, so such a deployment would turn it off.
 
 ## Alternatives considered
 
@@ -160,26 +217,27 @@ A copy or restore within the unfolded tail records the same content reference in
 
 **A new content reference kind.** One revision would have two references over time: an inline kind in the log and `blob_v1` in segments. Fingerprints, retries, the change feed, and content equality would all need to treat them as equal. Naming logical content and resolving its location avoids this.
 
-**Random content IDs assigned at the fold.** A fold that loses the manifest race would leave unreferenced objects that need discovery after a restart. Derived IDs make materialization idempotent.
+**Deriving the content ID from the commit ID and operation index.** An earlier draft did this so that a retry would build the same reference. It is unsound. The fingerprint leaves out the checksum because a fresh ID pins the bytes. With a derived ID, a second request under the same commit ID, with different bytes of the same length, has an equal fingerprint and replays the first receipt. A commit ID can also be reused after its receipt is reclaimed, while the revision it wrote is kept forever, so one immutable key could be asked to hold two different contents. Adding the payload digest to the derivation repairs both cases. It still lets a staged attempt and an inline attempt share one object, and that object then has two cleanup lifecycles.
 
-**A separate payload section in the WAL object,** readable by range so that metadata readers skip it. This removes the cold-replay and change-feed cost. It needs a second framing layer and its own integrity check. It is a compatible later step.
+**A separate payload section in the WAL object,** readable by range so that metadata readers skip it. This removes the cold-replay, read-amplification, and change-feed costs. It needs a second framing layer and its own integrity check. It is a compatible later step.
 
 **Packing a fold's values into one object.** One write per fold instead of one per value. Because revisions are never dropped, a pack in a live namespace never becomes partly dead. It changes reference resolution and direct downloads. Deferred.
 
-**Removing upload-session writes from the staged path.** This keeps content outside the log and must replace the session's role as the collector's candidate index. It helps embedded writers only. See the lab's discussion of that option.
+**Removing upload-session writes from the staged path.** This keeps content outside the log and must replace the session's role as the collector's candidate index. It helps embedded writers only. It is the smaller step if inline content is judged too large a change. See the lab's discussion of that option.
 
 ## Rollout
 
-Durable formats are at version 1 and carry no compatibility paths before the stable release. If this lands before that release, the record field is added to the WAL family, the golden fixtures regenerate, and writers emit inline content only when the runtime enables it. After the release, the same change needs a new WAL family version and a manifest capability so that older binaries refuse the namespace rather than report missing content. Adding the field and the read side before the release, even with writers disabled, keeps the later step small.
+Durable formats are at version 1 and carry no compatibility paths before the stable release. If this lands before that release, the record field is added to the WAL family, the golden fixtures regenerate, and writers emit inline content only when the runtime enables it. After the release, the same change needs a new WAL family version and a manifest capability so that older binaries refuse the namespace rather than report missing content. An unchanged reference shape does not remove the need for every reader and folder to understand the field. Adding the field and the read side before the release, even with writers disabled, keeps the later step small.
 
 Suggested order:
 
-1. One resolver for content location. No behavior change.
-2. The record field, replay validation, tail content cache, reads from the tail, and fold materialization. Writers disabled.
-3. The embedded inline policy with its budgets and fallback; lab measurement.
-4. `inline_content` on hosted commit operations.
-5. On-demand materialization for direct downloads.
-6. The byte-based fold trigger and tuned constants.
+1. One resolver for content location, keyed by owner namespace and content ID. No behavior change.
+2. The payload form of the commit fingerprint for puts that supply bytes. It stands alone.
+3. The read side, with writers disabled: the record field and its format limits, replay validation, the tail content cache, reads from the tail including a reclaimed WAL object, fold materialization with its deletion rule, on-demand materialization for direct downloads, and the byte-based fold trigger.
+4. Admission accounting, then the embedded inline policy with its fallback. The lab sweep runs here.
+5. `inline_content` on hosted commit operations.
+
+Writers are enabled only when the identity, fallback, materialization, deletion, and resource rules are all in place. Download behavior, the fold trigger, and admission accounting are part of the first usable version, not later tuning.
 
 ## Verification
 
@@ -188,22 +246,35 @@ Tests pin contracts a reviewer would otherwise have to trust, using the request-
 - A small embedded write issues one store write, and a read before the fold issues no content request.
 - A fold interrupted after materialization and before publication repeats cleanly: no missing content, no unreferenced objects.
 - Two folds racing over the same tail write identical keys and one manifest.
-- Collection never deletes a WAL object whose inline value lacks a content object, across interleavings of inline commits, folds, retention advances, and collection passes. This is a simulator property.
+- In a live namespace, collection never deletes a WAL object whose inline value lacks a content object, across interleavings of inline commits, folds, retention advances, and collection passes. This is a simulator property. A deleted namespace may drop never-folded values with their WAL objects.
 - Copy and restore of tail content, reads across a reader restart, and reads after the fold return the same verified bytes.
 - A full budget sends the write down the staged path without an error.
-- A retried commit derives the same content ID and replays its receipt.
 - A corrupted inline value fails the read as content corruption and stops the fold before publication.
 
-In the lab, a product scenario for steady small writes should approach the measured one-write sequence plus the freshness probe, and the hosted path should show one request per small write.
+Adversarial cases:
+
+| Case | Required result |
+| --- | --- |
+| Same commit ID, different payload of the same length | Conflict while the receipt is retained. Never a replay of the wrong bytes |
+| Commit ID reused after its receipt is reclaimed | A new content ID. No collision with the earlier content |
+| Retry that goes inline after a staged attempt, and the reverse | The same fingerprint. No content ID is reused |
+| An earlier attempt's session expires after a later attempt commits | Cleanup removes only the earlier attempt's content |
+| Deletion or retirement during materialization | Materialization stops within one step. Late writes are covered by the repeated owner sweep |
+| Old view, bytes evicted, WAL object folded and reclaimed | Verified bytes from the content object |
+| Concurrent writes near the tail ceiling | The count includes each proposed commit. Every commit stays atomic |
+| Writer threshold lowered after larger records exist | The old records still read and fold |
+
+In the lab, the sweep measures steady small writes, cold reads, replay after a restart, and sustained fold throughput at each threshold, on the product path with the publisher and folding included. A steady small write should approach the measured one-write sequence plus the freshness probe. The hosted path should show one request per small write.
 
 ## Evidence
 
-Lab repository, `analysis/steady-state-floors-experiments-20260916.md`, section "H3"; emulation run `20260917T025704Z-bench-s3-small-content-sequences`, release, S3 `us-east-2`, 1 KiB content, 24 rounds per arm. The inline arm submitted one 1,564-byte WAL object per write. The history of the staged path's session writes is in `analysis/h2-small-write-session-cost-discussion-20260917.md`.
+Lab repository, `analysis/steady-state-floors-experiments-20260916.md`, section "H3"; emulation run `20260917T025704Z-bench-s3-small-content-sequences`, release, S3 `us-east-2`, 1 KiB content, 24 rounds per arm. The inline arm submitted one 1,564-byte WAL object per write. These are request-sequence timings, not a product speedup claim. The history of the staged path's session writes is in `analysis/h2-small-write-session-cost-discussion-20260917.md`.
 
 ## Open questions
 
-1. Should the inline limit start below 64 KiB while the cold-replay cost is unmeasured?
+1. Which threshold does the sweep support, and is it cold replay, fold throughput, or the shared WAL object that sets it?
 2. Should the direct-download response later gain an inline access kind for small content, to save the second request? `access` is already kind-tagged. It would need a capability so older clients are not surprised.
 3. Does any consumer depend on a content object existing as soon as a commit is visible?
-4. Should hosted inline writes be limited per request or per namespace to protect the shared publisher?
-5. Is the byte-based fold trigger enough, or should the payload section be separately ranged from the start?
+4. Should hosted inline writes have a limit per namespace as well as the runtime budget, to protect the shared publisher?
+5. Should the payload section be separately ranged from the start? Read amplification on tail values that are not resident makes this more pressing than cold replay alone.
+6. Should the payload fingerprint cover large streamed writes? A retry of one must stage the whole stream again before it can find its receipt.
