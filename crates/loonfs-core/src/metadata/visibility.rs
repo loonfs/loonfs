@@ -7,7 +7,8 @@
 
 use super::queries::{ResolvedVisiblePath, VisiblePathError};
 use super::{
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
+    AccessRevisionRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
+    SubtreeTombstoneRecord,
 };
 use crate::binding_generation::BindingGeneration;
 use futures::FutureExt;
@@ -111,6 +112,12 @@ pub(crate) trait MetadataVisibilityReads {
         &mut self,
         direntry: &DirentryBindRecord,
     ) -> Result<bool, Self::Error>;
+
+    /// Newest access row of `inode_id` at the read seq, if any.
+    async fn find_access_row(
+        &mut self,
+        inode_id: InodeId,
+    ) -> Result<Option<AccessRevisionRecord>, Self::Error>;
 
     /// Composite rule; see [`current_parent_binding_for_child`].
     async fn current_parent_binding_for_child(
@@ -533,13 +540,13 @@ pub(crate) fn resolve_in_memory_read<T>(future: impl Future<Output = T>) -> T {
 }
 
 /// [`MetadataState`] reads scoped to `base_seq`.
-pub(super) struct MetadataStateReads<'a> {
+pub(crate) struct MetadataStateReads<'a> {
     state: &'a MetadataState,
     base_seq: ChangeSeq,
 }
 
 impl MetadataState {
-    pub(super) fn reads_at_seq(&self, base_seq: ChangeSeq) -> MetadataStateReads<'_> {
+    pub(crate) fn reads_at_seq(&self, base_seq: ChangeSeq) -> MetadataStateReads<'_> {
         MetadataStateReads {
             state: self,
             base_seq,
@@ -603,6 +610,13 @@ impl MetadataVisibilityReads for MetadataStateReads<'_> {
             self.state
                 .is_direntry_unbound_at_seq_scan(direntry, self.base_seq)
         })
+    }
+
+    async fn find_access_row(
+        &mut self,
+        inode_id: InodeId,
+    ) -> Result<Option<AccessRevisionRecord>, Self::Error> {
+        Ok(self.state.newest_access_row_at_seq(inode_id, self.base_seq))
     }
 
     async fn current_parent_binding_for_child(

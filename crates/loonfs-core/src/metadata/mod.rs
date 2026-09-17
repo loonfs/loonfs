@@ -4,6 +4,7 @@
 //! accelerate current reads, while historical reads scan the retained rows.
 //! The `visibility` module applies shared direntry rules to every storage view.
 
+pub(crate) mod access;
 mod apply;
 mod durable_cache;
 mod indexes;

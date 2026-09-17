@@ -13,8 +13,8 @@ use super::manifest_index;
 use super::view::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 use super::visibility::{self, BindingIdentity, MetadataVisibilityReads};
 use super::{
-    AttributesProjection, DirentryBindRecord, InodeRecord, MetadataView, RecoverableDeletion,
-    ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
+    AccessRevisionRecord, AttributesProjection, DirentryBindRecord, InodeRecord, MetadataView,
+    RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::CoreError;
 use loonfs_api::wire::manifest::lookup_keys;
@@ -141,6 +141,7 @@ pub(crate) struct MetadataViewSessionCounters {
     pub(crate) covering_tombstone_calls: u64,
     pub(crate) latest_revision_calls: u64,
     pub(crate) latest_attributes_calls: u64,
+    pub(crate) access_row_calls: u64,
     pub(crate) preload_attribute_lookups: u64,
     pub(crate) direntry_child_scan_calls: u64,
     pub(crate) scan_prefix_calls: u64,
@@ -152,7 +153,7 @@ pub(crate) struct MetadataViewSessionCounters {
 pub(crate) type MetadataViewSessionCounterField =
     (&'static str, fn(&MetadataViewSessionCounters) -> u64);
 
-pub(crate) const METADATA_VIEW_SESSION_COUNTER_FIELDS: [MetadataViewSessionCounterField; 12] = [
+pub(crate) const METADATA_VIEW_SESSION_COUNTER_FIELDS: [MetadataViewSessionCounterField; 13] = [
     ("list_page_visible_child_calls", |counters| {
         counters.visible_child_calls
     }),
@@ -189,6 +190,7 @@ pub(crate) const METADATA_VIEW_SESSION_COUNTER_FIELDS: [MetadataViewSessionCount
     ("list_page_preload_attribute_lookups", |counters| {
         counters.preload_attribute_lookups
     }),
+    ("access_row_calls", |counters| counters.access_row_calls),
 ];
 
 impl MetadataViewSessionCounters {
@@ -209,6 +211,7 @@ pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     latest_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
     latest_revision_head_cache: HashMap<InodeId, Option<RevisionRecord>>,
     attributes_cache: HashMap<InodeId, AttributesProjection>,
+    access_row_cache: HashMap<InodeId, Option<AccessRevisionRecord>>,
     active_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     unbind_cache: HashMap<BindingIdentity, bool>,
@@ -226,6 +229,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             latest_parent_binding_cache: HashMap::new(),
             latest_revision_head_cache: HashMap::new(),
             attributes_cache: HashMap::new(),
+            access_row_cache: HashMap::new(),
             active_tombstone_cache: HashMap::new(),
             covering_tombstone_cache: HashMap::new(),
             unbind_cache: HashMap::new(),
@@ -761,6 +765,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(revision)
     }
 
+    pub(crate) async fn access_row(
+        &mut self,
+        inode_id: InodeId,
+    ) -> Result<Option<AccessRevisionRecord>, CoreError> {
+        self.counters.access_row_calls = self.counters.access_row_calls.saturating_add(1);
+        if let Some(cached) = self.access_row_cache.get(&inode_id).cloned() {
+            return Ok(cached);
+        }
+        let access = self.base.latest_access_revision(inode_id).await?;
+        self.access_row_cache.insert(inode_id, access.clone());
+        Ok(access)
+    }
+
     /// Returns the attribute map and revision of an inode already proven
     /// visible at this session's seq.
     ///
@@ -993,6 +1010,13 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
         direntry: &DirentryBindRecord,
     ) -> Result<bool, Self::Error> {
         self.is_direntry_unbound(direntry).await
+    }
+
+    async fn find_access_row(
+        &mut self,
+        inode_id: InodeId,
+    ) -> Result<Option<AccessRevisionRecord>, Self::Error> {
+        self.access_row(inode_id).await
     }
 
     async fn current_parent_binding_for_child(

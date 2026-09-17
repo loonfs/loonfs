@@ -8,7 +8,9 @@
 use super::visibility::{
     self, resolve_in_memory_read, unbind_matches_binding, MetadataVisibilityReads,
 };
-use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
+use super::{
+    AccessRevisionRecord, DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
+};
 use crate::binding_generation::BindingGeneration;
 use loonfs_api::{AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey};
 use serde::{Deserialize, Serialize};
@@ -54,6 +56,24 @@ impl VisiblePathError {
 }
 
 impl MetadataState {
+    pub(super) fn newest_access_row_at_seq(
+        &self,
+        inode_id: InodeId,
+        seq: ChangeSeq,
+    ) -> Option<AccessRevisionRecord> {
+        self.access_revisions
+            .iter()
+            .filter(|record| record.inode_id == inode_id && record.committed_seq <= seq)
+            .max_by_key(|record| {
+                (
+                    record.access_revision_no,
+                    record.committed_seq,
+                    record.delta_index,
+                )
+            })
+            .cloned()
+    }
+
     pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
         read_now(self.reads_at_seq(base_seq).find_inode(inode_id))
     }

@@ -114,7 +114,10 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
     Ok(LoadedMetadataBasis {
         identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), manifest_head_seq),
         base_state: if segments.manifest().payload().runs.is_empty() {
-            bootstrap_metadata_state(segments.manifest().payload().created_at_ms)
+            bootstrap_metadata_state(
+                segments.manifest().payload().created_at_ms,
+                &segments.manifest().payload().access,
+            )
         } else {
             MetadataState::default()
         },

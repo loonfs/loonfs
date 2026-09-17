@@ -21,6 +21,45 @@ fn context() -> MutationContext {
     }
 }
 
+#[test]
+fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
+    use super::bootstrap::bootstrap_metadata_state;
+    use crate::metadata::AccessRevisionRecord;
+    use loonfs_api::{
+        AccessGrants, AccessRevisionNo, AccessRights, ActorId, ChangeSeq, NamespaceAccess,
+        PrincipalId, PrincipalScope, ROOT_INODE_ID,
+    };
+
+    let root_grants = AccessGrants::new(std::collections::BTreeMap::from([(
+        PrincipalId::parse("prn_root").expect("principal id"),
+        AccessRights::ADMIN,
+    )]))
+    .expect("root grants");
+    let state = bootstrap_metadata_state(
+        1_000,
+        &NamespaceAccess::Acl {
+            principal_scope: PrincipalScope::parse("org_test").expect("principal scope"),
+            root_grants: root_grants.clone(),
+        },
+    );
+    assert_eq!(
+        state.access_revisions(),
+        &[AccessRevisionRecord {
+            inode_id: ROOT_INODE_ID,
+            access_revision_no: AccessRevisionNo(0),
+            committed_seq: ChangeSeq(0),
+            commit_id: loonfs_api::wire::control::genesis_commit_id(),
+            delta_index: 0,
+            updated_by: ActorId::loonfs(),
+            updated_at_ms: 1_000,
+            boundary: false,
+            grants: root_grants,
+        }]
+    );
+    let state = bootstrap_metadata_state(1_000, &NamespaceAccess::Unrestricted {});
+    assert!(state.access_revisions().is_empty());
+}
+
 #[tokio::test]
 async fn creation_installs_descriptor_hint_and_manifest_then_reads_genesis() {
     let directory = tempdir().expect("directory");
