@@ -143,7 +143,13 @@ impl EmbeddedBackend {
     ) -> Result<Namespace, CliError> {
         let result = self
             .writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::new(actor_id.clone()))
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions {
+                    access: loonfs_api::NamespaceAccess::unrestricted(),
+                    ..CreateNamespaceOptions::new(actor_id.clone())
+                },
+            )
             .await
             .map_err(map_runtime_error);
         self.drain_runner_after(result).await

@@ -649,7 +649,11 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+                .create_namespace(
+                    &namespace_id,
+                    &loonfs_test_support::test_actor(),
+                    loonfs_api::NamespaceAccess::unrestricted(),
+                )
                 .await,
             &transport,
         );
@@ -766,6 +770,7 @@ mod tests {
     async fn retry_policy_read_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let response = Namespace {
+            access: loonfs_api::NamespaceAccessMode::Unrestricted {},
             created_at_ms: 1_000,
             created_by: loonfs_test_support::test_actor(),
             fork_basis: None,

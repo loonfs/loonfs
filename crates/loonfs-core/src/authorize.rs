@@ -18,20 +18,35 @@ pub(crate) enum Authorizer<'a> {
     },
 }
 
+/// Who a commit is authorized as.
+#[derive(Clone, Copy)]
+pub(crate) enum CommitAuthority<'a> {
+    /// The request's subject, or the token holder when absent.
+    Subject(Option<&'a Subject>),
+    /// A maintenance commit: no subject check on any namespace.
+    Maintenance,
+}
+
 impl<'a> Authorizer<'a> {
     pub(crate) fn for_request(
         namespace_id: &NamespaceId,
         access: &NamespaceAccess,
-        subject: Option<&'a Subject>,
+        authority: CommitAuthority<'a>,
     ) -> Result<Self> {
-        match (access, subject) {
-            (NamespaceAccess::Unrestricted {}, _) => Ok(Self::Unrestricted),
-            (NamespaceAccess::Acl { .. }, Some(subject)) => Ok(Self::Subject {
-                principals: &subject.principals,
-            }),
-            (NamespaceAccess::Acl { .. }, None) => Err(CoreError::SubjectRequired {
-                namespace_id: namespace_id.clone(),
-            }),
+        match (access, authority) {
+            (NamespaceAccess::Unrestricted {}, _) | (_, CommitAuthority::Maintenance) => {
+                Ok(Self::Unrestricted)
+            }
+            (NamespaceAccess::Acl { .. }, CommitAuthority::Subject(Some(subject))) => {
+                Ok(Self::Subject {
+                    principals: &subject.principals,
+                })
+            }
+            (NamespaceAccess::Acl { .. }, CommitAuthority::Subject(None)) => {
+                Err(CoreError::SubjectRequired {
+                    namespace_id: namespace_id.clone(),
+                })
+            }
         }
     }
 }

@@ -27,7 +27,11 @@ async fn a_client_trusting_the_server_certificate_round_trips_over_tls() {
     let namespace = namespace_id("over-tls");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("over-tls", "/note.txt").expect("parse path");
@@ -95,6 +99,7 @@ async fn a_client_without_the_certificate_authority_is_refused_at_the_handshake(
         .create_namespace(
             &namespace_id("still-serving"),
             &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("the server still serves trusted clients");
@@ -139,6 +144,7 @@ async fn a_plaintext_request_to_the_tls_port_loses_only_its_own_connection() {
         .create_namespace(
             &namespace_id("after-plaintext"),
             &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("the server still serves tls clients");

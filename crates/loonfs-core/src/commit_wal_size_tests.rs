@@ -149,7 +149,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         let mut allocation = session.begin_candidate();
         let plan = session
             .prepare_commit(
-                candidate.request(),
+                &candidate,
                 candidate
                     .semantic_identity(&namespace_id)
                     .expect("fingerprint"),

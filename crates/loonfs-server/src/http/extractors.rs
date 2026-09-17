@@ -79,19 +79,41 @@ pub(super) struct ActorHeader(pub(super) ActorId);
 impl<S: Send + Sync> FromRequestParts<S> for ActorHeader {
     type Rejection = ApiResponseError;
 
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let OptionalActorHeader(actor_id) =
+            OptionalActorHeader::from_request_parts(parts, state).await?;
+        actor_id.map(Self).ok_or_else(missing_actor)
+    }
+}
+
+/// `Loonfs-Actor` when the request sends it. Maintenance runs read it this
+/// way because only administrator recovery needs an actor.
+#[derive(Debug)]
+pub(super) struct OptionalActorHeader(pub(super) Option<ActorId>);
+
+impl<S: Send + Sync> FromRequestParts<S> for OptionalActorHeader {
+    type Rejection = ApiResponseError;
+
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let invalid = |message: &str| {
-            ApiResponseError::new(ErrorCode::InvalidRequest, message).with_param("Loonfs-Actor")
+        let Some(value) = parts.headers.get("Loonfs-Actor") else {
+            return Ok(Self(None));
         };
-        let value = parts
-            .headers
-            .get("Loonfs-Actor")
-            .ok_or_else(|| invalid("missing required header Loonfs-Actor"))?;
         let value = String::from_utf8_lossy(value.as_bytes());
         ActorId::parse(&value)
-            .map(Self)
-            .map_err(|error| invalid(error.reason()))
+            .map(|actor_id| Self(Some(actor_id)))
+            .map_err(|error| {
+                ApiResponseError::new(ErrorCode::InvalidRequest, error.reason())
+                    .with_param("Loonfs-Actor")
+            })
     }
+}
+
+pub(super) fn missing_actor() -> ApiResponseError {
+    ApiResponseError::new(
+        ErrorCode::InvalidRequest,
+        "missing required header Loonfs-Actor",
+    )
+    .with_param("Loonfs-Actor")
 }
 
 fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {

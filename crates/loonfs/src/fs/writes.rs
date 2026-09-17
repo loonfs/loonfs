@@ -804,7 +804,7 @@ impl FsWriter {
         self.commit_candidate_inner(namespace_id, candidate).await
     }
 
-    async fn commit_candidate_inner(
+    pub(crate) async fn commit_candidate_inner(
         &self,
         namespace_id: &NamespaceId,
         candidate: CommitCandidate,

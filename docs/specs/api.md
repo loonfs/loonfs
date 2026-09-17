@@ -622,9 +622,10 @@ unambiguous.
 `Loonfs-Subject` identifies the subject the request acts as and defaults to
 `Loonfs-Actor`. The principal count is capped by the advertised
 `access.max_principals` limit. An unrestricted namespace ignores both headers.
-An ACL namespace requires `Loonfs-Principals` on every commit and upload
-operation; its absence answers `invalid_request` with `param` set to
-`Loonfs-Principals`. When principals are present, a subject or actor is required.
+In an ACL namespace, per-subject reads, commits, and upload operations require
+`Loonfs-Principals`; its absence answers `invalid_request` with `param` set to
+`Loonfs-Principals`, while administrator-only surfaces and maintenance act as
+the token holder without principals. When principals are present, a subject or actor is required.
 These ids are opaque and reach access logs like the actor id; use internal ids,
 never email addresses or display names.
 
@@ -835,7 +836,7 @@ The table below lists the retry class for every v0 operation.
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`; requires the `Loonfs-Actor` header |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`; requires the `Loonfs-Actor` header and accepts the optional `access` body field |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
@@ -856,10 +857,12 @@ The table below lists the retry class for every v0 operation.
 | Read an upload session | `get_upload` | `idempotent` | `GET /v0/namespaces/{ns}/uploads/{upload_id}`; completed sessions return a fresh `content_token` |
 | Abort an upload session | `abort_upload` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
 | Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100&snapshot_id=...` (`snapshot_id` is optional) |
-| Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`; requires `name` and `ttl_ms` |
-| List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
-| Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling |
+| Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`; requires `name` and `ttl_ms`. |
+| List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...`. |
+| Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling. |
 | Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin; a missing id returns `snapshot_not_found`) |
+
+In an ACL namespace every snapshot operation requires an administrator subject; a request with no subject headers acts as the token holder.
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`; requires the `Loonfs-Actor` header |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `filesystem.namespaces.delete`; the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
@@ -918,6 +921,7 @@ A maintenance run body names exactly one job with `kind`:
 | `metadata_compaction` | None | `compaction`, tagged by `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
 | `gc` | Optional `grace_window_ms` | The collection result |
 | `retention` | None | `retention_floor_seq` |
+| `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. Grants `admin` on the root row to the principal and keeps every other root grant, through a commit that checks no subject and is attributed to `Loonfs-Actor`. Use it when an ACL namespace has lost every administrator. |
 
 The response carries the same `kind`, the addressed `namespace_id`, and that
 job's result. None of the jobs creates a checkpoint record.
@@ -1525,6 +1529,7 @@ namespace returns `410` with `namespace_deleted`.
 ```json
 {
   "namespace_id": "demo",
+  "access": {"kind": "unrestricted"},
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "head_seq": 418,
@@ -1537,11 +1542,14 @@ The `Namespace` object has exactly these fields:
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
+| `access` | Access mode: `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
+
+The create request carries `access` with the same shape plus `root_grants` for the `acl` kind, defaulting to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`.
 
 Namespace status derives the live sequence from the manifest and numbered
 WAL tip. A cold read follows a lagging hint by probing forward. A missing
@@ -1591,6 +1599,9 @@ namespace state plus storage details used by maintenance:
 ```
 
 ### 6.3 `DELETE /v0/namespaces/{ns}`
+
+In an ACL namespace this operation requires an administrator subject; a request
+with no subject headers acts as the token holder.
 
 Deletion is a fenced, terminal manifest publication ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it
 stay committed; everything that observes the deleted namespace afterwards —
@@ -2752,6 +2763,9 @@ A value above the head is invalid: accepting an unpublished sequence would let
 a consumer silently skip commits as the namespace catches up.
 
 ### 6.12 `POST /forks`
+
+In an ACL namespace this operation requires an administrator subject; a request
+with no subject headers acts as the token holder.
 
 Representative request:
 

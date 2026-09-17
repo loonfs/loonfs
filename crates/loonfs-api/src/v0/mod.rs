@@ -23,8 +23,9 @@ pub use operations::{
     ForkNamespaceRequest, GcRequest, GcResponse, ListCheckpointsResponse,
     ListFileRevisionsResponse, ListSnapshotsResponse, MetadataCompactionOutcome,
     MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceRequest,
-    MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, NamespaceForkBasis,
-    PreconditionFields, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    MetadataMaintenanceResponse, Namespace, NamespaceAccessMode, NamespaceDiagnostics,
+    NamespaceForkBasis, PreconditionFields, RecoverAdministratorRequest,
+    RecoverAdministratorResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
     RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, StoreProbeCheckOutcome,
     StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse, WalFlushStepOutcome,
 };

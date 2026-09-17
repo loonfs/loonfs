@@ -101,7 +101,11 @@ impl ResolvedTarget {
             }
             Self::Remote(target) => Ok(target
                 .client
-                .create_namespace(namespace_id, actor_id)
+                .create_namespace(
+                    namespace_id,
+                    actor_id,
+                    loonfs_api::NamespaceAccess::unrestricted(),
+                )
                 .await?),
         }
     }

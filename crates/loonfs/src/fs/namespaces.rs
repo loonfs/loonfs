@@ -9,6 +9,16 @@ use crate::{
 use crate::{Result, RuntimeError};
 
 impl FsWriter {
+    /// Fork, delete, and snapshot management belong to the token holder and
+    /// to administrators of an ACL namespace.
+    pub(super) async fn require_administrator(&self, namespace_id: &NamespaceId) -> Result<()> {
+        if self.core.subject.is_none() {
+            return Ok(());
+        }
+        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        Ok(engine.require_administrator(&context).await?)
+    }
+
     /// Creates a namespace, bootstrapping its durable state.
     ///
     /// With `options.allow_existing`, an already-existing namespace is
@@ -73,6 +83,7 @@ impl FsWriter {
         new_namespace_id: &NamespaceId,
         options: ForkNamespaceOptions,
     ) -> Result<Namespace> {
+        self.require_administrator(source_namespace_id).await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(source_namespace_id)
@@ -120,6 +131,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
+        self.require_administrator(namespace_id).await?;
         self.core.record_trace_context(&tracing::Span::current());
         self.publisher
             .submit_delete(namespace_id.clone(), options)

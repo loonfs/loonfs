@@ -7,6 +7,7 @@ use crate::{
     AttributeValue, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName,
     InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch, WriterId,
 };
+use crate::{NamespaceAccess, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -168,6 +169,10 @@ pub struct ErrorDetails {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateNamespaceRequest {
+    /// The access mode, fixed for the namespace's life. Defaults to
+    /// unrestricted.
+    #[serde(default = "NamespaceAccess::unrestricted")]
+    pub access: NamespaceAccess,
     /// Durable namespace id to create.
     pub namespace_id: NamespaceId,
 }
@@ -189,6 +194,8 @@ pub struct ForkNamespaceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Namespace {
+    /// The namespace's access mode.
+    pub access: NamespaceAccessMode,
     /// Namespace ID.
     pub namespace_id: NamespaceId,
     /// Time the namespace was created, in Unix milliseconds.
@@ -203,6 +210,33 @@ pub struct Namespace {
     pub head_seq: ChangeSeq,
     /// Oldest sequence still promised for incremental replay.
     pub retention_floor_seq: ChangeSeq,
+}
+
+/// A namespace's access mode as reported, without its genesis grants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NamespaceAccessMode {
+    /// Every caller holding the deployment credential may do everything.
+    Unrestricted {},
+    /// Access rows govern operations in this identity domain.
+    Acl {
+        /// Identity domain the namespace's principal ids belong to.
+        principal_scope: PrincipalScope,
+    },
+}
+
+impl From<&NamespaceAccess> for NamespaceAccessMode {
+    fn from(access: &NamespaceAccess) -> Self {
+        match access {
+            NamespaceAccess::Unrestricted {} => Self::Unrestricted {},
+            NamespaceAccess::Acl {
+                principal_scope, ..
+            } => Self::Acl {
+                principal_scope: principal_scope.clone(),
+            },
+        }
+    }
 }
 
 /// The source a forked namespace started from.
@@ -1298,6 +1332,32 @@ pub enum RunMaintenanceRequest {
     Gc(GcRequest),
     /// Advances the retention floor to the flushed manifest head.
     Retention(AdvanceRetentionRequest),
+    /// Restores a root administrator.
+    RecoverAdministrator(RecoverAdministratorRequest),
+}
+
+/// Grants `admin` on the root row to one principal, keeping every other
+/// root grant, through a commit that checks no subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RecoverAdministratorRequest {
+    /// Principal receiving administrator rights.
+    pub principal_id: PrincipalId,
+}
+
+/// The committed administrator recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RecoverAdministratorResponse {
+    /// Namespace whose root grants changed.
+    pub namespace_id: NamespaceId,
+    /// Recovery commit id.
+    pub commit_id: CommitId,
+    /// Sequence assigned to the recovery commit.
+    pub committed_seq: ChangeSeq,
+    /// Root access revision after recovery.
+    pub access_revision_no: AccessRevisionNo,
 }
 
 /// Overrides for the metadata-upkeep action.
@@ -1387,6 +1447,8 @@ pub enum RunMaintenanceResponse {
     Gc(GcResponse),
     /// Result of advancing the retention floor.
     Retention(AdvanceRetentionResponse),
+    /// The committed administrator recovery.
+    RecoverAdministrator(RecoverAdministratorResponse),
 }
 
 /// What one metadata-upkeep action did, part by part.
@@ -1540,6 +1602,7 @@ mod tests {
     #[test]
     fn namespace_wire_shape_has_only_core_state() {
         let namespace = Namespace {
+            access: NamespaceAccessMode::Unrestricted {},
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
@@ -1551,6 +1614,7 @@ mod tests {
             serde_json::to_value(namespace).expect("serialize namespace"),
             serde_json::json!({
                 "namespace_id": "demo",
+                "access": {"kind": "unrestricted"},
                 "created_at_ms": 1000,
                 "created_by": "test",
                 "head_seq": 11,

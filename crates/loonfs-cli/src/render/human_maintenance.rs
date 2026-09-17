@@ -138,6 +138,10 @@ pub(super) fn human_checkpoint_deleted(response: &DeleteCheckpointResponse) -> S
 
 pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
     match &ran.response {
+        RunMaintenanceResponse::RecoverAdministrator(recovery) => format!(
+            "administrator recovery for {}: access revision {} at seq {}",
+            recovery.namespace_id, recovery.access_revision_no, recovery.committed_seq,
+        ),
         RunMaintenanceResponse::Metadata(metadata) => format!(
             "metadata maintenance for {}: {}; {}",
             metadata.namespace_id,

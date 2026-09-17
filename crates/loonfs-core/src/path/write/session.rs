@@ -1,12 +1,12 @@
 //! [`PublishPlanningSession`]: plans a batch's candidates in admission
 //! order, each seeing the rows earlier candidates would persist.
 
-use super::intent::CommitRequest;
 use super::planner::prepare_commit_against_publish_view;
 use super::preconditions::evaluate_preconditions;
 use crate::commit::{
     CandidateAllocation, CommitFingerprint, CommitPlan, InodeAllocator, ValidatedCommitPlan,
 };
+use crate::commit_engine::CommitCandidate;
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
@@ -59,7 +59,7 @@ impl PublishPlanningSession {
     /// validated plan that only awaits the accepted allocation position.
     pub(crate) async fn prepare_commit<S: ObjectStore + ?Sized>(
         &self,
-        request: &CommitRequest,
+        candidate: &CommitCandidate,
         semantic_identity: CommitFingerprint,
         base_view: MetadataView<'_, '_, S>,
         committed_at_ms: u64,
@@ -69,14 +69,14 @@ impl PublishPlanningSession {
         let overlay = MetadataState::default();
         let pre_state = base_view.with_overlay(&overlay, &self.accepted_rows, self.head.seq);
         evaluate_preconditions(
-            &request.preconditions,
-            request.subject.as_ref(),
+            &candidate.request().preconditions,
+            candidate.authority(),
             &self.head,
             &pre_state,
         )
         .await?;
         prepare_commit_against_publish_view(
-            request,
+            candidate,
             semantic_identity,
             &self.head,
             base_view,
@@ -107,6 +107,7 @@ impl PublishPlanningSession {
 
 #[cfg(test)]
 mod tests {
+    use super::super::intent::CommitRequest;
     use super::super::intent::FilesystemOperation;
     use super::*;
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
@@ -256,7 +257,7 @@ mod tests {
             let mut allocation = session.begin_candidate();
             let plan = session
                 .prepare_commit(
-                    &request,
+                    &CommitCandidate::new(request.clone()),
                     commit_fingerprint(&namespace_id, &request).expect("fingerprint"),
                     view.projected_metadata_view(),
                     1,
@@ -320,7 +321,7 @@ mod tests {
         let mut first_allocation = session.begin_candidate();
         session
             .prepare_commit(
-                &first_request,
+                &CommitCandidate::new(first_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
                 1,
@@ -345,7 +346,7 @@ mod tests {
         let mut second_allocation = session.begin_candidate();
         session
             .prepare_commit(
-                &second_request,
+                &CommitCandidate::new(second_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
                 1,

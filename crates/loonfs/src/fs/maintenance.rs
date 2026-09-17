@@ -237,9 +237,13 @@ impl FsMaintenance {
             RunMaintenanceRequest::MetadataCompaction(_) => "metadata_compaction",
             RunMaintenanceRequest::Gc(_) => "gc",
             RunMaintenanceRequest::Retention(_) => "retention",
+            RunMaintenanceRequest::RecoverAdministrator(_) => "recover_administrator",
         };
         span.record("kind", kind);
         match request {
+            RunMaintenanceRequest::RecoverAdministrator(_) => Err(RuntimeError::Config(
+                "administrator recovery publishes a commit; run it through the writer".to_owned(),
+            )),
             RunMaintenanceRequest::Metadata(request) => {
                 let options = MetadataMaintenanceOptions::from_request(request)?;
                 self.maintain_metadata(namespace_id, options)
@@ -855,5 +859,76 @@ impl FsMaintenance {
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
+    }
+}
+
+impl crate::FsWriter {
+    /// Grants `admin` on the root row to `principal_id`, keeping every other
+    /// root grant, through a commit no subject check applies to.
+    pub async fn recover_administrator(
+        &self,
+        namespace_id: &NamespaceId,
+        principal_id: &loonfs_api::PrincipalId,
+        actor_id: loonfs_api::ActorId,
+    ) -> Result<loonfs_api::RecoverAdministratorResponse> {
+        use loonfs_api::v0::FilesystemChange;
+        use loonfs_api::{AccessGrants, AccessRight, AccessRights};
+
+        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (boundary, grants, current) = engine.root_access(&context).await?;
+        let mut entries: std::collections::BTreeMap<_, _> = grants
+            .iter()
+            .map(|(principal, rights)| (principal.clone(), rights))
+            .collect();
+        let rights = grants
+            .get(principal_id)
+            .union(AccessRights::from_iter([AccessRight::Admin]));
+        entries.insert(principal_id.clone(), rights);
+        let grants = AccessGrants::new(entries).map_err(|error| {
+            RuntimeError::Core(crate::CoreError::InvalidCommitField {
+                field: "grants",
+                message: error.to_string(),
+                precondition_index: None,
+            })
+        })?;
+        let request = crate::publish::CommitRequest::single(
+            loonfs_api::CommitId::generate(),
+            actor_id,
+            Some("administrator recovery".to_owned()),
+            crate::publish::FilesystemOperation::UpdateAccess {
+                path: loonfs_api::AbsolutePath::root(),
+                boundary,
+                grants,
+                expected_inode_id: Some(loonfs_api::ROOT_INODE_ID),
+                expected_access_revision_no: Some(current),
+            },
+        );
+        let commit = self
+            .commit_candidate_inner(
+                namespace_id,
+                crate::publish::CommitCandidate::maintenance(request),
+            )
+            .await?;
+        let access_revision_no = commit
+            .events
+            .iter()
+            .flatten()
+            .find_map(|event| match event {
+                FilesystemChange::AccessChanged {
+                    access_revision_no, ..
+                } => Some(*access_revision_no),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeError::Core(crate::CoreError::Internal(
+                    "administrator recovery published no access change".to_owned(),
+                ))
+            })?;
+        Ok(loonfs_api::RecoverAdministratorResponse {
+            namespace_id: commit.namespace_id,
+            commit_id: commit.commit_id,
+            committed_seq: commit.committed_seq,
+            access_revision_no,
+        })
     }
 }

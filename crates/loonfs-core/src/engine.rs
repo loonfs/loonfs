@@ -1,7 +1,7 @@
 //! [`NamespaceEngine`]: the namespace-scoped entry point for reads, writes,
 //! uploads, checkpoints, and maintenance.
 
-use crate::authorize::{Authorizer, ReadAccess};
+use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
 use crate::cache::{MetadataSegmentCache, WalTailProjectionCache};
 use crate::checkpoint::{CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor};
 use crate::commit_engine::CommitCandidate;
@@ -151,7 +151,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let authorizer = Authorizer::for_request(
             &self.namespace_id,
             &context.head.access,
-            self.subject.as_ref(),
+            CommitAuthority::Subject(self.subject.as_ref()),
         )?;
         Ok(match head_view {
             Some(head) => ReadAccess::at_head(authorizer, head),
@@ -174,7 +174,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         Authorizer::for_request(
             &self.namespace_id,
             &context.head.access,
-            self.subject.as_ref(),
+            CommitAuthority::Subject(self.subject.as_ref()),
         )
         .map(|_| ())
     }
@@ -196,6 +196,32 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 inode_id: ROOT_INODE_ID,
             })
         }
+    }
+
+    /// The root row's current boundary flag and grants. Refused on an
+    /// unrestricted namespace, which holds no access rows.
+    pub async fn root_access(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> Result<(bool, loonfs_api::AccessGrants, loonfs_api::AccessRevisionNo)> {
+        if matches!(context.head.access, NamespaceAccess::Unrestricted {}) {
+            return Err(CoreError::NamespaceUnrestricted {
+                namespace_id: self.namespace_id.clone(),
+            });
+        }
+        let view = self.load_read_view(context).await?;
+        let row = view
+            .metadata_view()
+            .latest_access_revision(ROOT_INODE_ID)
+            .await?;
+        Ok(row.map_or(
+            (
+                false,
+                loonfs_api::AccessGrants::default(),
+                loonfs_api::AccessRevisionNo(0),
+            ),
+            |row| (row.boundary, row.grants, row.access_revision_no),
+        ))
     }
 
     /// Returns the namespace this engine is bound to.

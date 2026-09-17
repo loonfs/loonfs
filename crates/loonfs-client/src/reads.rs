@@ -130,12 +130,14 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         actor_id: &loonfs_api::ActorId,
+        access: loonfs_api::NamespaceAccess,
     ) -> Result<Namespace> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
         self.request_json::<_, Namespace>(
             self.post(&url).header("Loonfs-Actor", actor_id.as_str()),
             Some(&CreateNamespaceRequest {
+                access,
                 namespace_id: namespace_id.clone(),
             }),
             SendPolicy::Once,

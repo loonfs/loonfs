@@ -18,6 +18,7 @@ use crate::commit::{
     validate_ops, CandidateAllocation, CommitFingerprint, CommitNumbering, PublishValidationView,
     ValidatedCommitPlan, ValidatedOp,
 };
+use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
@@ -60,7 +61,7 @@ pub(crate) fn commit_fingerprint(
 /// (`load_publish_metadata_view` fences on epoch equality, and the batch
 /// rejects namespace mismatches before admission).
 pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
-    request: &CommitRequest,
+    candidate: &CommitCandidate,
     semantic_identity: CommitFingerprint,
     head: &NamespaceReadState,
     base_view: MetadataView<'_, '_, S>,
@@ -68,6 +69,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     committed_at_ms: u64,
     allocation: &mut CandidateAllocation,
 ) -> Result<ValidatedCommitPlan> {
+    let request = candidate.request();
     let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
         .ok_or_else(|| {
@@ -77,7 +79,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         })?;
 
     let authorizer =
-        Authorizer::for_request(&head.namespace_id, &head.access, request.subject.as_ref())?;
+        Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
     let mut numbering = CommitNumbering::default();
     let mut validated_ops: Vec<ValidatedOp> = Vec::new();
@@ -426,7 +428,7 @@ mod tests {
         let allocator = InodeAllocator::new(view.head().next_inode_id);
         let mut allocation = allocator.begin_candidate();
         let validated = prepare_commit_against_publish_view(
-            request,
+            &CommitCandidate::new(request.clone()),
             serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
             view.head(),
             view.projected_metadata_view(),

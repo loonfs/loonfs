@@ -47,7 +47,11 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let before = NamespacePath::parse("demo", "/before.txt").expect("before path");
@@ -178,7 +182,11 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let root = harness
@@ -249,7 +257,11 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     let deleted_namespace = namespace_id("deleted");
     harness
         .client
-        .create_namespace(&deleted_namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &deleted_namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create deleted namespace");
     harness
@@ -291,7 +303,11 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
     let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     for name in ["Zebra.txt", "apple.txt", "B.txt"] {
@@ -430,7 +446,11 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let child = NamespacePath::parse("demo", "/docs/child.txt").expect("child path");
@@ -532,7 +552,11 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let actor = loonfs_test_support::test_actor();

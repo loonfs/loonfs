@@ -31,7 +31,11 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
 
@@ -107,7 +111,11 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/retry.txt").expect("target");
@@ -266,7 +274,11 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/message.txt").expect("target");
@@ -366,7 +378,11 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let commit_id = CommitId::parse("req-path-put").expect("valid commit id");
@@ -443,7 +459,11 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/precondition.txt").expect("target");
@@ -530,7 +550,11 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/batch.txt").expect("target");
@@ -614,7 +638,11 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
 
@@ -710,7 +738,11 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/trimmed.txt").expect("target");
@@ -803,7 +835,11 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
@@ -986,7 +1022,11 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     let client_b = server_b.client.clone();
 
     client_a
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("create namespace");
     let host_a_target = NamespacePath::parse("demo", "/docs/host-a.txt").expect("host a target");
@@ -1089,7 +1129,11 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
         .await
         .expect("namespace");
     for streamed in [false, true] {
