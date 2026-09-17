@@ -31,6 +31,7 @@ async fn retirement_includes_listing_time_in_its_budget_and_retries_with_a_fresh
             &namespace_id,
             &call,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -94,6 +95,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await

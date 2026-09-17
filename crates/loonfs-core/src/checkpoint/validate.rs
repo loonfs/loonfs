@@ -269,7 +269,8 @@ fn validate_run_index_parity(
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
                 | MetadataRowFamily::ContentPublications
-                | MetadataRowFamily::Attributes => {}
+                | MetadataRowFamily::Attributes
+                | MetadataRowFamily::Access => {}
             }
         }
         if direntry_bind_rows != direntry_child_bind_rows {

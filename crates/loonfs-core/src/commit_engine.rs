@@ -872,6 +872,7 @@ mod tests {
             &namespace_id,
             &writer_a,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -955,6 +956,7 @@ mod tests {
             &namespace_id,
             &writer_a,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -1024,6 +1026,7 @@ mod tests {
             &namespace_id,
             &writer_a,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -1124,6 +1127,7 @@ mod tests {
             &namespace_id,
             &writer,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -1200,6 +1204,7 @@ mod tests {
             &namespace_id,
             &writer,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await

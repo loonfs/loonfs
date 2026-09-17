@@ -192,6 +192,7 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -292,6 +293,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -379,6 +381,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
             &namespace_id,
             &setup,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false
         )
         .await
@@ -400,6 +403,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         &source,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -477,6 +481,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -557,6 +562,7 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -602,6 +608,7 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -647,6 +654,7 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -714,6 +722,7 @@ async fn upload_gc_reaps_a_session_that_never_staged_anything() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -744,6 +753,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -801,6 +811,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -933,6 +944,7 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -969,6 +981,7 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1014,6 +1027,7 @@ async fn completed_content_delete_failure_keeps_the_session_for_retry() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1069,6 +1083,7 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
             &namespace_id,
             &setup,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -1179,6 +1194,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1223,6 +1239,7 @@ async fn published_compaction_segments_are_referenced_and_kept() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1279,6 +1296,7 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1359,6 +1377,7 @@ async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1391,6 +1410,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1454,6 +1474,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1504,6 +1525,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1603,6 +1625,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1687,6 +1710,7 @@ async fn gc_retains_active_checkpoint_bases() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1764,6 +1788,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         &source,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1874,6 +1899,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         &source,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -1945,6 +1971,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         &source,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2018,6 +2045,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &source,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2104,6 +2132,7 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2176,6 +2205,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2248,6 +2278,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2356,6 +2387,7 @@ async fn competing_collectors_preserve_the_winning_retirement_deadline() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2409,6 +2441,7 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_fu
             &namespace_id,
             &setup,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -2459,6 +2492,7 @@ async fn retired_content_namespace<S: ObjectStore>(
         namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2511,6 +2545,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             &namespace_id,
             &setup,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -2568,6 +2603,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2662,6 +2698,7 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2848,6 +2885,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -2953,6 +2991,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         &namespace_id,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -3008,6 +3047,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
         &source,
         &setup,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await

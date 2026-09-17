@@ -4,9 +4,9 @@
 use super::indexes::MetadataIndexes;
 use crate::checkpoint::DecodedRowWeight;
 use loonfs_api::wire::manifest::{
-    ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentPublicationRecord, DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
+    CommitReceiptRecord, ContentPublicationRecord, DeletedDirentry, DirentryBindRecord,
+    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
 
@@ -20,6 +20,7 @@ pub struct MetadataState {
     pub(super) commit_receipts: Vec<CommitReceiptRecord>,
     pub(super) content_publications: Vec<ContentPublicationRecord>,
     pub(super) attributes_revisions: Vec<AttributesRevisionRecord>,
+    pub(super) access_revisions: Vec<AccessRevisionRecord>,
     pub(super) row_count: usize,
     pub(super) decoded_bytes: usize,
     pub(super) indexes: MetadataIndexes,
@@ -28,6 +29,7 @@ pub struct MetadataState {
 impl Default for MetadataState {
     fn default() -> Self {
         Self::from_rows(
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -144,6 +146,7 @@ impl MetadataState {
         commit_receipts: Vec<CommitReceiptRecord>,
         attributes_revisions: Vec<AttributesRevisionRecord>,
         content_publications: Vec<ContentPublicationRecord>,
+        access_revisions: Vec<AccessRevisionRecord>,
     ) -> Self {
         let mut state = Self {
             inodes,
@@ -153,6 +156,7 @@ impl MetadataState {
             subtree_tombstones,
             commit_receipts,
             attributes_revisions,
+            access_revisions,
             content_publications,
             row_count: 0,
             decoded_bytes: 0,
@@ -218,6 +222,10 @@ impl MetadataState {
         &self.attributes_revisions
     }
 
+    pub fn access_revisions(&self) -> &[AccessRevisionRecord] {
+        &self.access_revisions
+    }
+
     pub fn row_count(&self) -> usize {
         self.row_count
     }
@@ -278,6 +286,12 @@ impl MetadataState {
         self.attributes_revisions.push(record);
     }
 
+    pub(crate) fn push_access_revision_record(&mut self, record: AccessRevisionRecord) {
+        self.indexes.record_access_revision(&record);
+        self.record_row_weight(record.decoded_weight());
+        self.access_revisions.push(record);
+    }
+
     fn record_row_weight(&mut self, decoded_bytes: usize) {
         self.row_count = self.row_count.saturating_add(1);
         self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
@@ -324,6 +338,10 @@ impl MetadataStateBuilder {
         self.state.push_attributes_revision_record(record);
     }
 
+    pub(crate) fn push_access_revision(&mut self, record: AccessRevisionRecord) {
+        self.state.push_access_revision_record(record);
+    }
+
     pub(crate) fn finish(mut self) -> MetadataState {
         self.state.rebuild_indexes();
         self.state
@@ -341,6 +359,7 @@ fn metadata_row_count(state: &MetadataState) -> usize {
         .saturating_add(state.commit_receipts.len())
         .saturating_add(state.content_publications.len())
         .saturating_add(state.attributes_revisions.len())
+        .saturating_add(state.access_revisions.len())
 }
 
 fn metadata_decoded_bytes(state: &MetadataState) -> usize {
@@ -358,4 +377,5 @@ fn metadata_decoded_bytes(state: &MetadataState) -> usize {
         .saturating_add(total(&state.commit_receipts))
         .saturating_add(total(&state.content_publications))
         .saturating_add(total(&state.attributes_revisions))
+        .saturating_add(total(&state.access_revisions))
 }

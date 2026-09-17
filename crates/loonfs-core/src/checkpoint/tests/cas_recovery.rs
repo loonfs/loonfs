@@ -18,6 +18,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             &namespace_id,
             &context,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -161,6 +162,7 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
         &namespace_id,
         &context,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -229,6 +231,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         &namespace_id,
         &context,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -282,6 +285,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
             &namespace_id,
             &context,
             &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
             false,
         )
         .await
@@ -340,6 +344,7 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
         &namespace_id,
         &context,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -439,6 +444,7 @@ async fn read_anchor_reloads_the_head_when_the_manifest_is_ahead() {
         &namespace_id,
         &context,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -488,6 +494,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         &namespace_id,
         &context,
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await

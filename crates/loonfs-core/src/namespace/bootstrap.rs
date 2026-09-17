@@ -11,7 +11,9 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, ContentStoreState, ControlObjectKind, HintState,
 };
-use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestPayload};
+use loonfs_api::wire::manifest::{
+    encode_namespace_manifest_json, NamespaceAccess, NamespaceManifestPayload,
+};
 use loonfs_api::{
     ChangeSeq, ContentStoreId, ErrorCode, InodeKind, ManifestNo, Namespace, NamespaceId, WalNo,
     ROOT_INODE_ID,
@@ -69,6 +71,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     actor_id: &loonfs_api::ActorId,
+    access: &NamespaceAccess,
     allow_existing: bool,
 ) -> Result<Namespace, BootstrapNamespaceError> {
     let manifest = NamespaceManifestPayload::initial(
@@ -76,6 +79,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         ContentStoreId::generate(),
         context.now_ms,
         actor_id.clone(),
+        access.clone(),
     );
     match install_namespace_manifest(store, &manifest, || Ok(())).await? {
         NamespaceInstall::Landed => {}
@@ -195,6 +199,7 @@ pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
             created_by: loonfs_api::ActorId::loonfs(),
             created_at_ms,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

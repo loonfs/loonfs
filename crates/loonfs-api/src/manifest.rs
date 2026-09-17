@@ -6,11 +6,11 @@ use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::{
-    ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, ContentId, ContentRef,
-    DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId,
-    RevisionNo, RunNo,
+    AccessGrants, AccessRevisionNo, ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId,
+    ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
+    NamespaceId, RevisionNo, RunNo,
 };
-use crate::{ContentStoreId, WalNo, WriterEpoch};
+use crate::{ContentStoreId, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -67,6 +67,11 @@ pub enum MetadataRowFamily {
     /// Attributes are read only in this order, so the family has no secondary
     /// index and requires no cross-family parity check.
     Attributes,
+    /// Stores inode access revisions newest-first.
+    ///
+    /// Access rows are read only in this order, so the family has no
+    /// secondary index and requires no cross-family parity check.
+    Access,
 }
 
 /// Metadata families merged together as one consistency unit.
@@ -89,11 +94,13 @@ pub enum MetadataFamilyGroup {
     ContentPublications,
     /// Attributes.
     Attributes,
+    /// Access rows.
+    Access,
 }
 
 impl MetadataFamilyGroup {
     /// Every family group in serialized declaration order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Bindings,
         Self::Revisions,
         Self::Inodes,
@@ -102,6 +109,7 @@ impl MetadataFamilyGroup {
         Self::CommitReceipts,
         Self::ContentPublications,
         Self::Attributes,
+        Self::Access,
     ];
 
     /// Returns the snake-case name used in durable keys and serialized values.
@@ -115,6 +123,7 @@ impl MetadataFamilyGroup {
             Self::CommitReceipts => "commit_receipts",
             Self::ContentPublications => "content_publications",
             Self::Attributes => "attributes",
+            Self::Access => "access",
         }
     }
 
@@ -133,6 +142,7 @@ impl MetadataFamilyGroup {
             Self::CommitReceipts => &[MetadataRowFamily::CommitReceipts],
             Self::ContentPublications => &[MetadataRowFamily::ContentPublications],
             Self::Attributes => &[MetadataRowFamily::Attributes],
+            Self::Access => &[MetadataRowFamily::Access],
         }
     }
 }
@@ -235,6 +245,12 @@ pub enum MetadataRow {
     /// at revision 0 with an empty map, so nothing is written until a caller
     /// writes an attribute.
     AttributesRevision(AttributesRevisionRecord),
+    /// Publishes one inode's complete access state at one revision.
+    ///
+    /// Whole state, like an attribute revision: a reader takes the newest
+    /// row for an inode. An inode with no row anywhere is at revision 0
+    /// with no boundary and no grants.
+    AccessRevision(AccessRevisionRecord),
 }
 
 /// One inode's immutable identity and creation metadata.
@@ -411,6 +427,30 @@ pub struct AttributesRevisionRecord {
     pub attributes: Attributes,
 }
 
+/// One inode's complete access state at one revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessRevisionRecord {
+    /// Inode whose access this revision states.
+    pub inode_id: InodeId,
+    /// Monotonic per-inode access revision.
+    pub access_revision_no: AccessRevisionNo,
+    /// Namespace sequence that published the revision.
+    pub committed_seq: ChangeSeq,
+    /// Commit ID associated with this row.
+    pub commit_id: CommitId,
+    /// Delta position that disambiguates the revision within `committed_seq`.
+    pub delta_index: u32,
+    /// Actor that updated the access state.
+    pub updated_by: crate::ActorId,
+    /// Time of the update, in Unix milliseconds.
+    pub updated_at_ms: u64,
+    /// Whether this directory stops inheritance from its ancestors.
+    pub boundary: bool,
+    /// The inode's complete direct grants at this revision.
+    pub grants: AccessGrants,
+}
+
 /// Names one deletion generation: the commit that recorded a tombstone
 /// event and the position that disambiguates it inside that commit.
 ///
@@ -501,6 +541,23 @@ impl ActiveDeletionRowAction {
 }
 
 impl MetadataRowFamily {
+    /// Returns the snake-case name used in durable keys and serialized values.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inodes => "inodes",
+            Self::DirentryBinds => "direntry_binds",
+            Self::DirentryChildBinds => "direntry_child_binds",
+            Self::DirentryUnbinds => "direntry_unbinds",
+            Self::Revisions => "revisions",
+            Self::Tombstones => "tombstones",
+            Self::ActiveDeletions => "active_deletions",
+            Self::CommitReceipts => "commit_receipts",
+            Self::ContentPublications => "content_publications",
+            Self::Attributes => "attributes",
+            Self::Access => "access",
+        }
+    }
+
     /// Fixed prefix before the first variable component in this family's row
     /// keys. Compaction uses the remaining components to group rows for
     /// retention.
@@ -516,6 +573,7 @@ impl MetadataRowFamily {
             Self::CommitReceipts => lookup_keys::COMMIT_RECEIPT_ROW_PREFIX,
             Self::ContentPublications => lookup_keys::CONTENT_PUBLICATION_ROW_PREFIX,
             Self::Attributes => lookup_keys::ATTRIBUTE_ROW_PREFIX,
+            Self::Access => lookup_keys::ACCESS_ROW_PREFIX,
         }
     }
 }
@@ -535,6 +593,7 @@ impl MetadataRow {
             Self::CommitReceipt(_) => MetadataRowFamily::CommitReceipts,
             Self::ContentPublication(_) => MetadataRowFamily::ContentPublications,
             Self::AttributesRevision(_) => MetadataRowFamily::Attributes,
+            Self::AccessRevision(_) => MetadataRowFamily::Access,
         })
     }
 
@@ -567,7 +626,8 @@ impl MetadataRow {
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
                 | MetadataRowFamily::ContentPublications
-                | MetadataRowFamily::Attributes => None,
+                | MetadataRowFamily::Attributes
+                | MetadataRowFamily::Access => None,
             }
             .expect("a direntry bind row should use a direntry bind family"),
             Self::DirentryUnbind(record) => lookup_keys::direntry_unbind_row_key(
@@ -604,6 +664,12 @@ impl MetadataRow {
                 record.committed_seq,
                 record.delta_index,
             ),
+            Self::AccessRevision(record) => lookup_keys::access_row_key(
+                record.inode_id,
+                record.access_revision_no,
+                record.committed_seq,
+                record.delta_index,
+            ),
         }
     }
 
@@ -626,7 +692,8 @@ impl MetadataRow {
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
                 | MetadataRowFamily::ContentPublications
-                | MetadataRowFamily::Attributes => None,
+                | MetadataRowFamily::Attributes
+                | MetadataRowFamily::Access => None,
             }
             .expect("a direntry bind row should use a direntry bind family"),
             Self::DirentryUnbind(record) => {
@@ -644,6 +711,7 @@ impl MetadataRow {
                 lookup_keys::content_publication_probe(&record.content_id)
             }
             Self::AttributesRevision(record) => lookup_keys::attributes_probe(record.inode_id),
+            Self::AccessRevision(record) => lookup_keys::access_probe(record.inode_id),
         }
     }
 }
@@ -660,7 +728,7 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 /// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
 pub mod lookup_keys {
     use super::{hex_encode_row_key_component, TombstoneGeneration};
-    use crate::{AttributeRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo};
+    use crate::{AccessRevisionNo, AttributeRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo};
 
     /// Prefix for inode row keys.
     pub const INODE_ROW_PREFIX: &str = "inode-";
@@ -675,6 +743,7 @@ pub mod lookup_keys {
     pub(super) const CONTENT_PUBLICATION_ROW_PREFIX: &str = "content-publication-";
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
     pub(super) const ATTRIBUTE_ROW_PREFIX: &str = "attribute-";
+    pub(super) const ACCESS_ROW_PREFIX: &str = "access-";
 
     /// Builds the exclusive lower bound after `row_key`.
     pub fn after_row_key(row_key: &str) -> String {
@@ -963,6 +1032,48 @@ pub mod lookup_keys {
             u32::MAX - delta_index
         )
     }
+
+    /// Builds the Bloom filter probe for an inode's access revisions.
+    pub fn access_probe(inode_id: InodeId) -> String {
+        format!("{ACCESS_ROW_PREFIX}{:020}", inode_id.0)
+    }
+
+    /// Builds the prefix for an inode's newest-first access revisions.
+    pub fn access_prefix(inode_id: InodeId) -> String {
+        format!("{}-", access_probe(inode_id))
+    }
+
+    /// Builds a row key for an access revision.
+    pub(super) fn access_row_key(
+        inode_id: InodeId,
+        access_revision_no: AccessRevisionNo,
+        committed_seq: ChangeSeq,
+        delta_index: u32,
+    ) -> String {
+        format!(
+            "{}{:020}-{:020}-{:010}",
+            access_prefix(inode_id),
+            u64::MAX - access_revision_no.0,
+            u64::MAX - committed_seq.0,
+            u32::MAX - delta_index
+        )
+    }
+}
+
+/// A namespace's access mode, fixed at creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NamespaceAccess {
+    /// Every caller holding the deployment credential may do everything.
+    Unrestricted {},
+    /// Access rows govern every operation.
+    Acl {
+        /// Identity domain the namespace's principal ids belong to.
+        principal_scope: PrincipalScope,
+        /// The root inode's grants at genesis, normally `admin` for each
+        /// initial administrator.
+        root_grants: AccessGrants,
+    },
 }
 
 /// Carries one complete namespace file-set description inside a manifest envelope.
@@ -979,6 +1090,8 @@ pub struct NamespaceManifestPayload {
     pub created_at_ms: u64,
     /// Actor that created the namespace, as supplied by the application.
     pub created_by: ActorId,
+    /// Access mode, fixed at creation.
+    pub access: NamespaceAccess,
     /// Permanent fork provenance and source checkpoint identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
@@ -1043,12 +1156,14 @@ impl NamespaceManifestPayload {
         content_store_id: ContentStoreId,
         created_at_ms: u64,
         created_by: ActorId,
+        access: NamespaceAccess,
     ) -> Self {
         Self {
             namespace_id,
             content_store_id,
             created_at_ms,
             created_by,
+            access,
             fork_basis: None,
             status: NamespaceStatus::Active {},
             writer: None,
@@ -1088,6 +1203,9 @@ impl NamespaceManifestPayload {
         }
         if successor.created_by != self.created_by {
             return drift("created_by");
+        }
+        if successor.access != self.access {
+            return drift("access");
         }
         if successor.fork_basis != self.fork_basis {
             return drift("fork_basis");
@@ -1166,12 +1284,14 @@ mod tests {
                 .expect("content store"),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
+            super::NamespaceAccess::Unrestricted {},
         );
         for (field, change) in [
             ("namespace_id", 0),
             ("content_store_id", 1),
             ("created_at_ms", 2),
             ("fork_basis", 3),
+            ("access", 4),
         ] {
             let mut successor = initial.clone();
             match change {
@@ -1182,7 +1302,7 @@ mod tests {
                             .expect("content store")
                 }
                 2 => successor.created_at_ms += 1,
-                _ => {
+                3 => {
                     successor.fork_basis = Some(crate::control::ForkBasis {
                         manifest: crate::control::ManifestRef {
                             owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
@@ -1195,6 +1315,12 @@ mod tests {
                         )
                         .expect("checkpoint"),
                     })
+                }
+                _ => {
+                    successor.access = super::NamespaceAccess::Acl {
+                        principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
+                        root_grants: crate::AccessGrants::default(),
+                    }
                 }
             }
             assert_eq!(
@@ -1280,6 +1406,7 @@ mod tests {
                 .expect("content store"),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
+            access: super::NamespaceAccess::Unrestricted {},
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
@@ -1327,6 +1454,7 @@ mod tests {
                 .expect("content store"),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
+            access: super::NamespaceAccess::Unrestricted {},
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
@@ -1438,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn attributes_row_keys_sort_newest_revision_first_under_the_inode_prefix() {
+    fn whole_state_row_keys_sort_newest_revision_first_under_the_inode_prefix() {
         let row_of = |revision: u64, seq: u64, delta_index: u32| {
             super::MetadataRow::AttributesRevision(super::AttributesRevisionRecord {
                 inode_id: InodeId(42),
@@ -1479,6 +1607,31 @@ mod tests {
         assert!(!row_of(3, 12, 1)
             .row_key()
             .starts_with(&super::lookup_keys::attributes_prefix(InodeId(43))));
+
+        let access_row = |revision, seq, delta_index| {
+            super::MetadataRow::AccessRevision(super::AccessRevisionRecord {
+                inode_id: InodeId(42),
+                access_revision_no: crate::AccessRevisionNo(revision),
+                committed_seq: ChangeSeq(seq),
+                commit_id: crate::CommitId::parse("c_access").expect("commit"),
+                delta_index,
+                updated_by: crate::ActorId::loonfs(),
+                updated_at_ms: 1_000,
+                boundary: false,
+                grants: crate::AccessGrants::default(),
+            })
+        };
+        let newest = access_row(3, 12, 1);
+        let older = access_row(2, 11, 0);
+        assert_eq!(
+            newest.row_key(),
+            "access-00000000000000000042-18446744073709551612-18446744073709551603-4294967294"
+        );
+        assert!(newest.row_key() < older.row_key());
+        assert_eq!(
+            newest.filter_key_for_family(MetadataRowFamily::Access),
+            super::lookup_keys::access_probe(InodeId(42))
+        );
     }
 
     #[test]

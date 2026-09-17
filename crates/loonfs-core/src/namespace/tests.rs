@@ -34,6 +34,7 @@ async fn creation_installs_descriptor_hint_and_manifest_then_reads_genesis() {
         &namespace_id,
         &context(),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -87,7 +88,14 @@ async fn two_creations_race_at_manifest_one() {
     let context = context();
     let actor_id = loonfs_test_support::test_actor();
     let (loser, winner) = futures::join!(
-        bootstrap_namespace(&store, &namespace_id, &context, &actor_id, false),
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &context,
+            &actor_id,
+            &loonfs_api::NamespaceAccess::Unrestricted {},
+            false
+        ),
         async {
             store.wait_until_blocked().await;
             let result = bootstrap_namespace(
@@ -95,6 +103,7 @@ async fn two_creations_race_at_manifest_one() {
                 &namespace_id,
                 &context,
                 &loonfs_test_support::test_actor(),
+                &loonfs_api::NamespaceAccess::Unrestricted {},
                 false,
             )
             .await;
@@ -118,6 +127,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         &source,
         &context(),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await
@@ -241,6 +251,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         &namespace_id,
         &context(),
         &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
         false,
     )
     .await

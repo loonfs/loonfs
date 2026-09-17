@@ -15,10 +15,10 @@ use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, Metada
 use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
 use loonfs_api::wire::manifest::{
-    ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentPublicationRecord, DeletedDirentry, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, MetadataRow, MetadataSegmentRef, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
+    AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
+    CommitReceiptRecord, ContentPublicationRecord, DeletedDirentry, DirentryBindRecord,
+    DirentryUnbindRecord, InodeRecord, MetadataRow, MetadataSegmentRef, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
 use loonfs_api::ActorId;
@@ -316,6 +316,7 @@ impl DecodedRowWeight for MetadataRow {
             MetadataRow::CommitReceipt(record) => record.decoded_weight(),
             MetadataRow::ContentPublication(record) => record.decoded_weight(),
             MetadataRow::AttributesRevision(record) => record.decoded_weight(),
+            MetadataRow::AccessRevision(record) => record.decoded_weight(),
         }
     }
 }
@@ -398,5 +399,14 @@ impl DecodedRowWeight for AttributesRevisionRecord {
             + self.commit_id.as_str().len()
             + actor_bytes(&self.updated_by)
             + self.attributes.logical_bytes()
+    }
+}
+
+impl DecodedRowWeight for AccessRevisionRecord {
+    fn decoded_weight(&self) -> usize {
+        ALLOCATED_ROW_OVERHEAD
+            + self.commit_id.as_str().len()
+            + actor_bytes(&self.updated_by)
+            + self.grants.logical_bytes()
     }
 }

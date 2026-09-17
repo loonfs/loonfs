@@ -79,6 +79,12 @@ pub(super) fn manifest_rows_for_family(
             .cloned()
             .map(MetadataRow::AttributesRevision)
             .collect::<Vec<_>>(),
+        MetadataRowFamily::Access => metadata_state
+            .access_revisions()
+            .iter()
+            .cloned()
+            .map(MetadataRow::AccessRevision)
+            .collect::<Vec<_>>(),
     };
     rows.sort_by_key(|row| row.row_key_for_family(family));
     rows
@@ -111,6 +117,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         MetadataRow::CommitReceipt(record) => record.committed_seq,
         MetadataRow::ContentPublication(record) => record.committed_seq,
         MetadataRow::AttributesRevision(record) => record.committed_seq,
+        MetadataRow::AccessRevision(record) => record.committed_seq,
     }
 }
 
@@ -126,5 +133,6 @@ pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::CommitReceipt(_) => "commit_receipt",
         MetadataRow::ContentPublication(_) => "content_publication",
         MetadataRow::AttributesRevision(_) => "attributes_revision",
+        MetadataRow::AccessRevision(_) => "access_revision",
     }
 }

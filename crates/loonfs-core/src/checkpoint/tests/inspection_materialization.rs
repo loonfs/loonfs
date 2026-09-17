@@ -268,6 +268,9 @@ pub(crate) fn append_rows_to_metadata(
             MetadataRowFamily::Attributes => metadata_state.push_attributes_revision(
                 row_decode::attributes_revision_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
+            MetadataRowFamily::Access => metadata_state.push_access_revision(
+                row_decode::access_revision_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
         }
     }
     Ok(())

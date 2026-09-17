@@ -383,6 +383,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             );
             cache.insert(key.clone(), Arc::new(rows));
             assert_eq!(
