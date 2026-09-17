@@ -2228,6 +2228,109 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
 }
 
 #[tokio::test]
+async fn a_runtime_fold_materializes_inline_content_and_reloads_an_empty_tail() {
+    use loonfs_core::cache::DecodedBlock;
+    use loonfs_core::publish::InlineContent;
+
+    let directory = tempdir().expect("directory");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::content_blob(),
+    ));
+    let namespace_id = NamespaceId::parse("inline-fold").expect("namespace");
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("writer")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    append_wal_segments(
+        store.as_ref(),
+        &namespace_id,
+        FOLD_AT_WAL_SEGMENTS - 1,
+        &MutationContext {
+            writer_id: loonfs_api::WriterId::parse("seed").expect("writer"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("seed tail");
+    let value = InlineContent::new(
+        namespace_id.clone(),
+        loonfs_api::ContentId::generate(),
+        Bytes::from_static(b"folded inline bytes"),
+    );
+    let candidate = CommitCandidate::with_inline_content(
+        CommitRequest::single(
+            CommitId::parse("inline").expect("commit"),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::PutFile {
+                path: AbsolutePath::parse("/inline").expect("path"),
+                content_ref: value.content_ref().clone(),
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+        ),
+        Vec::new(),
+        vec![value.clone()],
+    );
+    let registry = writer.publisher();
+    registry
+        .submit_candidate(namespace_id.clone(), candidate.clone())
+        .await
+        .expect("publish");
+    writer.wait_for_fold(&namespace_id).await.expect("fold");
+    assert_eq!(store.count(OperationClass::Put), 1);
+    let reader = crate::FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("fresh reader");
+    assert_eq!(
+        reader
+            .get_file_bytes(&namespace_id, "/inline")
+            .await
+            .expect("read after fold")
+            .bytes,
+        value.bytes().as_ref()
+    );
+    assert!(store.count(OperationClass::Read) > 0);
+    store.reset();
+    registry
+        .submit_candidate(namespace_id.clone(), candidate)
+        .await
+        .expect("reload receipt");
+    let publisher = registry
+        .shared
+        .lock_state()
+        .publishers
+        .get(&namespace_id)
+        .cloned()
+        .expect("publisher");
+    let input = publisher
+        .engine
+        .lock()
+        .await
+        .engine
+        .as_ref()
+        .expect("engine")
+        .wal_fold_input()
+        .expect("reloaded projection");
+    assert_eq!(input.wal_tail_segments, 0);
+    assert_eq!(input.tail_state.weight().rows, 0);
+    assert_eq!(input.tail_state.weight().bytes, 0);
+    assert_eq!(store.count(OperationClass::Put), 0);
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn a_failed_fold_notifies_maintenance_when_the_attempt_finishes() {
     let temp_dir = tempdir().expect("tempdir");
     let failing = Arc::new(FailStore::matching(

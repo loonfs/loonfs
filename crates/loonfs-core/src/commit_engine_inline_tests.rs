@@ -17,15 +17,15 @@ use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStor
 
 async fn setup() -> (
     tempfile::TempDir,
-    RecordingStore<LocalFsStore>,
+    Arc<RecordingStore<LocalFsStore>>,
     NamespaceCommitEngine,
     MutationContext,
 ) {
     let directory = tempfile::tempdir().expect("directory");
-    let store = RecordingStore::new(
+    let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
-    );
+    ));
     let namespace_id = NamespaceId::parse("inline").expect("namespace");
     let context = MutationContext {
         writer_id: WriterId::parse("writer").expect("writer"),
@@ -314,7 +314,7 @@ async fn invalid_inline_candidates_write_nothing() {
 }
 
 #[tokio::test]
-async fn inline_tail_replay_matches_publication_and_prevents_flush_writes() {
+async fn inline_tail_replay_matches_publication_and_materializes_before_metadata() {
     let (_directory, store, mut engine, context) = setup().await;
     let directory = CommitCandidate::new(CommitRequest::single(
         CommitId::parse("directory").expect("commit"),
@@ -337,12 +337,15 @@ async fn inline_tail_replay_matches_publication_and_prevents_flush_writes() {
     );
     engine.invalidate_projection();
     let mut last = None;
+    let mut values = Vec::new();
     for (name, bytes) in [
         ("first", Bytes::from_static(b"first")),
         ("second", Bytes::from_static(b"second")),
         ("empty", Bytes::new()),
     ] {
-        let candidate = candidate(name, vec![inline(&engine.namespace_id, bytes)]);
+        let value = inline(&engine.namespace_id, bytes);
+        values.push(value.clone());
+        let candidate = candidate(name, vec![value]);
         publish(&mut engine, &store, &context, candidate.clone())
             .await
             .expect("publish");
@@ -362,20 +365,52 @@ async fn inline_tail_replay_matches_publication_and_prevents_flush_writes() {
     let reloaded = engine.wal_fold_input().expect("reloaded projection");
     assert_eq!(reloaded.tail_state, advanced.tail_state);
     assert_no_writes(&store);
-    for input in [Some(advanced), Some(reloaded), None] {
+    let folded_wal_no = advanced.head.wal_no;
+    let content_store_id = advanced.head.content_store_id.clone();
+    for (index, input) in [Some(advanced), Some(reloaded), None]
+        .into_iter()
+        .enumerate()
+    {
         store.reset();
-        assert!(matches!(
-            fold_wal_tail(
-                &store,
-                None,
-                &engine.namespace_id,
-                input,
-                &StdMonotonicTimer::default()
-            )
-            .await,
-            Err(CoreError::Internal(_))
-        ));
-        assert_no_writes(&store);
+        let flushed = fold_wal_tail(
+            &store,
+            None,
+            &engine.namespace_id,
+            input,
+            &StdMonotonicTimer::default(),
+        )
+        .await
+        .expect("flush inline content");
+        if index == 0 {
+            assert_eq!(flushed.outcome, FlushWalOutcome::Published);
+            fold_tests::assert_content_before_metadata(&store, values.len());
+            for value in &values {
+                let key = crate::storage::content::content_object_key_for_ref(
+                    &content_store_id,
+                    value.content_ref(),
+                )
+                .expect("content key");
+                assert_eq!(
+                    store
+                        .get(&key, None)
+                        .await
+                        .expect("get content")
+                        .expect("content"),
+                    value.bytes().as_ref()
+                );
+            }
+        } else {
+            assert_eq!(flushed.outcome, FlushWalOutcome::AlreadyCurrent);
+            assert_no_writes(&store);
+        }
+        let manifest =
+            crate::namespace::control::load_current_manifest(&store, &engine.namespace_id)
+                .await
+                .expect("manifest");
+        assert_eq!(
+            manifest.envelope.payload().last_folded_wal_no,
+            folded_wal_no
+        );
         assert_eq!(
             store
                 .list_prefix(&wal_segment_prefix(&engine.namespace_id))
@@ -388,3 +423,6 @@ async fn inline_tail_replay_matches_publication_and_prevents_flush_writes() {
 
 #[path = "commit_engine_inline_read_tests.rs"]
 mod read_tests;
+
+#[path = "commit_engine_inline_fold_tests.rs"]
+mod fold_tests;

@@ -652,11 +652,18 @@ impl NamespaceCommitEngine {
                 self.invalidate_projection();
                 return (projection.wal_tail_segments, None);
             }
-            PublishViewEffect::Advanced { records, head } => {
+            PublishViewEffect::Advanced {
+                records,
+                inline_content,
+                head,
+            } => {
                 projection.wal_tail_segments += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
+                for value in inline_content {
+                    tail_state
+                        .insert_inline_content(value.content_ref().clone(), value.bytes().clone());
+                }
                 for record in &records {
-                    tail_state.extend_inline_content(&record.inline_content);
                     tail_state.rows.apply_committed_wal_record_mut(record);
                 }
                 projection.reanchor(head.clone());
