@@ -114,7 +114,7 @@ async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
         let state = if family == ApiMetadataRowFamily::ActiveDeletions {
             tail_state.as_ref()
         } else {
-            projection.tail_state.as_ref()
+            &projection.tail_state.rows
         };
         rows.extend(manifest_rows_for_family(state, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));

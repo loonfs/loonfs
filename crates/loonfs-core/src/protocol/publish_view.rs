@@ -4,13 +4,14 @@ use crate::checkpoint::VerifiedMetadataSegments;
 use crate::checkpoint::{load_basis_metadata_segments, LoadedMetadataBasis, MetadataSegmentCache};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
-use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
+use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::load_replayed_wal_tail;
+use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
@@ -22,7 +23,7 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     pub(super) acquired_writer: AcquiredWriter,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
-    tail_state: Arc<MetadataState>,
+    tail_state: Arc<ProjectedWalTail>,
     /// The WAL tail length when it has reached the write-stop bound, so the
     /// tail this publish would extend stays inside it. New commits are refused
     /// with that count; a commit id the namespace already knows is still
@@ -32,7 +33,7 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state)
+        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state.rows)
     }
 
     pub(crate) fn content_store_id(&self) -> &ContentStoreId {
@@ -104,8 +105,7 @@ pub(crate) struct PublishTailProjection {
     pub(crate) head: NamespaceReadState,
     pub(crate) retention_floor_seq: ChangeSeq,
     pub(crate) wal_tail_segments: u64,
-    pub(crate) wal_tail_inline_values: u64,
-    pub(crate) tail_state: Arc<MetadataState>,
+    pub(crate) tail_state: Arc<ProjectedWalTail>,
 }
 
 impl PublishTailProjection {
@@ -115,7 +115,7 @@ impl PublishTailProjection {
 
     pub(crate) fn weight(&self) -> PublishTailWeight {
         PublishTailWeight {
-            rows: self.tail_state.row_count(),
+            rows: self.tail_state.rows.row_count(),
             decoded_bytes: self.tail_state.decoded_bytes(),
         }
     }
@@ -224,8 +224,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         head: head.clone(),
         retention_floor_seq,
         wal_tail_segments,
-        wal_tail_inline_values: replayed.wal_tail_inline_values,
-        tail_state: Arc::new(replayed.resulting_metadata_state),
+        tail_state: Arc::new(replayed.projected_tail),
     };
     Ok(projection)
 }
@@ -274,11 +273,10 @@ mod tests {
             retention_floor_seq: ChangeSeq(0),
             key,
             wal_tail_segments: 3,
-            wal_tail_inline_values: 0,
-            tail_state: Arc::new(bootstrap_metadata_state(
+            tail_state: Arc::new(ProjectedWalTail::from_rows(bootstrap_metadata_state(
                 1_000,
                 &loonfs_api::NamespaceAccess::Unrestricted {},
-            )),
+            ))),
         }
     }
 

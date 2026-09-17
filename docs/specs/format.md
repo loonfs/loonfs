@@ -361,13 +361,15 @@ A path-based revision read first resolves the current inode at that path, then l
 
 ### 4.5 Content verification
 
-Resolve the content store from the reading namespace's manifest. Construct the exact content key using the reference's original owner and content ID. Verify that the content kind is supported, then read and verify the complete byte length and checksum.
+A published reference names content, not its current location. Resolve the content store from the reading namespace's manifest. If the reference belongs to this namespace and the projected WAL tail holds its content ID, read the resident inline bytes. Otherwise read the content object keyed by the reference's original owner and content ID. Content inherited through a fork always resolves to an object. Both sources use the same supported-kind, byte-length, and checksum checks.
+
+A reader that replays the tail already holds its inline bytes, so reading them needs no content request. Replay does not hash them. Every read verifies them as it verifies an object. A pinned view whose WAL segments have been reclaimed fails as a stale view does. There is no fallback to a content object.
 
 A missing object, wrong size, unsupported algorithm, or checksum mismatch fails the read. A HEAD request may check existence and size before the download, but does not replace checksum verification of the bytes read.
 
 The embedded runtime may overlap a small buffered content read with current-path validation. It resolves a candidate from a cached view without consuming local publication evidence, then performs the ordinary freshness check. When that check returns the same read state and manifest, the candidate is the current resolution; otherwise the path is resolved again in the current view. Speculative bytes are usable only when the current path resolves to the same namespace-bound content store and complete content reference; the returned entry comes from the current view. Current metadata errors take precedence. An obsolete content result is discarded before fetching a changed reference once.
 
-Speculation is limited to nonempty files of at most 64 KiB and respects smaller configured buffered-read limits. A ranged GET requests the declared size plus one byte and verifies exact length and checksum. A length error on an oversized ranged response reports the observed lower bound, not the full object size. No speculative result advances freshness evidence or changes retention.
+Speculation is limited to nonempty files of at most 64 KiB and respects smaller configured buffered-read limits. For object content, a ranged GET requests the declared size plus one byte and verifies exact length and checksum. Tail content uses verified resident bytes without a content request. A length error on an oversized ranged response reports the observed lower bound, not the full object size. No speculative result advances freshness evidence or changes retention.
 
 For streamed full-file reads, the complete checksum can only be established after the full stream has been processed. The transport must preserve a late read failure; receiving an initial portion of a stream does not establish successful whole-file verification. For provider-direct downloads, bytes pass directly to the client. The [API specification][api-spec] defines the client's verification responsibilities.
 

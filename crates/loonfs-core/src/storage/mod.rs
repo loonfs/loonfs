@@ -3,4 +3,5 @@
 
 pub(crate) mod content;
 pub(crate) mod content_admission;
+pub(crate) mod content_location;
 pub(crate) mod inline_content;

@@ -1,0 +1,74 @@
+//! Resolves published content to resident WAL bytes or an object key.
+
+use super::content::{
+    content_object_key_for_ref, load_required_object, validate_loaded_content_bytes,
+    DurableContentValidationError,
+};
+use crate::error::CoreError;
+use bytes::Bytes;
+use loonfs_api::{ContentRef, ContentStoreId, NamespaceId};
+use loonfs_objectstore::ObjectStore;
+
+/// Identifies where a published reference's bytes are read from.
+/// `Tail` carries the object key that will hold the content after folding.
+/// Content errors are reported under that key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentLocation {
+    Tail { bytes: Bytes, object_key: String },
+    Object { object_key: String },
+}
+
+impl ContentLocation {
+    pub(crate) fn resolve(
+        namespace_id: &NamespaceId,
+        content_store_id: &ContentStoreId,
+        tail: Option<&crate::wal::ProjectedWalTail>,
+        content_ref: &ContentRef,
+    ) -> Result<Self, DurableContentValidationError> {
+        let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+        if content_ref.owner_namespace_id == *namespace_id {
+            if let Some(bytes) = tail.and_then(|tail| tail.inline_content(&content_ref.content_id))
+            {
+                return Ok(Self::Tail {
+                    bytes: bytes.clone(),
+                    object_key,
+                });
+            }
+        }
+        Ok(Self::Object { object_key })
+    }
+
+    pub(crate) fn object_key(&self) -> &str {
+        match self {
+            Self::Tail { object_key, .. } | Self::Object { object_key } => object_key,
+        }
+    }
+
+    pub(crate) fn direct_download_key(self) -> crate::error::Result<String> {
+        match self {
+            Self::Object { object_key } => Ok(object_key),
+            // A direct download needs an object that already holds these bytes.
+            Self::Tail { .. } => Err(CoreError::Internal(
+                "inline content has no direct download object".to_owned(),
+            )),
+        }
+    }
+
+    pub(crate) async fn get_bytes<S: ObjectStore + ?Sized>(
+        &self,
+        store: &S,
+        content_ref: &ContentRef,
+    ) -> Result<Vec<u8>, DurableContentValidationError> {
+        match self {
+            Self::Tail { bytes, object_key } => {
+                validate_loaded_content_bytes(object_key.clone(), content_ref, bytes)?;
+                Ok(bytes.to_vec())
+            }
+            Self::Object { object_key } => {
+                let bytes = load_required_object(store, object_key, None).await?;
+                validate_loaded_content_bytes(object_key.clone(), content_ref, &bytes)?;
+                Ok(bytes)
+            }
+        }
+    }
+}

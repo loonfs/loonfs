@@ -125,7 +125,7 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
     }
 }
 
-/// Probes the next WAL number and extends cached rows with the returned segments.
+/// Probes the next WAL number and extends the cached tail with returned segments.
 /// Returns false when a different writer epoch requires full discovery.
 pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,
@@ -138,7 +138,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         manifest_head_seq: context.basis.manifest().manifest_head_seq,
         head_seq: state.seq,
     };
-    let mut rows = None;
+    let mut projected_tail = None;
     let mut last_record = None;
     let mut walk = WalWalk::after(&context.head.namespace_id, state.wal_no, state.seq);
     while let Some(segment) = walk.next(store).await.map_err(wal_error)? {
@@ -146,7 +146,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             return Ok(false);
         }
         if state.wal_no == context.head.wal_no {
-            rows = context.tail_cache.get(&cache_key);
+            projected_tail = context.tail_cache.get(&cache_key);
         }
         let before = state.clone();
         apply_segment(
@@ -155,21 +155,21 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             &mut last_record,
             segment.object_key(),
         )?;
-        if let Some(current) = rows {
+        if let Some(current) = projected_tail {
             let object_key = segment.object_key().to_owned();
             let tail = ValidatedWalTail::new(vec![segment]);
             let replayed =
                 project_validated_wal_tail(&before, &current, Some(state.writer_epoch), &tail)
                     .map_err(|error| corrupt(&object_key, error))?;
-            rows = Some(Arc::new(replayed.resulting_metadata_state));
+            projected_tail = Some(Arc::new(replayed.projected_tail));
         }
         if let Some(commit_id) = &last_record {
             state.head_commit_id = commit_id.clone();
         }
     }
-    if let Some(rows) = rows {
+    if let Some(projected_tail) = projected_tail {
         cache_key.head_seq = state.seq;
-        context.tail_cache.insert(cache_key, rows);
+        context.tail_cache.insert(cache_key, projected_tail);
     }
     context.head = state;
     Ok(true)

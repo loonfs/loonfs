@@ -1,6 +1,7 @@
 //! Content object reads and writes: minting immutable identities,
 //! validating references, and verified read-back.
 
+pub(crate) use super::content_location::ContentLocation;
 use crate::error::CoreError;
 #[cfg(any(test, feature = "test-support"))]
 use crate::namespace::catalog::load_namespace_content_store_id;
@@ -121,7 +122,7 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
 ) -> Result<(String, ByteStream), DurableContentValidationError> {
     let source =
         FileContentStream::open_import(store, content_store_id, content_ref.clone()).await?;
-    let object_key = source.object_key.clone();
+    let object_key = source.location.object_key().to_owned();
     let stream_key = object_key.clone();
     let body = futures::stream::try_unfold(source, move |mut source| {
         let stream_key = stream_key.clone();
@@ -332,7 +333,7 @@ pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 pub struct FileContentStream<S> {
     store: S,
     entry: Option<PathEntry>,
-    object_key: String,
+    location: ContentLocation,
     content_ref: ContentRef,
     chunk_bytes: NonZeroU64,
     /// Start offset of the next ranged read.
@@ -357,7 +358,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// [`Self::fold_resumed_prefix`].
     pub(crate) async fn open(
         store: S,
-        content_store_id: &ContentStoreId,
+        location: ContentLocation,
         entry: PathEntry,
         content_ref: ContentRef,
         chunk_bytes: NonZeroU64,
@@ -365,7 +366,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     ) -> Result<Self, DurableContentValidationError> {
         Self::open_inner(
             store,
-            content_store_id,
+            location,
             Some(entry),
             content_ref,
             chunk_bytes,
@@ -379,9 +380,10 @@ impl<S: ObjectStore> FileContentStream<S> {
         content_store_id: &ContentStoreId,
         content_ref: ContentRef,
     ) -> Result<Self, DurableContentValidationError> {
+        let object_key = content_object_key_for_ref(content_store_id, &content_ref)?;
         Self::open_inner(
             store,
-            content_store_id,
+            ContentLocation::Object { object_key },
             None,
             content_ref,
             NonZeroU64::new(CONTENT_READ_CHUNK_BYTES)
@@ -393,20 +395,26 @@ impl<S: ObjectStore> FileContentStream<S> {
 
     pub(crate) async fn open_inner(
         store: S,
-        content_store_id: &ContentStoreId,
+        location: ContentLocation,
         entry: Option<PathEntry>,
         content_ref: ContentRef,
         chunk_bytes: NonZeroU64,
         start_offset: u64,
     ) -> Result<Self, DurableContentValidationError> {
-        let object_key = content_object_key_for_ref(content_store_id, &content_ref)?;
-        validate_content_size(&store, &object_key, &content_ref).await?;
+        match &location {
+            ContentLocation::Tail { bytes, object_key } => {
+                validate_loaded_content_bytes(object_key.clone(), &content_ref, bytes)?;
+            }
+            ContentLocation::Object { object_key } => {
+                validate_content_size(&store, object_key, &content_ref).await?;
+            }
+        }
         let expected = content_ref.checksum.clone();
         let digest = StreamingChecksum::for_algorithm(expected.algorithm);
         Ok(Self {
             store,
             entry,
-            object_key,
+            location,
             content_ref,
             chunk_bytes,
             next_offset: start_offset,
@@ -427,14 +435,14 @@ impl<S: ObjectStore> FileContentStream<S> {
             return Err(CoreError::Internal(format!(
                 "content stream for `{}` was handed a resumed prefix after its read had \
                  already reached the end",
-                self.object_key
+                self.location.object_key()
             )));
         }
         if self.next_offset != self.resumed_from {
             return Err(CoreError::Internal(format!(
                 "content stream for `{}` was handed a resumed prefix after it had already \
                  fetched content",
-                self.object_key
+                self.location.object_key()
             )));
         }
         let folded = self.prefix_folded.saturating_add(bytes.len() as u64);
@@ -494,35 +502,40 @@ impl<S: ObjectStore> FileContentStream<S> {
             .next_offset
             .saturating_add(self.chunk_bytes.get())
             .min(self.content_ref.size_bytes);
-        let bytes = match self
-            .store
-            .get(
-                &self.object_key,
-                Some(ByteRange {
-                    start_inclusive: self.next_offset,
-                    end_exclusive,
-                }),
-            )
-            .await
-        {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                return Err(DurableContentValidationError::MissingContentObject {
-                    object_key: self.object_key.clone(),
-                })
+        let bytes = match &self.location {
+            ContentLocation::Tail { bytes, .. } => {
+                bytes.slice(self.next_offset as usize..end_exclusive as usize)
             }
-            Err(err) => {
-                return Err(DurableContentValidationError::Store {
-                    object_key: self.object_key.clone(),
-                    message: err.public_message().into_owned(),
-                })
-            }
+            ContentLocation::Object { .. } => match self
+                .store
+                .get(
+                    self.location.object_key(),
+                    Some(ByteRange {
+                        start_inclusive: self.next_offset,
+                        end_exclusive,
+                    }),
+                )
+                .await
+            {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => {
+                    return Err(DurableContentValidationError::MissingContentObject {
+                        object_key: self.location.object_key().to_owned(),
+                    })
+                }
+                Err(err) => {
+                    return Err(DurableContentValidationError::Store {
+                        object_key: self.location.object_key().to_owned(),
+                        message: err.public_message().into_owned(),
+                    })
+                }
+            },
         };
         // A range ending past the object is truncated, so a short answer is
         // an object that ended earlier than its reference says it does.
         if bytes.len() as u64 != end_exclusive - self.next_offset {
             return Err(DurableContentValidationError::ContentLengthMismatch {
-                object_key: self.object_key.clone(),
+                object_key: self.location.object_key().to_owned(),
                 expected: self.content_ref.size_bytes,
                 actual: self.next_offset + bytes.len() as u64,
             });
@@ -561,7 +574,7 @@ impl<S: ObjectStore> FileContentStream<S> {
         let actual = digest.finish();
         if actual != self.expected {
             return Err(DurableContentValidationError::ContentChecksumMismatch {
-                object_key: self.object_key.clone(),
+                object_key: self.location.object_key().to_owned(),
                 expected: describe_checksum(&self.expected),
                 actual: describe_checksum(&actual),
             });
@@ -573,43 +586,35 @@ impl<S: ObjectStore> FileContentStream<S> {
 impl<S> std::fmt::Debug for FileContentStream<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileContentStream")
-            .field("object_key", &self.object_key)
+            .field("object_key", &self.location.object_key())
             .field("size_bytes", &self.content_ref.size_bytes)
             .field("next_offset", &self.next_offset)
             .finish_non_exhaustive()
     }
 }
 
-pub(crate) async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
-    content_ref: &ContentRef,
-) -> Result<Vec<u8>, DurableContentValidationError> {
-    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-    let bytes = load_required_object(store, &object_key, None).await?;
-    validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
-    Ok(bytes)
-}
-
 pub(crate) const MAX_SPECULATIVE_CONTENT_BYTES: u64 = 64 * 1024;
 
 pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: &ContentStoreId,
+    location: &ContentLocation,
     content_ref: &ContentRef,
 ) -> Result<Vec<u8>, CoreError> {
-    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
     crate::path::read::ensure_within_read_limit(
         content_ref.size_bytes,
         Some(MAX_SPECULATIVE_CONTENT_BYTES),
     )?;
+    if let ContentLocation::Tail { .. } = location {
+        return Ok(location.get_bytes(store, content_ref).await?);
+    }
+    let object_key = location.object_key();
     // The extra byte detects an oversized object without buffering all of it.
     let range = ByteRange {
         start_inclusive: 0,
         end_exclusive: content_ref.size_bytes + 1,
     };
-    let bytes = load_required_object(store, &object_key, Some(range)).await?;
-    validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
+    let bytes = load_required_object(store, object_key, Some(range)).await?;
+    validate_loaded_content_bytes(object_key.to_owned(), content_ref, &bytes)?;
     Ok(bytes)
 }
 
@@ -631,7 +636,7 @@ pub(crate) fn content_object_key_for_ref(
 ///
 /// The reference's checksum is recomputed over the complete payload for every
 /// supported algorithm.
-fn validate_loaded_content_bytes(
+pub(super) fn validate_loaded_content_bytes(
     object_key: String,
     content_ref: &ContentRef,
     bytes: &[u8],
@@ -872,7 +877,7 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     })
 }
 
-async fn load_required_object<S: ObjectStore + ?Sized>(
+pub(super) async fn load_required_object<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     range: Option<ByteRange>,
@@ -892,9 +897,9 @@ async fn load_required_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        get_durable_content_bytes, store_bytes_as_content_with_store_id,
-        validate_durable_content_reference, verify_durable_content_checksum, CoreError,
-        DurableContentValidationError, FileContentStream, NonZeroU64,
+        store_bytes_as_content_with_store_id, validate_durable_content_reference,
+        verify_durable_content_checksum, ContentLocation, CoreError, DurableContentValidationError,
+        FileContentStream, NonZeroU64,
     };
     use bytes::Bytes;
     use loonfs_api::{Checksum, ContentId, ContentRef, ContentRefKind, ContentStoreId, PathEntry};
@@ -904,6 +909,21 @@ mod tests {
     use loonfs_test_support::ids::content_ref;
     use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
     use tempfile::tempdir;
+
+    async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
+        store: &S,
+        content_store_id: &ContentStoreId,
+        content_ref: &ContentRef,
+    ) -> Result<Vec<u8>, DurableContentValidationError> {
+        ContentLocation::resolve(
+            &content_ref.owner_namespace_id,
+            content_store_id,
+            None,
+            content_ref,
+        )?
+        .get_bytes(store, content_ref)
+        .await
+    }
 
     #[tokio::test]
     async fn validate_content_ref_success() {
@@ -1231,7 +1251,9 @@ mod tests {
     ) -> Result<FileContentStream<S>, DurableContentValidationError> {
         FileContentStream::open(
             store,
-            content_store_id,
+            super::ContentLocation::Object {
+                object_key: super::content_object_key_for_ref(content_store_id, content_ref)?,
+            },
             test_entry(),
             content_ref.clone(),
             test_chunk_bytes(),

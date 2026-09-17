@@ -21,7 +21,9 @@ use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
     MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
 };
-use crate::storage::content::{open_content_import_reader, FileContentStream, StreamedPayloadKind};
+use crate::storage::content::{
+    open_content_import_reader, ContentLocation, FileContentStream, StreamedPayloadKind,
+};
 use crate::storage::content_admission::PreparedContent;
 use crate::time::current_time_ms;
 use loonfs_api::options::{
@@ -31,6 +33,7 @@ use loonfs_api::v0::{
     Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_api::wire::control::CheckpointOwner;
+use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
@@ -38,7 +41,6 @@ use loonfs_api::{
     NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo, Subject, SubjectId,
     TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
-use loonfs_api::{ContentStoreId, EffectiveLimit};
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -66,8 +68,8 @@ pub struct ResolvedFileContent {
     pub entry: PathEntry,
     /// Complete immutable identity to compare after current-path validation.
     pub content_ref: ContentRef,
-    /// Store bound by the resolved namespace manifest.
-    pub content_store_id: ContentStoreId,
+    /// Location resolved in the entry's metadata view, retaining any inline bytes.
+    pub location: ContentLocation,
 }
 
 impl ResolvedFileContent {
@@ -79,7 +81,8 @@ impl ResolvedFileContent {
 
     /// Requires equal store bindings and every content-reference field.
     pub fn has_same_content(&self, other: &Self) -> bool {
-        self.content_store_id == other.content_store_id && self.content_ref == other.content_ref
+        self.location.object_key() == other.location.object_key()
+            && self.content_ref == other.content_ref
     }
 }
 
@@ -432,20 +435,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         Ok(ResolvedFileContent {
             entry,
+            location: view.resolve_content_location(&content_ref)?,
             content_ref,
-            content_store_id: view.content_store_id().clone(),
         })
-    }
-
-    /// Fetches and verifies content after `resolve_file_content` authorizes it.
-    /// A cached target must first be validated against the current view.
-    pub async fn get_resolved_file_content(&self, target: &ResolvedFileContent) -> Result<Vec<u8>> {
-        Ok(crate::storage::content::get_durable_content_bytes(
-            &self.store,
-            &target.content_store_id,
-            &target.content_ref,
-        )
-        .await?)
     }
 
     /// Verifies at most 64 KiB of speculative content, plus an overflow byte.
@@ -456,17 +448,26 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Vec<u8>> {
         crate::storage::content::get_speculative_content_bytes(
             &self.store,
-            &target.content_store_id,
+            &target.location,
             &target.content_ref,
         )
         .await
     }
 
+    /// Fetches and verifies content after `resolve_file_content` authorizes it.
+    /// A cached target must first be validated against the current view.
+    pub async fn get_resolved_file_content(&self, target: &ResolvedFileContent) -> Result<Vec<u8>> {
+        Ok(target
+            .location
+            .get_bytes(&self.store, &target.content_ref)
+            .await?)
+    }
+
     /// Opens a chunked stream for the file resolved from the pinned read context.
     ///
-    /// The stream fetches `chunk_bytes` at a time, so memory use is bounded by one
-    /// chunk and the buffered-read size limit does not apply. The resolved content
-    /// object is immutable, so later commits cannot change the bytes being read.
+    /// Object reads fetch `chunk_bytes` at a time. Tail reads retain their inline
+    /// bytes. The buffered-read size limit does not apply. Later commits cannot
+    /// change the bytes being read.
     ///
     /// When `start_offset` is nonzero, the caller must pass the skipped prefix to
     /// [`FileContentStream::fold_resumed_prefix`] before fetching more data. This
@@ -496,7 +497,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
         Ok(FileContentStream::open(
             self.store.clone(),
-            view.content_store_id(),
+            view.resolve_content_location(&content_ref)?,
             entry,
             content_ref,
             chunk_bytes,
@@ -518,14 +519,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        let target = view
-            .direct_download_target_by_inode(inode_id, revision_no, &access)
-            .await?;
+        let content_ref = view
+            .authorized_revision_for_inode(inode_id, revision_no, &access)
+            .await?
+            .content_ref;
         Ok(FileContentStream::open_inner(
             self.store.clone(),
-            view.content_store_id(),
+            view.resolve_content_location(&content_ref)?,
             None,
-            target.content_ref,
+            content_ref,
             NonZeroU64::new(crate::CONTENT_READ_CHUNK_BYTES)
                 .expect("content read chunk size should be nonzero"),
             0,
@@ -647,7 +649,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::resolve_current_files(&view, inode_ids, &access).await
     }
 
-    /// Reads and verifies one immutable content object.
+    /// Reads and verifies the bytes named by a published reference.
     ///
     /// `max_bytes` is checked against the declared size before the fetch and is
     /// independent of deployment-wide download limits. The method returns an
@@ -661,12 +663,34 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self.require_administrator(context).await?;
         let catalog = self.live_catalog(context)?;
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
-        Ok(crate::storage::content::get_durable_content_bytes(
-            &self.store,
-            catalog.content_store_id(),
-            content_ref,
-        )
-        .await?)
+        let location = if content_ref.owner_namespace_id != self.namespace_id {
+            ContentLocation::resolve(
+                &self.namespace_id,
+                catalog.content_store_id(),
+                None,
+                content_ref,
+            )?
+        } else {
+            let key = crate::cache::WalTailProjectionCacheKey {
+                namespace_id: self.namespace_id.clone(),
+                manifest_no: context.basis.manifest_no(),
+                manifest_head_seq: context.basis.manifest().manifest_head_seq,
+                head_seq: context.head.seq,
+            };
+            if let Some(tail) = context.tail_cache.get(&key) {
+                ContentLocation::resolve(
+                    &self.namespace_id,
+                    catalog.content_store_id(),
+                    Some(&tail),
+                    content_ref,
+                )?
+            } else {
+                self.load_read_view(context)
+                    .await?
+                    .resolve_content_location(content_ref)?
+            }
+        };
+        Ok(location.get_bytes(&self.store, content_ref).await?)
     }
 
     /// Returns the namespace catalog derived from the pinned head after checking

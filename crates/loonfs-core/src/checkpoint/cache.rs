@@ -11,7 +11,7 @@ use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
     DecodedBlockWeight, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
 };
-use crate::metadata::MetadataState;
+use crate::wal::ProjectedWalTail;
 use loonfs_api::wire::manifest::MetadataRow;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
@@ -204,11 +204,11 @@ pub struct WalTailProjectionCacheKey {
     pub head_seq: ChangeSeq,
 }
 
-impl DecodedBlock for Arc<MetadataState> {
+impl DecodedBlock for Arc<ProjectedWalTail> {
     fn weight(&self) -> DecodedBlockWeight {
         DecodedBlockWeight {
             bytes: self.decoded_bytes(),
-            rows: self.row_count(),
+            rows: self.rows.row_count(),
         }
     }
 }
@@ -216,7 +216,7 @@ impl DecodedBlock for Arc<MetadataState> {
 pub struct WalTailProjectionCache {
     config: WalTailProjectionCacheConfig,
     observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-    blocks: DecodedBlockCache<WalTailProjectionCacheKey, Arc<MetadataState>>,
+    blocks: DecodedBlockCache<WalTailProjectionCacheKey, Arc<ProjectedWalTail>>,
     rejection_stats: WalTailProjectionCacheRejectionStats,
 }
 
@@ -280,15 +280,15 @@ impl WalTailProjectionCache {
         }
     }
 
-    pub fn get(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<MetadataState>> {
+    pub fn get(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
         self.blocks.get(key)
     }
 
-    pub fn insert(&self, key: WalTailProjectionCacheKey, rows: Arc<MetadataState>) {
+    pub fn insert(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
         if self.config.max_entries == 0 {
             return;
         }
-        let weight = rows.weight();
+        let weight = tail.weight();
         if weight.rows > self.config.max_rows || weight.bytes > self.config.max_decoded_bytes {
             self.rejection_stats
                 .uncacheable_count
@@ -304,7 +304,7 @@ impl WalTailProjectionCache {
             }
             return;
         }
-        self.blocks.insert(key, rows);
+        self.blocks.insert(key, tail);
     }
 
     pub fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
@@ -322,6 +322,7 @@ mod tests {
         WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
     };
     use crate::metadata::{InodeRecord, MetadataState};
+    use crate::wal::ProjectedWalTail;
     use loonfs_api::wire::sst_blocks::DecodedDataBlock;
     use loonfs_api::{ActorId, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use std::sync::Arc;
@@ -385,11 +386,12 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             );
-            cache.insert(key.clone(), Arc::new(rows));
+            cache.insert(key.clone(), Arc::new(ProjectedWalTail::from_rows(rows)));
             assert_eq!(
                 cache
                     .get(&key)
                     .expect("same projection cache key should hit")
+                    .rows
                     .inodes()[0]
                     .created_by,
                 actor

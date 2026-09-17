@@ -314,7 +314,7 @@ async fn invalid_inline_candidates_write_nothing() {
 }
 
 #[tokio::test]
-async fn inline_tail_counts_survive_reload_and_prevent_flush_writes() {
+async fn inline_tail_replay_matches_publication_and_prevents_flush_writes() {
     let (_directory, store, mut engine, context) = setup().await;
     let directory = CommitCandidate::new(CommitRequest::single(
         CommitId::parse("directory").expect("commit"),
@@ -335,6 +335,7 @@ async fn inline_tail_counts_survive_reload_and_prevent_flush_writes() {
             .outcome,
         FlushWalOutcome::Published
     );
+    engine.invalidate_projection();
     let mut last = None;
     for (name, bytes) in [
         ("first", Bytes::from_static(b"first")),
@@ -348,7 +349,7 @@ async fn inline_tail_counts_survive_reload_and_prevent_flush_writes() {
         last = Some(candidate);
     }
     let advanced = engine.wal_fold_input().expect("projection");
-    assert_eq!(advanced.wal_tail_inline_values, 3);
+    assert_eq!(advanced.tail_state.inline_bytes(), 11);
     let wal_before = store
         .list_prefix(&wal_segment_prefix(&engine.namespace_id))
         .await
@@ -359,10 +360,7 @@ async fn inline_tail_counts_survive_reload_and_prevent_flush_writes() {
         .await
         .expect("replay after reload");
     let reloaded = engine.wal_fold_input().expect("reloaded projection");
-    assert_eq!(
-        reloaded.wal_tail_inline_values,
-        advanced.wal_tail_inline_values
-    );
+    assert_eq!(reloaded.tail_state, advanced.tail_state);
     assert_no_writes(&store);
     for input in [Some(advanced), Some(reloaded), None] {
         store.reset();
@@ -387,3 +385,6 @@ async fn inline_tail_counts_survive_reload_and_prevent_flush_writes() {
         );
     }
 }
+
+#[path = "commit_engine_inline_read_tests.rs"]
+mod read_tests;

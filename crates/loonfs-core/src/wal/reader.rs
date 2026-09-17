@@ -212,7 +212,12 @@ pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
     let replayed = {
         let _span =
             tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
-        project_validated_wal_tail(base_head, base_metadata_state, expected_writer_epoch, &tail)?
+        project_validated_wal_tail(
+            base_head,
+            &super::ProjectedWalTail::from_rows(base_metadata_state.clone()),
+            expected_writer_epoch,
+            &tail,
+        )?
     };
     ensure_replayed_head_matches(current_head, &replayed.resulting_head)?;
     Ok(replayed)
