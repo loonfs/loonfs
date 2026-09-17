@@ -96,7 +96,7 @@ async fn check_buffered_read_access(content_size: usize) {
         .get_path_entry(&namespace_id, "/team", StatPathOptions::default())
         .await
         .expect("warm read");
-    for byte in [b'a', b'b'] {
+    for byte in *b"ab" {
         let bytes = vec![byte; content_size];
         let prepared = writer
             .prepare_file_bytes(&namespace_id, &bytes)
