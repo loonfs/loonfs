@@ -26,7 +26,7 @@ Inline was faster in 24 of 24 rounds. These timings cover store requests only, n
 | Content references, revision rows, change feed | | Unchanged |
 | Checkpoints, snapshots, forks | | Unchanged |
 | Garbage collection rules | | Unchanged |
-| Large files and direct transfers | | Unchanged |
+| Large files, direct transfers, and the download contract | | Unchanged |
 
 Three other systems built on object storage put payload bytes in their log and reorganize them later: SlateDB keeps values in WAL and SST objects, turbopuffer commits documents to its WAL and indexes them asynchronously, and Cursor's Git storage writes each push's packfile as a WAL entry and compacts in the background. LoonFS is the exception because it needs an independently addressable object for large and direct transfers. This proposal keeps that object and removes the wait for it.
 
@@ -84,7 +84,21 @@ Replayed bytes are kept in a byte-budgeted cache next to the tail projection. A 
 
 A small file read shortly after it was written needs no content request. With the speculative read path proposed in #966, the candidate's bytes are already available, so the read finishes when validation does.
 
-**Downloads.** A provider-direct download target names an object key. For tail content that object does not exist yet. The service serves such content itself, which is cheap because it is at most the inline limit. Direct targets are issued once content is materialized. Materializing on demand is the alternative if a direct target must always be available; it costs one content write on the first download.
+## Direct downloads
+
+The download contract does not change. `POST …/filesystem/downloads` exists so a deployment can serve back content larger than its proxied read limit. It returns a presigned URL for the content object. Inline content is at most the inline limit, so the ordinary proxied read always serves it, in one request instead of two.
+
+A client may still ask for a direct download of a small file that has not been folded. It cannot know whether a fold has happened, and it does not need to. The service materializes the object on demand and then signs the URL:
+
+1. Resolve the reference. If its location is the tail, take the verified bytes from the tail.
+2. Write the content object at its derived key with a create-only verified write.
+3. Issue the presigned URL as today.
+
+This is one step of the fold done early. The key is the one the fold would use, so a later fold finds the object present, and a concurrent fold writes identical bytes. The object is published content, so collection never removes it from a live namespace. A crash after the write leaves nothing to clean up. The cost is one content write on the first direct download of a small file written since the last fold. The response shape, the capability, and client code are unchanged.
+
+A deployment that cannot write content objects, such as a read-only replica, serves tail content through proxied reads. Its direct endpoint answers that the content is not yet materialized, which clears at the next fold.
+
+The embedded `DirectDownloadTarget` follows the same rule: a handle with write authority materializes first; a read-only handle reports that no object exists yet.
 
 ## Folding
 
@@ -137,7 +151,7 @@ A copy or restore within the unfolded tail records the same content reference in
 - A fold does more work: up to thousands of small writes, off the commit path. Request cost falls overall, from four writes per small file to two.
 - Inline bytes pass through WAL compression and CBOR encoding on the commit path.
 - Retained WAL objects hold a second copy of small content until retention advances.
-- The download contract gains a case.
+- The first direct download of a small file written since the last fold costs one extra content write.
 - Every reader, writer, and folder of a namespace must understand the record field before any writer uses it.
 
 ## Alternatives considered
@@ -164,7 +178,7 @@ Suggested order:
 2. The record field, replay validation, tail content cache, reads from the tail, and fold materialization. Writers disabled.
 3. The embedded inline policy with its budgets and fallback; lab measurement.
 4. `inline_content` on hosted commit operations.
-5. The download rule.
+5. On-demand materialization for direct downloads.
 6. The byte-based fold trigger and tuned constants.
 
 ## Verification
@@ -189,7 +203,7 @@ Lab repository, `analysis/steady-state-floors-experiments-20260916.md`, section 
 ## Open questions
 
 1. Should the inline limit start below 64 KiB while the cold-replay cost is unmeasured?
-2. Which download behavior does the API prefer for tail content: service-served, or materialize on demand?
+2. Should the direct-download response later gain an inline access kind for small content, to save the second request? `access` is already kind-tagged. It would need a capability so older clients are not surprised.
 3. Does any consumer depend on a content object existing as soon as a commit is visible?
 4. Should hosted inline writes be limited per request or per namespace to protect the shared publisher?
 5. Is the byte-based fold trigger enough, or should the payload section be separately ranged from the start?
