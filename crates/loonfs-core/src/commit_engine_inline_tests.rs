@@ -339,6 +339,7 @@ async fn inline_tail_counts_survive_reload_and_prevent_flush_writes() {
     for (name, bytes) in [
         ("first", Bytes::from_static(b"first")),
         ("second", Bytes::from_static(b"second")),
+        ("empty", Bytes::new()),
     ] {
         let candidate = candidate(name, vec![inline(&engine.namespace_id, bytes)]);
         publish(&mut engine, &store, &context, candidate.clone())
@@ -347,7 +348,7 @@ async fn inline_tail_counts_survive_reload_and_prevent_flush_writes() {
         last = Some(candidate);
     }
     let advanced = engine.wal_fold_input().expect("projection");
-    assert_eq!(advanced.wal_tail_inline_bytes, 11);
+    assert_eq!(advanced.wal_tail_inline_values, 3);
     let wal_before = store
         .list_prefix(&wal_segment_prefix(&engine.namespace_id))
         .await
@@ -359,8 +360,8 @@ async fn inline_tail_counts_survive_reload_and_prevent_flush_writes() {
         .expect("replay after reload");
     let reloaded = engine.wal_fold_input().expect("reloaded projection");
     assert_eq!(
-        reloaded.wal_tail_inline_bytes,
-        advanced.wal_tail_inline_bytes
+        reloaded.wal_tail_inline_values,
+        advanced.wal_tail_inline_values
     );
     assert_no_writes(&store);
     for input in [Some(advanced), Some(reloaded), None] {

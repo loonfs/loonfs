@@ -346,7 +346,7 @@ pub struct WalFoldInput {
     pub retention_floor_seq: ChangeSeq,
     pub tail_state: Arc<MetadataState>,
     pub wal_tail_segments: u64,
-    pub wal_tail_inline_bytes: u64,
+    pub wal_tail_inline_values: u64,
 }
 
 /// A read anchor plus the projected WAL tail as of one landed publish.
@@ -465,7 +465,7 @@ impl NamespaceCommitEngine {
                 retention_floor_seq: projection.retention_floor_seq,
                 tail_state: Arc::clone(&projection.tail_state),
                 wal_tail_segments: projection.wal_tail_segments,
-                wal_tail_inline_bytes: projection.wal_tail_inline_bytes,
+                wal_tail_inline_values: projection.wal_tail_inline_values,
             })
     }
 
@@ -658,11 +658,7 @@ impl NamespaceCommitEngine {
                 projection.wal_tail_segments += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
                 for record in &records {
-                    projection.wal_tail_inline_bytes += record
-                        .inline_content
-                        .iter()
-                        .map(|value| value.bytes.len() as u64)
-                        .sum::<u64>();
+                    projection.wal_tail_inline_values += record.inline_content.len() as u64;
                     tail_state.apply_committed_wal_record_mut(record);
                 }
                 projection.reanchor(head.clone());

@@ -18,17 +18,17 @@ pub(crate) fn project_validated_wal_tail(
     let mut replayed = ReplayedWalTail {
         resulting_head: base_head.clone(),
         resulting_metadata_state: base_metadata_state.clone(),
-        wal_tail_inline_bytes: 0,
+        wal_tail_inline_values: 0,
     };
     for segment in wal_tail.segments() {
-        let previous_inline_bytes = replayed.wal_tail_inline_bytes;
+        let previous_inline_values = replayed.wal_tail_inline_values;
         replayed = replay_wal_records(
             &replayed.resulting_head,
             &replayed.resulting_metadata_state,
             expected_writer_epoch,
             segment.decoded_records(),
         )?;
-        replayed.wal_tail_inline_bytes += previous_inline_bytes;
+        replayed.wal_tail_inline_values += previous_inline_values;
         let payload = segment.envelope().payload();
         if replayed.resulting_head.next_inode_id != payload.next_inode_id {
             return Err(WalSegmentError::SegmentSummaryMismatch);
@@ -72,14 +72,10 @@ where
     let mut current_head = base_head.clone();
     let mut current_metadata_state = base_metadata_state.clone();
 
-    let mut wal_tail_inline_bytes = 0;
+    let mut wal_tail_inline_values = 0;
     for record in records {
         validate_replay_record(&current_head, expected_writer_epoch, &record)?;
-        wal_tail_inline_bytes += record
-            .inline_content
-            .iter()
-            .map(|value| value.bytes.len() as u64)
-            .sum::<u64>();
+        wal_tail_inline_values += record.inline_content.len() as u64;
         current_head.seq = record.seq;
         current_head.head_commit_id = record.commit_id.clone();
         current_head.next_inode_id =
@@ -100,7 +96,7 @@ where
     Ok(ReplayedWalTail {
         resulting_head: current_head,
         resulting_metadata_state: current_metadata_state,
-        wal_tail_inline_bytes,
+        wal_tail_inline_values,
     })
 }
 
