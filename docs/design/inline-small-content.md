@@ -109,18 +109,18 @@ The model in the API specification has three stages: make content durable, make 
 
 ## Reading
 
-A view already replays the unfolded WAL tail. While it does, it records which content the tail carries inline, keyed by owner namespace and content ID. Only a reference owned by this namespace can resolve to the tail. Content inherited through a fork is always in an object. Resolving a reference then has two answers:
+A view already replays the unfolded WAL tail into a projection of its rows. That projection now also carries the tail's inline content, as a map from content ID to bytes. Only a reference owned by this namespace can resolve to the tail, because the format lets a segment carry inline content for its own namespace only. Content inherited through a fork is always in an object. Resolving a reference then has two answers:
 
 | Location | Condition | Source of bytes |
 | --- | --- | --- |
-| Tail | The view's tail carries this content | The replayed bytes, or a GET of the WAL object that holds them |
+| Tail | The view's projected tail carries this content ID | The bytes the projection holds |
 | Object | Otherwise | The content object, as today |
 
-Replayed bytes are kept in a byte-budgeted cache next to the tail projection. A value that is not resident costs one GET of its WAL object. That object can hold up to the per-object budget of other payloads, so a small read can download and decode far more than it returns. The per-object budget bounds this, and a separately ranged payload section would remove it.
+The bytes are resident wherever the projected tail is: in the reader's tail cache, in the writer's own projection, and in the input a fold consumes. A reader that holds a projected tail already downloaded those bytes while replaying it, so keeping them costs memory and no request. The existing projection budgets count them and evict whole projections as they do today. A reader that lost its projection replays the tail again, as it does today for rows. There is no second cache and no read of a WAL object on demand.
 
-**A reclaimed WAL object.** A long-lived view can outlast its tail. Its bytes are evicted, a later fold publishes, retention advances, and collection deletes the WAL object. A reader that finds the WAL object missing reads the content object instead. The fold invariant guarantees that it exists, because collection deletes a WAL object only at or below `last_folded_wal_no`. If both are missing, the read fails as missing content does today.
+A long-lived view can outlast its tail: a later fold publishes, retention advances, and collection deletes the WAL objects. Rebuilding that view fails as a stale view fails today. There is no fallback to the content object, and none is needed, because a view that still holds its projection still holds the bytes.
 
-About a dozen call sites turn a reference into a key or bytes today, in `engine.rs`, `path/read/materialized_view.rs`, and `storage/content.rs`. The first implementation step routes them through one resolver without changing behavior.
+About a dozen call sites turn a reference into a key or bytes today, in `engine.rs`, `path/read/materialized_view.rs`, and `storage/content.rs`. They go through one resolver on the view. Reading by reference, which the search indexer and bulk reads use with references taken from the change feed, consults the projected tail of its read context.
 
 A small file read shortly after it was written needs no content request. With the speculative read path (#966), the candidate's bytes are already available, so the read finishes when validation does.
 
@@ -194,7 +194,7 @@ An import reads a reference owned by another namespace and writes the bytes unde
 | Tail inline bytes that make a fold due | 8 MiB | Bounds what a cold reader downloads |
 | Tail inline bytes beyond which writes use the staged path | 32 MiB | Hard ceiling when folding falls behind; checked at admission, counting this commit |
 | Inline bytes in flight per runtime | Byte budget | Charges queued payloads, encoding copies, and materialization buffers. A write that cannot reserve uses the staged path |
-| Tail content cache | Byte budget shared by the runtime | Bounds resident inline bytes |
+| Resident tail bytes | The existing projection budgets | The reader's tail cache and the writer's projection count inline bytes |
 | Materialization concurrency | 32 | Matches WAL prefetch concurrency |
 
 The threshold starts low on purpose. The evidence so far is a request sequence for a 1 KiB value. It says nothing about cold replay, fold throughput, or how larger values slow a shared WAL object. 64 KiB is the top of the sweep because small-object PUT latency is flat to about that size and it is the speculative read cap (#966).
@@ -204,7 +204,7 @@ The threshold starts low on purpose. The evidence so far is a request sequence f
 ## Costs
 
 - A cold reader replays a tail that can now hold MiB rather than tens of KiB. Metadata-only operations pay this too: a cold stat or list replays the same tail. The byte trigger bounds it; a separately ranged payload section would remove it.
-- A read of a tail value that is not resident downloads and decodes its whole WAL object.
+- A reader or writer that holds a projected tail holds its inline bytes too, within the existing projection budgets.
 - Commits share WAL objects. Inline bytes make an object larger and its PUT slower, and every commit in the batch waits, including commits with no content. The per-object budget is small for this reason.
 - A fold does more work: up to thousands of small writes, off the commit path. Sustained fold throughput decides how fast small writes can arrive before they fall back to staging. Request cost falls overall, from four writes per small file to two.
 - Inline bytes pass through WAL compression and CBOR encoding on the commit path.
@@ -226,7 +226,7 @@ The threshold starts low on purpose. The evidence so far is a request sequence f
 
 **Content IDs drawn by the client for hosted inline writes.** A resent request would carry the same ID, so the reference form could stay the only form. But the server could not check that the ID is unused by an open upload session, so one content ID having one lifecycle would depend on every client being correct. A wrong ID can stop a fold or let an expired session delete committed content.
 
-**A separate payload section in the WAL object,** readable by range so that metadata readers skip it. This removes the cold-replay, read-amplification, and change-feed costs. It needs a second framing layer and its own integrity check. It is a compatible later step.
+**A separate payload section in the WAL object,** readable by range so that metadata readers skip it. This removes the cold-replay and change-feed costs. It needs a second framing layer and its own integrity check. It is a compatible later step.
 
 **Packing a fold's values into one object.** One write per fold instead of one per value. Because revisions are never dropped, a pack in a live namespace never becomes partly dead. It changes reference resolution and direct downloads. Deferred.
 
@@ -238,7 +238,7 @@ Durable formats are at version 1 and carry no compatibility paths before the sta
 
 Suggested order:
 
-1. The read side, with writers disabled, in slices: the record field with its format limits and validation; the content location resolver, keyed by owner namespace and content ID, with the tail content cache and reads from the tail including a reclaimed WAL object; fold materialization with its deletion rule; on-demand materialization for direct downloads and the byte-based fold trigger.
+1. The read side, with writers disabled, in slices: the record field with its format limits and validation; the projected tail carrying its inline content, with one content location resolver and reads from the tail; fold materialization with its deletion rule; on-demand materialization for direct downloads and the byte-based fold trigger.
 2. The embedded writer: inline prepared content with its inline fingerprint form, admission accounting, and the inline policy with its fallback. The lab sweep runs here.
 3. `inline_content` on hosted commit operations, with the limit in the capability document.
 
@@ -267,7 +267,7 @@ Adversarial cases:
 | The same bytes sent inline and then as an uploaded object under one commit ID | Conflict |
 | An earlier attempt's session expires after a later attempt commits | Cleanup removes only the earlier attempt's content |
 | Deletion or retirement during materialization | Materialization stops within one step. Late writes are covered by the repeated owner sweep |
-| Old view, bytes evicted, WAL object folded and reclaimed | Verified bytes from the content object |
+| A pinned view rebuilt after its WAL objects were reclaimed | Fails as a stale view does today. No content fallback |
 | Concurrent writes near the tail ceiling | The count includes each proposed commit. Every commit stays atomic |
 | Writer threshold lowered after larger records exist | The old records still read and fold |
 
@@ -282,6 +282,6 @@ Lab repository, `analysis/steady-state-floors-experiments-20260916.md`, section 
 1. Which threshold does the sweep support, and is it cold replay, fold throughput, or the shared WAL object that sets it?
 2. Should the direct-download response later gain an inline access kind for small content, to save the second request? `access` is already kind-tagged. It would need a capability so older clients are not surprised.
 3. Should hosted inline writes have a limit per namespace as well as the runtime budget, to protect the shared publisher?
-4. Should the payload section be separately ranged? Read amplification on tail values that are not resident makes this more pressing than cold replay alone. The plan is to build the simple layout, measure both costs in the sweep, and decide before the format is frozen.
+4. Should the payload section be separately ranged? It would spare cold readers and change-feed readers the inline bytes they do not need. The plan is to build the simple layout, measure both costs in the sweep, and decide before the format is frozen.
 
 Settled: nothing outside the repository reads content objects by key, and inside it one module builds content keys, so no consumer depends on an object existing as soon as a commit is visible.
