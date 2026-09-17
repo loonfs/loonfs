@@ -54,14 +54,14 @@ A put is identified by which content object it names, never by what the bytes ar
 Inline content has no object to name. For a hosted write the server draws the content ID, so a client that loses the response has nothing stable to resend except the bytes. For an embedded write a fallback to staging draws a second ID, so a fingerprint built on the ID would turn a valid retry into a conflict. Content that a commit carries inline is therefore identified by its bytes. This form takes the place of the reference form in the operation's preimage:
 
 ```json
-{"kind":"payload_v1","sha256":"<64 lowercase hex>","size_bytes":15}
+{"kind":"inline_v1","sha256":"<64 lowercase hex>","size_bytes":15}
 ```
 
 Everything else in the fingerprint is unchanged. The rule is the same one stated at a higher level: a put is identified by what its request names, an uploaded object or the bytes themselves.
 
 Identity is fixed when content is prepared. Preparing content at or under the writer's threshold makes an inline prepared value: the bytes and their digest, with no store request. Preparing larger content stages an object as today. The rules:
 
-- An inline prepared value uses the payload form whether it is published inline or falls back to staging. The form never depends on where the bytes were stored.
+- An inline prepared value uses the inline form whether it is published inline or falls back to staging. The form never depends on where the bytes were stored.
 - A staged prepared value and a hosted content reference keep the reference form. Nothing about uploaded objects changes.
 - While the receipt is retained, a retry with the same payload replays the original commit and returns the original reference. If the retry staged content before it found the receipt, that content is unpublished and its session reclaims it.
 - A retry with a different payload returns `commit_id_reuse_conflict`, including when the length is equal.
@@ -97,7 +97,7 @@ Inline bytes sit inside the WAL payload, so the envelope's existing validation c
 
 **Hosted.** A `put_file` operation in a commit request names exactly one content source: a content reference with its token, as today, or `inline_content`. For inline content the server checks the size, computes the checksum and digest, draws the content ID, and publishes. A small hosted write becomes one request and one store write. It shares batching, preconditions, and the commit response with every other operation. The server advertises its inline limit in the capability document, and the Rust HTTP client prepares content at or under it as an inline value, as the embedded runtime does. The 2 MiB JSON request limit already bounds a commit's inline bytes, to about 1.5 MiB of content after base64 encoding.
 
-**Falling back is always allowed.** Every inline limit is a preference. When a limit is reached the writer uses the staged path for that content, and no inline limit produces a write error. A write that falls back stages through an upload session exactly as today, under a content ID of its own, with the completion and abort rules unchanged. Its fingerprint keeps the payload form, so a retry can take a different path from the attempt before it.
+**Falling back is always allowed.** Every inline limit is a preference. When a limit is reached the writer uses the staged path for that content, and no inline limit produces a write error. A write that falls back stages through an upload session exactly as today, under a content ID of its own, with the completion and abort rules unchanged. Its fingerprint keeps the inline form, so a retry can take a different path from the attempt before it.
 
 **Where the choice is made.** Content is never staged inside the publication loop.
 
@@ -239,7 +239,7 @@ Durable formats are at version 1 and carry no compatibility paths before the sta
 Suggested order:
 
 1. The read side, with writers disabled, in slices: the record field with its format limits and validation; the content location resolver, keyed by owner namespace and content ID, with the tail content cache and reads from the tail including a reclaimed WAL object; fold materialization with its deletion rule; on-demand materialization for direct downloads and the byte-based fold trigger.
-2. The embedded writer: inline prepared content with its payload fingerprint form, admission accounting, and the inline policy with its fallback. The lab sweep runs here.
+2. The embedded writer: inline prepared content with its inline fingerprint form, admission accounting, and the inline policy with its fallback. The lab sweep runs here.
 3. `inline_content` on hosted commit operations, with the limit in the capability document.
 
 The resolver is not a step of its own. With one location it would be an abstraction without a second case. Writers are enabled only when the identity, fallback, materialization, deletion, and resource rules are all in place. Download behavior, the fold trigger, and admission accounting are part of the first usable version, not later tuning.
