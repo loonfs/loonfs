@@ -311,6 +311,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
+| `content_not_materialized` | 503 | The content is committed, but its object does not exist yet on a deployment that cannot write one. Read it through the proxied route, or retry after the next fold. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, deleted during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. The WAL write-stop threshold refuses new commits. A commit id the namespace already knows is still answered from its receipt. |
 | `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
@@ -2566,6 +2567,11 @@ bypass that service limit and keep object traffic off the server. So
 `filesystem.downloads.direct_get` is advertised by every deployment that offers
 any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.
+
+A direct download first materializes the object for content that a commit carried
+inline and that has not been folded yet. A deployment that cannot write content
+objects answers `content_not_materialized`; use the proxied route or retry after
+the next fold.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a path and, optionally,
 the revision to read in its JSON body:

@@ -22,7 +22,8 @@ use crate::protocol::{
     MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::storage::content::{
-    open_content_import_reader, ContentLocation, FileContentStream, StreamedPayloadKind,
+    open_content_import_reader, validate_loaded_content_bytes, ContentLocation, FileContentStream,
+    StreamedPayloadKind,
 };
 use crate::storage::content_admission::PreparedContent;
 use crate::time::current_time_ms;
@@ -535,8 +536,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .await?)
     }
 
-    /// Resolves a file to the object key needed for a direct download. This
-    /// reads metadata only and does not transfer content bytes.
+    /// Prepares a file's content object for a direct download.
     pub async fn direct_download_target(
         &self,
         path: impl AsRef<str>,
@@ -546,12 +546,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.direct_download_target(path.as_ref(), revision_no, &access)
+        view.direct_download_target(&self.store, path.as_ref(), revision_no, &access)
             .await
     }
 
-    /// Resolves one inode revision for a direct download without reading its
-    /// content bytes.
+    /// Prepares a retained inode revision's content object for a direct download.
     pub async fn direct_download_target_by_inode(
         &self,
         inode_id: InodeId,
@@ -561,7 +560,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.direct_download_target_by_inode(inode_id, revision_no, &access)
+        view.direct_download_target_by_inode(&self.store, inode_id, revision_no, &access)
             .await
     }
 
@@ -647,6 +646,23 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
         crate::path::read::resolve_current_files(&view, inode_ids, &access).await
+    }
+
+    /// Resolves a reference in the owner's pinned view and verifies resident bytes.
+    /// Holding the reference authorizes an import without namespace access rights.
+    pub async fn resolve_content_location(
+        &self,
+        content_ref: &ContentRef,
+        context: &RuntimeReadContext,
+    ) -> Result<ContentLocation> {
+        let location = self
+            .load_read_view(context)
+            .await?
+            .resolve_content_location(content_ref)?;
+        if let ContentLocation::Tail { bytes, object_key } = &location {
+            validate_loaded_content_bytes(object_key.clone(), content_ref, bytes)?;
+        }
+        Ok(location)
     }
 
     /// Reads and verifies the bytes named by a published reference.
@@ -994,6 +1010,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn import_content_ref(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
+        source_content_store_id: &loonfs_api::ContentStoreId,
         content_ref: &ContentRef,
     ) -> Result<PreparedContent>
     where
@@ -1002,7 +1019,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let catalog = self.own_catalog(catalog)?;
         let context = self.mutation_context()?;
         let (_object_key, body) =
-            open_content_import_reader(self.store.clone(), catalog.content_store_id(), content_ref)
+            open_content_import_reader(self.store.clone(), source_content_store_id, content_ref)
                 .await?;
         crate::protocol::stage_owned_stream(
             &self.store,

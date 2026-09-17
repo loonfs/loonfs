@@ -332,11 +332,9 @@ impl FsWriter {
 
     /// Imports an existing content ref for later publication.
     ///
-    /// Preparation performs one content HEAD, one full GET and digest check,
-    /// and one content PUT under a fresh identity owned by this namespace.
-    /// Later prepared publication performs no content I/O. The returned
-    /// prepared ref therefore differs from the input ref while describing the
-    /// same bytes.
+    /// Preparation verifies the source bytes and stages them under a fresh
+    /// identity owned by this namespace. Later publication performs no content
+    /// I/O. See the API specification's content preparation contract.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.prepare",
@@ -376,9 +374,24 @@ impl FsWriter {
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
-        Ok(self
-            .engine(namespace_id)
-            .import_content_ref(&catalog, &content_ref)
+        let engine = self.engine(namespace_id);
+        let source_content_store_id = if content_ref.owner_namespace_id != *namespace_id {
+            let (owner, context) = self
+                .core
+                .pinned_metadata_read(&content_ref.owner_namespace_id)
+                .await?;
+            if let loonfs_core::content::ContentLocation::Tail { bytes, .. } = owner
+                .resolve_content_location(&content_ref, &context)
+                .await?
+            {
+                return Ok(engine.stage_owned_bytes(&catalog, &bytes).await?);
+            }
+            context.head.content_store_id
+        } else {
+            catalog.content_store_id().clone()
+        };
+        Ok(engine
+            .import_content_ref(&catalog, &source_content_store_id, &content_ref)
             .await?)
     }
 

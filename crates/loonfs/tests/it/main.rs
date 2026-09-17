@@ -21,6 +21,7 @@ mod direct_put;
 mod handles;
 mod handoff;
 mod immutable_view_inputs;
+mod inline_content;
 mod inode_reads;
 mod invalidation;
 mod maintenance;

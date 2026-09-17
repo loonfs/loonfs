@@ -323,7 +323,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
 }
 
 #[tokio::test]
-async fn foreign_references_and_direct_downloads_use_only_objects() {
+async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write() {
     let (_directory, store, mut publisher, mutation_context) = setup().await;
     let value = inline(&publisher.namespace_id, Bytes::from_static(b"local"));
     publish(
@@ -336,10 +336,6 @@ async fn foreign_references_and_direct_downloads_use_only_objects() {
     .expect("publish");
     let context = fresh_context(&store, &publisher.namespace_id).await;
     let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
-    let target = engine
-        .resolve_file_content("/local-0", &context, None)
-        .await
-        .expect("resolve");
     let foreign = ContentRef::blob_v1(
         NamespaceId::parse("foreign").expect("owner"),
         value.content_ref().content_id.clone(),
@@ -376,20 +372,6 @@ async fn foreign_references_and_direct_downloads_use_only_objects() {
             .expect("foreign location"),
         ContentLocation::Object { .. }
     ));
-    for result in [
-        engine
-            .direct_download_target("/local-0", None, &context)
-            .await
-            .map(|target| target.object_key),
-        engine
-            .direct_download_target_by_inode(target.entry.inode_id, RevisionNo(1), &context)
-            .await
-            .map(|target| target.object_key),
-    ] {
-        assert!(
-            matches!(result, Err(CoreError::Internal(message)) if message == "inline content has no direct download object")
-        );
-    }
     assert_no_writes(&store);
     let stored = store_bytes_as_content(&store, &publisher.namespace_id, b"object")
         .await
@@ -427,6 +409,123 @@ async fn foreign_references_and_direct_downloads_use_only_objects() {
         .expect("inode download");
     assert_eq!(path_target.object_key, stored.object_key());
     assert_eq!(inode_target.object_key, stored.object_key());
+}
+
+#[tokio::test]
+async fn direct_downloads_materialize_once_and_do_not_write_after_a_flush() {
+    for fold_first in [false, true] {
+        let (_directory, store, mut publisher, mutation_context) = setup().await;
+        let value = inline(&publisher.namespace_id, Bytes::from_static(b"download"));
+        publish(
+            &mut publisher,
+            &store,
+            &mutation_context,
+            candidate("download", vec![value.clone()]),
+        )
+        .await
+        .expect("publish");
+        if fold_first {
+            flush_wal(&store, &publisher.namespace_id)
+                .await
+                .expect("flush");
+        }
+        let context = fresh_context(&store, &publisher.namespace_id).await;
+        let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
+        let inode_id = engine
+            .resolve_file_content("/download-0", &context, None)
+            .await
+            .expect("resolve")
+            .entry
+            .inode_id;
+        let key = content_blob(
+            &context.head.content_store_id,
+            &publisher.namespace_id,
+            &value.content_ref().content_id,
+        );
+        store.reset();
+        for _ in 0..2 {
+            let target = engine
+                .direct_download_target("/download-0", None, &context)
+                .await
+                .expect("path download");
+            let inode_target = engine
+                .direct_download_target_by_inode(inode_id, RevisionNo(1), &context)
+                .await
+                .expect("inode download");
+            assert_eq!(target.object_key, key);
+            assert_eq!(inode_target.object_key, key);
+            assert_eq!(store.counts().puts, usize::from(!fold_first));
+        }
+        let writes: Vec<_> = store
+            .snapshot()
+            .into_iter()
+            .filter(|operation| matches!(operation, RecordedOperation::Put { .. }))
+            .collect();
+        if let Some(write) = writes.first() {
+            assert_eq!(write.key(), key);
+        }
+        assert_eq!(
+            store.get(&key, None).await.expect("get").expect("object"),
+            value.bytes().as_ref()
+        );
+    }
+}
+
+#[tokio::test]
+async fn refused_materialization_leaves_proxied_content_readable() {
+    use loonfs_test_support::stores::{FailStore, InjectedError, OperationClass};
+    let (_directory, store, mut publisher, mutation_context) = setup().await;
+    let value = inline(&publisher.namespace_id, Bytes::from_static(b"readable"));
+    publish(
+        &mut publisher,
+        &store,
+        &mutation_context,
+        candidate("denied", vec![value.clone()]),
+    )
+    .await
+    .expect("publish");
+    let context = fresh_context(&store, &publisher.namespace_id).await;
+    let failing = FailStore::new(
+        store.clone(),
+        KeyPredicate::content_blob(),
+        OperationClass::Put,
+        InjectedError::PermissionDenied("read-only credentials".to_owned()),
+    );
+    failing.fail_all();
+    let engine = NamespaceEngine::reader(&failing, publisher.namespace_id.clone());
+    let inode_id = engine
+        .resolve_file_content("/denied-0", &context, None)
+        .await
+        .expect("resolve")
+        .entry
+        .inode_id;
+    store.reset();
+    let errors = [
+        engine
+            .direct_download_target("/denied-0", None, &context)
+            .await
+            .expect_err("write denied"),
+        engine
+            .direct_download_target_by_inode(inode_id, RevisionNo(1), &context)
+            .await
+            .expect_err("write denied"),
+    ];
+    for error in errors {
+        assert_eq!(error.code(), loonfs_api::ErrorCode::ContentNotMaterialized);
+        assert_eq!(error.kind(), loonfs_api::ErrorKind::Unavailable);
+    }
+    assert_eq!(failing.attempts(), 2);
+    assert_no_writes(&store);
+    store.reset();
+    assert_eq!(
+        engine
+            .get_file("/denied-0", &context, None)
+            .await
+            .expect("proxied read")
+            .bytes,
+        value.bytes().as_ref()
+    );
+    assert_no_content_requests(&store);
 }
 
 // This test inserts a checksum mismatch through the WAL codec.
@@ -497,6 +596,12 @@ async fn inline_checksum_failures_match_object_validation() {
         .expect_err("checksum mismatch");
     assert_no_content_requests(&store);
     store.reset();
+    let download_error = engine
+        .direct_download_target("/valid-0", None, &context)
+        .await
+        .expect_err("corrupt download");
+    assert_eq!(download_error.to_string(), error.to_string());
+    assert_no_content_requests(&store);
     let flush_error = flush_wal(&store, &publisher.namespace_id)
         .await
         .expect_err("corrupt tail");
