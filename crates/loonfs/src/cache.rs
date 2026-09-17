@@ -221,6 +221,16 @@ fn namespace_slot_is_live(
 }
 
 impl ReadCore {
+    pub(crate) fn cached_read_context(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Option<RuntimeReadContext> {
+        let cache = self.inner.control_cache();
+        let (anchor, _) = cache.namespaces.get(namespace_id)?;
+        // A speculative lookup must not consume local publication evidence.
+        Some(self.runtime_read_context(anchor))
+    }
+
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,

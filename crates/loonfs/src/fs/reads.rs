@@ -661,15 +661,8 @@ impl FsReader {
         absolute_path: &str,
     ) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let read = engine
-            .get_file(
-                absolute_path,
-                &read_context,
-                self.core.inner.config.max_read_content_bytes,
-            )
-            .await?;
-        Ok(read)
+        self.get_current_file_bytes(namespace_id, absolute_path)
+            .await
     }
 
     /// Reads a file's current content as bounded chunks instead of one buffer.

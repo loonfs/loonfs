@@ -29,7 +29,6 @@ use loonfs_api::v0::{
     Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_api::wire::control::CheckpointOwner;
-use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
@@ -37,6 +36,7 @@ use loonfs_api::{
     NamespaceId, Page, PageRequest, PathEntry, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
     WriterId,
 };
+use loonfs_api::{ContentStoreId, EffectiveLimit};
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -54,6 +54,31 @@ pub struct RuntimeReadContext {
     pub basis: MetadataBasis,
     pub segment_cache: Arc<MetadataSegmentCache>,
     pub tail_cache: Arc<WalTailProjectionCache>,
+}
+
+/// Owned metadata for one buffered read, without retaining its metadata view.
+/// The runtime must validate the current path before using speculative bytes.
+#[derive(Debug, Clone)]
+pub struct ResolvedFileContent {
+    /// Entry from the resolved view; old entries cannot authorize current reads.
+    pub entry: PathEntry,
+    /// Complete immutable identity to compare after current-path validation.
+    pub content_ref: ContentRef,
+    /// Store bound by the resolved namespace manifest.
+    pub content_store_id: ContentStoreId,
+}
+
+impl ResolvedFileContent {
+    /// Limits speculation to nonempty files of at most 64 KiB.
+    pub fn supports_speculative_read(&self) -> bool {
+        (1..=crate::storage::content::MAX_SPECULATIVE_CONTENT_BYTES)
+            .contains(&self.content_ref.size_bytes)
+    }
+
+    /// Requires equal store bindings and every content-reference field.
+    pub fn has_same_content(&self, other: &Self) -> bool {
+        self.content_store_id == other.content_store_id && self.content_ref == other.content_ref
+    }
 }
 
 fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_, '_> {
@@ -276,6 +301,37 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let view = self.load_read_view(context).await?;
         view.get_file_bytes(&self.store, path.as_ref(), max_content_bytes)
             .await
+    }
+
+    /// Resolves the metadata half of a buffered read for runtime speculation.
+    pub async fn resolve_file_content(
+        &self,
+        path: impl AsRef<str>,
+        context: &RuntimeReadContext,
+        max_content_bytes: Option<u64>,
+    ) -> Result<ResolvedFileContent> {
+        let view = self.load_read_view(context).await?;
+        let (entry, content_ref) = view.resolve_file_content(path.as_ref(), None).await?;
+        crate::path::read::ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
+        Ok(ResolvedFileContent {
+            entry,
+            content_ref,
+            content_store_id: view.content_store_id().clone(),
+        })
+    }
+
+    /// Verifies at most 64 KiB of speculative content, plus an overflow byte.
+    /// These bytes alone do not establish current path visibility.
+    pub async fn get_speculative_file_content(
+        &self,
+        target: &ResolvedFileContent,
+    ) -> Result<Vec<u8>> {
+        crate::storage::content::get_speculative_content_bytes(
+            &self.store,
+            &target.content_store_id,
+            &target.content_ref,
+        )
+        .await
     }
 
     /// Opens a chunked stream for the file resolved from the pinned read context.

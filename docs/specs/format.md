@@ -354,6 +354,10 @@ Resolve the content store from the reading namespace's manifest. Construct the e
 
 A missing object, wrong size, unsupported algorithm, or checksum mismatch fails the read. A HEAD request may check existence and size before the download, but does not replace checksum verification of the bytes read.
 
+The embedded runtime may overlap a small buffered content read with current-path validation. It resolves a candidate from a cached view without consuming local publication evidence, then performs the ordinary freshness check. When that check returns the same read state and manifest, the candidate is the current resolution; otherwise the path is resolved again in the current view. Speculative bytes are usable only when the current path resolves to the same namespace-bound content store and complete content reference; the returned entry comes from the current view. Current metadata errors take precedence. An obsolete content result is discarded before fetching a changed reference once.
+
+Speculation is limited to nonempty files of at most 64 KiB and respects smaller configured buffered-read limits. A ranged GET requests the declared size plus one byte and verifies exact length and checksum. A length error on an oversized ranged response reports the observed lower bound, not the full object size. No speculative result advances freshness evidence or changes retention.
+
 For streamed full-file reads, the complete checksum can only be established after the full stream has been processed. The transport must preserve a late read failure; receiving an initial portion of a stream does not establish successful whole-file verification. For provider-direct downloads, bytes pass directly to the client. The [API specification][api-spec] defines the client's verification responsibilities.
 
 ## 5. Uploading content

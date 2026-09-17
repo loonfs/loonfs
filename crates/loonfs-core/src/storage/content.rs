@@ -109,7 +109,7 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
 ) -> Result<(), DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
     validate_content_size(store, &object_key, content_ref).await?;
-    let bytes = load_required_object(store, &object_key).await?;
+    let bytes = load_required_object(store, &object_key, None).await?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
 }
 
@@ -586,7 +586,29 @@ pub(crate) async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
     content_ref: &ContentRef,
 ) -> Result<Vec<u8>, DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-    let bytes = load_required_object(store, &object_key).await?;
+    let bytes = load_required_object(store, &object_key, None).await?;
+    validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) const MAX_SPECULATIVE_CONTENT_BYTES: u64 = 64 * 1024;
+
+pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    content_ref: &ContentRef,
+) -> Result<Vec<u8>, CoreError> {
+    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+    crate::path::read::ensure_within_read_limit(
+        content_ref.size_bytes,
+        Some(MAX_SPECULATIVE_CONTENT_BYTES),
+    )?;
+    // The extra byte detects an oversized object without buffering all of it.
+    let range = ByteRange {
+        start_inclusive: 0,
+        end_exclusive: content_ref.size_bytes + 1,
+    };
+    let bytes = load_required_object(store, &object_key, Some(range)).await?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
     Ok(bytes)
 }
@@ -853,8 +875,9 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
 async fn load_required_object<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
+    range: Option<ByteRange>,
 ) -> Result<Vec<u8>, DurableContentValidationError> {
-    match store.get(object_key, None).await {
+    match store.get(object_key, range).await {
         Ok(Some(bytes)) => Ok(bytes.to_vec()),
         Ok(None) => Err(DurableContentValidationError::MissingContentObject {
             object_key: object_key.to_owned(),
