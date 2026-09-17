@@ -1,5 +1,6 @@
 //! The publish plan for one access update.
 
+use super::authorize::Absence;
 use super::ensure_expected_inode;
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use crate::commit::{CommitOp, CommitValidationError};
@@ -26,21 +27,6 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
     }
 
     let target = view.view.resolve_visible_path(absolute_path).await?;
-    if absolute_path.is_root() {
-        if let Some(expected) = expected_inode_id {
-            if target.inode_id != expected {
-                return Err(CommitValidationError::BindingPreconditionMismatch {
-                    target: format!("path `{absolute_path}`"),
-                    expected_inode_id: Some(expected),
-                    actual_inode_id: Some(target.inode_id),
-                    precondition_index: None,
-                }
-                .into());
-            }
-        }
-    } else {
-        ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
-    }
     if target.inode_id != ROOT_INODE_ID
         && grants
             .iter()
@@ -56,12 +42,35 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
         ));
     }
 
-    let current = view
-        .view
-        .latest_access_revision(target.inode_id)
-        .await?
-        .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
-    let base_access_revision_no = expected_access_revision_no.unwrap_or(current);
+    let current = view.view.latest_access_revision(target.inode_id).await?;
+    let empty = AccessGrants::default();
+    view.authorize_access_update(
+        target.inode_id,
+        current
+            .as_ref()
+            .map_or((false, &empty), |row| (row.boundary, &row.grants)),
+        (boundary, grants),
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await?;
+    if absolute_path.is_root() {
+        if let Some(expected) = expected_inode_id {
+            if target.inode_id != expected {
+                return Err(CommitValidationError::BindingPreconditionMismatch {
+                    target: format!("path `{absolute_path}`"),
+                    expected_inode_id: Some(expected),
+                    actual_inode_id: Some(target.inode_id),
+                    precondition_index: None,
+                }
+                .into());
+            }
+        }
+    } else {
+        ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
+    }
+    let current_revision_no =
+        current.map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
+    let base_access_revision_no = expected_access_revision_no.unwrap_or(current_revision_no);
     Ok(CompiledFilesystemOperation::new(vec![
         CommitOp::UpdateAccess {
             inode_id: target.inode_id,

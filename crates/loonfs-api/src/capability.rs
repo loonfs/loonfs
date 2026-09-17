@@ -104,6 +104,8 @@ limit_keys! {
     /// Advisory limit: the most path operations one commit may carry; a longer
     /// list answers `invalid_request` before planning.
     LIMIT_COMMIT_MAX_OPERATIONS = "commit.max_operations";
+    /// Most principal ids one request may act as.
+    LIMIT_ACCESS_MAX_PRINCIPALS = "access.max_principals";
     /// Counts precondition entries, not resources; a longer list answers
     /// `invalid_request` before planning.
     LIMIT_COMMIT_MAX_PRECONDITIONS = "commit.max_preconditions";

@@ -216,6 +216,7 @@ impl VisibilityHarness {
             preconditions: Vec::new(),
             commit_id: CommitId::generate(),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations,
         }))

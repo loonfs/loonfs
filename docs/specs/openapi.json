@@ -8597,6 +8597,16 @@
       "header": "Loonfs-Actor",
       "name": "actorId",
       "optional": true
+    },
+    {
+      "header": "Loonfs-Subject",
+      "name": "subjectId",
+      "optional": true
+    },
+    {
+      "header": "Loonfs-Principals",
+      "name": "principals",
+      "optional": true
     }
   ]
 }

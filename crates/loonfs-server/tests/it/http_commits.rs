@@ -186,6 +186,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .commit_prepared(
             &embedded_ns,
             CoreCommitRequest {
+                subject: None,
                 preconditions: Vec::new(),
                 commit_id: commit_id("batch-one"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -1003,6 +1004,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             .create_commit(
                 &namespace,
                 CoreCommitRequest {
+                    subject: None,
                     preconditions: Vec::new(),
                     commit_id: commit_id("crosses-transports"),
                     actor_id: loonfs_test_support::test_actor(),

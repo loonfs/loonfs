@@ -223,6 +223,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         upload_id: upload_id.clone(),
         content_id: loonfs_api::ContentId::generate(),
         created_at_ms: 1_000,
+        subject_id: None,
         mode: UploadSessionMode::ServiceProxied {
             staging: ProxiedStaging::Idle,
         },
@@ -248,13 +249,18 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> (UploadId, ContentRef, ContentStoreId) {
-    let begin = crate::protocol::begin_service_proxied_upload(store, namespace_id, context)
+    let begin = crate::protocol::begin_service_proxied_upload(store, namespace_id, None, context)
         .await
         .expect("begin upload");
-    let staged =
-        crate::protocol::upload_content(store, namespace_id, &begin.upload_id, b"racing upload\n")
-            .await
-            .expect("stage upload");
+    let staged = crate::protocol::upload_content(
+        store,
+        namespace_id,
+        &begin.upload_id,
+        None,
+        b"racing upload\n",
+    )
+    .await
+    .expect("stage upload");
     let content_store_id =
         crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
             .await
@@ -704,6 +710,7 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
         namespace_id,
         &content_store_id,
         upload_id,
+        None,
         crate::protocol::ResolvedUploadCompletion::KnownContent,
         context,
     )
@@ -776,6 +783,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
             &namespace_id,
             &content_store_id,
             &upload_id,
+            None,
             crate::protocol::ResolvedUploadCompletion::KnownContent,
             &aged,
         )
@@ -830,6 +838,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         &namespace_id,
         &content_store_id,
         &upload_id,
+        None,
         crate::protocol::ResolvedUploadCompletion::KnownContent,
         &aged,
     );
@@ -869,12 +878,13 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     ContentStoreId,
     crate::publish::PreparedContent,
 ) {
-    let begin = crate::protocol::begin_service_proxied_upload(store, namespace_id, context)
+    let begin = crate::protocol::begin_service_proxied_upload(store, namespace_id, None, context)
         .await
         .expect("begin upload");
-    let staged = crate::protocol::upload_content(store, namespace_id, &begin.upload_id, bytes)
-        .await
-        .expect("stage upload");
+    let staged =
+        crate::protocol::upload_content(store, namespace_id, &begin.upload_id, None, bytes)
+            .await
+            .expect("stage upload");
     let content_store_id =
         crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
             .await
@@ -884,6 +894,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
         namespace_id,
         &content_store_id,
         &begin.upload_id,
+        None,
         crate::protocol::ResolvedUploadCompletion::KnownContent,
         context,
     )

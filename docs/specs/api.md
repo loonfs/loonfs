@@ -88,6 +88,7 @@ either way.
     "query.grep": true
   },
   "limits": {
+    "access.max_principals": 64,
     "commit.max_content_tokens": 4096,
     "commit.max_external_content_refs": 4096,
     "commit.max_message_bytes": 4096,
@@ -135,6 +136,7 @@ Registered limit keys:
 | `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will stream and return in one response. Over-limit reads answer `content_too_large`; proxied reads use bounded chunks but do not support range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
 | `upload.max_concurrent` | How many service-proxied upload streams the deployment accepts at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content streams the deployment serves at once; requests past the cap answer `server_busy`. |
+| `access.max_principals` | Most principal ids one request may act as. Over-limit headers answer `invalid_request`. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_preconditions` | Most precondition entries one commit may carry, counting entries rather than resources. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_content_tokens` | Most content tokens one commit may carry. Over-limit requests answer `invalid_request` before planning. |
@@ -252,6 +254,7 @@ The codes that populate it:
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `precondition_index` identifies a failed request precondition. |
+| `forbidden` | `inode_id` |
 | `not_deleted` | `inode_id`, plus `expected_deletion_seq` and `actual_deletion_seq` when a live deletion exists at a different generation |
 | any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
 | any failed operation | `operation_index` — the zero-based position of the operation that stopped the request, 0 for a one-operation request (section 5.1) |
@@ -268,6 +271,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
+| `forbidden` | 403 | The subject holds a right on the inode but not the one the operation needs. An inode on which the subject holds no right at all is reported as not found instead. |
 | `content_too_large` | 413 | A request or proxied response exceeds its advertised size limit. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.completion_max_body_bytes`. For large reads, request a download grant when `filesystem.downloads.direct_get` is available. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
@@ -610,6 +614,23 @@ Responses expose attribution through these fields:
 | `attributes_updated_by`, `attributes_updated_at_ms` | Commit attribution for the latest stored attribute update; absent for the initial empty attributes at revision 0. |
 | `deleted_by`, `deleted_at_ms` | Commit attribution for an active trash entry. |
 
+### Subject and principals
+
+`Loonfs-Principals` carries comma-separated principal ids without whitespace.
+Principal, subject, and scope ids never contain a comma, so the list is
+unambiguous.
+`Loonfs-Subject` identifies the subject the request acts as and defaults to
+`Loonfs-Actor`. The principal count is capped by the advertised
+`access.max_principals` limit. An unrestricted namespace ignores both headers.
+An ACL namespace requires `Loonfs-Principals` on every commit and upload
+operation; its absence answers `invalid_request` with `param` set to
+`Loonfs-Principals`. When principals are present, a subject or actor is required.
+These ids are opaque and reach access logs like the actor id; use internal ids,
+never email addresses or display names.
+
+The subject id is part of a commit's semantic identity. Retrying a commit id
+from another subject answers `commit_id_reuse_conflict`.
+
 ### 5.2 Commit responses and safe retry
 
 Every commit returns a `Commit`: the `namespace_id` that changed, the
@@ -771,6 +792,11 @@ with the same `param` and the actor validator's reason. Authorization is checked
 first. Retries and replayed requests must carry the same header value, so saved
 requests must keep the actor beside the body. Request headers reach access logs,
 so the value must be an opaque identifier, never an email or a display name.
+
+`Loonfs-Principals` and `Loonfs-Subject` are optional headers on every operation
+in the transport schema. Their requirement follows the namespace access mode,
+rather than the operation's schema: ACL commits and uploads require principals,
+with the subject id defaulting to the actor.
 
 Request bodies reject unknown fields, at every level of nesting, with 400
 `invalid_request`. Most request fields are optional and several of those are
@@ -2208,11 +2234,53 @@ precondition requires its inode precondition, a wrong inode answers
 `path_conflict`, and a stale revision answers `stale_access` whether the
 caller stated the revision or the update's own precondition observed it.
 
+#### Authorization in ACL namespaces
+
+Each operation checks the subject's effective rights on the inodes it touches
+before its conflict checks. If the subject holds no right on a checked inode,
+the response is `path_not_found` or `inode_not_found`, according to how the
+request named it. If it holds some right but lacks a required right, the
+response is `forbidden` with the checked `inode_id` in the error details.
+
+| Operation | Required rights |
+| --- | --- |
+| create_directory, new put_file | `create` on the parent, or the deepest existing directory when allocating parents. |
+| create_directory_by_inode, create_file_by_inode | `create` on the parent. |
+| Replacing put_file, put_file_revision_by_inode | `write` on the existing file. |
+| put_file with no_replace at an occupied name | `create` on the parent before reporting the conflict. |
+| delete_path, delete_by_inode | `remove` on the source parent. |
+| move_path, move_by_inode | `remove` on the source parent and `create` on the destination parent; replacing an occupant also requires `remove` on the destination parent. |
+| copy_path | `read` on the source file; `create` on the destination parent for a vacant name or a name conflict, or `write` on an occupied file being replaced. |
+| restore_revision | `write` and `history` on the file. |
+| update_attributes | `write` on the target inode. |
+| undelete | `remove` on the saved parent and `create` on the recovery parent, including when recovering in place. |
+| update_access | Authority for the changes, as described below. |
+
+A move that changes any principal's effective rights on the moved inode is
+authorized as if the mover had granted the gained rights. The mover must hold
+`share` and every gained right, or `manage`, or be an administrator. Only gains
+count; removing access needs no extra authority. Entry rights suffice when
+nothing is conferred. A boundary folder can move anywhere with entry rights,
+because its inherited rights do not change. Root administrator principals do
+not contribute gains. Relocating an undelete follows the same rule.
+
+For `update_access`, changing the root's set of administrator principals
+requires an administrator. Otherwise `manage` permits any update. A subject
+without `manage` must hold `share`, leave the boundary unchanged, and hold every
+right it adds or removes from any principal's direct grant.
+
+Preconditions require `read` on the inode they name, or the existing parent for
+path absence; a namespace-head precondition needs no inode right.
+
 ### 6.9 Upload transport
 
 The upload transport standardizes staged content publication, not one specific
 byte path. In v0, uploads are whole-file uploads: the staged body is the
 complete file content, not a separate metadata document or multipart strategy.
+
+A session in an ACL namespace belongs to the subject that opened it. Every
+upload operation requires principals; any other subject receives
+`upload_not_found`. An unrestricted namespace records no subject ownership.
 
 The semantic rule is:
 

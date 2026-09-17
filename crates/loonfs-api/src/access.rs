@@ -22,6 +22,33 @@ validation_error!(
 );
 
 validation_error!(
+    SubjectIdValidationError,
+    "invalid subject_id {value:?}: {reason}"
+);
+
+string_id! {
+    /// The stable identity a request acts as, used for upload ownership
+    /// and commit replay. Same grammar as an actor id.
+    SubjectId,
+    error = SubjectIdValidationError,
+    validate = validate_subject_id,
+    schema(
+        description = "Stable opaque subject id containing 1 to 256 visible ASCII characters other than the comma.",
+        pattern = r"^[\x21-\x7E]{1,256}$",
+        example = "usr_8f3c"
+    )
+}
+
+/// Who a request acts as: a stable id and the principals whose grants apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subject {
+    /// Stable identity for upload ownership and commit replay.
+    pub subject_id: SubjectId,
+    /// Principals whose grants apply to the request.
+    pub principals: PrincipalSet,
+}
+
+validation_error!(
     PrincipalScopeValidationError,
     "invalid principal_scope {value:?}: {reason}"
 );
@@ -29,12 +56,13 @@ validation_error!(
 string_id! {
     /// A validated principal identifier supplied by the application.
     ///
-    /// Principal IDs contain 1 to 256 visible ASCII characters (0x21 through 0x7E).
+    /// Principal IDs contain 1 to 256 visible ASCII characters (0x21 through 0x7E)
+    /// other than the comma, which separates ids on the wire.
     PrincipalId,
     error = PrincipalIdValidationError,
     validate = validate_principal_id,
     schema(
-        description = "Stable opaque principal id containing 1 to 256 visible ASCII characters.",
+        description = "Stable opaque principal id containing 1 to 256 visible ASCII characters other than the comma.",
         pattern = r"^[\x21-\x7E]{1,256}$",
         example = "prn_8f3c"
     )
@@ -49,7 +77,7 @@ string_id! {
     error = PrincipalScopeValidationError,
     validate = validate_principal_scope,
     schema(
-        description = "Opaque identity-domain id containing 1 to 256 visible ASCII characters.",
+        description = "Opaque identity-domain id containing 1 to 256 visible ASCII characters other than the comma.",
         pattern = r"^[\x21-\x7E]{1,256}$",
         example = "org_acme"
     )
@@ -72,12 +100,21 @@ fn visible_ascii_reason(value: &str) -> Option<&'static str> {
     if !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
         return Some("must contain only visible ASCII characters");
     }
+    if value.contains(',') {
+        return Some("must not contain a comma, which separates ids on the wire");
+    }
     None
 }
 
 fn validate_principal_id(value: &str) -> Result<(), PrincipalIdValidationError> {
     visible_ascii_reason(value).map_or(Ok(()), |reason| {
         Err(PrincipalIdValidationError::new(value, reason))
+    })
+}
+
+fn validate_subject_id(value: &str) -> Result<(), SubjectIdValidationError> {
+    visible_ascii_reason(value).map_or(Ok(()), |reason| {
+        Err(SubjectIdValidationError::new(value, reason))
     })
 }
 
@@ -386,6 +423,14 @@ mod tests {
         AccessGrants, AccessGrantsError, AccessRight, AccessRights, PrincipalId,
         MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES,
     };
+
+    #[test]
+    fn ids_never_contain_the_wire_separator() {
+        assert!(PrincipalId::parse("visitor,prn_root").is_err());
+        assert!(super::SubjectId::parse("usr,ada").is_err());
+        assert!(super::PrincipalScope::parse("org,demo").is_err());
+        assert!(PrincipalId::parse("visitor").is_ok());
+    }
     use std::collections::BTreeMap;
 
     #[test]

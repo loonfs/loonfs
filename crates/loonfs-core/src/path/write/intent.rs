@@ -1,6 +1,6 @@
 //! [`CommitRequest`]: the one filesystem commit language, before planning.
 
-use loonfs_api::{ActorId, CommitId, CommitPrecondition};
+use loonfs_api::{ActorId, CommitId, CommitPrecondition, Subject};
 
 /// The operation language a commit is written in, owned by `loonfs-api` and
 /// used here unchanged.
@@ -34,6 +34,8 @@ pub struct CommitRequest {
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
     pub actor_id: ActorId,
+    /// The subject the request acts as; absent on unrestricted namespaces.
+    pub subject: Option<Subject>,
     /// Caller annotation recorded on the commit. Part of the request's
     /// identity: reusing a commit id with a different message conflicts.
     pub message: Option<String>,
@@ -44,6 +46,12 @@ pub struct CommitRequest {
 }
 
 impl CommitRequest {
+    /// Sets the subject the request acts as.
+    pub fn with_subject(mut self, subject: Subject) -> Self {
+        self.subject = Some(subject);
+        self
+    }
+
     /// Sets the admission conditions in caller order.
     pub fn preconditions(mut self, preconditions: Vec<CommitPrecondition>) -> Self {
         self.preconditions = preconditions;
@@ -60,6 +68,7 @@ impl CommitRequest {
         Self {
             commit_id,
             actor_id: actor,
+            subject: None,
             message,
             operations: vec![operation],
             preconditions: Vec::new(),

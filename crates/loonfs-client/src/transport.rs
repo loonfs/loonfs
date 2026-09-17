@@ -44,20 +44,37 @@ pub(crate) struct WireRequest {
 }
 
 impl Client {
+    fn with_subject_headers(&self, request: WireRequest) -> WireRequest {
+        let Some(subject) = &self.subject else {
+            return request;
+        };
+        request
+            .header("Loonfs-Subject", subject.subject_id.as_str())
+            .header(
+                "Loonfs-Principals",
+                subject
+                    .principals
+                    .iter()
+                    .map(|principal| principal.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+    }
+
     pub(crate) fn get(&self, url: &str) -> WireRequest {
-        WireRequest::to_server(Method::GET, url)
+        self.with_subject_headers(WireRequest::to_server(Method::GET, url))
     }
 
     pub(crate) fn post(&self, url: &str) -> WireRequest {
-        WireRequest::to_server(Method::POST, url)
+        self.with_subject_headers(WireRequest::to_server(Method::POST, url))
     }
 
     pub(crate) fn put(&self, url: &str) -> WireRequest {
-        WireRequest::to_server(Method::PUT, url)
+        self.with_subject_headers(WireRequest::to_server(Method::PUT, url))
     }
 
     pub(crate) fn delete(&self, url: &str) -> WireRequest {
-        WireRequest::to_server(Method::DELETE, url)
+        self.with_subject_headers(WireRequest::to_server(Method::DELETE, url))
     }
 }
 

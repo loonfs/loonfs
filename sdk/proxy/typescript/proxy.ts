@@ -8,6 +8,8 @@ export interface ProxyRouteContext {
 export interface ProxyAuthorization {
     /** Sent upstream in `Loonfs-Actor`. */
     actorId?: string;
+    subjectId?: string;
+    principals?: string[];
 }
 
 export interface ProxyConfig {
@@ -112,6 +114,12 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
         if (authorization?.actorId !== undefined) {
             headers.set("Loonfs-Actor", authorization.actorId);
         }
+        if (authorization?.subjectId !== undefined) {
+            headers.set("Loonfs-Subject", authorization.subjectId);
+        }
+        if (authorization?.principals !== undefined) {
+            headers.set("Loonfs-Principals", authorization.principals.join(","));
+        }
         const init: RequestInit & { duplex?: "half" } = {
             method: request.method,
             headers,
@@ -187,7 +195,12 @@ function forwardedHeaders(source: Headers, extra: readonly string[]): Headers {
 }
 
 // Do not forward application cookies to LoonFS.
-const REQUEST_STRIPPED_HEADERS = ["cookie", "loonfs-actor"] as const;
+const REQUEST_STRIPPED_HEADERS = [
+    "cookie",
+    "loonfs-actor",
+    "loonfs-subject",
+    "loonfs-principals",
+] as const;
 // Fetch decompresses responses, so remove the old encoding and length headers.
 // Do not forward LoonFS cookies to the application.
 const RESPONSE_STRIPPED_HEADERS = ["content-encoding", "content-length", "set-cookie"] as const;

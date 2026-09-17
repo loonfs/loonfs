@@ -733,6 +733,7 @@ mod tests {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
                 .map(|index| FilesystemOperation::CreateDirectory {
@@ -768,6 +769,7 @@ mod tests {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("too-long-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
             operations: vec![FilesystemOperation::CreateDirectory {
                 path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
@@ -785,6 +787,7 @@ mod tests {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("oversized-batch").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
                 .map(|index| FilesystemOperation::CreateDirectory {
@@ -804,6 +807,7 @@ mod tests {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("largest-batch").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: (0..crate::limits::MAX_COMMIT_OPERATIONS)
                 .map(|index| FilesystemOperation::CreateDirectory {
@@ -829,6 +833,7 @@ mod tests {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("oversized-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
             operations: operations.clone(),
         });
@@ -841,6 +846,7 @@ mod tests {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("largest-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES)),
             operations,
         });

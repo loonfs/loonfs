@@ -2357,7 +2357,9 @@ fn actor_headers_are_global_and_only_attributed_operations_require_them() {
     assert_eq!(
         full["x-fern-global-headers"],
         json!([
-            {"header": "Loonfs-Actor", "name": "actorId", "optional": true}
+            {"header": "Loonfs-Actor", "name": "actorId", "optional": true},
+        {"header": "Loonfs-Subject", "name": "subjectId", "optional": true},
+        {"header": "Loonfs-Principals", "name": "principals", "optional": true}
         ])
     );
     assert!(proxy.get("x-fern-global-headers").is_none());

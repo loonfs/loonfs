@@ -764,6 +764,7 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
             preconditions: Vec::new(),
             commit_id: commit_id("put-then-set"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 FilesystemOperation::PutFile {
@@ -811,6 +812,7 @@ async fn an_unchanged_update_and_a_second_update_commit_together() {
             preconditions: Vec::new(),
             commit_id: commit_id("twice"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 remove_attributes("/docs/a.txt", &["owner"]),
@@ -861,6 +863,7 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
             preconditions: Vec::new(),
             commit_id: commit_id("stops"),
             actor_id: loonfs_test_support::test_actor(),
+            subject: None,
             message: None,
             operations: vec![
                 set_attributes("/docs/a.txt", &[("owner", "ada")]),

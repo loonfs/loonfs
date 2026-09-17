@@ -40,12 +40,18 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> (CompletedUpload, ContentStoreId) {
-    let upload = begin_service_proxied_upload(store, namespace_id, context)
+    let upload = begin_service_proxied_upload(store, namespace_id, None, context)
         .await
         .expect("begin upload");
-    upload_content(store, namespace_id, &upload.upload_id, b"completed content")
-        .await
-        .expect("stage upload");
+    upload_content(
+        store,
+        namespace_id,
+        &upload.upload_id,
+        None,
+        b"completed content",
+    )
+    .await
+    .expect("stage upload");
     let content_store_id = load_namespace_content_store_id(store, namespace_id)
         .await
         .expect("content store");
@@ -54,6 +60,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
         namespace_id,
         &content_store_id,
         &upload.upload_id,
+        None,
         ResolvedUploadCompletion::KnownContent,
         context,
     )

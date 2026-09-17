@@ -393,6 +393,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("thousand-file-atomic").expect("commit id"),
                 actor_id: loonfs_test_support::test_actor(),
+                subject: None,
                 message: None,
                 operations,
             },

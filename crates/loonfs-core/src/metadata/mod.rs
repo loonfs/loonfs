@@ -45,3 +45,5 @@ pub(crate) use loonfs_api::wire::manifest::ActiveDeletionRecord;
 
 #[cfg(test)]
 pub(crate) use self::rows::MetadataStateBuilder;
+
+pub(crate) use visibility::MetadataVisibilityReads;

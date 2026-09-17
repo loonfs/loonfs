@@ -6,6 +6,7 @@ mod check_config;
 mod common;
 mod direct_put_real_provider;
 mod grep_modes;
+mod http_access;
 mod http_attributes;
 mod http_attribution;
 mod http_auth;

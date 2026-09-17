@@ -70,6 +70,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
             CommitRequest {
                 commit_id: CommitId::parse("maximum-attribute-updates").expect("commit"),
                 actor_id: loonfs_test_support::test_actor(),
+                subject: None,
                 message: None,
                 preconditions: Vec::new(),
                 operations: (0..loonfs::publish::MAX_COMMIT_OPERATIONS)
@@ -147,6 +148,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let explicit_fingerprint = semantic_commit_fingerprint(
         &namespace_id,
         &explicit.actor_id,
+        None,
         explicit.message.as_deref(),
         &explicit.operations,
         &[],
@@ -188,6 +190,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
         semantic_commit_fingerprint(
             &namespace_id,
             &different.actor_id,
+            None,
             different.message.as_deref(),
             &different.operations,
             &[]

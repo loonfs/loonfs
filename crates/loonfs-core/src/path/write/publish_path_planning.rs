@@ -1,5 +1,6 @@
 //! Shared path-planning checks and visible-ancestor walks.
 
+use super::authorize::Authorizer;
 use crate::binding_generation::BindingGeneration;
 use crate::commit::{CandidateAllocation, CommitOp, ResolvedBinding};
 use crate::error::{CoreError, Result};
@@ -47,6 +48,7 @@ impl CompiledFilesystemOperation {
 pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: &'a NamespaceId,
     pub(super) access: &'a NamespaceAccess,
+    pub(super) authorizer: &'a Authorizer<'a>,
     pub(super) view: &'a MetadataView<'view, 'store, S>,
 }
 
@@ -212,23 +214,6 @@ pub(super) enum ReplaceDestination {
     SameInode,
 }
 
-/// Resolves the shared move/copy destination rule: replacement accepts a
-/// distinct file, a move may respell its own binding, and everything else
-/// visible at the destination is a conflict.
-pub(super) async fn resolve_replace_destination<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    to_path: &AbsolutePath,
-    behavior: DestinationBehavior,
-    source_inode_id: InodeId,
-) -> Result<ReplaceDestination> {
-    let occupant = match view.view.resolve_visible_path(to_path).await {
-        Ok(existing) => Some(existing),
-        Err(error) if is_missing_visible_path(&error) => None,
-        Err(error) => return Err(error),
-    };
-    classify_replace_destination(occupant, behavior, source_inode_id, to_path.as_str())
-}
-
 pub(super) fn classify_replace_destination(
     occupant: Option<ResolvedVisiblePath>,
     behavior: DestinationBehavior,
@@ -256,19 +241,31 @@ pub(super) fn classify_replace_destination(
     })
 }
 
+pub(super) struct ResolvedParents {
+    /// The directory the new entry is bound under, possibly allocated here.
+    pub(super) parent_inode_id: InodeId,
+    /// The deepest directory that already existed, whose `create` right
+    /// covers every directory allocated below it.
+    pub(super) deepest_existing: InodeId,
+}
+
 pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     ops: &mut Vec<CommitOp>,
     allocation: &mut CandidateAllocation,
-) -> Result<InodeId> {
+) -> Result<ResolvedParents> {
     let components = absolute_path.components();
     if components.len() <= 1 {
-        return Ok(ROOT_INODE_ID);
+        return Ok(ResolvedParents {
+            parent_inode_id: ROOT_INODE_ID,
+            deepest_existing: ROOT_INODE_ID,
+        });
     }
 
     let mut current_inode = ROOT_INODE_ID;
     let mut creating_missing_ancestors = false;
+    let mut deepest_existing = current_inode;
     for component in &components[..components.len() - 1] {
         let display_name = component.to_display_name();
         let name_key = NameKey::for_display_name(&display_name);
@@ -287,6 +284,7 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
                 current_inode = child.child_inode_id;
                 continue;
             }
+            deepest_existing = current_inode;
             creating_missing_ancestors = true;
         }
 
@@ -298,7 +296,13 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
         });
         current_inode = child_inode_id;
     }
-    Ok(current_inode)
+    if !creating_missing_ancestors {
+        deepest_existing = current_inode;
+    }
+    Ok(ResolvedParents {
+        parent_inode_id: current_inode,
+        deepest_existing,
+    })
 }
 
 pub(super) async fn resolve_parent_directory<S: ObjectStore + ?Sized>(

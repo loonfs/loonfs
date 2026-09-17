@@ -103,6 +103,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let upload = crate::protocol::begin_direct_multipart_upload_target(
         &inner,
         &namespace_id,
+        None,
         Default::default(),
         &setup,
     )
@@ -112,6 +113,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &inner,
         &namespace_id,
         &upload.session.upload_id,
+        None,
         &[loonfs_api::v0::UploadPartChecksumClaim {
             part_number: 1,
             checksum: loonfs_api::Checksum::crc64nvme(b"part"),

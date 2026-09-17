@@ -377,7 +377,7 @@ For streamed full-file reads, the complete checksum can only be established afte
 
 Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace and is stored under that namespace's owner prefix.
 
-An upload session contains `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, a tagged `mode`, and a tagged `status`.
+An upload session contains `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
 
 | Status | Stored fields | Meaning |
 | --- | --- | --- |
@@ -988,7 +988,7 @@ An extension must remain rebuildable from authoritative core state. Its absence 
 
 The current inode kinds are `file` and `dir`. Mount creation and traversal are not defined by this version; no standard operation creates a mount.
 
-Access rows and the namespace access mode are stored as section 1.8 defines. No read evaluates them in this version. Authorization is unspecified in this version. Access changes publish in commit order and appear in the change feed as `access_changed` events.
+Access rows and the namespace access mode are stored as section 1.8 defines. Commits and upload sessions are authorized against access rows as the API specification defines. Reads do not evaluate access rows in this version. Access changes publish in commit order and appear in the change feed as `access_changed` events.
 
 ## Appendix A. Durable records and byte encodings
 
@@ -1078,7 +1078,7 @@ The following tables list the durable payload fields. Their transition rules are
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum` |
 | Content-store descriptor | `content_store_id`, `created_at_ms` |
 | Pin record | `namespace_id`, `pin_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum`, `head_commit_id`, `created_at_ms`, `owner` |
-| Upload session | `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, `mode`, `status` |
+| Upload session | `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with optional `reclaim_after_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
@@ -1329,15 +1329,16 @@ The fingerprint is the SHA-256 of compact UTF-8 JSON with the following top-leve
   "domain": "loonfs.commit.semantic.v1",
   "namespace_id": <namespace string>,
   "actor_id": <actor ID string>,
+  "subject_id": <subject ID string or null>,
   "operations": <ordered canonical operations>,
   "message": <string or null>,
   "preconditions": <ordered canonical preconditions>
 }
 ```
 
-The layout above is a schema illustration. Actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present and is `[]` for an empty list; `message` is always present and is `null` when absent.
+The layout above is a schema illustration. Actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present and is `[]` for an empty list; `message` and `subject_id` are always present and are `null` when absent.
 
-The `namespace_id`, `actor_id`, message, operation order, and caller preconditions are significant. A changed `actor_id` is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The commit ID itself, writer epoch, and committed timestamp are excluded.
+The `namespace_id`, `actor_id`, `subject_id`, message, operation order, and caller preconditions are significant. A changed `actor_id` is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The commit ID itself, writer epoch, and committed timestamp are excluded.
 
 ### B.1 Operation fields
 
