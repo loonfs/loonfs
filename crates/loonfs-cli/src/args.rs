@@ -27,6 +27,7 @@ Filesystem:
   mv          Move or rename a path
   cp          Copy a file or directory tree
   annotate    Write and remove attributes
+  access      Replace an item's access row
 
 Context and configuration:
   init        Interactively create a config and first profile
@@ -72,6 +73,15 @@ pub(crate) struct Cli {
     /// `LOONFS_NAMESPACE`, then the profile default.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
     pub(crate) namespace: Option<String>,
+    /// Subject id to act as. Precedence is `--subject-id`,
+    /// `LOONFS_SUBJECT_ID`, the profile, then the actor id.
+    #[arg(long, global = true, value_hint = ValueHint::Other)]
+    pub(crate) subject_id: Option<String>,
+    /// Comma-separated principal ids whose grants apply. Precedence is
+    /// `--principals`, `LOONFS_PRINCIPALS`, then the profile. Without
+    /// principals the CLI acts as the token holder.
+    #[arg(long, global = true, value_hint = ValueHint::Other)]
+    pub(crate) principals: Option<String>,
     /// Emit machine-readable JSON instead of human output.
     #[arg(long, global = true)]
     pub(crate) json: bool,
@@ -167,6 +177,11 @@ pub(crate) enum Command {
     Stat(FilesystemStatArgs),
     /// Write and remove attributes on a file or directory.
     Annotate(FilesystemAnnotateArgs),
+    /// Replace an item's access row.
+    Access {
+        #[command(subcommand)]
+        command: AccessCommand,
+    },
     /// Print a file's content to stdout.
     Cat(FilesystemCatArgs),
     /// Search file content through the grep index.
@@ -234,6 +249,7 @@ impl Command {
             } | Self::Ls(_)
                 | Self::Stat(_)
                 | Self::Annotate(_)
+                | Self::Access { .. }
                 | Self::Cat(_)
                 | Self::Grep(_)
                 | Self::Get(_)
@@ -255,7 +271,8 @@ impl Command {
                         | MaintenanceCommand::Flush(_)
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Compact(_)
-                        | MaintenanceCommand::Gc(_),
+                        | MaintenanceCommand::Gc(_)
+                        | MaintenanceCommand::RecoverAdministrator(_),
                 }
         )
     }
@@ -340,6 +357,10 @@ pub(crate) struct ProfileCreateActorArgs {
     /// Actor ID to save in the profile. Defaults to loonfs-cli when unset.
     #[arg(long, value_hint = ValueHint::Other)]
     pub actor_id: Option<String>,
+    #[arg(from_global)]
+    pub subject_id: Option<String>,
+    #[arg(from_global)]
+    pub principals: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -498,6 +519,10 @@ pub(crate) struct ProfileUpdateActorArgs {
     /// Sets the profile's actor ID.
     #[arg(long)]
     pub actor_id: Option<String>,
+    #[arg(from_global)]
+    pub subject_id: Option<String>,
+    #[arg(from_global)]
+    pub principals: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -648,7 +673,17 @@ pub(crate) struct RequestBehaviorArgs {
 }
 
 #[derive(Debug, Args, Clone)]
+pub(crate) struct SubjectSelectorArgs {
+    #[arg(from_global)]
+    pub subject_id: Option<String>,
+    #[arg(from_global)]
+    pub principals: Option<String>,
+}
+
+#[derive(Debug, Args, Clone)]
 pub(crate) struct TargetSelectorArgs {
+    #[command(flatten)]
+    pub subject: SubjectSelectorArgs,
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[arg(from_global)]
@@ -719,6 +754,12 @@ pub(crate) struct NamespaceShowArgs {
     pub namespace_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum NamespaceAccessArg {
+    Unrestricted,
+    Acl,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
@@ -729,10 +770,21 @@ pub(crate) struct NamespaceCreateArgs {
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: String,
+    /// Access mode, fixed for the namespace's life.
+    #[arg(long, value_enum, default_value_t = NamespaceAccessArg::Unrestricted)]
+    pub access: NamespaceAccessArg,
+    /// Principal scope of an ACL namespace.
+    #[arg(long, required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
+    pub principal_scope: Option<String>,
+    /// A principal granted `admin` on the root at creation; repeatable.
+    #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
+    pub administrators: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceDeleteArgs {
+    #[command(flatten)]
+    pub subject: SubjectSelectorArgs,
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
@@ -749,6 +801,8 @@ pub(crate) struct NamespaceDeleteArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceForkArgs {
+    #[command(flatten)]
+    pub subject: SubjectSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     #[command(flatten)]
@@ -840,6 +894,40 @@ pub(crate) struct FilesystemStatArgs {
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
     pub snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AccessCommand {
+    /// Replace the access row of a path with the grants given.
+    Set(AccessSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AccessSetArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
+    pub path: String,
+    /// A grant as `principal=right[,right...]`; repeat the flag for more
+    /// principals. Rights are read, history, write, create, remove, share,
+    /// manage, and admin (root only).
+    #[arg(long = "grant")]
+    pub grants: Vec<String>,
+    /// Stop inheritance at this directory.
+    #[arg(long)]
+    pub boundary: bool,
+    /// Replace only while the path still resolves to this inode; a raced
+    /// rebinding fails instead of changing a different inode's access.
+    #[arg(long, value_parser = parse_public_inode_id)]
+    pub expected_inode_id: Option<InodeId>,
+    /// Replace only while the row is still at this access revision. Needs
+    /// --expected-inode-id, which names the row.
+    #[arg(long, value_hint = ValueHint::Other, requires = "expected_inode_id")]
+    pub expected_revision: Option<u64>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
 }
 
 #[derive(Debug, Args)]
@@ -1124,6 +1212,8 @@ pub(crate) enum SnapshotCommand {
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotTargetArgs {
     #[command(flatten)]
+    pub subject: SubjectSelectorArgs,
+    #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
@@ -1175,6 +1265,8 @@ pub(crate) struct SnapshotDeleteArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceCommand {
+    /// Restore a principal's administrator grant on the root.
+    RecoverAdministrator(MaintenanceRecoverAdministratorArgs),
     /// Run the local scheduler loop for selected namespaces. Requires an embedded profile.
     Loop(MaintenanceLoopArgs),
     /// Run the metadata job once.
@@ -1205,6 +1297,16 @@ pub(crate) enum MaintenanceCommand {
         #[command(subcommand)]
         command: MaintenanceStoreCommand,
     },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MaintenanceRecoverAdministratorArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
+    #[arg(value_hint = ValueHint::Other)]
+    pub principal_id: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1462,6 +1564,8 @@ command_kinds! {
     FilesystemLs => "filesystem_ls",
     FilesystemStat => "filesystem_stat",
     FilesystemAnnotate => "filesystem_annotate",
+    AccessSet => "access_set",
+    MaintenanceRecoverAdministrator => "maintenance_recover_administrator",
     FilesystemCat => "filesystem_cat",
     FilesystemGrep => "filesystem_grep",
     FilesystemGet => "filesystem_get",
@@ -1532,6 +1636,9 @@ impl Cli {
             Command::Ls(_) => CommandKind::FilesystemLs,
             Command::Stat(_) => CommandKind::FilesystemStat,
             Command::Annotate(_) => CommandKind::FilesystemAnnotate,
+            Command::Access { command } => match command {
+                AccessCommand::Set(_) => CommandKind::AccessSet,
+            },
             Command::Cat(_) => CommandKind::FilesystemCat,
             Command::Grep(_) => CommandKind::FilesystemGrep,
             Command::Get(_) => CommandKind::FilesystemGet,
@@ -1548,6 +1655,9 @@ impl Cli {
             Command::Capabilities(_) => CommandKind::Capabilities,
             Command::Doctor(_) => CommandKind::Doctor,
             Command::Maintenance { command } => match command {
+                MaintenanceCommand::RecoverAdministrator(_) => {
+                    CommandKind::MaintenanceRecoverAdministrator
+                }
                 MaintenanceCommand::Loop(_) => CommandKind::MaintenanceLoop,
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
                 MaintenanceCommand::Flush(_) => CommandKind::MaintenanceFlush,
@@ -1909,6 +2019,7 @@ mod tests {
         assert_subcommands(
             maintenance,
             &[
+                "recover-administrator",
                 "loop",
                 "metadata",
                 "flush",

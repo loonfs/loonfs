@@ -187,6 +187,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     let replace = PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
+            subject: None,
             preconditions: Vec::new(),
             actor_id: loonfs_test_support::test_actor(),
             commit_id: None,

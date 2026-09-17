@@ -3,7 +3,7 @@
 
 use super::context::{
     parse_public_ordinal_arg, parse_snapshot_id_arg, resolve_command_context,
-    resolve_profile_context,
+    resolve_mutation_context, resolve_profile_context,
 };
 use super::output::{
     CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport, MaintenanceRan,
@@ -14,17 +14,19 @@ use crate::args::{
     MaintenanceCheckpointDeleteArgs, MaintenanceCheckpointListArgs, MaintenanceCommand,
     MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs, MaintenanceIndexGcArgs,
     MaintenanceJobArg, MaintenanceLoopArgs, MaintenanceMetadataArgs, MaintenanceNamespaceArgs,
-    MaintenanceRetentionCommand, MaintenanceStoreCommand, MaintenanceStoreProbeArgs,
-    RuntimeBehavior,
+    MaintenanceRecoverAdministratorArgs, MaintenanceRetentionCommand, MaintenanceStoreCommand,
+    MaintenanceStoreProbeArgs, RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
+use crate::error::CliError;
 use crate::resolve::parse_namespace_id;
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
     AdvanceRetentionRequest, ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode,
-    GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest, RunMaintenanceRequest,
+    GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest, PrincipalId,
+    RecoverAdministratorRequest, RunMaintenanceRequest,
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
@@ -39,6 +41,9 @@ pub(crate) async fn run_maintenance_command(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
+        MaintenanceCommand::RecoverAdministrator(args) => {
+            run_maintenance_recover_administrator(kind, config_path, args).await
+        }
         MaintenanceCommand::Loop(args) => run_maintenance_loop(kind, config_path, args).await,
         MaintenanceCommand::Metadata(args) => {
             run_maintenance_metadata(kind, config_path, args).await
@@ -84,6 +89,31 @@ pub(crate) async fn run_maintenance_command(
     }
 }
 
+async fn run_maintenance_recover_administrator(
+    kind: CommandKind,
+    config_path: &Path,
+    args: MaintenanceRecoverAdministratorArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let principal_id = PrincipalId::parse(&args.principal_id).map_err(|error| {
+        context.fail(
+            kind,
+            CliError::invalid_request(error.to_string()).with_param("principal_id"),
+        )
+    })?;
+    let request =
+        RunMaintenanceRequest::RecoverAdministrator(RecoverAdministratorRequest { principal_id });
+    let response = context
+        .target
+        .run_maintenance(context.namespace(), request, context.actor_id.as_ref())
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+    Ok(context.output(
+        kind,
+        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
+    ))
+}
+
 async fn run_maintenance_metadata(
     kind: CommandKind,
     config_path: &Path,
@@ -95,7 +125,7 @@ async fn run_maintenance_metadata(
     });
     let response = context
         .target
-        .run_maintenance(context.namespace(), request)
+        .run_maintenance(context.namespace(), request, context.actor_id.as_ref())
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -118,6 +148,7 @@ async fn run_maintenance_gc(
             RunMaintenanceRequest::Gc(GcRequest {
                 grace_window_ms: args.grace_window_ms,
             }),
+            context.actor_id.as_ref(),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -214,6 +245,7 @@ async fn run_maintenance_flush(
             RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
                 max_wal_tail_segments: Some(1),
             }),
+            context.actor_id.as_ref(),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -235,6 +267,7 @@ async fn run_maintenance_compact(
         .run_maintenance(
             context.namespace(),
             RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
+            context.actor_id.as_ref(),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -262,6 +295,7 @@ async fn run_maintenance_retention_advance(
         .run_maintenance(
             context.namespace(),
             RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
+            context.actor_id.as_ref(),
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -283,8 +317,14 @@ async fn run_maintenance_loop(
     args: MaintenanceLoopArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let context =
-        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let context = resolve_profile_context(
+        kind,
+        config_path,
+        explicit_profile,
+        args.request.no_retry,
+        None,
+    )
+    .await?;
     let namespaces = args
         .namespaces
         .iter()
@@ -339,8 +379,14 @@ async fn run_maintenance_store_probe(
     args: MaintenanceStoreProbeArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let context =
-        resolve_profile_context(kind, config_path, explicit_profile, args.request.no_retry).await?;
+    let context = resolve_profile_context(
+        kind,
+        config_path,
+        explicit_profile,
+        args.request.no_retry,
+        None,
+    )
+    .await?;
     let response = context
         .target
         .probe_store()

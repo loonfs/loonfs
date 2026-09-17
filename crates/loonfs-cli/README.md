@@ -146,7 +146,8 @@ Profile management
     Make a profile the default
 
 Namespace management
-  loonfs namespace create <namespace> [--actor-id <stable-id>]
+  loonfs namespace create <namespace> [--access acl --principal-scope <scope> --administrator <principal>...]
+                            [--actor-id <stable-id>]
     Create a new empty namespace
 
   loonfs namespace show [namespace]
@@ -227,6 +228,12 @@ Writing
   LOONFS_ACTOR_ID, then the profile actor_id. Without any of them,
   loonfs-cli identifies the tool, not the human running it.
 
+  Every command that reaches a namespace accepts --subject-id <id> and
+  --principals <a,b>. The flags override LOONFS_SUBJECT_ID and
+  LOONFS_PRINCIPALS, then the profile's subject_id and principals. Without
+  principals the CLI acts as the token holder, and the subject id defaults
+  to the actor id.
+
   loonfs put <local-path|-> [remote-path] [-r] [--force]
              [--expected-inode-id <id>] [--expected-revision <n>]
              [--actor-id <id>]
@@ -258,6 +265,9 @@ Writing
 
     --attributes-json cannot be combined with --set or --remove. The expected
     value flags reject the update if the inode or attributes changed
+
+  loonfs access set <path> --grant <principal>=<right>[,<right>...]... [--boundary]
+                    [--expected-inode-id <id> --expected-revision <n>]
 
   loonfs rm <path> [-r] [--actor-id <id>]
     Delete a file, or with -r a directory and everything under it as one
@@ -330,6 +340,8 @@ Maintenance
     --namespaces and --jobs accept comma-separated lists or repeated flags.
     --max-steps and --deadline-ms bound a drain.
     --poll-interval-ms defaults to 60000, has a minimum of 100, and is ignored by drains.
+
+  loonfs maintenance recover-administrator <principal>
 
   loonfs maintenance metadata [--max-wal-tail-segments <n>]
     Run the metadata job once: flush the WAL tail when it reaches

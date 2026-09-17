@@ -2,7 +2,7 @@
 
 use crate::error::CliError;
 use loonfs_api::env::AUTH_TOKEN_ENV;
-use loonfs_api::{ActorId, NamespaceId, SecretString};
+use loonfs_api::{ActorId, NamespaceId, PrincipalId, SecretString, SubjectId};
 use loonfs_client::{ClientConfig, ClientError};
 use loonfs_objectstore::StoreConfigError;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,8 @@ pub(crate) const CONFIG_PATH_ENV: &str = "LOONFS_CONFIG";
 pub(crate) const PROFILE_ENV: &str = "LOONFS_PROFILE";
 pub(crate) const NAMESPACE_ENV: &str = "LOONFS_NAMESPACE";
 pub(crate) const ACTOR_ID_ENV: &str = "LOONFS_ACTOR_ID";
+pub(crate) const SUBJECT_ID_ENV: &str = "LOONFS_SUBJECT_ID";
+pub(crate) const PRINCIPALS_ENV: &str = "LOONFS_PRINCIPALS";
 
 /// A blank environment value carries no usable setting, so treat it as unset
 /// rather than passing it on to validation.
@@ -67,6 +69,10 @@ pub(crate) enum ProfileConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actor_id: Option<ActorId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_id: Option<SubjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        principals: Option<Vec<PrincipalId>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         writer_id: Option<String>,
@@ -75,6 +81,10 @@ pub(crate) enum ProfileConfig {
         server_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actor_id: Option<ActorId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_id: Option<SubjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        principals: Option<Vec<PrincipalId>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -143,6 +153,22 @@ impl ProfileConfig {
         }
     }
 
+    pub(crate) fn subject_id(&self) -> Option<SubjectId> {
+        match self {
+            Self::Embedded { subject_id, .. } | Self::Remote { subject_id, .. } => {
+                subject_id.clone()
+            }
+        }
+    }
+
+    pub(crate) fn principals(&self) -> Option<Vec<PrincipalId>> {
+        match self {
+            Self::Embedded { principals, .. } | Self::Remote { principals, .. } => {
+                principals.clone()
+            }
+        }
+    }
+
     pub(crate) fn mode_str(&self) -> &'static str {
         match self {
             ProfileConfig::Embedded { .. } => "embedded",
@@ -172,6 +198,8 @@ impl ProfileConfig {
             ProfileConfig::Remote {
                 server_url,
                 actor_id: _,
+                subject_id: _,
+                principals: _,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
@@ -193,23 +221,31 @@ impl ProfileConfig {
             ProfileConfig::Embedded {
                 store,
                 actor_id,
+                subject_id,
+                principals,
                 default_namespace,
                 writer_id,
             } => ProfileConfig::Embedded {
                 store: store.redacted(),
                 actor_id: actor_id.clone(),
+                subject_id: subject_id.clone(),
+                principals: principals.clone(),
                 default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
             },
             ProfileConfig::Remote {
                 server_url,
                 actor_id,
+                subject_id,
+                principals,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
             } => ProfileConfig::Remote {
                 server_url: server_url.clone(),
                 actor_id: actor_id.clone(),
+                subject_id: subject_id.clone(),
+                principals: principals.clone(),
                 default_namespace: default_namespace.clone(),
                 auth_token: auth_token.as_ref().map(SecretString::masked),
                 ca_cert_path: ca_cert_path.clone(),
@@ -1029,6 +1065,8 @@ secret_access_key = "secret"
                                         "https://agent-{thread_index}-{mutation_index}.example.com"
                                     ),
                                     actor_id: None,
+                                    subject_id: None,
+                                    principals: None,
                                     default_namespace: Some(namespace),
                                     auth_token: None,
                                     ca_cert_path: None,

@@ -74,6 +74,9 @@ pub(crate) fn map_runtime_error(error: RuntimeError) -> CliError {
     match error {
         RuntimeError::Config(_) => CliError::invalid_config(public_message),
         RuntimeError::RuntimeTask(_) => CliError::runtime_error(public_message),
+        RuntimeError::Core(loonfs::CoreError::SubjectRequired { .. }) => {
+            CliError::invalid_request(public_message).with_param("Loonfs-Principals")
+        }
         // The embedded surface reports the same structured details a server
         // puts in its error envelope for the same condition, so `--json`
         // consumers read one contract from both backends.

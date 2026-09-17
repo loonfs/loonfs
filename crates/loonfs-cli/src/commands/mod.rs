@@ -1,5 +1,6 @@
 //! Command implementations, one submodule per command group.
 
+mod access;
 mod config;
 mod context;
 mod fs;
@@ -21,7 +22,7 @@ pub(crate) use self::output::{
     MaintenanceKeyReport, MaintenanceRan, TrashListing,
 };
 
-use crate::args::{Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior};
+use crate::args::{AccessCommand, Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior};
 use crate::config::resolve_config_location;
 use crate::error::CliError;
 use clap::CommandFactory;
@@ -81,6 +82,11 @@ pub(crate) async fn run(
                 Command::Annotate(args) => {
                     fs::run_filesystem_annotate(kind, config_path, args).await
                 }
+                Command::Access { command } => match command {
+                    AccessCommand::Set(args) => {
+                        access::run_access_set(kind, config_path, args).await
+                    }
+                },
                 Command::Cat(args) => fs::run_filesystem_cat(kind, config_path, args).await,
                 Command::Grep(args) => fs::run_filesystem_grep(kind, config_path, args).await,
                 Command::Get(args) => {

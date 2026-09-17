@@ -14,9 +14,14 @@ async fn resolve_snapshot_context(
     target: &SnapshotTargetArgs,
 ) -> Result<CommandContext, CommandFailure> {
     let explicit_profile = target.profile.profile.as_deref();
-    let mut context =
-        resolve_profile_context(kind, config_path, explicit_profile, target.request.no_retry)
-            .await?;
+    let mut context = resolve_profile_context(
+        kind,
+        config_path,
+        explicit_profile,
+        target.request.no_retry,
+        Some(&target.subject),
+    )
+    .await?;
     let namespace_id = parse_namespace_id(&target.namespace_id)
         .map_err(|error| error.with_param("namespace_id"))
         .map_err(|error| context.fail(kind, error))?;

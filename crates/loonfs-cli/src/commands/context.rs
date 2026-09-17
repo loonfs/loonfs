@@ -1,13 +1,15 @@
 //! Shared per-command context: target resolution and common helpers.
 
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use crate::args::{ActorSelectorArgs, CommandKind, TargetSelectorArgs};
+use crate::args::{ActorSelectorArgs, CommandKind, SubjectSelectorArgs, TargetSelectorArgs};
 use crate::config::{CliConfig, ConfigLocation, ConfigSource};
 use crate::error::CliError;
-use crate::resolve::{load_cli_config, resolve_actor, resolve_namespace, ResolvedTarget};
+use crate::resolve::{
+    load_cli_config, resolve_actor, resolve_namespace, resolve_subject, ResolvedTarget,
+};
 use loonfs_api::{
     AbsolutePath, ActorId, ChangeSeq, Commit, ErrorCode, InodeId, InodeKind, NamespaceId,
-    PublicOrdinalRangeError, SnapshotId,
+    PublicOrdinalRangeError, SnapshotId, Subject,
 };
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use std::path::{Path, PathBuf};
@@ -17,6 +19,7 @@ pub(crate) struct CommandContext {
     pub(crate) mode: String,
     pub(crate) namespace: Option<NamespaceId>,
     pub(crate) actor_id: Option<ActorId>,
+    pub(crate) subject: Option<Subject>,
     pub(crate) target: ResolvedTarget,
 }
 
@@ -128,12 +131,18 @@ pub(crate) async fn resolve_profile_context(
     config_path: &Path,
     explicit_profile: Option<&str>,
     no_retry: bool,
+    subject: Option<&SubjectSelectorArgs>,
 ) -> Result<CommandContext, CommandFailure> {
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let (context, _) =
-        resolve_profile_context_from_config(kind, &loaded.config, explicit_profile, no_retry)
-            .await?;
+    let (context, _) = resolve_profile_context_from_config(
+        kind,
+        &loaded.config,
+        explicit_profile,
+        no_retry,
+        subject,
+    )
+    .await?;
     Ok(context)
 }
 
@@ -142,19 +151,45 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
     config: &'a CliConfig,
     explicit_profile: Option<&'a str>,
     no_retry: bool,
+    subject: Option<&SubjectSelectorArgs>,
 ) -> Result<(CommandContext, &'a crate::config::ProfileConfig), CommandFailure> {
     let (profile_name, profile) = crate::profiles::resolve_profile(config, explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let target = ResolvedTarget::resolve(profile, no_retry)
+    let mut target = ResolvedTarget::resolve(profile, no_retry)
         .await
         .map_err(|error| fail(kind, Some(profile_name.to_owned()), None, error))?;
     let mode = target.mode_str().to_owned();
+    let subject = match subject {
+        Some(selector) => {
+            let attribute = |error| {
+                fail(
+                    kind,
+                    Some(profile_name.to_owned()),
+                    Some(mode.clone()),
+                    error,
+                )
+            };
+            let actor = resolve_actor(profile, None).map_err(&attribute)?;
+            resolve_subject(
+                profile,
+                &actor,
+                selector.subject_id.as_deref(),
+                selector.principals.as_deref(),
+            )
+            .map_err(attribute)?
+        }
+        None => None,
+    };
+    if let Some(subject) = &subject {
+        target.scope_to_subject(subject);
+    }
     Ok((
         CommandContext {
             profile_name: profile_name.to_owned(),
             mode,
             namespace: None,
             actor_id: None,
+            subject,
             target,
         },
         profile,
@@ -191,13 +226,23 @@ async fn resolve_command_context_with_actor(
         crate::profiles::resolve_profile(&loaded.config, explicit_profile)
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let profile_name = profile_name.to_owned();
-    let resolved_target = ResolvedTarget::resolve(profile, target.request.no_retry)
+    let mut resolved_target = ResolvedTarget::resolve(profile, target.request.no_retry)
         .await
         .map_err(|error| fail(kind, Some(profile_name.clone()), None, error))?;
     let mode = resolved_target.mode_str().to_owned();
     let attribute = |error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error);
     let actor = resolve_actor(profile, actor.and_then(|actor| actor.actor_id.as_deref()))
         .map_err(&attribute)?;
+    let subject = resolve_subject(
+        profile,
+        &actor,
+        target.subject.subject_id.as_deref(),
+        target.subject.principals.as_deref(),
+    )
+    .map_err(&attribute)?;
+    if let Some(subject) = &subject {
+        resolved_target.scope_to_subject(subject);
+    }
     let namespace = resolve_namespace(&profile_name, profile, target.namespace.as_deref())
         .map_err(attribute)?
         .namespace;
@@ -207,6 +252,7 @@ async fn resolve_command_context_with_actor(
         mode,
         namespace: Some(namespace),
         actor_id: Some(actor),
+        subject,
         target: resolved_target,
     })
 }

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
+use loonfs_api::ActorId;
 
 /// A pager over active checkpoints.
 pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, ClientError>;
@@ -96,17 +97,23 @@ impl Client {
     }
 
     /// Runs one maintenance job against a namespace (maintenance API group).
+    /// `actor_id` attributes the administrator recovery commit when supplied.
     /// Retrying this request starts a distinct attempt.
     pub async fn run_maintenance(
         &self,
         namespace_id: &NamespaceId,
         request: &RunMaintenanceRequest,
+        actor_id: Option<&ActorId>,
     ) -> Result<RunMaintenanceResponse> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/runs",
             self.base_url
         );
-        self.request_json(self.post(&url), Some(request), SendPolicy::Once)
+        let mut wire_request = self.post(&url);
+        if let Some(actor_id) = actor_id {
+            wire_request = wire_request.header("Loonfs-Actor", actor_id.as_str());
+        }
+        self.request_json(wire_request, Some(request), SendPolicy::Once)
             .await
     }
 

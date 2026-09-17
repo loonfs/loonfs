@@ -486,6 +486,8 @@ mod tests {
                     key_prefix: None,
                 },
                 actor_id: None,
+                subject_id: None,
+                principals: None,
                 default_namespace: Some("demo".to_owned()),
                 writer_id: None,
             }),

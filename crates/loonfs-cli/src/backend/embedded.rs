@@ -49,6 +49,10 @@ use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, 
 pub(crate) struct EmbeddedBackend {
     pub(crate) writer: FsWriter,
     pub(crate) reader: FsReader,
+    /// The unscoped reader grep's index and change-feed reads keep using
+    /// when a subject scopes the others.
+    pub(crate) service_reader: FsReader,
+    pub(crate) subject: Option<loonfs_api::Subject>,
     pub(crate) maintenance: FsMaintenance,
     pub(crate) jobs: MaintenanceRegistry,
     pub(crate) runner: MaintenanceRunner,
@@ -140,13 +144,14 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
         actor_id: &loonfs_api::ActorId,
+        access: loonfs_api::NamespaceAccess,
     ) -> Result<Namespace, CliError> {
         let result = self
             .writer
             .create_namespace(
                 namespace_id,
                 CreateNamespaceOptions {
-                    access: loonfs_api::NamespaceAccess::unrestricted(),
+                    access,
                     ..CreateNamespaceOptions::new(actor_id.clone())
                 },
             )
@@ -252,7 +257,11 @@ impl EmbeddedBackend {
         limit: Option<u32>,
     ) -> Result<GrepResponse, CliError> {
         let store = self.writer.object_store();
-        let reads = NamespaceReads::new(&self.reader, namespace_id);
+        let reads = NamespaceReads::new(&self.service_reader, namespace_id);
+        let reads = match &self.subject {
+            Some(subject) => reads.as_subject(subject.clone()),
+            None => reads,
+        };
         self.grep
             .query(request, resolve_cli_page_limit(limit)?, &reads, &store)
             .await
@@ -1332,7 +1341,11 @@ mod tests {
             .expect("build embedded target");
         target
             .backend
-            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace_id("demo"),
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
 
@@ -1401,7 +1414,11 @@ mod tests {
             .expect("build embedded target");
         target
             .backend
-            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace_id("demo"),
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
 
@@ -1492,7 +1509,11 @@ mod tests {
             .expect("build first embedded target");
         first
             .backend
-            .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+            .create_namespace(
+                &namespace_id("demo"),
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
             .await
             .expect("create namespace");
         first

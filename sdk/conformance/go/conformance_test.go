@@ -1978,6 +1978,19 @@ type proxyCaseRequest struct {
 	ContentUTF8           string         `json:"content_utf8"`
 	DisallowedPathSuffix  string         `json:"disallowed_path_suffix"`
 	Authorize             proxyAuthorize `json:"authorize"`
+	ACL                   proxyACL       `json:"acl"`
+}
+
+type proxyACL struct {
+	NamespaceAlias    string `json:"namespace_alias"`
+	NamespaceID       string `json:"namespace_id"`
+	PrincipalScope    string `json:"principal_scope"`
+	Administrator     string `json:"administrator"`
+	Member            string `json:"member"`
+	MemberSubjectID   string `json:"member_subject_id"`
+	BrowserPrincipals string `json:"browser_principals"`
+	CommitID          string `json:"commit_id"`
+	Directory         string `json:"directory"`
 }
 
 type proxyAuthorize struct {
@@ -2005,6 +2018,8 @@ type proxyExpected struct {
 	StampedCommittedBy          loonfs.ActorID `json:"stamped_committed_by"`
 	StampedCommittedSeq         int64          `json:"stamped_committed_seq"`
 	RefusedStatus               int            `json:"refused_status"`
+	ACLStampedCommittedSeq      int64          `json:"acl_stamped_committed_seq"`
+	ACLForbiddenStatus          int            `json:"acl_forbidden_status"`
 }
 
 func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
@@ -2241,6 +2256,71 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 		t.Errorf("refused response = (%d, %q, %s)", refused.StatusCode, refused.Header.Get("Content-Type"), actualBody)
 	}
 
+	runProxyACL(t, h, request, expected)
+}
+
+func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected proxyExpected) {
+	t.Helper()
+	acl := request.ACL
+	proxyJSONRequest[json.RawMessage](t, http.DefaultClient, http.MethodPost, h.serverBaseURL+"/v0/namespaces", map[string]any{
+		"namespace_id": acl.NamespaceID,
+		"access": map[string]any{
+			"kind":            "acl",
+			"principal_scope": acl.PrincipalScope,
+			"root_grants": map[string][]string{
+				acl.Administrator: {"admin"},
+				acl.Member:        {"create", "read"},
+			},
+		},
+	}, http.Header{
+		"Authorization": []string{"Bearer " + h.serverToken},
+		"Loonfs-Actor":  []string{string(request.ActorID)},
+	})
+	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
+		ServerBaseURL:    h.serverBaseURL,
+		Token:            h.serverToken,
+		NamespaceAliases: map[string]string{acl.NamespaceAlias: acl.NamespaceID},
+		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
+			return loonfsproxy.Authorization{
+				ActorID:    string(request.ActorID),
+				SubjectID:  acl.MemberSubjectID,
+				Principals: []string{acl.Member},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("create ACL proxy: %v", err)
+	}
+	proxyServer := httptest.NewServer(proxyHandler)
+	defer proxyServer.Close()
+	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(acl.NamespaceAlias)
+	headers := http.Header{"Loonfs-Principals": []string{acl.BrowserPrincipals}}
+	stamped := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL,
+		createDirectoryCommit(acl.NamespaceID, acl.CommitID, acl.Directory, nil), request.ActorID, headers)
+	if int64(stamped.CommittedSeq) != expected.ACLStampedCommittedSeq {
+		t.Errorf("ACL stamped sequence = %d, want %d", stamped.CommittedSeq, expected.ACLStampedCommittedSeq)
+	}
+	body, err := json.Marshal(map[string]any{
+		"commit_id": acl.CommitID + "-forbidden",
+		"operations": []any{map[string]any{
+			"kind": "update_access", "path": "/", "boundary": false, "grants": map[string]any{},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("encode forbidden ACL commit: %v", err)
+	}
+	response := sendProxyRequest(t, proxyServer.Client(), http.MethodPost,
+		namespaceAliasBaseURL+"/commits", bytes.NewReader(body), "application/json", headers)
+	defer response.Body.Close()
+	var failure struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&failure); err != nil {
+		t.Fatalf("decode forbidden ACL response: %v", err)
+	}
+	if response.StatusCode != expected.ACLForbiddenStatus || failure.Code != "forbidden" {
+		t.Errorf("ACL forbidden response = (%d, %q), want (%d, forbidden)", response.StatusCode, failure.Code, expected.ACLForbiddenStatus)
+	}
 }
 
 func proxyCreateUpload(
@@ -2315,6 +2395,7 @@ func proxyCreateCommit(
 	namespaceAliasBaseURL string,
 	request *loonfs.CommitRequest,
 	actor loonfs.ActorID,
+	headers ...http.Header,
 ) *loonfs.Commit {
 	t.Helper()
 	return proxyJSONRequest[loonfs.Commit](
@@ -2323,7 +2404,7 @@ func proxyCreateCommit(
 		http.MethodPost,
 		namespaceAliasBaseURL+"/commits",
 		request,
-		http.Header{"Loonfs-Actor": []string{string(actor)}},
+		append([]http.Header{{"Loonfs-Actor": []string{string(actor)}}}, headers...)...,
 	)
 }
 

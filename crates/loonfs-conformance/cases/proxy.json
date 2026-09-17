@@ -1,6 +1,6 @@
 {
   "name": "proxy",
-  "intent": "A proxy maps namespace aliases, adds server credentials, streams bodies, rejects routes outside the proxy API, and lets an authorization hook refuse requests or replace browser-claimed actor headers for commit attribution.",
+  "intent": "A proxy maps namespace aliases, adds server credentials, streams bodies, rejects routes outside the proxy API, and lets an authorization hook refuse requests or replace browser-claimed actor headers and principals with the hook's.",
   "request": {
     "namespace_alias": "team-files",
     "namespace_id": "conf-proxy-namespace",
@@ -23,6 +23,17 @@
       "directory": "/proxy-cases/stamped",
       "refuse_header": "x-loonfs-conformance-refuse",
       "refused_status": 403
+    },
+    "acl": {
+      "namespace_alias": "team-acl",
+      "namespace_id": "conf-proxy-acl",
+      "principal_scope": "conformance",
+      "administrator": "prn_admin",
+      "member": "prn_member",
+      "member_subject_id": "usr_member",
+      "browser_principals": "prn_admin",
+      "commit_id": "conf-proxy-acl-stamped",
+      "directory": "/stamped-by-subject"
     }
   },
   "expected": {
@@ -34,6 +45,8 @@
     "disallowed_route_status": 404,
     "stamped_committed_by": "proxy-stamped-actor",
     "stamped_committed_seq": 4,
-    "refused_status": 403
+    "refused_status": 403,
+    "acl_stamped_committed_seq": 1,
+    "acl_forbidden_status": 403
   }
 }

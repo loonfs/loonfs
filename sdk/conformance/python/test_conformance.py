@@ -341,6 +341,19 @@ class ProxyAuthorize:
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class ProxyACL:
+    namespace_alias: str
+    namespace_id: str
+    principal_scope: str
+    administrator: str
+    member: str
+    member_subject_id: str
+    browser_principals: str
+    commit_id: str
+    directory: str
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ProxyRequest:
     namespace_alias: str
     namespace_id: str
@@ -353,6 +366,7 @@ class ProxyRequest:
     content_utf8: str
     disallowed_path_suffix: str
     authorize: ProxyAuthorize
+    acl: ProxyACL
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -366,6 +380,8 @@ class ProxyExpected:
     stamped_committed_by: ActorId
     stamped_committed_seq: int
     refused_status: int
+    acl_stamped_committed_seq: int
+    acl_forbidden_status: int
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -1540,6 +1556,78 @@ def test_proxy(
             assert refused.status_code == expected.refused_status
             assert refused.headers["content-type"] == "application/json"
             assert refused.json() == refusal_body
+
+
+    _proxy_acl(request, expected)
+
+
+def _proxy_acl(request: ProxyRequest, expected: ProxyExpected) -> None:
+    acl = request.acl
+    server_url = _required_environment("LOONFS_CONFORMANCE_URL")
+    token = _required_environment("LOONFS_CONFORMANCE_TOKEN")
+    with httpx.Client(base_url=server_url) as client:
+        created = client.post(
+            "/v0/namespaces",
+            headers={"Authorization": f"Bearer {token}", "Loonfs-Actor": request.actor_id},
+            json={
+                "namespace_id": acl.namespace_id,
+                "access": {
+                    "kind": "acl",
+                    "principal_scope": acl.principal_scope,
+                    "root_grants": {
+                        acl.administrator: ["admin"],
+                        acl.member: ["create", "read"],
+                    },
+                },
+            },
+        )
+        created.raise_for_status()
+
+    async def authorize(
+        _scope: dict[str, Any], _context: ProxyRouteContext
+    ) -> ProxyAuthorization:
+        return ProxyAuthorization(
+            actor_id=request.actor_id,
+            subject_id=acl.member_subject_id,
+            principals=[acl.member],
+        )
+
+    app = LoonFSProxy(
+        server_url, token, {acl.namespace_alias: acl.namespace_id}, authorize=authorize
+    )
+    with _serve_asgi(app, "loonfs-python-acl-proxy") as base_url:
+        with httpx.Client(base_url=base_url) as client:
+            commits = f"/v0/namespace-aliases/{acl.namespace_alias}/commits"
+            headers = {"Loonfs-Principals": acl.browser_principals}
+            stamped_response = client.post(
+                commits,
+                headers=headers,
+                json={
+                    "commit_id": acl.commit_id,
+                    "operations": [{
+                        "kind": "create_directory",
+                        "path": acl.directory,
+                        "parents": False,
+                    }],
+                },
+            )
+            stamped = Commit(**_proxy_response_json(stamped_response, "ACL stamped commit"))
+            assert stamped.committed_seq == expected.acl_stamped_committed_seq
+            forbidden = client.post(
+                commits,
+                headers=headers,
+                json={
+                    "commit_id": f"{acl.commit_id}-forbidden",
+                    "operations": [{
+                        "kind": "update_access",
+                        "path": "/",
+                        "boundary": False,
+                        "grants": {},
+                    }],
+                },
+            )
+            assert forbidden.status_code == expected.acl_forbidden_status
+            assert forbidden.json()["code"] == "forbidden"
 
 
 

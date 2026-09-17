@@ -280,6 +280,19 @@ interface ProxyRequest {
     content_utf8: string;
     disallowed_path_suffix: string;
     authorize: ProxyAuthorize;
+    acl: ProxyACL;
+}
+
+interface ProxyACL {
+    namespace_alias: string;
+    namespace_id: string;
+    principal_scope: string;
+    administrator: string;
+    member: string;
+    member_subject_id: string;
+    browser_principals: string;
+    commit_id: string;
+    directory: string;
 }
 
 interface ProxyAuthorize {
@@ -301,6 +314,8 @@ interface ProxyExpected {
     stamped_committed_by: LoonFS.ActorId;
     stamped_committed_seq: number;
     refused_status: number;
+    acl_stamped_committed_seq: number;
+    acl_forbidden_status: number;
 }
 
 interface Harness {
@@ -511,6 +526,7 @@ const PROXY_REQUEST_FIELDS = [
     "content_utf8",
     "disallowed_path_suffix",
     "authorize",
+    "acl",
 ] as const;
 const PROXY_EXPECTED_FIELDS = [
     "mkdir_committed_seq",
@@ -522,6 +538,8 @@ const PROXY_EXPECTED_FIELDS = [
     "stamped_committed_by",
     "stamped_committed_seq",
     "refused_status",
+    "acl_stamped_committed_seq",
+    "acl_forbidden_status",
 ] as const;
 
 function decodeErrorContract(
@@ -653,6 +671,21 @@ function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
             "refused_status",
         ],
         `${testCase.name} authorize`,
+    );
+    strictObject(
+        testCase.request.acl,
+        [
+            "namespace_alias",
+            "namespace_id",
+            "principal_scope",
+            "administrator",
+            "member",
+            "member_subject_id",
+            "browser_principals",
+            "commit_id",
+            "directory",
+        ],
+        `${testCase.name} acl`,
     );
     strictObject(testCase.expected, PROXY_EXPECTED_FIELDS, `${testCase.name} expected`);
     return [
@@ -2171,6 +2204,67 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     assert.equal(refused.status, expected.refused_status);
     assert.equal(refused.headers.get("content-type"), "application/json");
     assert.deepEqual(await refused.json(), refusalBody);
+
+    const acl = request.acl;
+    const createdACL = await fetch(`${activeHarness.serverBaseUrl}/v0/namespaces`, {
+        method: "POST",
+        headers: {
+            "content-type": "application/json",
+            Authorization: `Bearer ${activeHarness.token}`,
+            "Loonfs-Actor": request.actor_id,
+        },
+        body: JSON.stringify({
+            namespace_id: acl.namespace_id,
+            access: {
+                kind: "acl",
+                principal_scope: acl.principal_scope,
+                root_grants: {
+                    [acl.administrator]: ["admin"],
+                    [acl.member]: ["create", "read"],
+                },
+            },
+        }),
+    });
+    await requireSuccessfulResponse(createdACL, "create ACL namespace");
+    await createdACL.arrayBuffer();
+    const aclProxy = await startProxyServer(
+        createProxyHandler({
+            serverBaseUrl: activeHarness.serverBaseUrl,
+            token: activeHarness.token,
+            namespaceAliases: { [acl.namespace_alias]: acl.namespace_id },
+            authorize: () => ({
+                actorId: request.actor_id,
+                subjectId: acl.member_subject_id,
+                principals: [acl.member],
+            }),
+        }),
+    );
+    context.after(() => aclProxy.close());
+    const aclCommits = `${aclProxy.baseUrl}/v0/namespace-aliases/${encodeURIComponent(acl.namespace_alias)}/commits`;
+    const aclHeaders = {
+        "content-type": "application/json",
+        "Loonfs-Principals": acl.browser_principals,
+    };
+    const aclStamped = await proxyJson<LoonFS.Commit>(
+        aclCommits,
+        {
+            method: "POST",
+            headers: aclHeaders,
+            body: JSON.stringify(namespaceAliasDirectoryCommit(acl.commit_id, acl.directory)),
+        },
+        "ACL stamped commit",
+    );
+    assert.equal(aclStamped.committed_seq, expected.acl_stamped_committed_seq);
+    const aclForbidden = await fetchThroughProxy(aclCommits, {
+        method: "POST",
+        headers: aclHeaders,
+        body: JSON.stringify({
+            commit_id: `${acl.commit_id}-forbidden`,
+            operations: [{ kind: "update_access", path: "/", boundary: false, grants: {} }],
+        }),
+    });
+    assert.equal(aclForbidden.status, expected.acl_forbidden_status);
+    assert.equal((await aclForbidden.json()).code, "forbidden");
 
     beginModes.length = 0;
     const browserClient = new BrowserLoonFSClient({ baseUrl: proxy.baseUrl });

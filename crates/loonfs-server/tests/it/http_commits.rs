@@ -405,6 +405,7 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
         .run_maintenance(
             &namespace,
             &RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
+            None,
         )
         .await
         .expect("advance retention floor");

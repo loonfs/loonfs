@@ -416,6 +416,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
             &loonfs_api::RunMaintenanceRequest::Metadata(loonfs_api::MetadataMaintenanceRequest {
                 max_wal_tail_segments: Some(1),
             }),
+            None,
         )
         .await
         .expect("forced step");
@@ -433,6 +434,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
         .run_maintenance(
             &namespace,
             &loonfs_api::RunMaintenanceRequest::Retention(loonfs_api::AdvanceRetentionRequest {}),
+            None,
         )
         .await
         .expect("advance retention");

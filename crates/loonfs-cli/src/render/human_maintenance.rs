@@ -22,8 +22,14 @@ pub(super) fn human_current(profile: &str, namespace: Option<&str>) -> String {
 }
 
 pub(super) fn human_namespace_status(namespace: &Namespace) -> String {
+    let access = match &namespace.access {
+        loonfs_api::v0::NamespaceAccessMode::Unrestricted {} => "unrestricted".to_owned(),
+        loonfs_api::v0::NamespaceAccessMode::Acl { principal_scope } => {
+            format!("acl (scope {principal_scope})")
+        }
+    };
     format!(
-        "{} @ seq {} (retention floor {})\ncreated_by: {}",
+        "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}",
         namespace.namespace_id,
         namespace.head_seq.0,
         namespace.retention_floor_seq.0,

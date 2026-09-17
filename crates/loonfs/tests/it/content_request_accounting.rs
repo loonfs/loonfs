@@ -855,6 +855,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
+                    subject: None,
                     preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
