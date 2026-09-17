@@ -1,6 +1,5 @@
 //! Plans inode-addressed mutations.
 
-use super::authorize::{Absence, Replacement};
 use super::plan_delete::plan_delete;
 use super::plan_transfer::plan_move;
 use super::publish_path_planning::{
@@ -8,6 +7,7 @@ use super::publish_path_planning::{
     resolve_visible_child, resolve_visible_directory, resolve_visible_inode,
     CompiledFilesystemOperation, PublishPathPlanningView,
 };
+use crate::authorize::{Absence, Replacement};
 use crate::commit::{CandidateAllocation, CommitOp};
 use crate::error::{CoreError, Result};
 use loonfs_api::{

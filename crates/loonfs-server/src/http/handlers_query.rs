@@ -1,5 +1,6 @@
 //! The `query/v0` API group: derived-index reads.
 
+use super::extractors::SubjectHeaders;
 use super::handlers_uploads::current_unix_ms;
 use super::query_params::{parse_boolean_query_param, required_query_param, resolve_page_limit};
 #[cfg(feature = "openapi")]
@@ -72,6 +73,7 @@ pub(super) struct GrepQuery {
 )]
 pub(super) async fn grep(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(mut query): AppQuery<GrepQuery>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
@@ -89,6 +91,10 @@ pub(super) async fn grep(
     // through the same reader handle the core API groups serve from.
     let store = state.writer.object_store();
     let reads = NamespaceReads::new(&state.reader, &namespace_id);
+    let reads = match subject {
+        Some(subject) => reads.as_subject(subject),
+        None => reads,
+    };
     let response = service
         .query(&request, limit, &reads, &store)
         .await

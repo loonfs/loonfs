@@ -7,6 +7,7 @@ use crate::{
     CapabilityDocument, Result, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
     StoreConfig, TraceMode, TraceStoreKind,
 };
+use loonfs_api::Subject;
 use std::sync::Arc;
 
 /// Read-only handle for latest namespace views.
@@ -24,6 +25,13 @@ pub struct FsReader {
 }
 
 impl FsReader {
+    /// Returns a reader whose reads are authorized for `subject`.
+    pub fn as_subject(&self, subject: Subject) -> Self {
+        Self {
+            core: self.core.as_subject(subject),
+        }
+    }
+
     /// Starts a reader builder that constructs its object-store client from
     /// configuration inside this handle's runtime ownership domain.
     pub fn builder(store_config: StoreConfig) -> FsReaderBuilder {

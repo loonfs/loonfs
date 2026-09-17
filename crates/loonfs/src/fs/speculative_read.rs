@@ -36,7 +36,7 @@ impl FsReader {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         cached: &CachedFileTarget,
-    ) -> Result<(RuntimeReadContext, ResolvedFileContent)> {
+    ) -> Result<ResolvedFileContent> {
         let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
         let target = if context.head == cached.view.head && context.basis == cached.view.basis {
             cached.target.clone()
@@ -49,7 +49,7 @@ impl FsReader {
                 )
                 .await?
         };
-        Ok((context, target))
+        Ok(target)
     }
 
     pub(super) async fn get_current_file_bytes(
@@ -65,7 +65,7 @@ impl FsReader {
 
         let engine = self.core.reader_engine(namespace_id);
         let current = self.current_file_target(namespace_id, absolute_path, &cached);
-        let (context, target) = if cached.target.supports_speculative_read() {
+        let target = if cached.target.supports_speculative_read() {
             let content = engine.get_speculative_file_content(&cached.target);
             tokio::pin!(current, content);
             // An old content error matters only if current metadata still names it.
@@ -74,7 +74,7 @@ impl FsReader {
                 result = &mut current => (result, None),
                 result = &mut content => (current.await, Some(result)),
             };
-            let (context, target) = current_result?;
+            let target = current_result?;
             if target.has_same_content(&cached.target) {
                 let bytes = match content_result {
                     Some(result) => result?,
@@ -85,15 +85,13 @@ impl FsReader {
                     bytes,
                 });
             }
-            (context, target)
+            target
         } else {
             current.await?
         };
 
         // The obsolete future and any completed buffer are dropped before this read.
-        let bytes = engine
-            .read_content_ref(&target.content_ref, max_bytes.unwrap_or(u64::MAX), &context)
-            .await?;
+        let bytes = engine.get_resolved_file_content(&target).await?;
         Ok(FileBytes {
             entry: target.entry,
             bytes,

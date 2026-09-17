@@ -220,7 +220,11 @@ mod tests {
         crate::path::read::load_current_metadata_view(store, namespace_id)
             .await
             .expect("load view")
-            .resolve_path(absolute_path, loonfs_api::AttributeInclusion::Omit)
+            .resolve_path(
+                absolute_path,
+                loonfs_api::AttributeInclusion::Omit,
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
             .await
             .expect("visible path")
             .inode_id
@@ -542,7 +546,11 @@ mod tests {
         crate::path::read::load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("load view")
-            .resolve_path("/docs/doomed.txt", loonfs_api::AttributeInclusion::Omit)
+            .resolve_path(
+                "/docs/doomed.txt",
+                loonfs_api::AttributeInclusion::Omit,
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
             .await
             .expect_err("deleted file is no longer visible");
     }

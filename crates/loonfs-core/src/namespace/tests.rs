@@ -108,7 +108,11 @@ async fn creation_installs_descriptor_hint_and_manifest_then_reads_genesis() {
     let root = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view")
-        .resolve_path("/", AttributeInclusion::Omit)
+        .resolve_path(
+            "/",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
         .await
         .expect("root");
     assert_eq!(root.inode_id, loonfs_api::ROOT_INODE_ID);
@@ -249,9 +253,13 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .await
         .expect("nested view");
     for path in ["/inherited", "/child"] {
-        view.resolve_path(path, AttributeInclusion::Omit)
-            .await
-            .expect("inherited path");
+        view.resolve_path(
+            path,
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("inherited path");
     }
     assert_eq!(store.count(OperationClass::Any), 0);
 }

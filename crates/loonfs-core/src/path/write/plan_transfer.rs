@@ -1,12 +1,12 @@
 //! Publish plans that move or copy visible paths.
 
-use super::authorize::{Absence, Replacement};
 use super::ensure_expected_inode;
 use super::publish_path_planning::ReplaceDestination;
 use super::publish_path_planning::{
     classify_replace_destination, is_missing_visible_path, reject_tombstoned_path_ancestor,
     resolve_parent_directory, source_binding, CompiledFilesystemOperation, PublishPathPlanningView,
 };
+use crate::authorize::{Absence, Replacement};
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;

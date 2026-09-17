@@ -752,6 +752,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
             CurrentFileState {
                 inode_id: directory,
                 visible: true,
+                readable: true,
                 current_revision_no: None,
                 current_path: Some(
                     loonfs_api::AbsolutePath::parse("/m").expect("valid absolute path")
@@ -765,6 +766,7 @@ fn visible_file(inode_id: InodeId, revision_no: RevisionNo, path: &str) -> Curre
     CurrentFileState {
         inode_id,
         visible: true,
+        readable: true,
         current_revision_no: Some(revision_no),
         current_path: Some(loonfs_api::AbsolutePath::parse(path).expect("valid absolute path")),
     }
@@ -774,6 +776,7 @@ fn gone(inode_id: InodeId) -> CurrentFileState {
     CurrentFileState {
         inode_id,
         visible: false,
+        readable: true,
         current_revision_no: None,
         current_path: None,
     }

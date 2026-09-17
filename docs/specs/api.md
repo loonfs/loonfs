@@ -1025,6 +1025,8 @@ expired. The maintenance checkpoint listing keeps expired records visible until
 collection deletes them. Snapshot deletion removes the pin. A second delete returns
 `snapshot_not_found`.
 
+Snapshot reads in an ACL namespace require `read` and `history` on the historical inode, evaluated at the current head.
+
 These operations manage the snapshot lifetime. Path stat, inode stat, path directory listing,
 inode children listing, file content, download, and change-feed requests accept an optional
 `snapshot_id`; the download request carries it in its body. File content and download requests cannot combine `snapshot_id`
@@ -1793,6 +1795,8 @@ An unrecognized cursor version is also rejected as `invalid_request`.
 
 ### 6.6 `GET /filesystem/trash`
 
+In an ACL namespace a page may return fewer entries than `limit` and still carry `next_cursor`.
+
 Lists the namespace's recoverable deletions, oldest deletion first — ascending
 by `(deletion_seq, inode_id)` — paged with the standard `limit`/`cursor`
 pattern (the cursor is an ordering resume like every other). The listing is a
@@ -2272,6 +2276,39 @@ right it adds or removes from any principal's direct grant.
 Preconditions require `read` on the inode they name, or the existing parent for
 path absence; a namespace-head precondition needs no inode right.
 
+
+The not-found-versus-forbidden rule also applies to reads: a subject with no
+right on the target receives `path_not_found` or `inode_not_found`; a subject
+with some right but without a required right receives `forbidden`.
+
+| Read operation | Required rights |
+| --- | --- |
+| Path or inode stat, directory listing, current content, current download | `read` on the target inode. |
+| Older content revision or historical download, by path or inode | `read` and `history` on the target inode. |
+| Revision listing, by path or inode | `read` and `history` on the target inode. |
+| Snapshot stat, listing, content, or download | `read` and `history` on the historical inode, evaluated at the current head. |
+| Trash listing | `read` on each deletion's saved original parent. |
+| Batch file resolution and grep candidates | `read` on the candidate inode; snapshot resolution also requires `history`. |
+| Change feed or bare content reference | Administrator. |
+
+Names belong to the directory. A subject with `read` on a directory sees every
+child in a listing. A child the subject cannot read keeps its entry fields but
+omits its `attributes` projection, even when attributes were requested.
+Snapshot reads evaluate rights at the current head on the historical inode
+resolved by the snapshot, never on today's occupant of the path. Every
+snapshot read of an inode also requires `history`.
+
+The trash listing filters entries by whether the subject can read their saved
+original parent. A filtered page may be short and still carry `next_cursor`.
+Grep filters candidates the subject cannot read before reading their content;
+those candidates still count against the page's candidate budget.
+
+The change feed and bare content references require an administrator when a
+subject is supplied. With no subject headers, these two surfaces read as the
+token holder; every per-subject read surface instead answers `invalid_request`
+naming `Loonfs-Principals`. Checkpoints and maintenance continue to read as the
+service.
+
 ### 6.9 Upload transport
 
 The upload transport standardizes staged content publication, not one specific
@@ -2611,6 +2648,8 @@ presign writes either, no file it holds can be larger than it will proxy.
 
 ### 6.11 `GET /changes`
 
+In an ACL namespace the change feed requires an administrator when subject headers are supplied; without them it reads as the token holder.
+
 Each change is one commit carrying its identity (`committed_seq`, `commit_id`,
 `committed_by`, observational `committed_at_ms`, optional `message`) and `events`:
 the semantic filesystem operations the commit
@@ -2767,6 +2806,9 @@ If the source checkpoint cannot be renewed, the server returns
 `checkpoint_unavailable` and no target namespace is installed.
 
 ### 6.13 `GET /grep`
+
+Grep filters candidates the subject cannot read before reading their content, and those candidates still count against the page budget.
+A scan without the index skips every directory the subject cannot read; files under it are reachable only through the index.
 
 Representative request:
 

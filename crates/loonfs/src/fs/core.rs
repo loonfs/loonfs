@@ -11,7 +11,7 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
-    PaginationPolicy, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    PaginationPolicy, Subject, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
     FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
     LIMIT_ACCESS_MAX_PRINCIPALS, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
@@ -34,6 +34,7 @@ use tokio::sync::Semaphore;
 #[derive(Clone)]
 pub(crate) struct ReadCore {
     pub(crate) inner: Arc<ReadCoreInner>,
+    pub(crate) subject: Option<Subject>,
 }
 
 pub(crate) struct ReadCoreInner {
@@ -152,6 +153,13 @@ impl ReadCoreInner {
 }
 
 impl ReadCore {
+    pub(crate) fn as_subject(&self, subject: Subject) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            subject: Some(subject),
+        }
+    }
+
     /// Opens a read core. When `shared_metadata_segment_cache` is set, the
     /// core reuses that decoded-block cache instead of creating one from
     /// `config.runtime_cache.metadata_segment_cache`. Sharing is safe because
@@ -186,6 +194,7 @@ impl ReadCore {
             instruments.wal_tail_projection_cache_observer(),
         ));
         Self {
+            subject: None,
             inner: Arc::new(ReadCoreInner {
                 store,
                 config,
@@ -312,7 +321,11 @@ impl ReadCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> NamespaceReaderEngine<SharedObjectStore> {
-        NamespaceReaderEngine::reader(self.inner.store.clone(), namespace_id.clone())
+        let engine = NamespaceReaderEngine::reader(self.inner.store.clone(), namespace_id.clone());
+        match &self.subject {
+            Some(subject) => engine.with_subject(subject.clone()),
+            None => engine,
+        }
     }
 
     /// A mutating engine bound to one actor identity.

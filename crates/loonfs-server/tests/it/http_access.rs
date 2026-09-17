@@ -74,3 +74,53 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
         .expect("request")).await.expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn read_handlers_accept_the_subject_headers() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, state) = loonfs_server::app(
+        test_config(
+            temp_dir.path().join("store"),
+            "read-subject-headers",
+            "read-subject-headers",
+        ),
+        loonfs_server::AppOptions::default(),
+    )
+    .await
+    .expect("app");
+    state
+        .writer
+        .create_namespace(
+            &namespace_id("demo"),
+            loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    for (principals, status) in [
+        ("team", StatusCode::OK),
+        ("bad principal", StatusCode::BAD_REQUEST),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/namespaces/demo/filesystem/entry?path=/")
+                    .header("authorization", "Bearer test-token")
+                    .header("Loonfs-Subject", "usr_ada")
+                    .header("Loonfs-Principals", principals)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), status);
+        if status == StatusCode::BAD_REQUEST {
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let error: ApiError = serde_json::from_slice(&body).expect("error");
+            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
+        }
+    }
+}

@@ -25,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             CreateNamespaceOptions {
                 actor_id: loonfs::ActorId::parse("embedded-example")?,
                 allow_existing: true,
+                access: loonfs_api::NamespaceAccess::Unrestricted {},
             },
         )
         .await?;

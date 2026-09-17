@@ -272,9 +272,13 @@ async fn a_number_collision_replans_and_commits_the_next_number_without_a_swap()
         .await
         .expect("view");
     for path in ["/left", "/right"] {
-        view.resolve_path(path, AttributeInclusion::Omit)
-            .await
-            .expect("committed");
+        view.resolve_path(
+            path,
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("committed");
     }
 }
 
@@ -370,7 +374,11 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
     load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("cold view")
-        .resolve_path("/two", AttributeInclusion::Omit)
+        .resolve_path(
+            "/two",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
         .await
         .expect("tip");
     assert!(store.snapshot().iter().any(|operation| operation.key()
@@ -523,8 +531,12 @@ async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number()
         .await
         .expect("view");
     for path in ["/seed", "/after-gc"] {
-        view.resolve_path(path, AttributeInclusion::Omit)
-            .await
-            .expect("file");
+        view.resolve_path(
+            path,
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("file");
     }
 }

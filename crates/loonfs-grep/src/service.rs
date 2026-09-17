@@ -739,7 +739,11 @@ async fn candidate_content(
     }
     CandidateContent::Fetched(
         reads
-            .read_content_ref(content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
+            .read_revision_content(
+                candidate.inode_id,
+                candidate.revision_no,
+                INDEX_GRAMS_MAX_FILE_BYTES,
+            )
             .await,
     )
 }
@@ -857,6 +861,10 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
                 break;
             }
             self.verified_files += 1;
+            if !state.readable {
+                self.rejected_frontier = Some(inode_id);
+                continue;
+            }
             candidates.push(GrepContentCandidate {
                 inode_id,
                 revision_no,
@@ -974,9 +982,18 @@ async fn scan_candidate_inodes(
         walked_directories += 1;
         let mut cursor = None;
         loop {
-            let page = reads
+            let page = match reads
                 .list_path_page(&directory, cursor, SCAN_DIRECTORY_PAGE_ENTRIES)
-                .await?;
+                .await
+            {
+                Ok(page) => page,
+                Err(error)
+                    if matches!(error.code(), ErrorCode::PathNotFound | ErrorCode::Forbidden) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
             for entry in page.items {
                 match entry.inode_kind() {
                     InodeKind::Directory => directories.push(entry.path),

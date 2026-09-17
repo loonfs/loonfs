@@ -1,9 +1,9 @@
 //! Publish plans that restore an earlier file revision.
 
-use super::authorize::Absence;
 use super::publish_path_planning::{
     reject_tombstoned_path_ancestor, CompiledFilesystemOperation, PublishPathPlanningView,
 };
+use crate::authorize::Absence;
 use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::ensure_mutation_path;

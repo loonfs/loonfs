@@ -348,12 +348,20 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .expect("reopen namespace");
     for path in ["/content", "/later"] {
         reopened
-            .resolve_path(path, loonfs_api::AttributeInclusion::Omit)
+            .resolve_path(
+                path,
+                loonfs_api::AttributeInclusion::Omit,
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
             .await
             .expect("committed path");
     }
     reopened
-        .resolve_path("/original", loonfs_api::AttributeInclusion::Omit)
+        .resolve_path(
+            "/original",
+            loonfs_api::AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
         .await
         .expect("original remains");
 }

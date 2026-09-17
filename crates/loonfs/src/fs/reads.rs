@@ -220,6 +220,25 @@ impl FsReadSnapshot {
             .await?)
     }
 
+    /// Refuses a reader with no subject on an ACL namespace, for callers
+    /// that could otherwise answer before any per-subject read.
+    pub fn require_subject(&self) -> Result<()> {
+        Ok(self.engine.require_subject(&self.context)?)
+    }
+
+    /// Reads one inode revision through this snapshot's authorization.
+    pub async fn read_revision_content(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        Ok(self
+            .engine
+            .get_file_revision_for_inode(inode_id, revision_no, &self.context, Some(max_bytes))
+            .await?)
+    }
+
     /// Reads the file selected by this snapshot.
     pub async fn get_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
         Ok(self
@@ -1157,6 +1176,10 @@ impl FsReader {
         options: ListChangesOptions,
     ) -> Result<ListChangesResponse> {
         self.core.record_trace_context(&tracing::Span::current());
+        if self.core.subject.is_some() {
+            let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+            engine.require_administrator(&context).await?;
+        }
         let limit = match options.limit {
             Some(limit) => limit,
             None => PaginationPolicy::default()

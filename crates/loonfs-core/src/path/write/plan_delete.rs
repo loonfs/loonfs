@@ -1,10 +1,10 @@
 //! Publish plans that delete visible paths.
 
-use super::authorize::Absence;
 use super::ensure_expected_inode;
 use super::publish_path_planning::{
     source_binding, CompiledFilesystemOperation, PublishPathPlanningView,
 };
+use crate::authorize::Absence;
 use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;

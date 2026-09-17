@@ -2,7 +2,6 @@
 //! compiles it into one commit's operations, and the publish planning
 //! session.
 
-mod authorize;
 mod intent;
 mod plan_access;
 mod plan_attributes;

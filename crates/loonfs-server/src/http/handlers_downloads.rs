@@ -1,6 +1,7 @@
 //! Direct-download handlers.
 
 use super::error::ApiResponseError;
+use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::{pin_requested_snapshot, reject_snapshot_with_revision};
 use super::handlers_inodes::{parse_inode_id, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
@@ -51,12 +52,15 @@ use std::time::Duration;
 )]
 pub(super) async fn create_download(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateDownloadRequest>,
 ) -> Result<Json<CreateDownloadResponse>, ApiResponseError> {
+    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
+    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     reject_snapshot_with_revision(request.snapshot_id.as_ref(), request.revision_no)?;
-    let target = pin_requested_snapshot(&state, &namespace_id, request.snapshot_id).await?;
+    let target = pin_requested_snapshot(reader, &namespace_id, request.snapshot_id).await?;
     let issuer = direct_get_issuer(&state)?;
 
     let download = target
@@ -104,15 +108,17 @@ pub(super) async fn create_download(
 )]
 pub(super) async fn create_download_by_inode(
     State(state): State<AppState>,
+    SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
+    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
+    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let issuer = direct_get_issuer(&state)?;
-    let target = state
-        .reader
+    let target = reader
         .create_download_by_inode(&namespace_id, inode_id, revision_no)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;

@@ -35,7 +35,7 @@ impl FsWriter {
             .engine(namespace_id)
             .bootstrap_namespace(loonfs_core::BootstrapOptions {
                 actor_id: options.actor_id,
-                access: loonfs_api::NamespaceAccess::Unrestricted {},
+                access: options.access,
                 allow_existing: options.allow_existing,
             })
             .await
