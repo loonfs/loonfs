@@ -3,6 +3,7 @@
 //! session.
 
 mod intent;
+mod plan_access;
 mod plan_attributes;
 mod plan_by_inode;
 mod plan_create;

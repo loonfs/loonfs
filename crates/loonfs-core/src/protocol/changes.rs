@@ -278,6 +278,18 @@ fn event_from_op_deltas(
             attributes_revision_no: *attributes_revision_no,
             attributes: attributes.clone(),
         },
+        [WalDelta::AppendAccessRevision {
+            inode_id,
+            access_revision_no,
+            boundary,
+            grants,
+            ..
+        }] => FilesystemChange::AccessChanged {
+            inode_id: *inode_id,
+            access_revision_no: *access_revision_no,
+            boundary: *boundary,
+            grants: grants.clone(),
+        },
         other => {
             return Err(CoreError::Internal(format!(
                 "change feed cannot map a committed operation's delta \

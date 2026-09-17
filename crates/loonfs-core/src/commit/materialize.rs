@@ -260,6 +260,26 @@ pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedComm
                 },
             );
         }
+        ValidatedOp::UpdateAccess {
+            op_index,
+            inode_id,
+            access_revision_no,
+            boundary,
+            grants,
+            access_delta_index,
+        } => {
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::AppendAccessRevision {
+                    delta_index: *access_delta_index,
+                    inode_id: *inode_id,
+                    access_revision_no: *access_revision_no,
+                    boundary: *boundary,
+                    grants: grants.clone(),
+                },
+            );
+        }
     }
 
     deltas

@@ -49,6 +49,44 @@
         "example": "/docs/report.txt",
         "type": "string"
       },
+      "AccessGrants": {
+        "additionalProperties": {
+          "$ref": "#/components/schemas/AccessRights"
+        },
+        "description": "A validated map from principal to rights, limited to\n[`MAX_ACCESS_GRANT_ENTRIES`] entries and [`MAX_ACCESS_GRANTS_PRINCIPAL_BYTES`]\nbytes of principal ids. No entry has an empty set of rights.",
+        "propertyNames": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "AccessRevisionNo": {
+        "description": "Monotonic per-inode access revision. It increases with every accepted access update.",
+        "format": "int64",
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "AccessRight": {
+        "description": "One right a grant can carry.",
+        "enum": [
+          "read",
+          "history",
+          "write",
+          "create",
+          "remove",
+          "share",
+          "manage",
+          "admin"
+        ],
+        "type": "string"
+      },
+      "AccessRights": {
+        "description": "A set of rights. Encoded as a sorted list of distinct right names.",
+        "items": {
+          "$ref": "#/components/schemas/AccessRight"
+        },
+        "type": "array"
+      },
       "ActorId": {
         "description": "Stable opaque actor id containing 1 to 256 visible ASCII characters.",
         "example": "usr_8f3c",
@@ -221,6 +259,7 @@
         "description": "Admission conditions checked against the candidate's pre-state before its operations.\nThe pre-state head sequence is the last admitted commit's sequence in the batch,\nor the batch's base head sequence when no earlier candidate was admitted.",
         "discriminator": {
           "mapping": {
+            "access_revision": "#/components/schemas/CommitPreconditionAccessRevision",
             "attributes_revision": "#/components/schemas/CommitPreconditionAttributesRevision",
             "file_revision": "#/components/schemas/CommitPreconditionFileRevision",
             "namespace_head": "#/components/schemas/CommitPreconditionNamespaceHead",
@@ -243,9 +282,37 @@
             "$ref": "#/components/schemas/CommitPreconditionAttributesRevision"
           },
           {
+            "$ref": "#/components/schemas/CommitPreconditionAccessRevision"
+          },
+          {
             "$ref": "#/components/schemas/CommitPreconditionPathAbsence"
           }
         ]
+      },
+      "CommitPreconditionAccessRevision": {
+        "description": "Requires a visible inode with the access revision the caller read.",
+        "properties": {
+          "expected_access_revision_no": {
+            "$ref": "#/components/schemas/AccessRevisionNo",
+            "description": "Access revision observed by the caller."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Inode whose state the caller read."
+          },
+          "kind": {
+            "enum": [
+              "access_revision"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "expected_access_revision_no",
+          "kind"
+        ],
+        "type": "object"
       },
       "CommitPreconditionAttributesRevision": {
         "description": "Requires a visible inode with the attribute revision the caller read.",
@@ -819,6 +886,10 @@
             "$ref": "#/components/schemas/WriterEpoch",
             "description": "Epoch that currently owns the namespace."
           },
+          "actual_access_revision_no": {
+            "$ref": "#/components/schemas/AccessRevisionNo",
+            "description": "Access revision that is actually current for the inode."
+          },
           "actual_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
             "description": "Attribute revision that is actually current for the inode."
@@ -858,6 +929,10 @@
           "committed_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The sequence where this commit ID already landed, when recorded by a durable receipt."
+          },
+          "expected_access_revision_no": {
+            "$ref": "#/components/schemas/AccessRevisionNo",
+            "description": "Access revision the request expected to be current."
           },
           "expected_attributes_revision_no": {
             "$ref": "#/components/schemas/AttributeRevisionNo",
@@ -1014,6 +1089,7 @@
         "description": "One filesystem change within a commit.\n\nOne request operation can produce multiple changes.",
         "discriminator": {
           "mapping": {
+            "access_changed": "#/components/schemas/FilesystemChangeAccessChanged",
             "attributes_changed": "#/components/schemas/FilesystemChangeAttributesChanged",
             "content_changed": "#/components/schemas/FilesystemChangeContentChanged",
             "deleted": "#/components/schemas/FilesystemChangeDeleted",
@@ -1045,8 +1121,46 @@
           },
           {
             "$ref": "#/components/schemas/FilesystemChangeAttributesChanged"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemChangeAccessChanged"
           }
         ]
+      },
+      "FilesystemChangeAccessChanged": {
+        "description": "An inode's access row was replaced. `grants` is the complete\ndirect grant map after the update.",
+        "properties": {
+          "access_revision_no": {
+            "$ref": "#/components/schemas/AccessRevisionNo",
+            "description": "Revision published by the update."
+          },
+          "boundary": {
+            "description": "Whether the directory stops inheritance from its ancestors.",
+            "type": "boolean"
+          },
+          "grants": {
+            "$ref": "#/components/schemas/AccessGrants",
+            "description": "The inode's complete direct grants after this update."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Inode whose access state advanced."
+          },
+          "kind": {
+            "enum": [
+              "access_changed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "access_revision_no",
+          "boundary",
+          "grants",
+          "kind"
+        ],
+        "type": "object"
       },
       "FilesystemChangeAttributesChanged": {
         "description": "An inode's attributes changed.",
@@ -1309,6 +1423,7 @@
             "put_file_revision_by_inode": "#/components/schemas/FilesystemOperationPutFileRevisionByInode",
             "restore_revision": "#/components/schemas/FilesystemOperationRestoreRevision",
             "undelete": "#/components/schemas/FilesystemOperationUndelete",
+            "update_access": "#/components/schemas/FilesystemOperationUpdateAccess",
             "update_attributes": "#/components/schemas/FilesystemOperationUpdateAttributes"
           },
           "propertyName": "kind"
@@ -1352,6 +1467,9 @@
           },
           {
             "$ref": "#/components/schemas/FilesystemOperationUpdateAttributes"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemOperationUpdateAccess"
           }
         ]
       },
@@ -1729,6 +1847,44 @@
         "required": [
           "inode_id",
           "deletion_seq",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "FilesystemOperationUpdateAccess": {
+        "description": "Replace the access row of the inode one path resolves to. The root\npath is a valid target.",
+        "properties": {
+          "boundary": {
+            "description": "Whether the directory stops inheritance from its ancestors.",
+            "type": "boolean"
+          },
+          "expected_access_revision_no": {
+            "$ref": "#/components/schemas/AccessRevisionNo",
+            "description": "With an inode precondition, the access revision that must still be current."
+          },
+          "expected_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "The inode that the path must still resolve to before the update."
+          },
+          "grants": {
+            "$ref": "#/components/schemas/AccessGrants",
+            "description": "The inode's complete direct grants after this update."
+          },
+          "kind": {
+            "enum": [
+              "update_access"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path that must resolve to a visible file or directory."
+          }
+        },
+        "required": [
+          "path",
+          "boundary",
+          "grants",
           "kind"
         ],
         "type": "object"

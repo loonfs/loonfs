@@ -292,3 +292,38 @@ async fn the_served_capability_document_advertises_attributes() {
     );
     document.validate().expect("the document is well formed");
 }
+
+#[tokio::test]
+async fn an_unrestricted_namespace_answers_namespace_unrestricted_over_http() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-access",
+        "http-access",
+    ))
+    .await;
+    harness
+        .client
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let error = harness
+        .client
+        .update_access(
+            &path("/"),
+            &loonfs_client::UpdateAccessOptions::new(
+                loonfs_test_support::test_actor(),
+                loonfs_api::AccessGrants::default(),
+            ),
+        )
+        .await
+        .expect_err("unrestricted namespace");
+    assert_eq!(
+        error.code(),
+        Some(loonfs_api::ErrorCode::NamespaceUnrestricted)
+    );
+    assert!(matches!(
+        error,
+        loonfs_client::ClientError::Api { status: 409, .. }
+    ));
+}

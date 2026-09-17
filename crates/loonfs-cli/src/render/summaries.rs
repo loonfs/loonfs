@@ -332,6 +332,15 @@ pub(super) fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> Stri
             public_inode_id(*inode_id),
             attributes_revision_no.0
         ),
+        FilesystemChange::AccessChanged {
+            inode_id,
+            access_revision_no,
+            ..
+        } => format!(
+            "access inode {} rev #{}",
+            public_inode_id(*inode_id),
+            access_revision_no.0
+        ),
     }
 }
 

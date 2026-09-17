@@ -8,7 +8,7 @@ use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::{AbsolutePath, BindingGeneration, CommitPrecondition, InodeId};
+use loonfs_api::{AbsolutePath, AccessRevisionNo, BindingGeneration, CommitPrecondition, InodeId};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
@@ -18,6 +18,7 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     let view = PublishPathPlanningView {
         namespace_id: &head.namespace_id,
+        access: &head.access,
         view: pre_state,
     };
     for (index, precondition) in preconditions.iter().enumerate() {
@@ -90,6 +91,30 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                         }
                         .into(),
                     );
+                }
+            }
+            CommitPrecondition::AccessRevision {
+                inode_id,
+                expected_access_revision_no,
+            } => {
+                let actual = if inode_is_visible(&view, *inode_id).await? {
+                    Some(
+                        pre_state
+                            .latest_access_revision(*inode_id)
+                            .await?
+                            .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no),
+                    )
+                } else {
+                    None
+                };
+                if actual != Some(*expected_access_revision_no) {
+                    return Err(CommitValidationError::UpdateAccessBaseRevisionMismatch {
+                        inode_id: *inode_id,
+                        expected: *expected_access_revision_no,
+                        actual,
+                        precondition_index,
+                    }
+                    .into());
                 }
             }
         }

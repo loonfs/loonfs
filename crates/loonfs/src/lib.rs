@@ -196,7 +196,8 @@ pub use options::{
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions,
     ForkNamespaceOptions, ListChangesOptions, ListInodeChildrenOptions, ListPathEntriesOptions,
     MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
-    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAttributesOptions,
+    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAccessOptions,
+    UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState, WriterSessionStats};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};

@@ -7,7 +7,7 @@ use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::read;
 use loonfs_api::{
     AbsolutePath, BindingGeneration as BindingGenerationToken, DestinationBehavior, DisplayName,
-    InodeId, InodeKind, NameKey, NamespaceId, ROOT_INODE_ID,
+    InodeId, InodeKind, NameKey, NamespaceAccess, NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -46,6 +46,7 @@ impl CompiledFilesystemOperation {
 
 pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: &'a NamespaceId,
+    pub(super) access: &'a NamespaceAccess,
     pub(super) view: &'a MetadataView<'view, 'store, S>,
 }
 

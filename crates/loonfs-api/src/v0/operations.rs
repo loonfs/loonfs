@@ -3,9 +3,9 @@
 use super::ContentToken;
 use crate::SnapshotId;
 use crate::{
-    AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, BindingGeneration,
-    ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName, InodeId, ManifestNo, NamespaceId,
-    RevisionNo, WriterEpoch, WriterId,
+    AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo,
+    AttributeValue, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName,
+    InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch, WriterId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -129,6 +129,14 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_attributes_revision_no: Option<AttributeRevisionNo>,
+    /// Access revision the request expected to be current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub expected_access_revision_no: Option<AccessRevisionNo>,
+    /// Access revision that is actually current for the inode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub actual_access_revision_no: Option<AccessRevisionNo>,
     /// Change-feed cursor the request asked to resume after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -380,9 +388,33 @@ pub fn validate_attributes_precondition(
     expected_inode_id: Option<InodeId>,
     expected_attributes_revision_no: Option<AttributeRevisionNo>,
 ) -> Result<(), DestinationPreconditionError> {
-    if expected_attributes_revision_no.is_some() && expected_inode_id.is_none() {
+    validate_revision_precondition(
+        expected_inode_id,
+        expected_attributes_revision_no.is_some(),
+        "expected_attributes_revision_no",
+    )
+}
+
+/// Rejects an access revision precondition without an inode precondition.
+pub fn validate_access_precondition(
+    expected_inode_id: Option<InodeId>,
+    expected_access_revision_no: Option<AccessRevisionNo>,
+) -> Result<(), DestinationPreconditionError> {
+    validate_revision_precondition(
+        expected_inode_id,
+        expected_access_revision_no.is_some(),
+        "expected_access_revision_no",
+    )
+}
+
+fn validate_revision_precondition(
+    expected_inode_id: Option<InodeId>,
+    has_revision: bool,
+    revision_field: &'static str,
+) -> Result<(), DestinationPreconditionError> {
+    if has_revision && expected_inode_id.is_none() {
         return Err(DestinationPreconditionError::RevisionRequiresInode {
-            revision_field: "expected_attributes_revision_no",
+            revision_field,
             inode_field: "expected_inode_id",
         });
     }
@@ -607,6 +639,29 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributeRevisionNo>,
     },
+    /// Replace the access row of the inode one path resolves to. The root
+    /// path is a valid target.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUpdateAccess"))]
+    UpdateAccess {
+        /// Absolute path that must resolve to a visible file or directory.
+        path: AbsolutePath,
+        /// Whether the directory stops inheritance from its ancestors.
+        boundary: bool,
+        /// The inode's complete direct grants after this update.
+        grants: AccessGrants,
+        /// The inode that the path must still resolve to before the update.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_inode_id: Option<InodeId>,
+        /// With an inode precondition, the access revision that must still be current.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_access_revision_no: Option<AccessRevisionNo>,
+    },
 }
 
 impl FilesystemOperation {
@@ -625,7 +680,8 @@ impl FilesystemOperation {
             | Self::CopyPath { .. }
             | Self::Undelete { .. }
             | Self::RestoreRevision { .. }
-            | Self::UpdateAttributes { .. } => None,
+            | Self::UpdateAttributes { .. }
+            | Self::UpdateAccess { .. } => None,
         }
     }
 }
@@ -676,6 +732,18 @@ pub enum CommitPrecondition {
         inode_id: InodeId,
         /// Attribute revision observed by the caller.
         expected_attributes_revision_no: AttributeRevisionNo,
+    },
+    /// Requires a visible inode with the access revision the caller read.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitPreconditionAccessRevision")
+    )]
+    AccessRevision {
+        /// Inode whose state the caller read.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// Access revision observed by the caller.
+        expected_access_revision_no: AccessRevisionNo,
     },
     /// Requires no visible entry at the full path.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionPathAbsence"))]
@@ -2392,6 +2460,46 @@ mod tests {
                 "source_namespace_id": "other"
             }))
             .is_err()
+        );
+    }
+    #[test]
+    fn update_access_round_trips_and_requires_boundary_and_grants() {
+        let operation = FilesystemOperation::UpdateAccess {
+            path: AbsolutePath::parse("/docs/secret").expect("path"),
+            boundary: true,
+            grants: serde_json::from_value(serde_json::json!({"prn_ada": ["read", "write"]}))
+                .expect("grants"),
+            expected_inode_id: Some(InodeId(9)),
+            expected_access_revision_no: Some(AccessRevisionNo(2)),
+        };
+        let json = serde_json::json!({
+            "kind": "update_access",
+            "path": "/docs/secret",
+            "boundary": true,
+            "grants": {"prn_ada": ["read", "write"]},
+            "expected_inode_id": "ino_9",
+            "expected_access_revision_no": 2
+        });
+        assert_eq!(serde_json::to_value(&operation).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_value::<FilesystemOperation>(json.clone()).expect("decode"),
+            operation
+        );
+        for field in ["boundary", "grants"] {
+            let mut missing = json.clone();
+            missing.as_object_mut().expect("object").remove(field);
+            assert!(
+                serde_json::from_value::<FilesystemOperation>(missing).is_err(),
+                "missing {field}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(CommitPrecondition::AccessRevision {
+                inode_id: InodeId(9),
+                expected_access_revision_no: AccessRevisionNo(2),
+            })
+            .expect("serialize precondition"),
+            serde_json::json!({"kind": "access_revision", "inode_id": "ino_9", "expected_access_revision_no": 2})
         );
     }
 }

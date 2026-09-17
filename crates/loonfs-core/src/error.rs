@@ -235,6 +235,8 @@ pub enum CoreError {
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
+    #[error("namespace `{namespace_id}` is unrestricted and holds no access rows")]
+    NamespaceUnrestricted { namespace_id: NamespaceId },
     /// A caller-supplied `expected_head_seq` did not match the current head.
     ///
     /// Unlike [`WalPublishError::StaleHead`], this error reports a failed
@@ -416,6 +418,7 @@ impl CoreError {
             }
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+            CoreError::NamespaceUnrestricted { .. } => ErrorCode::NamespaceUnrestricted,
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
             CoreError::BindingGenerationMismatch { .. } => ErrorCode::BindingGenerationMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
@@ -534,6 +537,7 @@ impl CoreError {
             | CoreError::Internal(_)
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
+            | CoreError::NamespaceUnrestricted { .. }
             | CoreError::StaleHeadPrecondition { .. } => None,
             #[cfg(any(test, feature = "test-support"))]
             CoreError::DurableContent(DurableContentValidationError::ContentStoreMismatch {

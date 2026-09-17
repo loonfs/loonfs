@@ -2,6 +2,7 @@
 //! operations into one commit's operations.
 
 use super::intent::{CommitRequest, FilesystemOperation};
+use super::plan_access::plan_update_access;
 use super::plan_attributes::plan_update_attributes;
 use super::plan_by_inode::{
     plan_create_by_inode, plan_delete_by_inode, plan_move_by_inode,
@@ -81,6 +82,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             let resolution_view = resolved.view();
             let view = PublishPathPlanningView {
                 namespace_id: &head.namespace_id,
+                access: &head.access,
                 view: &resolution_view,
             };
             plan_operation(operation, &view, allocation)
@@ -264,6 +266,23 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 remove,
                 *expected_inode_id,
                 *expected_attributes_revision_no,
+                view,
+            )
+            .await
+        }
+        FilesystemOperation::UpdateAccess {
+            path,
+            boundary,
+            grants,
+            expected_inode_id,
+            expected_access_revision_no,
+        } => {
+            plan_update_access(
+                path,
+                *boundary,
+                grants,
+                *expected_inode_id,
+                *expected_access_revision_no,
                 view,
             )
             .await

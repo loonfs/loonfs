@@ -1,8 +1,8 @@
 //! Commit responses and change-feed shapes for the v0 HTTP API.
 
 use crate::{
-    AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq, CommitId, ContentRef,
-    DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
+    AccessGrants, AccessRevisionNo, AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq,
+    CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -154,6 +154,20 @@ pub enum FilesystemChange {
         /// when all attributes were cleared.
         attributes: Attributes,
     },
+    /// An inode's access row was replaced. `grants` is the complete
+    /// direct grant map after the update.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeAccessChanged"))]
+    AccessChanged {
+        /// Inode whose access state advanced.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// Revision published by the update.
+        access_revision_no: AccessRevisionNo,
+        /// Whether the directory stops inheritance from its ancestors.
+        boundary: bool,
+        /// The inode's complete direct grants after this update.
+        grants: AccessGrants,
+    },
 }
 
 /// Change-feed response after a cursor.
@@ -177,7 +191,7 @@ pub struct ListChangesResponse {
 #[cfg(test)]
 mod tests {
     use super::{Commit, FilesystemChange};
-    use crate::InodeId;
+    use crate::{AccessRevisionNo, InodeId};
 
     fn binding_generation() -> crate::BindingGeneration {
         crate::BindingGeneration::parse("abcdef").expect("binding generation")
@@ -411,6 +425,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&cleared).expect("serialize cleared attributes event"),
             r#"{"kind":"attributes_changed","inode_id":"ino_2","attributes_revision_no":5,"attributes":{}}"#
+        );
+
+        let access_changed = FilesystemChange::AccessChanged {
+            inode_id: InodeId(2),
+            access_revision_no: AccessRevisionNo(3),
+            boundary: true,
+            grants: serde_json::from_value(serde_json::json!({"prn_ada": ["read", "write"]}))
+                .expect("grants"),
+        };
+        assert_eq!(
+            serde_json::to_string(&access_changed).expect("serialize access event"),
+            r#"{"kind":"access_changed","inode_id":"ino_2","access_revision_no":3,"boundary":true,"grants":{"prn_ada":["read","write"]}}"#
         );
     }
 }

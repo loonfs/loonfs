@@ -169,7 +169,7 @@ The rights are `read`, `history`, `write`, `create`, `remove`, `share`, `manage`
 
 An inode begins at access revision `0` with no boundary and no grants; that initial state has no persisted access row. The root inode of an ACL namespace is the exception: it begins with a row at revision `0` holding the manifest's `root_grants`, materialized at genesis like the root inode row itself. Each accepted update increments `access_revision_no` by one and stores the complete resulting state. A row with no boundary and no grants is a real revision, distinguishable from an inode whose access was never changed.
 
-Each namespace records an access mode in its manifest, fixed at creation: `unrestricted`, or `acl` with a `principal_scope` naming the identity domain of its principal ids and the `root_grants` the root inode holds at genesis, normally `admin` for each initial administrator. An inode's effective rights for a set of principals are the union of those principals' grants on the inode's own row and on each ancestor's row, walking current parent bindings and stopping after a row whose boundary is set or at the root. A deletion root has no current binding; its tombstone's saved parent supplies that edge. `admin` on the root row confers every right everywhere and is never inherited. No standard operation writes an access row in this version.
+Each namespace records an access mode in its manifest, fixed at creation: `unrestricted`, or `acl` with a `principal_scope` naming the identity domain of its principal ids and the `root_grants` the root inode holds at genesis, normally `admin` for each initial administrator. An inode's effective rights for a set of principals are the union of those principals' grants on the inode's own row and on each ancestor's row, walking current parent bindings and stopping after a row whose boundary is set or at the root. A deletion root has no current binding; its tombstone's saved parent supplies that edge. `admin` on the root row confers every right everywhere and is never inherited. The `update_access` operation replaces an inode's row; the API specification defines it.
 
 ## 2. Objects and references
 
@@ -988,7 +988,7 @@ An extension must remain rebuildable from authoritative core state. Its absence 
 
 The current inode kinds are `file` and `dir`. Mount creation and traversal are not defined by this version; no standard operation creates a mount.
 
-Access rows and the namespace access mode are stored as section 1.8 defines. No operation writes them and no read evaluates them in this version. Inheritance, authorization, and the ordering and notification behavior of access changes are unspecified.
+Access rows and the namespace access mode are stored as section 1.8 defines. No read evaluates them in this version. Authorization is unspecified in this version. Access changes publish in commit order and appear in the change feed as `access_changed` events.
 
 ## Appendix A. Durable records and byte encodings
 
@@ -1358,6 +1358,7 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `restore_revision` | `path`, `source_revision_no` |
 | `undelete` | `inode_id`, `deletion_seq`, `destination_path` |
 | `update_attributes` | `path`, `set`, `remove`, `expected_inode_id`, `expected_attributes_revision_no` |
+| `update_access` | `path`, `boundary`, `grants`, `expected_inode_id`, `expected_access_revision_no` |
 
 Paths use their validated canonical absolute form. Display-name fields contain one validated component. Inode IDs in these operation shapes use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers. Binding generations retain their opaque string representation.
 
@@ -1384,6 +1385,7 @@ The precondition list appears after `message` and retains caller order without s
 | `namespace_head` | `expected_head_seq` |
 | `file_revision` | `inode_id`, `expected_revision_no` |
 | `attributes_revision` | `inode_id`, `expected_attributes_revision_no` |
+| `access_revision` | `inode_id`, `expected_access_revision_no` |
 | `path_binding` | `path`, `expected_inode_id`, `expected_binding_generation` |
 | `path_absence` | `path` |
 

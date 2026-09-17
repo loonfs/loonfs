@@ -280,6 +280,31 @@ impl Client {
         .await
     }
 
+    /// Replaces a visible inode's access row, including the root, under optional inode and revision preconditions.
+    pub async fn update_access(
+        &self,
+        spec: &NamespacePath,
+        options: &UpdateAccessOptions,
+    ) -> Result<Commit> {
+        self.create_commit(
+            spec.namespace(),
+            &CommitRequest::single(
+                commit_id_or_generated(&options.commit),
+                options.commit.message.clone(),
+                FilesystemOperation::UpdateAccess {
+                    path: spec.absolute_path().clone(),
+                    boundary: options.boundary,
+                    grants: options.grants.clone(),
+                    expected_inode_id: options.expected_inode_id,
+                    expected_access_revision_no: options.expected_access_revision_no,
+                },
+            )
+            .preconditions(options.commit.preconditions.clone()),
+            &options.commit.actor_id,
+        )
+        .await
+    }
+
     /// Moves a path within one namespace.
     pub async fn move_path(
         &self,

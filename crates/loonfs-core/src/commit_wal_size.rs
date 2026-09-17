@@ -2,7 +2,8 @@
 
 use crate::path::write::CommitRequest;
 use loonfs_api::{
-    AbsolutePath, FilesystemOperation, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES,
+    AbsolutePath, AccessRight, FilesystemOperation, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES,
+    MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES,
     MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
 };
 
@@ -80,6 +81,30 @@ const ATTRIBUTES_BYTES: usize = delta_bytes(
         (
             "attributes",
             9 + MAX_ATTRIBUTES_TOTAL_BYTES + MAX_ATTRIBUTE_ENTRIES * (2 + 3),
+        ),
+    ],
+);
+/// The longest encoded rights list: every right name with its framing,
+/// plus the array header.
+const fn rights_list_bytes() -> usize {
+    let mut bytes = 1;
+    let mut index = 0;
+    while index < AccessRight::ALL.len() {
+        bytes += AccessRight::ALL[index].as_str().len() + 2;
+        index += 1;
+    }
+    bytes
+}
+const ACCESS_BYTES: usize = delta_bytes(
+    "append_access_revision",
+    &[
+        ("inode_id", INTEGER_BYTES),
+        ("access_revision_no", INTEGER_BYTES),
+        ("boundary", 1),
+        (
+            "grants",
+            9 + MAX_ACCESS_GRANTS_PRINCIPAL_BYTES
+                + MAX_ACCESS_GRANT_ENTRIES * (2 + 3 + rights_list_bytes()),
         ),
     ],
 );
@@ -179,6 +204,7 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
         }
         FilesystemOperation::Undelete { .. } => REVOKE_BYTES + BIND_BYTES + NAMES_BYTES,
         FilesystemOperation::UpdateAttributes { .. } => ATTRIBUTES_BYTES,
+        FilesystemOperation::UpdateAccess { .. } => ACCESS_BYTES,
     }
 }
 
