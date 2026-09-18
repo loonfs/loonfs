@@ -441,18 +441,19 @@ A commit request may therefore be rejected immediately, or tentatively
 accepted into a WAL batch, without yet being a committed or successful change.
 
 The embedded `loonfs::FsWriter` makes the first two stages independently
-drivable. `prepare_file_bytes` stages bytes, while `prepare_content_ref`
-fully validates an existing reference and re-homes its bytes under a fresh
-content identity owned by the target namespace; both return opaque prepared
-content. `put_file_prepared` consumes that evidence without content-store I/O
-during publication. `complete_upload_prepared` returns the ordinary
+drivable. `prepare_file_bytes` prepares eligible files inline and stages the
+rest. `prepare_content_ref` fully validates an existing reference and copies
+its bytes to a new content object owned by the target namespace. Both return
+opaque prepared content. `put_file_prepared` publishes the prepared value. Inline values that
+exceed WAL limits are staged before publication. Already staged values need
+no further content-store I/O. `complete_upload_prepared` returns the ordinary
 completion response together with the same evidence. These are embedded
-conveniences, not HTTP operations; hosted clients continue to carry validated
-content tokens on the existing wire requests.
+conveniences, not HTTP operations; hosted clients supply inline bytes or
+validated content tokens in commit requests.
 
-Staging is staging wherever it happens, so `prepare_file_bytes` opens an
-upload session for the object it writes, exactly as a remote upload does: the
-session record lands before the bytes and completes after them. The opaque
+When `prepare_file_bytes` stages content, it opens an upload session for the
+object it writes, as a remote upload does: the session record lands before
+the bytes and completes after them. The opaque
 prepared value carries an admission deadline no later than the expiry of the
 last token the completed session could issue. Publication checks it at batch
 admission and immediately before the numbered WAL put, using the request clock plus
@@ -681,7 +682,10 @@ retry rules depend on how it was supplied:
 | Inline content | The original bytes. Different bytes return `commit_id_reuse_conflict`, even if the file size is unchanged. |
 
 Inline retry rules still apply if the bytes are written to a separate content
-object to stay within WAL limits. Switching between inline bytes and an
+object to stay within WAL limits. Before any fallback staging, the runtime
+checks for a retained receipt, including after a restart or on another server.
+A retained receipt skips staging, so a replay writes no content. Publication
+still checks request identity and subject. Switching between inline bytes and an
 uploaded reference changes the request's identity, even for identical content.
 
 **Prepared content.** Prepare the content once, retain the result, and reuse

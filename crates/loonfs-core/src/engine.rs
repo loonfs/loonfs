@@ -36,11 +36,11 @@ use loonfs_api::v0::{
 use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
-    AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, ContentRef,
-    DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
-    FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId, Namespace,
-    NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo, Subject, SubjectId,
-    TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
+    AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, CommitId,
+    ContentRef, DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse,
+    DirectoryPageCursor, FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse,
+    InodeId, Namespace, NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo,
+    Subject, SubjectId, TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -132,6 +132,18 @@ pub struct NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    /// Checks the pinned WAL and manifest receipts without acquiring writer authority.
+    pub async fn has_retained_commit_receipt(
+        &self,
+        context: &RuntimeReadContext,
+        commit_id: &CommitId,
+    ) -> Result<bool> {
+        self.load_read_view(context)
+            .await?
+            .has_retained_commit_receipt(commit_id)
+            .await
+    }
+
     /// Sets the subject for this engine's reads.
     pub fn with_subject(mut self, subject: Subject) -> Self {
         self.subject = Some(subject);

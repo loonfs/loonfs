@@ -88,6 +88,13 @@ impl PublisherRegistry {
                 return Ok(());
             }
         }
+        let (reader, context) = self.read_core.pinned_read(namespace_id).await?;
+        if reader
+            .has_retained_commit_receipt(&context, candidate.commit_id())
+            .await?
+        {
+            return Ok(());
+        }
         let writer = self.writer.upgrade().ok_or(CoreError::ShuttingDown)?;
         let catalog = self
             .read_core
