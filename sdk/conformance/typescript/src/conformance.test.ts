@@ -1171,11 +1171,21 @@ let cases: Map<string, ConformanceCase> | undefined;
 test("server client rejects a partial subject context", () => {
     const expected = /principalScope and principals must be configured together/;
     assert.throws(
-        () => new LoonFSClient({ baseUrl: "http://127.0.0.1", principals: "prn_team" }),
+        () =>
+            new LoonFSClient({
+                baseUrl: "http://127.0.0.1",
+                token: "unused-token",
+                principals: "prn_team",
+            }),
         expected,
     );
     assert.throws(
-        () => new LoonFSClient({ baseUrl: "http://127.0.0.1", principalScope: "org_demo" }),
+        () =>
+            new LoonFSClient({
+                baseUrl: "http://127.0.0.1",
+                token: "unused-token",
+                principalScope: "org_demo",
+            }),
         expected,
     );
 });
