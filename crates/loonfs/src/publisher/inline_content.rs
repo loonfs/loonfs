@@ -27,7 +27,7 @@ impl PublisherRegistry {
                     true
                 })
                 .count();
-            self.stage_inline_values(namespace_id, &mut candidate, &values[kept..])
+            self.stage_inline_values(namespace_id, &mut candidate, &values[kept..], publisher)
                 .await?;
         }
         PreparedCandidate::new(candidate).map_err(Into::into)
@@ -58,8 +58,13 @@ impl PublisherRegistry {
                 publisher.inline_content.inline_content_tail_limit_bytes,
             )
         };
-        self.stage_inline_values(namespace_id, &mut candidate.candidate, &values[kept..])
-            .await?;
+        self.stage_inline_values(
+            namespace_id,
+            &mut candidate.candidate,
+            &values[kept..],
+            publisher,
+        )
+        .await?;
         PreparedCandidate::new(candidate.candidate).map_err(Into::into)
     }
 
@@ -68,9 +73,20 @@ impl PublisherRegistry {
         namespace_id: &NamespaceId,
         candidate: &mut CommitCandidate,
         values: &[InlineContent],
+        publisher: &NamespacePublisher,
     ) -> Result<()> {
         if values.is_empty() {
             return Ok(());
+        }
+        {
+            let slot = publisher.engine.lock().await;
+            if slot
+                .engine
+                .as_ref()
+                .is_some_and(|engine| engine.has_retained_commit_receipt(candidate.commit_id()))
+            {
+                return Ok(());
+            }
         }
         let writer = self.writer.upgrade().ok_or(CoreError::ShuttingDown)?;
         let catalog = self

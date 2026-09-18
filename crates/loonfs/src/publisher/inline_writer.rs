@@ -378,6 +378,72 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
 }
 
 #[tokio::test]
+async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fail() {
+    for bytes in [b"four".as_slice(), b"longer"] {
+        let directory = tempdir().expect("directory");
+        let failing = Arc::new(FailStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::content_blob(),
+            OperationClass::Put,
+            InjectedError::PermissionDenied("content writes refused".to_owned()),
+        ));
+        let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
+        let writer = crate::FsWriter::builder_with_store(store.clone())
+            .writer_id("inline-writer")
+            .inline_content(InlineContentOptions {
+                inline_content_threshold_bytes: Some(8),
+                inline_content_segment_budget_bytes: 4,
+                inline_content_fold_at_bytes: 5,
+                inline_content_tail_limit_bytes: 5,
+            })
+            .min_publish_interval_ms(0)
+            .monotonic_timer(Arc::new(ManualClock::new(0)))
+            .build()
+            .await
+            .expect("writer");
+        let namespace = NamespaceId::parse("receipt").expect("namespace");
+        writer
+            .create_namespace(
+                &namespace,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("namespace");
+        let prepared = writer
+            .prepare_file_bytes(&namespace, bytes)
+            .await
+            .expect("prepare");
+        let original = writer
+            .put_file_prepared(&namespace, "/file", prepared.clone(), put_options("retry"))
+            .await
+            .expect("publish");
+        assert_eq!(
+            writer.publisher().wal_tail_inline_bytes(&namespace).await,
+            Some(if bytes.len() == 4 { 4 } else { 0 })
+        );
+        failing.fail_all();
+        store.reset();
+        assert_eq!(
+            writer
+                .put_file_prepared(&namespace, "/file", prepared, put_options("retry"))
+                .await
+                .expect("receipt replays despite failed content writes"),
+            original
+        );
+        let mut different = bytes.to_vec();
+        different[0] = b'x';
+        let error = writer
+            .put_file_bytes(&namespace, "/file", &different, put_options("retry"))
+            .await
+            .expect_err("receipt rejects different bytes before staging");
+        assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(failing.attempts(), 0);
+        writer.shutdown().await.expect("shutdown");
+    }
+}
+
+#[tokio::test]
 async fn segment_fallback_keeps_operation_order_and_one_atomic_commit() {
     let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
         inline_content_segment_budget_bytes: 4,
@@ -415,7 +481,7 @@ async fn segment_fallback_keeps_operation_order_and_one_atomic_commit() {
     prepared.reverse();
     let candidate = CommitCandidate::prepared(request, prepared);
     let fingerprint = candidate.semantic_identity(&namespace).expect("identity");
-    let first = writer
+    writer
         .commit_candidate(&namespace, candidate.clone())
         .await
         .expect("commit");
@@ -435,13 +501,13 @@ async fn segment_fallback_keeps_operation_order_and_one_atomic_commit() {
             expected.as_ref()
         );
     }
-    assert_eq!(
-        writer
-            .commit_candidate(&namespace, candidate)
-            .await
-            .expect("replay"),
-        first
-    );
+    store.reset();
+    let error = writer
+        .commit_candidate(&namespace, candidate)
+        .await
+        .expect_err("unchanged retry exceeds the namespace admission budget");
+    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    assert_eq!(store.count(OperationClass::Put), 0);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -528,7 +594,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
 }
 
 #[tokio::test]
-async fn admission_without_a_projection_does_not_read_the_tail() {
+async fn an_absent_projection_allows_one_commit_to_exceed_the_tail_limit_without_replay() {
     let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
         inline_content_fold_at_bytes: 4,
         inline_content_tail_limit_bytes: 4,

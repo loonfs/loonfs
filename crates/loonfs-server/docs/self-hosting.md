@@ -367,7 +367,12 @@ and `InlineContentOptions`. These settings do not change reader format limits.
 | `inline_content_threshold_bytes` | `None` | Prepares content at or under this size inline; `None` disables inline writes. |
 | `inline_content_segment_budget_bytes` | 1 MiB | Limits inline bytes in one WAL segment and stages overflow in operation order. |
 | `inline_content_fold_at_bytes` | 8 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
-| `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when unfolded and admitted inline bytes would exceed this size. |
+| `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when known unfolded and admitted inline bytes would exceed this size. |
+
+The tail limit is enforced against the writer's known tail. An absent projection
+counts as zero. After a process starts, the first inline commit in a namespace
+can exceed the limit by at most that commit's inline bytes, which is at most the
+segment budget, once per namespace per process start.
 
 The threshold cannot exceed 256 KiB and the segment budget cannot exceed 4 MiB.
 The segment budget, fold trigger, and tail limit must be positive, and the fold

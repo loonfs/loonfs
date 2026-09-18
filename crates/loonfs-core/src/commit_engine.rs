@@ -512,6 +512,19 @@ impl NamespaceCommitEngine {
             .map(PublishTailProjection::weight)
     }
 
+    /// Whether the retained tail contains a receipt, without loading a projection.
+    pub fn has_retained_commit_receipt(&self, commit_id: &CommitId) -> bool {
+        self.publish_tail_projection
+            .as_ref()
+            .is_some_and(|projection| {
+                projection
+                    .tail_state
+                    .rows
+                    .find_commit_receipt(commit_id)
+                    .is_some()
+            })
+    }
+
     /// The retained projection as a fold input, or `None` when the engine
     /// holds no projection.
     ///
