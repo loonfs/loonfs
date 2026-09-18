@@ -1,6 +1,6 @@
 # Inline small content
 
-**Status: implemented behind a default-off policy.** The seven steps below are open as a stack of pull requests, #968 through #974, each reviewed and gated. Writers stay off until the lab sweep picks a threshold. Constants are starting points to tune by measurement.
+**Status: implemented and enabled by default.** The seven steps below are open as a stack of pull requests, #968 through #974, each reviewed and gated, and #975 turns the writer policy on at a 64 KiB threshold with a 2 MiB fold trigger. The lab sweep chose those values; the writer policy table below holds them.
 
 LoonFS writes file bytes to a content object before it commits the metadata that names them. For a large file that is the right order: the transfer can be direct, resumable, and independent of the commit. For a small file it is most of the cost. A 1 KiB write spends three object-store writes making the bytes durable and owned, then a fourth to commit.
 
@@ -187,17 +187,17 @@ An import reads a reference owned by another namespace and writes the bytes unde
 
 **Writer policy.** These are runtime settings at or below the format limits.
 
-| Setting | Proposed | Purpose |
+| Setting | Default | Purpose |
 | --- | ---: | --- |
-| Inline threshold per value | 4 KiB to start | The lab sweeps 4, 16, and 64 KiB before the default rises |
+| Inline threshold per value | 64 KiB | The lab swept 1, 4, 16, and 64 KiB against a staged control; every size beat the control by three times or more at p50 |
 | Inline budget per WAL object | 1 MiB | Every commit in a batch waits for the object's PUT, including commits with no content |
-| Tail inline bytes that make a fold due | 8 MiB | Bounds what a cold reader downloads |
+| Tail inline bytes that make a fold due | 2 MiB | Bounds what a cold reader downloads: a 2 MiB tail adds about 0.45 s to a cold stat and folds in about 3 s |
 | Tail inline bytes beyond which writes use the staged path | 32 MiB | Ceiling when folding falls behind; checked at admission against the writer's known tail, counting this commit. After a process start the first inline commit in a namespace can pass it by at most its own inline bytes, at most the segment budget, once |
 | Inline bytes in flight per runtime | Byte budget | Charges queued payloads, encoding copies, and materialization buffers. A write that cannot reserve uses the staged path |
 | Resident tail bytes | The existing projection budgets | The reader's tail cache and the writer's projection count inline bytes |
 | Materialization concurrency | 32 | Matches WAL prefetch concurrency |
 
-The threshold starts low on purpose. The evidence so far is a request sequence for a 1 KiB value. It says nothing about cold replay, fold throughput, or how larger values slow a shared WAL object. 64 KiB is the top of the sweep because small-object PUT latency is flat to about that size and it is the speculative read cap (#966).
+64 KiB is the top of the sweep because small-object PUT latency is flat to about that size and it is the speculative read cap (#966). The sweep found no size under it where the inline path lost to the staged control. At 64 KiB, warm writes were three times faster at p50 and twice as fast at p90, and the read after a write cost no content request. The fold trigger dropped from the proposed 8 MiB because cold-stat time and fold time grew with the tail: 2, 8, and 32 MiB tails of 4 KiB files cost about 0.45, 1.0, and 2.6 s more than a folded namespace to stat cold, and folded in about 3, 7, and 19 s.
 
 `MAX_WAL_SEGMENT_BYTES` remains a document-size limit. It is not a working-memory budget and is not the inline bound.
 
@@ -236,7 +236,7 @@ The threshold starts low on purpose. The evidence so far is a request sequence f
 
 Durable formats are at version 1 and carry no compatibility paths before the stable release. If this lands before that release, the record field is added to the WAL family, the golden fixtures regenerate, and writers emit inline content only when the runtime enables it. After the release, the same change needs a new WAL family version and a manifest capability so that older binaries refuse the namespace rather than report missing content. An unchanged reference shape does not remove the need for every reader and folder to understand the field. Adding the field and the read side before the release, even with writers disabled, keeps the later step small.
 
-Order, as landed in #968 (record field), #969 (core publish), #970 (tail reads), #971 (fold materialization), #972 (downloads and imports), #973 (embedded writer), and #974 (hosted):
+Order, as landed in #968 (record field), #969 (core publish), #970 (tail reads), #971 (fold materialization), #972 (downloads and imports), #973 (embedded writer), #974 (hosted), and #975 (enabled by default):
 
 1. The read side, with writers disabled, in slices: the record field with its format limits and validation; the projected tail carrying its inline content, with one content location resolver and reads from the tail; fold materialization with its deletion rule; on-demand materialization for direct downloads and the byte-based fold trigger.
 2. The embedded writer: inline prepared content with its inline fingerprint form, admission accounting, and the inline policy with its fallback. The lab sweep runs here.
@@ -275,11 +275,11 @@ In the lab, the sweep measures steady small writes, cold reads, replay after a r
 
 ## Evidence
 
-Lab repository, `analysis/steady-state-floors-experiments-20260916.md`, section "H3"; emulation run `20260917T025704Z-bench-s3-small-content-sequences`, release, S3 `us-east-2`, 1 KiB content, 24 rounds per arm. The inline arm submitted one 1,564-byte WAL object per write. These are request-sequence timings, not a product speedup claim. The history of the staged path's session writes is in `analysis/h2-small-write-session-cost-discussion-20260917.md`.
+Lab repository, `analysis/steady-state-floors-experiments-20260916.md`, section "H3"; emulation run `20260917T025704Z-bench-s3-small-content-sequences`, release, S3 `us-east-2`, 1 KiB content, 24 rounds per arm. The inline arm submitted one 1,564-byte WAL object per write. These are request-sequence timings, not a product speedup claim. The history of the staged path's session writes is in `analysis/h2-small-write-session-cost-discussion-20260917.md`. The threshold sweep that set the defaults is `analysis/inline-content-sweep-20260918.md`.
 
 ## Open questions
 
-1. Which threshold does the sweep support, and is it cold replay, fold throughput, or the shared WAL object that sets it?
+1. Answered by the sweep: 64 KiB, the top of the range, and no size under it lost to the staged control. Cold replay and fold time set the fold trigger instead. Two observations stay open in the lab: a cold reader downloaded about 1.3 times the tail's inline bytes, and the sweep harness's memory grew about 14 MiB per MiB of tail.
 2. Should the direct-download response later gain an inline access kind for small content, to save the second request? `access` is already kind-tagged. It would need a capability so older clients are not surprised.
 3. Should hosted inline writes have a limit per namespace as well as the runtime budget, to protect the shared publisher?
 4. Should the payload section be separately ranged? It would spare cold readers and change-feed readers the inline bytes they do not need. The plan is to build the simple layout, measure both costs in the sweep, and decide before the format is frozen.
