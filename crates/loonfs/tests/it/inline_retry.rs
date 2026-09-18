@@ -1,4 +1,4 @@
-//! Retained inline receipts are resolved before fallback content writes.
+//! Retrying an inline commit with a retained receipt must not upload the content again.
 
 use bytes::Bytes;
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};

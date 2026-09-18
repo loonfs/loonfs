@@ -1,6 +1,6 @@
 # Inline small content
 
-**Status: implemented and enabled by default.** The seven steps below landed as #968 through #974. #975 enabled the writer policy at a 64 KiB threshold with a 2 MiB fold trigger. The lab sweep chose those values; the writer policy table below holds them.
+**Status: implemented.** Inline writes are enabled by default for files up to 64 KiB. The default fold trigger is 2 MiB.
 
 LoonFS writes file bytes to a content object before it commits the metadata that names them. For a large file that is the right order: the transfer can be direct, resumable, and independent of the commit. For a small file it is most of the cost. A 1 KiB write spends three object-store writes making the bytes durable and owned, then a fourth to commit.
 
@@ -63,7 +63,7 @@ Identity is fixed when content is prepared. Preparing content at or under the wr
 
 - An inline prepared value uses the inline form whether it is published inline or falls back to staging. The form never depends on where the bytes were stored.
 - A staged prepared value and a hosted content reference keep the reference form. Nothing about uploaded objects changes.
-- While the receipt is retained, a retry with the same payload replays the original commit and returns the original reference. A retry looks up its receipt before any fallback staging, in any process, so a replay writes no content.
+- While the commit receipt is retained, retrying the same request returns the original commit and content reference without uploading the bytes again. This applies after a restart or on another server.
 - A retry with a different payload returns `commit_id_reuse_conflict`, including when the length is equal.
 - After the receipt is reclaimed, the same request executes as a new commit with a new content ID. It cannot collide with the content of the earlier commit, whose revision is kept.
 - The same bytes sent once inline and once as an uploaded object, under one commit ID, conflict. They are different requests. A writer whose threshold changed between two attempts can meet this case.

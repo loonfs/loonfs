@@ -380,9 +380,10 @@ counts as zero. After a process starts, the first inline commit in a namespace
 can exceed the limit by at most that commit's inline bytes, which is at most the
 segment budget, once per namespace per process start.
 
-Before staging overflow, the runtime checks for a retained commit receipt.
-Retries with retained receipts write no content, including after a restart or
-on another server. Changed bytes or a different subject still conflict.
+If a commit already succeeded, retrying the same request returns the original
+result without uploading the file again, as long as the commit receipt is still
+available. This also works after a restart or on another server. Changed bytes
+or a different subject return `commit_id_reuse_conflict`.
 
 The threshold cannot exceed 256 KiB and the segment budget cannot exceed 4 MiB.
 The segment budget, fold trigger, and tail limit must be positive, and the fold

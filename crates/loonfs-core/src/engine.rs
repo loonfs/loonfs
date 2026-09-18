@@ -132,7 +132,8 @@ pub struct NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Checks the pinned WAL and manifest receipts without acquiring writer authority.
+    /// Checks whether the commit receipt exists in the supplied read view.
+    /// Searches both the WAL and metadata segments without acquiring a writer epoch.
     pub async fn has_retained_commit_receipt(
         &self,
         context: &RuntimeReadContext,

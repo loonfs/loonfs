@@ -69,7 +69,8 @@ impl Default for PublicationLimits {
 }
 
 /// Writer policy for content carried in WAL segments.
-/// A retry whose receipt is retained skips fallback staging; see `docs/specs/api.md`, section 5.2.
+/// Retrying a completed inline commit does not upload its content again while
+/// the commit receipt is retained. See `docs/specs/api.md`, section 5.2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineContentOptions {
     /// Maximum size prepared inline; defaults to 64 KiB. `None` disables inline preparation.
