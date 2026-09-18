@@ -4,6 +4,7 @@
 
 use super::batch::BatchOutcomeSlot;
 use super::publish_view::PublishMetadataView;
+use crate::authorize::Authorizer;
 use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan};
 use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
 use crate::error::{CoreError, MetadataViewError, Result};
@@ -95,6 +96,11 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     committed_at_ms: u64,
     dedup: &mut BatchDedup,
 ) -> CandidateAdmission {
+    if let Err(error) =
+        Authorizer::for_request(namespace_id, &view.head.access, candidate.authority())
+    {
+        return CandidateAdmission::independent(Err(error));
+    }
     if let Err(error) = candidate.validate_request_has_operations() {
         return CandidateAdmission::independent(Err(error));
     }

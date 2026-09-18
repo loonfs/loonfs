@@ -802,6 +802,40 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
 }
 
 #[tokio::test]
+async fn a_replay_from_another_principal_scope_is_refused() {
+    let (_temp_dir, store, namespace_id, context) = setup().await;
+    let request = CommitRequest::single(
+        CommitId::parse("scope-replay").expect("commit id"),
+        loonfs_test_support::test_actor(),
+        None,
+        create_directory("/docs"),
+    )
+    .with_subject(subject("root", &["prn_root"]));
+    submit_commit(&store, &namespace_id, request.clone(), &context)
+        .await
+        .expect("commit");
+
+    let mut wrong_scope = subject("root", &["prn_root"]);
+    wrong_scope.principal_scope = PrincipalScope::parse("org_other").expect("scope");
+    let error = submit_commit(
+        &store,
+        &namespace_id,
+        request.with_subject(wrong_scope),
+        &context,
+    )
+    .await
+    .expect_err("wrong-scope replay");
+    assert!(matches!(
+        error,
+        loonfs_core::Error::PrincipalScopeMismatch {
+            expected_principal_scope,
+            actual_principal_scope,
+        } if expected_principal_scope.as_str() == "org_demo"
+            && actual_principal_scope.as_str() == "org_other"
+    ));
+}
+
+#[tokio::test]
 async fn upload_sessions_belong_to_their_subject() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     let engine = namespace_engine(&store, &namespace_id, &context);
