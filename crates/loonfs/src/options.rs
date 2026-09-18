@@ -23,7 +23,7 @@ pub use loonfs_api::options::{
 pub struct MetadataMaintenanceOptions {
     /// Flush the visible WAL tail once it reaches this many segments.
     pub max_wal_tail_segments: NonZeroU64,
-    /// Flush once unfolded inline bytes reach this size; defaults to 8 MiB.
+    /// Flush once unfolded inline bytes reach this size; defaults to 2 MiB.
     /// Applies only when the writer's publisher knows the count.
     pub inline_content_fold_at_bytes: NonZeroUsize,
     /// Whether run sizes must justify the rewrite before maintenance merges them.

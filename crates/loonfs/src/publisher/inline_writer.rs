@@ -153,7 +153,13 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
 
 #[tokio::test]
 async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
-    for options in [InlineContentOptions::default(), policy()] {
+    for options in [
+        InlineContentOptions {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        },
+        policy(),
+    ] {
         let (_directory, store, writer, namespace) = writer_with_policy(options).await;
         let bytes: &[u8] = if writer
             .bits

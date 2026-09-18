@@ -112,7 +112,7 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         .expect("writer a first put");
 
     let writer_b = writer(&store, "writer-b").await;
-    writer_b
+    let takeover = writer_b
         .put_file_bytes(
             &namespace_id,
             "/b1.txt",
@@ -157,6 +157,18 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         ),
         "unexpected error: {still_fenced:?}"
     );
+    let reader = writer_a.reader();
+    let entry = reader
+        .get_path_entry(&namespace_id, "/b1.txt", Default::default())
+        .await
+        .expect("fencing refreshes the former writer's reader");
+    assert_eq!(entry.head_seq, takeover.committed_seq);
+    let bytes = reader
+        .get_file_bytes(&namespace_id, "/b1.txt")
+        .await
+        .expect("read the new writer's inline content");
+    assert_eq!(bytes.entry.head_seq, entry.head_seq);
+    assert_eq!(bytes.bytes, b"b");
     writer_b
         .put_file_bytes(
             &namespace_id,

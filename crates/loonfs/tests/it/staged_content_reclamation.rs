@@ -16,7 +16,7 @@
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
-use crate::common::{open_runtime_async, store, TestRuntime};
+use crate::common::{open_runtime_with_async, store, TestRuntime};
 use loonfs::{
     ContentRef, CreateNamespaceOptions, GcConfig, GcResponse, NamespaceId, PutFileOptions,
     SharedObjectStore,
@@ -35,6 +35,16 @@ use tempfile::tempdir;
 /// The grace a pass is configured with, well above the enforced floor so
 /// the derived content grace is what decides these tests.
 const GRACE_MS: u64 = 60 * 60 * 1000;
+
+async fn open_staged_runtime(store: SharedObjectStore, writer_id: &str) -> TestRuntime {
+    open_runtime_with_async(store, writer_id, |builder| {
+        builder.inline_content(loonfs::InlineContentOptions {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        })
+    })
+    .await
+}
 
 fn config() -> GcConfig {
     GcConfig {
@@ -107,7 +117,7 @@ async fn session_keys(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
 async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let runtime = open_runtime_async(store.clone(), "prepare-only").await;
+    let runtime = open_staged_runtime(store.clone(), "prepare-only").await;
     let namespace_id = namespace(&runtime).await;
     // A published file, so the reference scan has a root to read and the
     // verdict on the prepared object is "absent" rather than "unknown".
@@ -160,7 +170,7 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
 async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let runtime = open_runtime_async(store.clone(), "published-put").await;
+    let runtime = open_staged_runtime(store.clone(), "published-put").await;
     let namespace_id = namespace(&runtime).await;
     runtime
         .writer
@@ -210,7 +220,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
 async fn imported_content_survives_collection_in_the_source_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let runtime = open_runtime_async(store.clone(), "content-import").await;
+    let runtime = open_staged_runtime(store.clone(), "content-import").await;
     let source = namespace(&runtime).await;
     let target = NamespaceId::parse("target").expect("valid namespace id");
     runtime
@@ -277,7 +287,7 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
 async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let runtime = open_runtime_async(store.clone(), "retrying-writer").await;
+    let runtime = open_staged_runtime(store.clone(), "retrying-writer").await;
     let namespace_id = namespace(&runtime).await;
     let options = || {
         let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
@@ -358,7 +368,7 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
         InjectedError::PreconditionFailed,
     ));
     let store: SharedObjectStore = failing.clone();
-    let runtime = open_runtime_async(store.clone(), "failing-writer").await;
+    let runtime = open_staged_runtime(store.clone(), "failing-writer").await;
     let namespace_id = namespace(&runtime).await;
 
     failing.fail_all();
@@ -404,7 +414,7 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
         KeyPredicate::family(DurableObjectFamily::UploadSession),
     ));
     let store: SharedObjectStore = sessions.clone();
-    let runtime = open_runtime_async(store, "counted-writer").await;
+    let runtime = open_staged_runtime(store, "counted-writer").await;
     let namespace_id = namespace(&runtime).await;
 
     sessions.reset();

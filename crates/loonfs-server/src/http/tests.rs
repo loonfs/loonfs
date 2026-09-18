@@ -2570,6 +2570,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_config(temp_dir.path(), "server-writer");
+    config.inline_content.inline_content_threshold_bytes = None;
     config.max_upload_bytes = 1024;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -3006,6 +3007,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_config(temp_dir.path(), "server-writer");
+    config.inline_content.inline_content_threshold_bytes = None;
     config.max_concurrent_uploads = 1;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

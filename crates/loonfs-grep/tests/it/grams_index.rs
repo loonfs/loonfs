@@ -260,8 +260,11 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
 #[tokio::test]
 async fn a_worker_policy_bounds_each_build_step() {
     let temp_dir = tempdir().expect("tempdir");
-    let store: loonfs::SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let raw_store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("local store"),
+        KeyPredicate::new(is_content_object),
+    ));
+    let store: SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-config-policy").expect("namespace id");
 
     let writer = FsWriter::builder_with_store(store.clone())
@@ -310,11 +313,24 @@ async fn a_worker_policy_bounds_each_build_step() {
          third put's commit"
     );
 
-    drive_worker_step(&host.worker, &namespace_id, policy).await;
+    let byte_policy = GramIndexBuildPolicy {
+        max_content_bytes_per_step: NonZeroU64::new(b"a needle numbered 0\n".len() as u64)
+            .expect("content byte budget"),
+        ..policy
+    };
+    raw_store.reset();
+    drive_worker_step(&host.worker, &namespace_id, byte_policy).await;
     let after_second = grams_built_through_seq(&store, &namespace_id).await;
     assert_eq!(
-        after_second, put_seqs[4],
-        "the next step must consume the remaining two commits"
+        after_second, put_seqs[3],
+        "the byte budget must stop after one inline file"
+    );
+    assert_eq!(raw_store.count(OperationClass::Get), 0);
+
+    drive_worker_step(&host.worker, &namespace_id, byte_policy).await;
+    assert_eq!(
+        grams_built_through_seq(&store, &namespace_id).await,
+        put_seqs[4]
     );
 
     writer.shutdown().await.expect("writer shutdown");
@@ -338,6 +354,10 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     let namespace_id = NamespaceId::parse("grams-thousand-atomic").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-thousand-writer")
+        .inline_content(loonfs::InlineContentOptions {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        })
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -733,6 +753,10 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fault-writer")
+        .inline_content(loonfs::InlineContentOptions {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        })
         .min_publish_interval_ms(0)
         .build()
         .await

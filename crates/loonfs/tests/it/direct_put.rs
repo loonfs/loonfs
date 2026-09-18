@@ -331,7 +331,16 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
         KeyPredicate::content_blob(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = open_runtime(object_store, "put-file-content-validation-test");
+    let fs = open_runtime_with(
+        object_store,
+        "put-file-content-validation-test",
+        |builder| {
+            builder.inline_content(loonfs::InlineContentOptions {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            })
+        },
+    );
 
     fs.create_namespace_blocking(
         &namespace_id,
@@ -385,7 +394,12 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(fail_content_blob_puts_store(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = open_runtime(object_store, "content-write-failure-test");
+    let fs = open_runtime_with(object_store, "content-write-failure-test", |builder| {
+        builder.inline_content(loonfs::InlineContentOptions {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        })
+    });
 
     fs.create_namespace_blocking(
         &namespace_id,
@@ -647,7 +661,13 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
     let raw_store = Arc::new(fail_content_blob_puts_store(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     block_on(async {
-        let fs = open_runtime_async(object_store, "window-abort-test").await;
+        let fs = open_runtime_with_async(object_store, "window-abort-test", |builder| {
+            builder.inline_content(loonfs::InlineContentOptions {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            })
+        })
+        .await;
         fs.create_namespace(
             &namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),

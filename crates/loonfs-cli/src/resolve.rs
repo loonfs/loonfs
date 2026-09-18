@@ -224,7 +224,13 @@ impl EmbeddedTarget {
             .configured_object_store()
             .map_err(|err| CliError::invalid_config(err.public_message().into_owned()))?
             .into_shared();
-        Self::over_store(store, writer_id, TraceStoreKind::from(store_config.kind())).await
+        Self::over_store(
+            store,
+            writer_id,
+            TraceStoreKind::from(store_config.kind()),
+            loonfs::InlineContentOptions::default(),
+        )
+        .await
     }
 
     /// Opens the runtime handles over a store the caller already holds.
@@ -236,6 +242,7 @@ impl EmbeddedTarget {
         store: SharedObjectStore,
         writer_id: Option<&str>,
         trace_store_kind: TraceStoreKind,
+        inline_content: loonfs::InlineContentOptions,
     ) -> Result<Self, CliError> {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
@@ -245,6 +252,7 @@ impl EmbeddedTarget {
         );
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
+            .inline_content(inline_content)
             .maintenance_hint_observer(move |hint| observer(hint))
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.

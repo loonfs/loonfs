@@ -84,6 +84,7 @@ either way.
     "filesystem.namespaces.delete": true,
     "filesystem.snapshots": true,
     "filesystem.attributes": true,
+    "filesystem.commits.inline_content": true,
     "filesystem.inodes.list_children": true,
     "query.grep": true
   },
@@ -91,6 +92,7 @@ either way.
     "access.max_principals": 64,
     "commit.max_content_tokens": 4096,
     "commit.max_external_content_refs": 4096,
+    "commit.max_inline_content_bytes": 65536,
     "commit.max_message_bytes": 4096,
     "commit.max_operations": 4096,
     "commit.max_preconditions": 1024,
@@ -699,8 +701,10 @@ This works for both inline and staged prepared content. Embedded preparation
 at or under the configured inline threshold makes no store request and has no
 expiry. The Rust HTTP client prepares inline when the server advertises
 `filesystem.commits.inline_content` and the bytes fit `commit.max_inline_content_bytes`.
-With capabilities cached, a small put needs only the commit HTTP request. Inline writes are disabled by default. Preparation alone does not publish
-a file or extend a completed upload's lifetime.
+With capabilities cached, a small put needs only the commit HTTP request. Inline
+writes are enabled by default at a 64 KiB threshold and can be disabled by
+configuration. The capability flag and inline limit are advertised by default.
+Preparation alone does not publish a file or extend a completed upload's lifetime.
 
 | Client | Prepare content | Publish retained content |
 | --- | --- | --- |
@@ -2001,8 +2005,10 @@ The 2 MiB JSON request-body limit includes base64 and all other request fields.
 An inline value above `commit.max_inline_content_bytes` returns `invalid_request`
 before any store write. If the request's inline total exceeds the writer's
 segment budget, shared submission stages the excess and keeps the commit atomic
-and its inline retry identity. Inline writes are disabled by default. When
-disabled, an inline request returns `not_supported` with `feature` set to
+and its inline retry identity. Inline writes are enabled by default at a 64 KiB
+threshold and can be disabled by configuration. The capability flag and inline
+limit are advertised by default. When disabled, an inline request returns
+`not_supported` with `feature` set to
 `filesystem.commits.inline_content`; the capability flag and inline limit are absent.
 
 Resending the same inline bytes under the same commit ID replays the original

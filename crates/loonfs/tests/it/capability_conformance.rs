@@ -7,8 +7,8 @@
 //! `loonfs-grep`, which a host composes on top of these handles. Both grep
 //! keys are composed — `query.grep` for searching and `maintenance.grep.index`
 //! for maintaining the index — even though the second one is parented by
-//! an API group these handles do advertise. So the embedded document is the
-//! spec's example minus the grep extension, and `loonfs-server`'s
+//! an API group these handles do advertise. The embedded document omits
+//! host-specific features and limits from the spec's example. `loonfs-server`'s
 //! `grep_modes` test pins the merged document a composed deployment answers
 //! with.
 #![allow(clippy::panic)]
@@ -31,14 +31,16 @@ fn embedded_capabilities() -> CapabilityDocument {
     reader.get_capabilities()
 }
 
-/// The composed grep extension, dropped from a document so what remains is
-/// what this crate is responsible for.
-fn without_the_grep_extension(mut document: CapabilityDocument) -> CapabilityDocument {
+fn without_host_capabilities(mut document: CapabilityDocument) -> CapabilityDocument {
     document
         .api_groups
         .retain(|api_group| api_group != API_GROUP_QUERY_V0);
-    document.features.retain(|key, _| !is_grep_key(key));
-    document.limits.retain(|key, _| !is_grep_key(key));
+    document
+        .features
+        .retain(|key, _| !is_grep_key(key) && !is_host_feature_key(key));
+    document.limits.retain(|key, _| {
+        !is_grep_key(key) && key != loonfs_api::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES
+    });
     document
 }
 
@@ -69,7 +71,7 @@ fn spec_section<'a>(spec: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 #[test]
-fn embedded_capability_document_is_the_spec_example_without_the_composed_grep_extension() {
+fn embedded_capability_document_matches_the_spec_example_without_host_capabilities() {
     let spec = std::fs::read_to_string(API_SPEC_PATH).expect("read docs/specs/api.md");
     let example = spec_section(&spec, "### 2.1", "### 2.2")
         .split("```json")
@@ -92,7 +94,7 @@ fn embedded_capability_document_is_the_spec_example_without_the_composed_grep_ex
     document.validate().expect("document is well-formed");
     assert_eq!(
         document,
-        without_the_grep_extension(expected),
+        without_host_capabilities(expected),
         "the advertised capability document drifted from the api.md section 2.1 example"
     );
 }

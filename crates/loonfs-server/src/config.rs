@@ -17,13 +17,46 @@ use thiserror::Error;
 pub use loonfs_objectstore::StoreConfig;
 
 /// Overrides the embedded writer's inline content policy.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct InlineContentOverrides {
+    #[serde(deserialize_with = "deserialize_inline_content_threshold")]
     pub inline_content_threshold_bytes: Option<usize>,
     pub inline_content_segment_budget_bytes: Option<usize>,
     pub inline_content_fold_at_bytes: Option<usize>,
     pub inline_content_tail_limit_bytes: Option<usize>,
+}
+
+impl Default for InlineContentOverrides {
+    fn default() -> Self {
+        Self {
+            inline_content_threshold_bytes: loonfs::InlineContentOptions::default()
+                .inline_content_threshold_bytes,
+            inline_content_segment_budget_bytes: None,
+            inline_content_fold_at_bytes: None,
+            inline_content_tail_limit_bytes: None,
+        }
+    }
+}
+
+fn deserialize_inline_content_threshold<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Threshold {
+        Bytes(usize),
+        Enabled(bool),
+    }
+
+    match Threshold::deserialize(deserializer)? {
+        Threshold::Bytes(bytes) => Ok(Some(bytes)),
+        Threshold::Enabled(false) => Ok(None),
+        Threshold::Enabled(true) => Err(serde::de::Error::custom(
+            "`inline_content_threshold_bytes` must be a byte count or false",
+        )),
+    }
 }
 
 impl InlineContentOverrides {
@@ -113,7 +146,7 @@ pub struct ServerConfig {
     /// Shared request and concurrency limits for namespace publications.
     #[serde(default)]
     pub publication: PublicationLimitsOverrides,
-    /// Disabled unless an inline threshold is configured.
+    /// Defaults to a 64 KiB threshold; `false` disables inline writes in TOML.
     #[serde(default)]
     pub inline_content: InlineContentOverrides,
     #[serde(default)]
@@ -730,8 +763,8 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{
-        load_server_config, PublicationLimitsOverrides, ServerConfigError, AUTH_TOKEN_ENV,
-        CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES, MIN_DISK_BYTES,
+        load_server_config, InlineContentOverrides, PublicationLimitsOverrides, ServerConfigError,
+        AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES, MIN_DISK_BYTES,
     };
     use loonfs_test_support::EnvGuard;
     use std::fs;
@@ -1335,6 +1368,42 @@ root = "/tmp/loonfs-server"
             let error = load_server_config(&path).expect_err("zero deadline must be rejected");
             assert_invalid_field(error, field);
         }
+    }
+
+    #[test]
+    fn inline_content_defaults_and_overrides_preserve_explicit_disablement() {
+        let defaults = loonfs::InlineContentOptions::default();
+        assert_eq!(defaults.inline_content_threshold_bytes, Some(64 * 1024));
+        assert_eq!(defaults.inline_content_fold_at_bytes, 2 * 1024 * 1024);
+        assert_eq!(defaults.inline_content_segment_budget_bytes, 1024 * 1024);
+        assert_eq!(defaults.inline_content_tail_limit_bytes, 32 * 1024 * 1024);
+        assert_eq!(
+            loonfs::MetadataMaintenanceOptions::default()
+                .inline_content_fold_at_bytes
+                .get(),
+            defaults.inline_content_fold_at_bytes
+        );
+        assert_eq!(InlineContentOverrides::default().resolve(), defaults);
+        for (source, threshold) in [
+            ("", Some(64 * 1024)),
+            (
+                "inline_content_segment_budget_bytes = 1024",
+                Some(64 * 1024),
+            ),
+            ("inline_content_threshold_bytes = 4096", Some(4096)),
+            ("inline_content_threshold_bytes = 0", Some(0)),
+            ("inline_content_threshold_bytes = false", None),
+        ] {
+            let overrides: InlineContentOverrides = toml::from_str(source).expect("overrides");
+            assert_eq!(
+                overrides.resolve().inline_content_threshold_bytes,
+                threshold
+            );
+        }
+        assert!(
+            toml::from_str::<InlineContentOverrides>("inline_content_threshold_bytes = true")
+                .is_err()
+        );
     }
 
     #[test]
