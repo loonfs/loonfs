@@ -346,7 +346,11 @@ impl ReadCore {
 pub(crate) fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
     match result {
         Ok(_) => true,
-        Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => true,
+        Err(RuntimeError::Core(error))
+            if matches!(error.code(), ErrorCode::StaleHead | ErrorCode::WriterFenced) =>
+        {
+            true
+        }
         _ => false,
     }
 }

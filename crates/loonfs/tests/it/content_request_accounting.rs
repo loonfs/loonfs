@@ -141,6 +141,10 @@ async fn build_initialized_writer(
 ) -> FsWriter {
     let writer = FsWriter::builder_with_store(store)
         .writer_id(writer_id)
+        .inline_content(loonfs::InlineContentOptions {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        })
         .min_publish_interval_ms(0)
         .build()
         .await

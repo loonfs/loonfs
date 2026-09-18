@@ -84,6 +84,7 @@ either way.
     "filesystem.namespaces.delete": true,
     "filesystem.snapshots": true,
     "filesystem.attributes": true,
+    "filesystem.commits.inline_content": true,
     "filesystem.inodes.list_children": true,
     "query.grep": true
   },
@@ -91,6 +92,7 @@ either way.
     "access.max_principals": 64,
     "commit.max_content_tokens": 4096,
     "commit.max_external_content_refs": 4096,
+    "commit.max_inline_content_bytes": 65536,
     "commit.max_message_bytes": 4096,
     "commit.max_operations": 4096,
     "commit.max_preconditions": 1024,
@@ -137,7 +139,7 @@ Registered limit keys:
 | `upload.max_concurrent` | How many service-proxied upload streams the deployment accepts at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content streams the deployment serves at once; requests past the cap answer `server_busy`. |
 | `access.max_principals` | Most principal ids one request may act as. Over-limit headers answer `invalid_request`. |
-| `commit.max_inline_content_bytes` | Largest decoded inline value accepted on a commit operation. Advertised only with `filesystem.commits.inline_content`. Larger values answer `invalid_request` before planning. |
+| `commit.max_inline_content_bytes` | Maximum file size for one `inline_content` value, measured before base64 encoding. Advertised only with `filesystem.commits.inline_content`. Larger values return `invalid_request` before commit planning. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_preconditions` | Most precondition entries one commit may carry, counting entries rather than resources. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_content_tokens` | Most content tokens one commit may carry. Over-limit requests answer `invalid_request` before planning. |
@@ -167,7 +169,7 @@ hoc.
 | `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
 | `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
-| `filesystem.commits.inline_content` | Inline bytes on `put_file`, `create_file_by_inode`, and `put_file_revision_by_inode` commit operations. | Present only when the writer inline policy is enabled. Its per-value threshold is `commit.max_inline_content_bytes`. An absent flag means clients upload content before committing. |
+| `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | Advertised when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes`. Without this feature, upload content before committing. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `filesystem.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
@@ -313,7 +315,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
-| `content_not_materialized` | 503 | The content is committed, but its object does not exist yet on a deployment that cannot write one. Read it through the proxied route, or retry after the next fold. |
+| `content_not_materialized` | 503 | The file is committed, but a direct download requires a content object that this deployment cannot create. Read through the proxied content route, or retry after a fold writes the object. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, deleted during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. The WAL write-stop threshold refuses new commits. A commit id the namespace already knows is still answered from its receipt. |
 | `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
@@ -637,70 +639,54 @@ from another subject answers `commit_id_reuse_conflict`.
 
 ### 5.2 Commit responses and safe retry
 
-Every commit returns a `Commit`: the `namespace_id` that changed, the
-`commit_id` it committed under, and the `committed_seq` where it
-became visible. When the caller did not supply a commit id, the surface that
-accepted the request generates one and returns it, so every caller holds the
-identity it needs to reconcile an uncertain outcome.
+Every successful commit returns a `Commit` with its `namespace_id`,
+`commit_id`, and `committed_seq`. The response also includes `committed_by`,
+`committed_at_ms`, the optional `message`, and `events`. These match the change
+feed, including values such as newly created inode IDs. If the caller omits an
+optional `commit_id`, the response includes a generated ID.
 
-The response also includes `committed_by`, `committed_at_ms`, the optional `message`, and `events`. These match the change feed, so the caller immediately receives values such as newly created inode IDs.
+To retry a commit, resubmit the same request with the same `commit_id`:
 
-A replay reads these fields from the retained WAL record. If that record has been retired but its commit receipt has not yet been removed, the response omits `events`. The receipt still supplies the commit ID, sequence, actor, timestamp, and message.
+- If the original request committed, the response includes the original
+  `committed_seq`. No new commit is made.
+- If it did not commit, the request can commit on this attempt.
+- If the ID was used for a different request, the retry returns
+  `commit_id_reuse_conflict`. Changing a write precondition counts as a
+  different request, even if the operations are unchanged.
 
-The retry rule has three cases:
+A new `commit_id` means a new commit. After `commit_outcome_unknown`, a
+transport failure, or a process restart, retry with the original ID and
+request. There is no separate commit-status lookup.
 
-- Resubmitting the semantically identical commit with the same `commit_id`
-  is safe: if the original committed, the response replays the original
-  `committed_seq` without committing again; if it never committed, the
-  resubmission completes it.
-- Reusing a `commit_id` for a different commit fails with
-  `commit_id_reuse_conflict`.
-- Retrying with a new `commit_id` is a new logical commit.
+**Retention limits.** These retry rules apply while the commit receipt is
+retained. Once the retention floor passes the commit and metadata runs are
+rebuilt, the receipt is removed. The same ID can then be used for a new commit,
+so a late retry may apply the operation again. For example, a replacing put
+may append another revision with the same content. Applications that retry
+beyond this window must check whether the original operation took effect.
 
-**The replay guarantee has a horizon.** A commit's receipt lives exactly as
-long as retained history: when the retention floor passes a commit and
-metadata runs are rebuilt, its receipt is dropped, and from then on the id
-is indistinguishable from one never used. A retry past that horizon does
-not replay and does not conflict — **it commits again as a new mutation.**
-The effects are bounded and mostly self-announcing: creates fail
-`destination_exists`, moves and deletes fail against the already-moved
-state, and a put lays down a duplicate revision of identical content
-(the read surface is unchanged; revision history gains one entry). Retries
-should therefore happen promptly — within the retention window, they are
-fully guaranteed — and a caller that must reuse ids beyond the window is
-responsible for its own reconciliation. LoonFS chooses this documented
-horizon over an unbounded receipt index deliberately: detecting a dropped
-id would require remembering every id forever.
+A replay includes the original response fields from the retained WAL record.
+If the record has been retired but its receipt remains, the response omits
+`events`. The commit ID, sequence, actor, timestamp, and message are still
+returned. A reuse conflict also reports the original `committed_seq` when
+it was resolved from a receipt.
 
-Write preconditions are part of the commit's identity. Reusing a `commit_id` after
-changing a precondition fails with `commit_id_reuse_conflict`.
+**File content.** A commit can refer to an upload or include the file's bytes
+directly (inline content). Content is part of the request's identity, and the
+retry rules depend on how it was supplied:
 
-A put's content is part of that identity too. For uploaded content, identity
-means *which content object*, not what bytes it holds. So:
+| Content supplied with the commit | What to retain for a retry |
+| --- | --- |
+| Uploaded content | The original `content_ref`. Uploading the same bytes again creates a new object; using that object's reference with the original commit ID returns `commit_id_reuse_conflict`. |
+| Inline content | The original bytes. Different bytes return `commit_id_reuse_conflict`, even if the file size is unchanged. |
 
-- **Retrying a commit means resending the same `content_ref`.** That is a
-  semantically identical commit and it replays.
-- **Re-uploading the bytes and then reusing the `commit_id` conflicts at the
-  server.** A fresh upload mints a fresh content object, which is a
-  different commit, answered with `commit_id_reuse_conflict`.
+Inline retry rules still apply if the bytes are written to a separate content
+object to stay within WAL limits. Switching between inline bytes and an
+uploaded reference changes the request's identity, even for identical content.
 
-Keep the `content_ref` a completed upload returned and reuse it across
-commit retries; that is the cheapest retry and the one the server can
-answer on its own.
-
-Content a commit supplies inline is identified by its bytes. A rerun with the
-same bytes replays, even if the writer stages the content because an inline
-policy limit was reached. Different bytes conflict, including when their length
-is unchanged. Inline content and uploaded objects use different identity forms.
-
-**Prepared content.** Prepare bytes once, retain the returned content, then publish
-with the same explicit commit ID, path, actor, and options on each attempt.
-This works for both inline and staged prepared content. Embedded preparation
-at or under the configured inline threshold makes no store request and has no
-expiry. The Rust HTTP client prepares inline when the server advertises
-`filesystem.commits.inline_content` and the bytes fit `commit.max_inline_content_bytes`.
-With capabilities cached, a small put needs only the commit HTTP request. Inline writes are disabled by default. Preparation alone does not publish
-a file or extend a completed upload's lifetime.
+**Prepared content.** Prepare the content once, retain the result, and reuse
+it with the same explicit commit ID, path, actor, and options on each attempt.
+This works for both inline content and completed uploads.
 
 | Client | Prepare content | Publish retained content |
 | --- | --- | --- |
@@ -709,40 +695,41 @@ a file or extend a completed upload's lifetime.
 | Go | `Files.Prepare()` | `Files.UploadPrepared()` |
 | TypeScript server and browser clients | `files.prepare()` | `files.uploadPrepared()` |
 
-The helpers generate a `commit_id` when the caller omits one and return it
-on the commit; the actor may be set once on the client.
+In the embedded runtime, preparing content at or below the enabled inline
+threshold makes no storage request. The Rust HTTP client also prepares content
+inline when the server advertises `filesystem.commits.inline_content` and the
+file fits `commit.max_inline_content_bytes`. Once capabilities are cached,
+writing a small file requires only the commit HTTP request.
 
-The whole-file convenience calls (`files.upload` / `files.uploadStream` /
-`files.upload_stream` / `Files.Upload` / `Files.UploadStream` in generated SDKs,
-`put_file_bytes()` / `put_file_stream()` in Rust) prepare content on each
-invocation. Embedded and Rust HTTP content at or under their enabled inline threshold uses byte identity,
-so the same bytes and commit ID replay. Larger content, and content prepared with
-inline writes disabled, stages a new object. Reusing an already-committed ID with
-a fresh object returns `commit_id_reuse_conflict`, even for identical bytes. The
-unused upload can be reclaimed after its grace period. These helpers do not read the change feed or
-substitute an earlier content reference. To recover across processes, retain the
-complete publication request; the remote CLI saves that request before
-submission and resends it directly.
+Prepared inline bytes have no expiry. Completed uploads retain their normal
+expiry; preparing content does not extend it. Preparation does not make a file
+visible. A commit is still required.
 
-Identical resubmission is the reconciliation mechanism. There is no separate
-commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
-a process restart, resubmit the same request with the same `commit_id` and
-read the definitive answer from the response.
+The whole-file convenience methods (`files.upload`, `files.uploadStream`,
+`files.upload_stream`, `Files.Upload`, `Files.UploadStream`,
+`put_file_bytes()`, and `put_file_stream()`) prepare content on every call.
+In Rust, small files can be prepared inline, so another call with the same
+bytes, commit ID, and options can replay the original commit. Larger files,
+files prepared with inline writes disabled, and uploads through the generated
+SDKs create new objects. When a new object is created, reusing the original
+commit ID conflicts, even for identical bytes. An unused upload can be reclaimed
+after its grace period.
 
-The WAL write-stop threshold refuses new commits with `maintenance_required`.
-A commit id the namespace already knows is still answered from its receipt, so
-reconciliation after `commit_outcome_unknown` or `deadline_exceeded` remains
-available under this backpressure. Writer-session, availability, and corruption
-checks still apply.
+For reliable retries, use the preparation methods above and retain the complete
+commit request. The remote CLI saves this request before submission so it can
+resend it after a process restart. If a helper call omits `commit_id`, each
+call generates a new one. The actor can be configured once on the client.
 
-The blocking Rust client retries operations labeled `idempotent` or `replayable`. It makes one attempt for operations labeled `not_idempotent`: namespace create, fork, and delete; upload-session begin; checkpoint create; maintenance; grep index collection; and store probe. Presigned direct PUT also receives one attempt.
+At the WAL write-stop threshold, new commits return `maintenance_required`.
+Retries of retained commits can still return their receipts, including after
+`commit_outcome_unknown` or `deadline_exceeded`. Writer-session, availability,
+and corruption checks still apply.
 
-Commits record a durable receipt binding the `commit_id` to its
-`committed_seq`; replay reads that receipt, and a reuse conflict reports the
-`committed_seq` it read. The replay window is the namespace's retention
-floor: metadata reorganization drops receipts whose `committed_seq` has
-fallen below the floor, so resubmitting from below the window is a new
-logical commit rather than a replay of the original.
+The blocking Rust client automatically retries operations labeled `idempotent`
+or `replayable`. It makes one attempt for operations labeled `not_idempotent`:
+namespace create, fork, and delete; upload-session begin; checkpoint create;
+maintenance; grep index collection; and store probe. Presigned direct PUT also
+receives one attempt.
 
 ### 5.3 Writer topology and fencing
 
@@ -1979,37 +1966,6 @@ create a directory and write into it:
 }
 ```
 
-One `content_tokens` proof covers every operation that names its
-`content_ref`; tokens naming a ref no operation puts are ignored.
-
-These three operations accept either uploaded or inline content:
-
-| Operation | Fields |
-| --- | --- |
-| `put_file` | `path`, `content_ref?`, `inline_content?`, `behavior?`, `expected_inode_id?`, `expected_revision_no?` |
-| `create_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref?`, `inline_content?` |
-| `put_file_revision_by_inode` | `inode_id`, `content_ref?`, `inline_content?`, `expected_revision_no` |
-
-Each operation requires exactly one of `content_ref` and `inline_content`.
-Both or neither returns `invalid_request` before planning. Requests reject
-unknown fields. `content_ref` keeps its proof in `content_tokens`.
-`inline_content` is the complete file as a standard padded base64 JSON string;
-an empty string writes an empty file. It needs no token. The server draws a
-fresh content ID and computes the byte length and SHA-256 itself.
-
-The 2 MiB JSON request-body limit includes base64 and all other request fields.
-An inline value above `commit.max_inline_content_bytes` returns `invalid_request`
-before any store write. If the request's inline total exceeds the writer's
-segment budget, shared submission stages the excess and keeps the commit atomic
-and its inline retry identity. Inline writes are disabled by default. When
-disabled, an inline request returns `not_supported` with `feature` set to
-`filesystem.commits.inline_content`; the capability flag and inline limit are absent.
-
-Resending the same inline bytes under the same commit ID replays the original
-`committed_seq`. Different bytes, even of the same length, conflict. Sending the
-same bytes as an uploaded reference under that ID also conflicts.
-
-
 The first operation that fails aborts the whole request — nothing it or its
 predecessors would have written becomes visible — and the error names the
 position that stopped it. Had the put above raced another writer:
@@ -2025,6 +1981,60 @@ position that stopped it. Had the put above raced another writer:
   }
 }
 ```
+
+**File content.** These three operations require either `content_ref` for
+uploaded content or `inline_content` for bytes included in the commit request:
+
+| Operation | Other fields (`?` means optional) |
+| --- | --- |
+| `put_file` | `path`, `behavior?`, `expected_inode_id?`, `expected_revision_no?` |
+| `create_file_by_inode` | `parent_inode_id`, `display_name` |
+| `put_file_revision_by_inode` | `inode_id`, `expected_revision_no` |
+
+Supplying both content fields, or neither, returns `invalid_request` before
+commit planning. Unknown fields are also rejected.
+
+For uploaded content, include the proof in `content_tokens`. One token covers
+every operation that uses its `content_ref`; tokens for unused references are
+ignored.
+
+For inline content, encode the complete file as a standard padded base64 JSON
+string. No content token is needed. For example, this request writes
+`hello\n` to `/hello.txt`:
+
+`Loonfs-Actor: usr_8f3c`
+
+```json
+{
+  "commit_id": "c_6d2a8f013e9b4c57a0f6d3b8217c95e4",
+  "operations": [
+    {
+      "kind": "put_file",
+      "path": "/hello.txt",
+      "inline_content": "aGVsbG8K"
+    }
+  ]
+}
+```
+
+An empty string writes an empty file. The content ID is assigned by the server,
+and the size and SHA-256 checksum are computed from the decoded bytes.
+
+Inline writes are enabled by default for files up to 64 KiB. The configured
+limit is advertised as `commit.max_inline_content_bytes`, alongside
+`filesystem.commits.inline_content`. If inline writes are disabled, both keys
+are absent. An inline request then returns `not_supported` with `feature` set
+to `filesystem.commits.inline_content`.
+
+The size limit applies to each file before base64 encoding. A larger value
+returns `invalid_request` before any storage write. The complete JSON body,
+including base64 content and all other fields, must also fit the 2 MiB request
+limit.
+
+Some inline files may be uploaded to the content store before the commit to
+meet the configured WAL limits. All operations still commit together. Retry
+the same request with the same inline bytes and commit ID, even if those bytes
+were stored separately. The retry rules in section 5.2 apply.
 
 Move and copy accept the same `behavior` choice as put: `no_replace` (the
 default) fails when the destination is occupied, and `replace` replaces a
@@ -2609,10 +2619,11 @@ bypass that service limit and keep object traffic off the server. So
 any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.
 
-A direct download first materializes the object for content that a commit carried
-inline and that has not been folded yet. A deployment that cannot write content
-objects answers `content_not_materialized`; use the proxied route or retry after
-the next fold.
+A direct download requires a content object. If a file's bytes are still in the
+WAL and no object exists yet, the server writes one before returning a download
+URL. If the deployment cannot write that object, the request returns
+`content_not_materialized`. Read through the proxied content route, which can
+serve the WAL bytes directly, or retry after a fold writes the object.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a path and, optionally,
 the revision to read in its JSON body:

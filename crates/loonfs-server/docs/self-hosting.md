@@ -359,19 +359,20 @@ slack, HTTP request buffers, and the metadata/working copies a publication
 loads. Size process memory for those costs and the separate fold/cache limits
 too. Embedded hosts set the same limits with `FsWriterBuilder::publication_limits`.
 
-Hosted servers use the `[inline_content]` table with the settings below. Omit
-`inline_content_threshold_bytes` to keep the policy off. When enabled, capability
-discovery advertises `filesystem.commits.inline_content` and
-`commit.max_inline_content_bytes`.
+Hosted servers use the `[inline_content]` table with the settings below. Inline
+writes are enabled by default at a 64 KiB threshold. Set
+`inline_content_threshold_bytes = false` to disable them. Capability discovery
+advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes`
+by default and omits both when disabled.
 
 Embedded hosts configure inline writes with `FsWriterBuilder::inline_content`
 and `InlineContentOptions`. These settings do not change reader format limits.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `inline_content_threshold_bytes` | `None` | Prepares content at or under this size inline; `None` disables inline writes. |
+| `inline_content_threshold_bytes` | 64 KiB | Prepares content at or under this size inline; `None` in embedded options or `false` in server TOML disables inline writes. |
 | `inline_content_segment_budget_bytes` | 1 MiB | Limits inline bytes in one WAL segment and stages overflow in operation order. |
-| `inline_content_fold_at_bytes` | 8 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
+| `inline_content_fold_at_bytes` | 2 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
 | `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when known unfolded and admitted inline bytes would exceed this size. |
 
 The tail limit is enforced against the writer's known tail. An absent projection
@@ -383,7 +384,7 @@ The threshold cannot exceed 256 KiB and the segment budget cannot exceed 4 MiB.
 The segment budget, fold trigger, and tail limit must be positive, and the fold
 trigger cannot exceed the tail limit. Inline payloads count toward the existing
 publication byte limits. Explicit metadata maintenance uses
-`MetadataMaintenanceOptions::inline_content_fold_at_bytes`, also 8 MiB by default,
+`MetadataMaintenanceOptions::inline_content_fold_at_bytes`, also 2 MiB by default,
 when a writer-derived handle has a cached tail count. Maintenance probes use the
 segment threshold and manifest descriptors; they do not replay the tail.
 

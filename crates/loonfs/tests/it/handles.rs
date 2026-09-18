@@ -717,6 +717,10 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         let store: SharedObjectStore = failing.clone();
         let writer = FsWriter::builder_with_store(store)
             .writer_id("fold-failure-writer")
+            .inline_content(loonfs::InlineContentOptions {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            })
             .build()
             .await
             .expect("build writer");

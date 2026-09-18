@@ -611,10 +611,17 @@ mod tests {
             LocalFsStore::new(store_dir).expect("create local-fs store"),
         ));
         let store: SharedObjectStore = watched.clone();
-        let target =
-            EmbeddedTarget::over_store(store, Some("put-tree-test"), TraceStoreKind::LocalFs)
-                .await
-                .expect("build embedded target");
+        let target = EmbeddedTarget::over_store(
+            store,
+            Some("put-tree-test"),
+            TraceStoreKind::LocalFs,
+            loonfs::InlineContentOptions {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("build embedded target");
         let namespace = NamespaceId::parse("demo").expect("valid namespace id");
         let context = CommandContext {
             profile_name: "default".to_owned(),

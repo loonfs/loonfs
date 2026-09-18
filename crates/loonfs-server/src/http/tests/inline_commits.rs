@@ -20,14 +20,22 @@ struct Harness {
 
 impl Harness {
     async fn new(threshold: Option<usize>, segment_budget: usize) -> Self {
+        Self::with_policy(crate::config::InlineContentOverrides {
+            inline_content_threshold_bytes: threshold,
+            inline_content_segment_budget_bytes: Some(segment_budget),
+            ..Default::default()
+        })
+        .await
+    }
+
+    async fn with_policy(inline_content: crate::config::InlineContentOverrides) -> Self {
         let directory = tempdir().expect("directory");
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any(),
         ));
         let mut config = test_config(directory.path(), "inline-host");
-        config.inline_content.inline_content_threshold_bytes = threshold;
-        config.inline_content.inline_content_segment_budget_bytes = Some(segment_budget);
+        config.inline_content = inline_content;
         config.maintenance = crate::config::MaintenanceMode::Disabled;
         config.grep = Default::default();
         let (router, state) = app(config, options_with_store(store.clone()))
@@ -141,8 +149,23 @@ fn created_content(response: &Value) -> (InodeId, ContentRef) {
 }
 
 #[tokio::test]
-async fn inline_commits_write_only_wal_and_replay_by_bytes() {
-    let harness = Harness::new(Some(4), 1024).await;
+async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
+    let harness = Harness::with_policy(Default::default()).await;
+    let (status, body) = harness
+        .request("GET", "/v0/capabilities", Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let capabilities: CapabilityDocument = serde_json::from_slice(&body).expect("capabilities");
+    assert_eq!(
+        capabilities.features.get(FEATURE_COMMIT_INLINE_CONTENT),
+        Some(&true)
+    );
+    assert_eq!(
+        capabilities
+            .limits
+            .get(LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES),
+        Some(&(64 * 1024))
+    );
     let request = inline_request("small", "/file", "c2FtZQ==");
     let (status, first) = harness.commit(request.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");

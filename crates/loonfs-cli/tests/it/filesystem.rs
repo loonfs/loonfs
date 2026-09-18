@@ -556,8 +556,6 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         json_error(&conflicted)
     );
 
-    // Embedded PUTs upload a new object on each command invocation.
-    // The original receipt remains authoritative even when the bytes match.
     let local_payload = payload.to_str().expect("utf-8 path");
     let first = harness.run(&[
         "--json",
@@ -576,12 +574,11 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         "--commit-id",
         "pinned-put",
     ]);
-    assert_failure(&rerun);
-    assert_eq!(json_error(&rerun)["code"], "commit_id_reuse_conflict");
+    assert_success(&rerun);
     assert_eq!(
-        json_error(&rerun)["details"]["committed_seq"],
+        json_data(&rerun)["committed_seq"],
         json_data(&first)["committed_seq"],
-        "the conflict identifies the original publication"
+        "identical inline bytes replay the original publication"
     );
 
     // Different bytes under that commit id are a different operation, and
@@ -714,7 +711,8 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
 
-    let payload = b"the bytes that were committed".to_vec();
+    // Above the inline threshold, so the bytes live in a content object.
+    let payload: Vec<u8> = (0..=64 * 1024).map(|index| index as u8).collect();
     let local = harness.temp_dir.path().join("source.bin");
     fs::write(&local, &payload).expect("write payload");
     assert_success(&harness.run(&["put", local.to_str().expect("utf-8 path"), "/doc.bin"]));
@@ -2218,8 +2216,11 @@ fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
 #[test]
 fn a_remote_put_replays_its_exact_request_after_the_upload_session_is_gone() {
     let harness = Harness::new();
-    let server =
-        harness.start_external_server(harness.write_server_config("remote", "put-recovery"));
+    let server = harness.start_external_server(harness.write_server_config_with(
+        "remote",
+        "put-recovery",
+        "\n[inline_content]\ninline_content_threshold_bytes = false\n",
+    ));
     assert_success(&harness.run(&[
         "profile",
         "create",

@@ -86,10 +86,15 @@ async fn reader_reuses_published_projection_after_control_cache_eviction() {
     let other_namespace_id = NamespaceId::parse("other").expect("namespace id");
     let object_store = store(temp_dir.path());
     let fs = open_runtime_with_async(object_store.clone(), "shared-projection", |builder| {
-        builder.runtime_cache(RuntimeCacheConfig {
-            max_cached_namespaces: 1,
-            ..Default::default()
-        })
+        builder
+            .inline_content(loonfs::InlineContentOptions {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            })
+            .runtime_cache(RuntimeCacheConfig {
+                max_cached_namespaces: 1,
+                ..Default::default()
+            })
     })
     .await;
     for namespace_id in [&namespace_id, &other_namespace_id] {

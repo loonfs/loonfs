@@ -71,11 +71,11 @@ impl Default for PublicationLimits {
 /// Writer policy for content carried in WAL segments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineContentOptions {
-    /// Maximum size prepared inline; `None` disables inline preparation by default.
+    /// Maximum size prepared inline; defaults to 64 KiB. `None` disables inline preparation.
     pub inline_content_threshold_bytes: Option<usize>,
     /// Maximum inline bytes in one WAL segment; defaults to 1 MiB.
     pub inline_content_segment_budget_bytes: usize,
-    /// Unfolded inline bytes that make a fold due; defaults to 8 MiB.
+    /// Unfolded inline bytes that make a fold due; defaults to 2 MiB.
     pub inline_content_fold_at_bytes: usize,
     /// Limit on known unfolded and admitted inline bytes; defaults to 32 MiB.
     /// An absent projection counts as zero. After a process starts, the first
@@ -87,9 +87,9 @@ pub struct InlineContentOptions {
 impl Default for InlineContentOptions {
     fn default() -> Self {
         Self {
-            inline_content_threshold_bytes: None,
+            inline_content_threshold_bytes: Some(64 * 1024),
             inline_content_segment_budget_bytes: 1024 * 1024,
-            inline_content_fold_at_bytes: 8 * 1024 * 1024,
+            inline_content_fold_at_bytes: 2 * 1024 * 1024,
             inline_content_tail_limit_bytes: 32 * 1024 * 1024,
         }
     }

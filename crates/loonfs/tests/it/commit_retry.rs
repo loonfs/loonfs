@@ -1,7 +1,7 @@
 //! File publication replays the same prepared content and commit ID.
-//! Uploading again creates a new object and must preserve a reuse conflict.
+//! Inline retries replay by bytes; staged uploads retain their object identity.
 
-use crate::common::{open_runtime_async, store, TestRuntime};
+use crate::common::{open_runtime_async, open_runtime_with_async, store, TestRuntime};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
@@ -169,7 +169,7 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
 }
 
 #[tokio::test]
-async fn reuploading_identical_bytes_under_the_same_commit_id_conflicts() {
+async fn repeating_identical_inline_bytes_under_the_same_commit_id_replays() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
@@ -181,6 +181,35 @@ async fn reuploading_identical_bytes_under_the_same_commit_id_conflicts() {
         .expect("first put");
     let rerun = runtime
         .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect("identical inline bytes replay");
+
+    assert_eq!(rerun, first);
+    assert_eq!(
+        runtime
+            .reader
+            .get_file_bytes(&namespace_id, PATH)
+            .await
+            .expect("read file")
+            .bytes,
+        b"stable bytes\n"
+    );
+}
+
+#[tokio::test]
+async fn reuploading_identical_bytes_above_the_inline_threshold_conflicts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+    let payload = vec![7u8; 64 * 1024 + 1];
+
+    let first = runtime
+        .put_file_bytes(&namespace_id, PATH, &payload, options(&commit_id))
+        .await
+        .expect("first put");
+    let rerun = runtime
+        .put_file_bytes(&namespace_id, PATH, &payload, options(&commit_id))
         .await
         .expect_err("a fresh upload is a different request");
 
@@ -196,7 +225,7 @@ async fn reuploading_identical_bytes_under_the_same_commit_id_conflicts() {
             .await
             .expect("read file")
             .bytes,
-        b"stable bytes\n"
+        payload
     );
 }
 
@@ -618,7 +647,13 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
 #[tokio::test]
 async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let runtime = open_runtime_with_async(store(temp_dir.path()), "writer-a", |builder| {
+        builder.inline_content(loonfs::InlineContentOptions {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        })
+    })
+    .await;
     let namespace_id = namespace(&runtime).await;
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 

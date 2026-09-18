@@ -104,12 +104,13 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
+    let mut config = test_config(
         temp_dir.path().join("store"),
         "loonfs-server-put",
         "http-put",
-    ))
-    .await;
+    );
+    config.inline_content.inline_content_threshold_bytes = None;
+    let harness = start_server(config).await;
 
     harness
         .client
@@ -740,12 +741,13 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
+    let mut config = test_config(
         temp_dir.path().join("store"),
         "loonfs-server-trimmed",
         "http-trimmed",
-    ))
-    .await;
+    );
+    config.inline_content.inline_content_threshold_bytes = None;
+    let harness = start_server(config).await;
 
     let namespace = namespace_id("demo");
     harness
