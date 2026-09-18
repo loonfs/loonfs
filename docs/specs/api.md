@@ -425,48 +425,43 @@ reference.
 
 ## 5. Minimal upload, commit, and change-feed model
 
-The writer surface has three stages:
+To write a file, prepare its content and then commit the change. Committed
+changes are available through the change feed in sequence order.
 
-1. make content durable
-2. make metadata visible
-3. observe ordered changes through the change feed
+Uploaded content is durable before the commit, but the file is not yet visible.
+Inline content can become durable and visible in the same write. In both cases,
+the commit takes effect when the next numbered WAL segment is written with
+put-if-absent. Accepting a request into a batch does not mean it has committed.
 
-This split is deliberate:
+With the embedded `loonfs::FsWriter`, you can prepare content separately from
+committing it. Call `prepare_file_bytes` with the file's bytes. Files at or below
+the enabled inline threshold stay in memory; other files are uploaded to the
+content store. To import existing content, call `prepare_content_ref`. The bytes
+are verified and copied to a new object owned by the destination namespace.
+Both calls return an opaque prepared value.
 
-- content durability is not visibility;
-- put-if-absent of the next numbered WAL segment commits its records and
-  makes them visible.
+Use `put_file_prepared` to commit that value. Inline bytes may need to be
+uploaded first if WAL limits are reached. Already uploaded content requires no
+further content-store I/O during publication. For an upload session,
+`complete_upload_prepared` returns both the completion response and a prepared
+value. Over HTTP, include either inline bytes or a content reference with its
+content token in the commit request.
 
-A commit request may therefore be rejected immediately, or tentatively
-accepted into a WAL batch, without yet being a committed or successful change.
+When preparation requires an upload, the upload session is recorded before the
+content object is written and completed afterward. Prepared uploads have a
+deadline no later than the expiry of the last token the completed session could
+issue. The deadline is checked when the commit enters a batch and again just
+before the numbered WAL write. Both checks use the request clock plus the time
+elapsed since the publication attempt began. This matches the lifetime of
+remote upload tokens (section 6.3; format spec, "Garbage collection", rule 11)
+and prevents publication from referring to content that may have been reclaimed.
+Prepared inline bytes have no expiry.
 
-The embedded `loonfs::FsWriter` makes the first two stages independently
-drivable. `prepare_file_bytes` stages bytes, while `prepare_content_ref`
-fully validates an existing reference and re-homes its bytes under a fresh
-content identity owned by the target namespace; both return opaque prepared
-content. `put_file_prepared` consumes that evidence without content-store I/O
-during publication. `complete_upload_prepared` returns the ordinary
-completion response together with the same evidence. These are embedded
-conveniences, not HTTP operations; hosted clients continue to carry validated
-content tokens on the existing wire requests.
-
-Staging is staging wherever it happens, so `prepare_file_bytes` opens an
-upload session for the object it writes, exactly as a remote upload does: the
-session record lands before the bytes and completes after them. The opaque
-prepared value carries an admission deadline no later than the expiry of the
-last token the completed session could issue. Publication checks it at batch
-admission and immediately before the numbered WAL put, using the request clock plus
-the elapsed time of the whole publication attempt. This is the same horizon
-that bounds remote upload tokens (section 6.3; format spec, "Garbage
-collection", rule 11), so content cannot
-be reclaimed and then admitted through an older in-process proof.
-
-Prepared evidence is bound to both the namespace and its content store. Two
-namespaces sharing a content store therefore cannot exchange prepared values:
-their collectors have different metadata roots and upload-session records.
-The explicit `prepare_content_ref` import is the safe handoff when only a ref
-is available; the returned prepared value names the fresh target-owned ref,
-not the input ref.
+Prepared content belongs to one namespace and content store. Two namespaces
+cannot share a prepared value, even if they use the same content store: uploads
+and garbage collection are tracked separately for each namespace. Use
+`prepare_content_ref` to import content into another namespace. The result
+refers to the new copy owned by that namespace.
 
 ### 5.1 Commit identity and preconditions
 
@@ -681,8 +676,13 @@ retry rules depend on how it was supplied:
 | Inline content | The original bytes. Different bytes return `commit_id_reuse_conflict`, even if the file size is unchanged. |
 
 Inline retry rules still apply if the bytes are written to a separate content
-object to stay within WAL limits. Switching between inline bytes and an
-uploaded reference changes the request's identity, even for identical content.
+object to stay within WAL limits. Switching between inline bytes and an uploaded
+reference changes the request's identity, even for identical content.
+
+If the original commit succeeded and its receipt is still available, retrying
+the same request returns the original result without uploading the file again.
+This also works after a restart or on another server. Changed bytes or a
+different subject still return `commit_id_reuse_conflict`.
 
 **Prepared content.** Prepare the content once, retain the result, and reuse
 it with the same explicit commit ID, path, actor, and options on each attempt.

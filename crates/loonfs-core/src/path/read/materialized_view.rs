@@ -27,9 +27,9 @@ use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
-    ContentRef, ContentStoreId, DirectoryPageCursor, DisplayName, FileBytes, FileRevision,
-    FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo, NamespaceId, Page, PageRequest,
-    PathEntry, PathEntryKind, RevisionNo, TrashEntry, TrashPageCursor,
+    CommitId, ContentRef, ContentStoreId, DirectoryPageCursor, DisplayName, FileBytes,
+    FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo, NamespaceId, Page,
+    PageRequest, PathEntry, PathEntryKind, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -153,6 +153,14 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
+    pub(crate) async fn has_retained_commit_receipt(&self, commit_id: &CommitId) -> Result<bool> {
+        Ok(self
+            .metadata_view()
+            .find_commit_receipt(commit_id)
+            .await?
+            .is_some())
+    }
+
     #[cfg(test)]
     pub(crate) fn head(&self) -> &NamespaceReadState {
         &self.head

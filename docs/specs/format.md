@@ -537,7 +537,9 @@ Every WAL commit and commit receipt stores a `semantic_commit_fingerprint`. It r
 
 While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
 
-Content a commit carries inline is identified by its bytes. While the receipt is retained, a retry with the same inline bytes replays the original commit, even with a different content ID. Different inline bytes conflict.
+Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`.
+
+Check for the commit receipt before uploading inline bytes to the content store. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
 
 The guarantee is bounded by retention. Receipts below the retention floor can be removed during compaction. Once a receipt is gone, the old ID cannot be distinguished from an unused ID and a later request can execute as a new mutation. A receipt that has not yet been compacted may still be available, but callers must not depend on that extra lifetime.
 
