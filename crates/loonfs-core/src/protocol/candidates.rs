@@ -243,15 +243,11 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     Ok(change)
 }
 
-/// Checks that each put's content is covered by a staged proof or an equal inline value.
-fn validate_commit_content_references(
+pub(crate) fn validate_inline_content_references<'a>(
     request: &CommitRequest,
-    admissions: &[PreparedContent],
-    inline_content: &[InlineContent],
+    inline_content: &'a [InlineContent],
     namespace_id: &NamespaceId,
-    content_store_id: &ContentStoreId,
-    now_ms: u64,
-) -> Result<()> {
+) -> Result<HashMap<&'a ContentId, &'a loonfs_api::ContentRef>> {
     let references: HashSet<_> = request
         .operations
         .iter()
@@ -280,6 +276,31 @@ fn validate_commit_content_references(
             )));
         }
     }
+    for reference in &references {
+        if inline_by_content_id
+            .get(&reference.content_id)
+            .is_some_and(|inline| *inline != *reference)
+        {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "inline content `{}` does not match every reference",
+                reference.content_id
+            )));
+        }
+    }
+    Ok(inline_by_content_id)
+}
+
+/// Checks that each put's content is covered by a staged proof or an equal inline value.
+fn validate_commit_content_references(
+    request: &CommitRequest,
+    admissions: &[PreparedContent],
+    inline_content: &[InlineContent],
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    now_ms: u64,
+) -> Result<()> {
+    let inline_by_content_id =
+        validate_inline_content_references(request, inline_content, namespace_id)?;
     let mut admissions_by_content_id: HashMap<&ContentId, Vec<&PreparedContent>> =
         HashMap::with_capacity(admissions.len());
     for admission in admissions {
@@ -294,12 +315,7 @@ fn validate_commit_content_references(
         .filter_map(FilesystemOperation::content_ref)
     {
         let content_id = &content_ref.content_id;
-        if let Some(inline_reference) = inline_by_content_id.get(content_id) {
-            if *inline_reference != content_ref {
-                return Err(CoreError::InvalidCommitRequest(format!(
-                    "inline content `{content_id}` does not match every reference"
-                )));
-            }
+        if inline_by_content_id.contains_key(content_id) {
             continue;
         }
         let admitted = admissions_by_content_id

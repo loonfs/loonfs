@@ -4,6 +4,7 @@ use super::{CoreError, NamespaceId, PreparedCandidate};
 use crate::PublicationLimits;
 use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Semaphore};
 
@@ -23,6 +24,7 @@ struct Usage {
 struct RequestWeight {
     requests: usize,
     estimated_bytes: usize,
+    inline_bytes: usize,
 }
 
 impl PublicationAdmission {
@@ -50,6 +52,11 @@ impl PublicationAdmission {
         namespace_id: &NamespaceId,
         candidate: &PreparedCandidate,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
+        Self::validate_candidate(candidate)?;
+        self.acquire(namespace_id, candidate.estimated_retained_bytes)
+    }
+
+    pub(super) fn validate_candidate(candidate: &PreparedCandidate) -> Result<(), CoreError> {
         let document_bytes = candidate
             .wal_record_bytes_upper_bound
             .saturating_add(WAL_SEGMENT_OVERHEAD_BYTES);
@@ -59,7 +66,7 @@ impl PublicationAdmission {
                 max_bytes: MAX_WAL_SEGMENT_BYTES,
             });
         }
-        self.acquire(namespace_id, candidate.estimated_retained_bytes)
+        Ok(())
     }
 
     pub(super) fn acquire(
@@ -102,6 +109,7 @@ impl PublicationAdmission {
             budget: Arc::clone(self),
             namespace_id: namespace_id.clone(),
             estimated_bytes,
+            inline_bytes: AtomicUsize::new(0),
         }))
     }
 }
@@ -110,6 +118,46 @@ pub(super) struct AdmissionPermit {
     budget: Arc<PublicationAdmission>,
     namespace_id: NamespaceId,
     estimated_bytes: usize,
+    inline_bytes: AtomicUsize,
+}
+
+impl AdmissionPermit {
+    pub(super) fn reserve_inline(
+        &self,
+        sizes: impl Iterator<Item = usize>,
+        unfolded_bytes: usize,
+        limit: usize,
+    ) -> usize {
+        let mut usage = self.budget.lock_usage();
+        let namespace = usage
+            .namespaces
+            .get_mut(&self.namespace_id)
+            .expect("admitted namespace should have usage");
+        let mut remaining = limit
+            .saturating_sub(unfolded_bytes)
+            .saturating_sub(namespace.inline_bytes);
+        let mut kept = 0;
+        let mut reserved = 0;
+        for size in sizes {
+            if size > remaining {
+                break;
+            }
+            remaining -= size;
+            reserved += size;
+            kept += 1;
+        }
+        namespace.inline_bytes += reserved;
+        self.inline_bytes.store(reserved, Ordering::Relaxed);
+        kept
+    }
+
+    pub(super) fn release_inline(&self) {
+        let mut usage = self.budget.lock_usage();
+        let bytes = self.inline_bytes.swap(0, Ordering::Relaxed);
+        if let Some(namespace) = usage.namespaces.get_mut(&self.namespace_id) {
+            namespace.inline_bytes -= bytes;
+        }
+    }
 }
 
 impl Drop for AdmissionPermit {
@@ -120,6 +168,7 @@ impl Drop for AdmissionPermit {
         if let Some(namespace) = usage.namespaces.get_mut(&self.namespace_id) {
             namespace.requests -= 1;
             namespace.estimated_bytes -= self.estimated_bytes;
+            namespace.inline_bytes -= self.inline_bytes.load(Ordering::Relaxed);
             if namespace.requests == 0 {
                 usage.namespaces.remove(&self.namespace_id);
             }
@@ -132,14 +181,14 @@ impl Drop for AdmissionPermit {
 /// retries share it instead of competing for a second admission slot.
 pub(super) struct AdmittedWaiter<T> {
     sender: oneshot::Sender<T>,
-    _permit: Arc<AdmissionPermit>,
+    pub(super) permit: Arc<AdmissionPermit>,
 }
 
 impl<T> AdmittedWaiter<T> {
     pub(super) fn new(sender: oneshot::Sender<T>, permit: &Arc<AdmissionPermit>) -> Self {
         Self {
             sender,
-            _permit: Arc::clone(permit),
+            permit: Arc::clone(permit),
         }
     }
 

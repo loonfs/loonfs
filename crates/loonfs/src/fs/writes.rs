@@ -12,6 +12,7 @@ use crate::{
     UpdateAttributesOptions,
 };
 use crate::{Result, RuntimeError};
+use futures::StreamExt;
 use loonfs_core::NamespaceWriterEngine;
 use std::sync::Arc;
 
@@ -58,12 +59,11 @@ impl FsWriter {
 
     /// Writes file bytes to a path.
     ///
-    /// The bytes become durable content first; metadata referencing them is
-    /// published only afterward. `options.behavior` selects create-only or
-    /// replace semantics.
-    /// Each call stages new content. For retries, retain the result of
-    /// [`Self::prepare_file_bytes`] and use [`Self::put_file_prepared`] with
-    /// the same explicit commit ID and options.
+    /// Content at or under the configured inline threshold is prepared inline
+    /// and identified by its bytes. A rerun with the same bytes and commit ID
+    /// replays. Larger content stages, so a rerun conflicts. At every size,
+    /// retain [`Self::prepare_file_bytes`]'s result and retry with
+    /// [`Self::put_file_prepared`], the same commit ID, and unchanged options.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.put",
@@ -95,10 +95,11 @@ impl FsWriter {
 
     /// Writes a file from a payload read once from its source.
     ///
-    /// The stream is hashed while it is forwarded to object storage, using
-    /// one transfer part of memory. Each call stages new content. For retries,
-    /// retain [`Self::prepare_file_stream`]'s result and call
-    /// [`Self::put_file_prepared`] with the same explicit commit ID and options.
+    /// Content at or under the configured inline threshold is prepared inline
+    /// and identified by its bytes. A rerun with the same bytes and commit ID
+    /// replays. Larger content stages, so a rerun conflicts. At every size,
+    /// retain [`Self::prepare_file_stream`]'s result and retry with
+    /// [`Self::put_file_prepared`], the same commit ID, and unchanged options.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.put",
@@ -126,16 +127,11 @@ impl FsWriter {
             .await
     }
 
-    /// Stores file bytes and returns proof that they are ready to publish.
+    /// Prepares file bytes for publication.
     ///
-    /// Preparation writes the upload-session record, the content object, and the
-    /// completed session record, in that order. If publication later fails, the
-    /// unpublished object is reclaimed after the content-reclamation grace
-    /// period.
-    ///
-    /// The returned proof remains valid through the completed upload's receipt
-    /// horizon. Publication rejects it after that deadline so garbage
-    /// collection cannot reclaim the object before a later commit uses it.
+    /// Content at or under the configured inline threshold needs no store
+    /// request and has no expiry. Larger content writes an upload session and
+    /// object. Its proof expires at the completed upload's receipt horizon.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.prepare",
@@ -166,6 +162,17 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
+        if self
+            .bits
+            .inline_content
+            .inline_content_threshold_bytes
+            .is_some_and(|threshold| bytes.len() <= threshold)
+        {
+            return Ok(PreparedContent::inline(
+                namespace_id.clone(),
+                bytes::Bytes::copy_from_slice(bytes),
+            ));
+        }
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
@@ -175,14 +182,8 @@ impl FsWriter {
             .await?)
     }
 
-    /// Stages a streamed payload as durable content for later publication.
-    ///
-    /// The stream is hashed as it is forwarded to object storage and never
-    /// held whole, so a large file costs one transfer part of memory rather
-    /// than its own size. What comes back is the same [`PreparedContent`]
-    /// [`Self::prepare_file_bytes`] produces — same full-object checksum,
-    /// same publication path, same guarantees — so callers that
-    /// already hold their bytes have no reason to come here.
+    /// Prepares a stream, buffering at most the inline threshold plus one byte
+    /// before choosing inline content or forwarding the stream to storage.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.prepare",
@@ -209,8 +210,32 @@ impl FsWriter {
     async fn prepare_file_stream_inner(
         &self,
         namespace_id: &NamespaceId,
-        body: ByteStream,
+        mut body: ByteStream,
     ) -> Result<PreparedContent> {
+        if let Some(threshold) = self.bits.inline_content.inline_content_threshold_bytes {
+            let mut buffered = bytes::BytesMut::with_capacity(threshold + 1);
+            while buffered.len() <= threshold {
+                let Some(chunk) = body.next().await else {
+                    return Ok(PreparedContent::inline(
+                        namespace_id.clone(),
+                        buffered.freeze(),
+                    ));
+                };
+                let mut chunk = chunk.map_err(|error| crate::CoreError::Store {
+                    object_key: "upload body".to_owned(),
+                    message: error.public_message().into_owned(),
+                    class: loonfs_objectstore::ObjectStoreErrorClass::of(&error),
+                })?;
+                let take = chunk.len().min(threshold + 1 - buffered.len());
+                buffered.extend_from_slice(&chunk.split_to(take));
+                if buffered.len() > threshold {
+                    body = futures::stream::iter([Ok(buffered.freeze()), Ok(chunk)])
+                        .chain(body)
+                        .boxed();
+                    break;
+                }
+            }
+        }
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
@@ -222,7 +247,8 @@ impl FsWriter {
 
     /// Publishes a file revision from already-prepared content.
     ///
-    /// Submission and publication perform no content I/O. `options.behavior`
+    /// Inline content may stage before submission when a policy limit is reached.
+    /// `options.behavior`
     /// selects create-only or replace semantics. Retry with a clone of the
     /// prepared content, the same explicit `options.commit.commit_id`, and
     /// unchanged options. A missing commit ID generates a new one on each call.
@@ -763,8 +789,8 @@ impl FsWriter {
 
     /// Applies one commit request with prepared content proofs.
     ///
-    /// Submission and publication perform no content I/O. One prepared value
-    /// covers every operation that uses its content ref.
+    /// Inline content may stage before submission when a policy limit is reached.
+    /// One prepared value covers every operation that uses its content ref.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.apply_commit",
@@ -846,6 +872,7 @@ impl FsWriter {
 pub(crate) struct EnginePublishResult {
     pub(crate) results: Vec<Result<Commit>>,
     pub(crate) wal_tail_segments: u64,
+    pub(crate) wal_tail_inline_bytes: usize,
 }
 
 /// Publishes already-classified candidates as one batch — one WAL
@@ -871,6 +898,7 @@ pub(crate) async fn publish_batch_with_engine(
             return EnginePublishResult {
                 results: candidates.iter().map(|_| Err(error.clone())).collect(),
                 wal_tail_segments: 0,
+                wal_tail_inline_bytes: 0,
             };
         }
     };
@@ -911,6 +939,7 @@ pub(crate) async fn publish_batch_with_engine(
         }
     }
     let wal_tail_segments = publish.wal_tail_segments;
+    let wal_tail_inline_bytes = publish.wal_tail_inline_bytes;
     let results = publish
         .results
         .into_iter()
@@ -922,11 +951,13 @@ pub(crate) async fn publish_batch_with_engine(
             namespace_id: namespace_id.clone(),
             committed_through_seq: highest_committed_seq(&results),
             wal_tail_segments,
+            wal_tail_inline_bytes,
         },
     );
     EnginePublishResult {
         results,
         wal_tail_segments,
+        wal_tail_inline_bytes,
     }
 }
 

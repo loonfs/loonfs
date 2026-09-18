@@ -2,7 +2,7 @@
 
 use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
-    MaintenanceProbe, MaintenanceRunReport,
+    MaintenanceProbe, MaintenanceRunReport, NamespacePublication,
 };
 use crate::{
     ErrorCode, FsMaintenance, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
@@ -74,6 +74,13 @@ impl MaintenanceJob for MetadataMaintenanceJob {
             Err(error) if metadata_has_nothing_to_maintain(&error) => Ok(MaintenanceProbe::Idle),
             Err(error) => Err(error),
         }
+    }
+
+    fn should_run_after_publication(&self, publication: &NamespacePublication) -> bool {
+        self.options.flush_is_due(
+            publication.wal_tail_segments,
+            publication.wal_tail_inline_bytes,
+        )
     }
 
     fn should_run_after_fold(&self) -> bool {

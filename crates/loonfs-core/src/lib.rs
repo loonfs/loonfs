@@ -120,6 +120,8 @@ pub mod cache {
         load_deleted_namespace_diagnostics, load_namespace, load_namespace_diagnostics,
         load_namespace_flush_basis, NamespaceFlushBasis, NamespaceStorageDiagnostics,
     };
+    #[cfg(any(test, feature = "test-support"))]
+    pub use crate::namespace::status::{load_namespace_wal_tail_usage, NamespaceWalTailUsage};
 }
 
 /// Typed loaders for namespace control objects and verified catalog state.

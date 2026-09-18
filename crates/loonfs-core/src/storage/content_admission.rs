@@ -8,6 +8,7 @@
 
 use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::storage::inline_content::InlineContent;
 use base64::Engine as _;
 use loonfs_api::v0::ContentToken;
 use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceId};
@@ -53,40 +54,67 @@ impl CompletedUploadReceipt {
 /// Opaque evidence that a content reference was prepared for publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedContent {
-    namespace_id: NamespaceId,
-    content_store_id: ContentStoreId,
-    content_ref: ContentRef,
-    expires_at_ms: u64,
+    kind: PreparedContentKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreparedContentKind {
+    Inline(InlineContent),
+    Staged {
+        namespace_id: NamespaceId,
+        content_store_id: ContentStoreId,
+        content_ref: ContentRef,
+        expires_at_ms: u64,
+    },
 }
 
 impl PreparedContent {
+    /// Prepares bytes without store access or an expiry.
+    pub fn inline(namespace_id: NamespaceId, bytes: bytes::Bytes) -> Self {
+        Self {
+            kind: PreparedContentKind::Inline(InlineContent::new(
+                namespace_id,
+                ContentId::generate(),
+                bytes,
+            )),
+        }
+    }
+
+    pub(crate) fn inline_content(&self) -> Option<&InlineContent> {
+        match &self.kind {
+            PreparedContentKind::Inline(value) => Some(value),
+            PreparedContentKind::Staged { .. } => None,
+        }
+    }
+
     pub(crate) fn estimated_payload_bytes(&self) -> usize {
-        self.namespace_id
-            .as_str()
-            .len()
-            .saturating_add(self.content_store_id.as_str().len())
-            .saturating_add(self.content_ref.content_id.as_str().len())
-            .saturating_add(self.content_ref.checksum.value.len())
+        match &self.kind {
+            PreparedContentKind::Inline(value) => value.bytes().len(),
+            PreparedContentKind::Staged {
+                namespace_id,
+                content_store_id,
+                content_ref,
+                ..
+            } => namespace_id
+                .as_str()
+                .len()
+                .saturating_add(content_store_id.as_str().len())
+                .saturating_add(content_ref.content_id.as_str().len())
+                .saturating_add(content_ref.checksum.value.len()),
+        }
     }
 
     pub(crate) fn content_id(&self) -> &ContentId {
-        &self.content_ref.content_id
+        &self.content_ref().content_id
     }
 
-    /// Unbounded admission for a ref the caller keeps externally rooted;
-    /// no deadline is derivable from the reference alone.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_durable_content_write(
         namespace_id: NamespaceId,
         content_store_id: ContentStoreId,
         content_ref: ContentRef,
     ) -> Self {
-        Self {
-            namespace_id,
-            content_store_id,
-            content_ref,
-            expires_at_ms: u64::MAX,
-        }
+        Self::for_completed_upload(namespace_id, content_store_id, content_ref, u64::MAX)
     }
 
     pub(crate) fn for_completed_upload(
@@ -96,10 +124,12 @@ impl PreparedContent {
         expires_at_ms: u64,
     ) -> Self {
         Self {
-            namespace_id,
-            content_store_id,
-            content_ref,
-            expires_at_ms,
+            kind: PreparedContentKind::Staged {
+                namespace_id,
+                content_store_id,
+                content_ref,
+                expires_at_ms,
+            },
         }
     }
 
@@ -110,15 +140,28 @@ impl PreparedContent {
         content_ref: &ContentRef,
         now_ms: u64,
     ) -> bool {
-        self.namespace_id == *namespace_id
-            && self.content_store_id == *content_store_id
-            && self.content_ref == *content_ref
-            && now_ms <= self.expires_at_ms
+        match &self.kind {
+            PreparedContentKind::Inline(_) => false,
+            PreparedContentKind::Staged {
+                namespace_id: expected_namespace_id,
+                content_store_id: expected_content_store_id,
+                content_ref: expected_content_ref,
+                expires_at_ms,
+            } => {
+                expected_namespace_id == namespace_id
+                    && expected_content_store_id == content_store_id
+                    && expected_content_ref == content_ref
+                    && now_ms <= *expires_at_ms
+            }
+        }
     }
 
-    /// Returns the prepared content reference.
+    /// Returns the reference fixed during preparation.
     pub fn content_ref(&self) -> &ContentRef {
-        &self.content_ref
+        match &self.kind {
+            PreparedContentKind::Inline(value) => value.content_ref(),
+            PreparedContentKind::Staged { content_ref, .. } => content_ref,
+        }
     }
 }
 

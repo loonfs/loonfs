@@ -9,6 +9,7 @@
 //! [`FsWriter::shutdown`](crate::FsWriter::shutdown).
 
 mod admission;
+mod inline_content;
 
 use crate::fs::{ReadCore, WriterBits};
 use crate::metrics::{PublishOutcome, RESULT_OK};
@@ -18,12 +19,10 @@ use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespaceSessionPolicy,
     RuntimeCacheConfig, RuntimeError,
 };
-use admission::{AdmittedWaiter, PublicationAdmission};
+use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
 use loonfs_api::v0::Commit;
-use loonfs_api::wire::wal::{
-    MAX_WAL_SEGMENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES,
-};
+use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::cache::Recency;
 use loonfs_core::commit::{CommitFingerprint, WalPublishError};
@@ -387,15 +386,25 @@ impl PublisherRegistry {
         namespace_id: NamespaceId,
         candidate: CommitCandidate,
     ) -> CommitResult {
-        let candidate = PreparedCandidate::new(candidate)?;
-        let permit = {
+        let publisher = {
             let mut state = self.shared.lock_state();
             let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
+            publisher.check_admission(&publisher.lock_state())?;
+            publisher
+        };
+        let candidate = self
+            .prepare_segment_candidate(&namespace_id, candidate, &publisher)
+            .await?;
+        let permit = {
             publisher.check_admission(&publisher.lock_state())?;
             self.shared
                 .admission
                 .acquire_candidate(&namespace_id, &candidate)?
         };
+        let candidate = self
+            .admit_inline_candidate(&namespace_id, candidate, &publisher, &permit)
+            .await?;
+        PublicationAdmission::validate_candidate(&candidate)?;
         submit_with_admission(
             &namespace_id,
             candidate,
@@ -584,6 +593,20 @@ impl PublisherRegistry {
         }
     }
 
+    pub(crate) async fn wal_tail_inline_bytes(&self, namespace_id: &NamespaceId) -> Option<usize> {
+        let publisher = self
+            .shared
+            .lock_state()
+            .publishers
+            .get(namespace_id)
+            .cloned()?;
+        let slot = publisher.engine.lock().await;
+        slot.engine
+            .as_ref()
+            .and_then(|engine| engine.wal_fold_input())
+            .map(|input| input.wal_tail_inline_bytes)
+    }
+
     pub(crate) async fn wait_for_fold(
         &self,
         namespace_id: &NamespaceId,
@@ -751,8 +774,8 @@ struct NamespacePublisher {
     /// is the owning writer's work, and it stops when that writer is gone.
     writer: Weak<WriterBits>,
     state: Arc<Mutex<NamespacePublisherState>>,
-    /// Locked only by the worker, across one publication or delete, and by
-    /// [`Self::invalidate_projection`], which never waits for it.
+    /// Admission holds this lock until it reserves bytes against the observed
+    /// tail, so a publication cannot change that tail before the reservation.
     engine: Arc<AsyncMutex<EngineSlot>>,
     session: SharedWriterSessionState,
     /// Weak: the registry map owns its publishers, and a strong reference
@@ -762,6 +785,7 @@ struct NamespacePublisher {
     runtime: Handle,
     timer: Arc<dyn MonotonicTimer>,
     min_publish_interval: Duration,
+    inline_content: crate::InlineContentOptions,
 }
 
 /// Commit engine and writer session retained by one namespace publisher.
@@ -903,6 +927,7 @@ impl PreparedCandidate {
 
 #[derive(Clone)]
 struct BatchCandidate {
+    permit: Arc<AdmissionPermit>,
     commit_id: CommitId,
     candidate: CommitCandidate,
     enqueued_at: u64,
@@ -953,6 +978,11 @@ impl NamespacePublisher {
             timer: Arc::clone(&registry.timer),
             min_publish_interval: registry.min_publish_interval,
             admission: Arc::clone(&registry.shared.admission),
+            inline_content: registry
+                .writer
+                .upgrade()
+                .map(|writer| writer.inline_content.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1103,6 +1133,7 @@ impl NamespacePublisher {
         let wal_record_bytes_upper_bound = candidate.wal_record_bytes_upper_bound;
         let inline_content_bytes = candidate.inline_content_bytes;
         let candidate = BatchCandidate {
+            permit: Arc::clone(&waiter.permit),
             commit_id: commit_id.clone(),
             candidate: candidate.candidate,
             enqueued_at,
@@ -1121,7 +1152,7 @@ impl NamespacePublisher {
                     && batch
                         .inline_content_bytes
                         .saturating_add(inline_content_bytes)
-                        <= MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES =>
+                        <= self.inline_content.inline_content_segment_budget_bytes =>
             {
                 batch.wal_record_bytes_upper_bound += wal_record_bytes_upper_bound;
                 batch.inline_content_bytes += inline_content_bytes;
@@ -1300,6 +1331,14 @@ impl NamespacePublisher {
             return;
         }
         self.record_panic();
+        // A panic can follow the WAL put, so the cached tail may omit committed bytes.
+        {
+            let mut slot = self.engine.lock().await;
+            if let Some(engine) = slot.engine.as_mut() {
+                engine.invalidate_projection();
+            }
+            self.settle_retained_projection(None);
+        }
         let orphaned_waiters = {
             let mut state = self.lock_state();
             taken_commit_ids
@@ -1328,6 +1367,10 @@ impl NamespacePublisher {
                 wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at)
             );
         }
+        let permits: Vec<_> = candidates
+            .iter()
+            .map(|candidate| Arc::clone(&candidate.permit))
+            .collect();
         let (commit_ids, candidates): (Vec<_>, Vec<_>) = candidates
             .into_iter()
             .map(|candidate| (candidate.commit_id, candidate.candidate))
@@ -1352,7 +1395,9 @@ impl NamespacePublisher {
                         .collect();
                     break;
                 };
-                results = self.publish_through_engine(&writer, &candidates).await;
+                results = self
+                    .publish_through_engine(&writer, &candidates, &permits)
+                    .await;
                 if !results.iter().any(is_retryable_wal_publish) {
                     break;
                 }
@@ -1379,6 +1424,7 @@ impl NamespacePublisher {
         &self,
         writer: &Arc<WriterBits>,
         candidates: &[CommitCandidate],
+        permits: &[Arc<AdmissionPermit>],
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
@@ -1390,11 +1436,19 @@ impl NamespacePublisher {
             candidates,
         )
         .await;
+        if !publish.results.iter().any(is_retryable_wal_publish) {
+            for permit in permits {
+                permit.release_inline();
+            }
+        }
         let write_stopped = publish.results.iter().any(is_maintenance_required);
         if write_stopped {
             self.read_core.instruments().publisher_write_stop_refusal();
         }
-        let fold_start = if publish.wal_tail_segments >= FOLD_AT_WAL_SEGMENTS || write_stopped {
+        let fold_start = if publish.wal_tail_segments >= FOLD_AT_WAL_SEGMENTS
+            || publish.wal_tail_inline_bytes >= self.inline_content.inline_content_fold_at_bytes
+            || write_stopped
+        {
             self.start_fold()
         } else {
             None
@@ -1477,10 +1531,11 @@ impl NamespacePublisher {
                 .engine
                 .as_ref()
                 .and_then(NamespaceCommitEngine::wal_fold_input);
-            if input
-                .as_ref()
-                .is_some_and(|input| input.wal_tail_segments < FOLD_AT_WAL_SEGMENTS)
-            {
+            if input.as_ref().is_some_and(|input| {
+                input.wal_tail_segments < FOLD_AT_WAL_SEGMENTS
+                    && input.wal_tail_inline_bytes
+                        < self.inline_content.inline_content_fold_at_bytes
+            }) {
                 return;
             }
             input

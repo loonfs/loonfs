@@ -541,6 +541,7 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
             namespace_id: namespace_id.clone(),
             committed_through_seq: None,
             wal_tail_segments: 4,
+            wal_tail_inline_bytes: 0,
         }));
     runner.drain().await.expect("nothing was scheduled");
     assert!(
@@ -554,6 +555,7 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
             namespace_id: namespace_id.clone(),
             committed_through_seq: Some(ChangeSeq(7)),
             wal_tail_segments: 5,
+            wal_tail_inline_bytes: 0,
         }));
     runner.drain().await.expect("the subscriber's step settles");
 
@@ -816,6 +818,7 @@ async fn wal_fold_finished_hints_coalesce_and_follow_ups_admit_once() {
             namespace_id: namespace_id.clone(),
             committed_through_seq: Some(ChangeSeq(1)),
             wal_tail_segments: loonfs_core::limits::FOLD_AT_WAL_SEGMENTS,
+            wal_tail_inline_bytes: 0,
         }));
     runner.drain().await.expect("publication schedules nothing");
     assert_eq!(
@@ -872,6 +875,7 @@ async fn reconciliation_recovers_a_hint_dropped_before_attachment() {
         namespace_id: namespace_id.clone(),
         committed_through_seq: Some(ChangeSeq(1)),
         wal_tail_segments: 0,
+        wal_tail_inline_bytes: 0,
     });
     let dropped_before = dropped_hints();
 

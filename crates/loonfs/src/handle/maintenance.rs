@@ -16,6 +16,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct FsMaintenance {
     pub(crate) core: ReadCore,
+    pub(crate) publisher: Option<crate::publisher::PublisherRegistry>,
     pub(crate) actor: WriterIdentity,
     pub(crate) compactor_epochs:
         Arc<tokio::sync::Mutex<std::collections::BTreeMap<crate::NamespaceId, u64>>>,
@@ -42,9 +43,14 @@ impl FsMaintenance {
         FsMaintenanceBuilder::new(HandleBuilderCore::from_store(store))
     }
 
-    pub(crate) fn from_read_core(core: ReadCore, actor_id: String) -> Result<Self> {
+    pub(crate) fn from_read_core(
+        core: ReadCore,
+        publisher: crate::publisher::PublisherRegistry,
+        actor_id: String,
+    ) -> Result<Self> {
         Ok(Self {
             core,
+            publisher: Some(publisher),
             actor: WriterIdentity::new(actor_id)?,
             compactor_epochs: Arc::default(),
             #[cfg(test)]
@@ -155,6 +161,7 @@ impl FsMaintenanceBuilder {
         let actor = WriterIdentity::new(actor_id)?;
         Ok(FsMaintenance {
             core: self.core.open_read_core()?,
+            publisher: None,
             actor,
             compactor_epochs: Arc::default(),
             #[cfg(test)]

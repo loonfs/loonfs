@@ -15,6 +15,41 @@ pub struct NamespaceFlushBasis {
     pub has_unflushed_wal_tail: bool,
 }
 
+/// Decoded WAL tail usage for test assertions.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamespaceWalTailUsage {
+    pub head_seq: ChangeSeq,
+    pub wal_tail_segments: u64,
+    pub wal_tail_inline_bytes: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<NamespaceWalTailUsage> {
+    let loaded = crate::namespace::read_anchor::load_head_and_metadata_basis(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    super::control::ensure_namespace_live(&loaded.head)?;
+    let basis = crate::checkpoint::load_basis_metadata_segments(store, None, &loaded.basis).await?;
+    let tail = crate::wal::load_replayed_wal_tail(
+        store,
+        &basis.replay_head(&loaded.head),
+        &loaded.head,
+        &basis.base_state,
+        Some(loaded.head.writer_epoch),
+    )
+    .await
+    .map_err(CoreError::MetadataProjection)?;
+    Ok(NamespaceWalTailUsage {
+        head_seq: loaded.head.seq,
+        wal_tail_segments: loaded.head.unfolded_wal_segments(),
+        wal_tail_inline_bytes: tail.projected_tail.inline_bytes(),
+    })
+}
+
 /// Namespace storage diagnostics that do not require checkpoint enumeration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStorageDiagnostics {
