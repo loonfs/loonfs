@@ -221,7 +221,7 @@ impl FsWriter {
     // and upload operations in `fs/writes.rs` and `fs/uploads.rs`.
 
     /// Builds a maintenance handle over this writer's read core and caches.
-    /// Uses the publisher's cached inline byte count for flush decisions.
+    /// Uses the publisher's last observed inline byte count for flush decisions.
     pub fn maintenance_handle(&self, actor_id: impl Into<String>) -> Result<FsMaintenance> {
         FsMaintenance::from_read_core(self.core.clone(), self.publisher.clone(), actor_id.into())
     }

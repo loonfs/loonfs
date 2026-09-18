@@ -235,6 +235,41 @@ impl CommitCandidate {
     /// allocating a second request. Allocator slack and publication working
     /// copies are excluded; this is a sizing policy, not a heap measurement.
     pub fn estimated_retained_bytes(&self) -> Result<usize> {
+        self.estimated_retained_bytes_with_inline_content(&self.inline_content)
+    }
+
+    /// Estimates retained bytes after selected inline values are staged.
+    pub fn estimated_retained_bytes_after_inline_staging(
+        &self,
+        namespace_id: &NamespaceId,
+        retained_inline_content: &[InlineContent],
+        staged_inline_content: &[InlineContent],
+    ) -> Result<usize> {
+        let mut bytes =
+            self.estimated_retained_bytes_with_inline_content(retained_inline_content)?;
+        if matches!(&self.content, ContentPreparation::Ready(_)) {
+            bytes = bytes.saturating_add(
+                staged_inline_content
+                    .len()
+                    .saturating_mul(std::mem::size_of::<PreparedContent>()),
+            );
+            for value in staged_inline_content {
+                bytes = bytes
+                    .saturating_add(PreparedContent::estimated_owned_staging_payload_bytes(
+                        namespace_id,
+                        value.content_ref(),
+                    ))
+                    .saturating_add(std::mem::size_of::<ContentId>())
+                    .saturating_add(value.content_ref().content_id.as_str().len());
+            }
+        }
+        Ok(bytes)
+    }
+
+    fn estimated_retained_bytes_with_inline_content(
+        &self,
+        retained_inline_content: &[InlineContent],
+    ) -> Result<usize> {
         let mut bytes = RequestByteCounter(
             std::mem::size_of_val(self)
                 .saturating_add(std::mem::size_of_val(self.request.operations.as_slice()))
@@ -251,6 +286,17 @@ impl CommitCandidate {
             ),
         )
         .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
+        if let Some(subject) = &self.request.subject {
+            serde_json::to_writer(&mut bytes, &subject.subject_id)
+                .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
+            for principal_id in subject.principals.iter() {
+                bytes.0 = bytes
+                    .0
+                    .saturating_add(std::mem::size_of::<loonfs_api::PrincipalId>());
+                serde_json::to_writer(&mut bytes, principal_id)
+                    .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
+            }
+        }
         match &self.content {
             ContentPreparation::Ready(proofs) => {
                 bytes.0 = bytes
@@ -279,8 +325,8 @@ impl CommitCandidate {
         }
         bytes.0 = bytes
             .0
-            .saturating_add(std::mem::size_of_val(self.inline_content.as_slice()));
-        for value in &self.inline_content {
+            .saturating_add(std::mem::size_of_val(retained_inline_content));
+        for value in retained_inline_content {
             bytes.0 = bytes.0.saturating_add(value.bytes().len());
             serde_json::to_writer(&mut bytes, value.content_ref())
                 .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
@@ -298,6 +344,14 @@ impl CommitCandidate {
     /// the document envelope.
     pub fn wal_record_bytes_upper_bound(&self) -> usize {
         crate::commit_wal_size::estimated_wal_record_bytes(&self.request, &self.inline_content)
+    }
+
+    /// Bounds the WAL record after selected values are retained inline.
+    pub fn wal_record_bytes_upper_bound_with_inline_content(
+        &self,
+        inline_content: &[InlineContent],
+    ) -> usize {
+        crate::commit_wal_size::estimated_wal_record_bytes(&self.request, inline_content)
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
@@ -400,6 +454,8 @@ pub struct NamespaceCommitEnginePublishResult {
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
     pub wal_tail_inline_bytes: usize,
+    /// Whether this attempt loaded a tail that makes the two counts current.
+    pub wal_tail_observed: bool,
     /// Read state produced by a successful, unambiguous WAL put. Callers can
     /// use it to update read caches without reloading from object storage.
     pub resulting_read_state: Option<ResultingReadState>,
@@ -648,6 +704,7 @@ impl NamespaceCommitEngine {
                 results: Vec::new(),
                 wal_tail_segments: 0,
                 wal_tail_inline_bytes: 0,
+                wal_tail_observed: false,
                 resulting_read_state: None,
             };
         }
@@ -660,6 +717,7 @@ impl NamespaceCommitEngine {
                     results: repeated_error(candidate_count, error),
                     wal_tail_segments: 0,
                     wal_tail_inline_bytes: 0,
+                    wal_tail_observed: false,
                     resulting_read_state: None,
                 };
             }
@@ -697,6 +755,7 @@ impl NamespaceCommitEngine {
                     results: repeated_error(candidate_count, error),
                     wal_tail_segments: 0,
                     wal_tail_inline_bytes: 0,
+                    wal_tail_observed: false,
                     resulting_read_state: None,
                 };
             }
@@ -722,6 +781,7 @@ impl NamespaceCommitEngine {
             results: published.results,
             wal_tail_segments,
             wal_tail_inline_bytes,
+            wal_tail_observed: true,
             resulting_read_state,
         }
     }
@@ -825,11 +885,15 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::load_namespace_read_state;
     use futures::StreamExt;
-    use loonfs_api::{ChangeSeq, ContentRef, ContentStoreId, WriterEpoch};
+    use loonfs_api::{
+        ChangeSeq, ContentRef, ContentStoreId, PrincipalId, PrincipalSet, Subject, SubjectId,
+        WriterEpoch,
+    };
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{OperationClass, RecordingStore};
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
 
@@ -895,6 +959,23 @@ mod tests {
             ]),
         );
         assert!(rejected.estimated_retained_bytes().expect("weight") > baseline + 40960);
+    }
+
+    #[test]
+    fn principals_add_to_candidate_admission_weight() {
+        let mut candidate = CommitCandidate::new(create_dir_request("subject-weight", "docs"));
+        let before = candidate.estimated_retained_bytes().expect("weight");
+        let principals = (0..64)
+            .map(|index| {
+                PrincipalId::parse(format!("{index:03}{}", "x".repeat(253))).expect("principal")
+            })
+            .collect::<BTreeSet<_>>();
+        candidate.request.subject = Some(Subject {
+            subject_id: SubjectId::parse("subject").expect("subject"),
+            principals: PrincipalSet::new(principals).expect("principals"),
+        });
+        let after = candidate.estimated_retained_bytes().expect("weight");
+        assert!(after >= before + 64 * 256);
     }
 
     #[test]

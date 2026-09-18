@@ -80,9 +80,10 @@ pub struct InlineContentOptions {
     /// Unfolded inline bytes that make a fold due; defaults to 2 MiB.
     pub inline_content_fold_at_bytes: usize,
     /// Limit on known unfolded and admitted inline bytes; defaults to 32 MiB.
-    /// An absent projection counts as zero. After a process starts, the first
-    /// inline commit in a namespace can exceed this limit by at most its own
-    /// inline bytes, at most the segment budget, once per namespace per process start.
+    /// Projection invalidation keeps the last count this publisher observed.
+    /// A publisher that has never observed the namespace counts zero, so its
+    /// first inline commit can exceed the limit by at most the segment budget.
+    /// `MAX_UNFLUSHED_WAL_SEGMENTS` stops new commits regardless of this limit.
     pub inline_content_tail_limit_bytes: usize,
 }
 

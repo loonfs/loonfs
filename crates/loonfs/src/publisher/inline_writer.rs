@@ -22,6 +22,18 @@ async fn writer_with_policy(
     crate::FsWriter,
     NamespaceId,
 ) {
+    writer_with_policy_and_byte_limit(policy, 8192).await
+}
+
+async fn writer_with_policy_and_byte_limit(
+    policy: InlineContentOptions,
+    max_estimated_bytes_per_namespace: usize,
+) -> (
+    tempfile::TempDir,
+    Arc<RecordingStore<LocalFsStore>>,
+    crate::FsWriter,
+    NamespaceId,
+) {
     let directory = tempdir().expect("directory");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -31,7 +43,7 @@ async fn writer_with_policy(
         .writer_id("inline-writer")
         .inline_content(policy)
         .publication_limits(crate::PublicationLimits {
-            max_estimated_bytes_per_namespace: NonZeroUsize::new(8192)
+            max_estimated_bytes_per_namespace: NonZeroUsize::new(max_estimated_bytes_per_namespace)
                 .expect("namespace byte limit"),
             ..Default::default()
         })
@@ -451,18 +463,51 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
 }
 
 #[tokio::test]
-async fn segment_fallback_keeps_operation_order_and_one_atomic_commit() {
+async fn full_queue_refuses_segment_fallback_without_store_writes() {
     let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
         inline_content_segment_budget_bytes: 4,
-        inline_content_threshold_bytes: Some(16 * 1024),
+        inline_content_threshold_bytes: Some(8),
         ..policy()
     })
     .await;
-    let payloads = [
-        Bytes::from_static(b"aa"),
-        Bytes::from(vec![b'b'; 16 * 1024]),
-        Bytes::from_static(b"c"),
-    ];
+    let registry = writer.publisher();
+    let mut permits = Vec::new();
+    while let Ok(permit) = registry.shared.admission.acquire(&namespace, 0) {
+        permits.push(permit);
+    }
+    store.reset();
+    let error = writer
+        .put_file_bytes(&namespace, "/file", b"longer", put_options("full-queue"))
+        .await
+        .expect_err("queue full");
+    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
+    assert_eq!(
+        family_requests(&store, DurableObjectFamily::UploadSession),
+        0
+    );
+    drop(permits);
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn segment_fallback_keeps_bulk_commit_order_and_one_atomic_commit() {
+    const VALUES: usize = 128;
+    const VALUE_BYTES: usize = 16 * 1024;
+    const ADMISSION_BYTES: usize = 256 * 1024;
+    let (_directory, store, writer, namespace) = writer_with_policy_and_byte_limit(
+        InlineContentOptions {
+            inline_content_segment_budget_bytes: VALUE_BYTES,
+            inline_content_threshold_bytes: Some(VALUE_BYTES),
+            ..policy()
+        },
+        ADMISSION_BYTES,
+    )
+    .await;
+    let payloads = (0..VALUES)
+        .map(|index| Bytes::from(vec![u8::try_from(index).expect("byte index"); VALUE_BYTES]))
+        .collect::<Vec<_>>();
+    assert!(payloads.len() * VALUE_BYTES > ADMISSION_BYTES);
     let mut prepared = Vec::new();
     for bytes in &payloads {
         prepared.push(
@@ -488,7 +533,7 @@ async fn segment_fallback_keeps_operation_order_and_one_atomic_commit() {
     prepared.reverse();
     let candidate = CommitCandidate::prepared(request, prepared);
     let fingerprint = candidate.semantic_identity(&namespace).expect("identity");
-    writer
+    let published = writer
         .commit_candidate(&namespace, candidate.clone())
         .await
         .expect("commit");
@@ -497,7 +542,29 @@ async fn segment_fallback_keeps_operation_order_and_one_atomic_commit() {
     assert_eq!(records[0].semantic_commit_fingerprint, fingerprint);
     assert_eq!(records[0].inline_content.len(), 1);
     assert_eq!(records[0].inline_content[0].content_id, expected_inline_id);
-    for (index, expected) in payloads.iter().enumerate() {
+    let staged_content_ids = store
+        .snapshot()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::Put { key, .. } => parse_object_key(&key)
+                .filter(|parsed| parsed.family() == DurableObjectFamily::ContentBlob)
+                .and_then(|parsed| parsed.identifier().map(str::to_owned)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let operation_content_ids = records[0]
+        .deltas
+        .iter()
+        .filter_map(|delta| match &delta.delta {
+            loonfs_api::wire::wal::WalDelta::AppendFileRevision { content_ref, .. } => {
+                Some(content_ref.content_id.as_str())
+            }
+            _ => None,
+        })
+        .skip(1)
+        .collect::<Vec<_>>();
+    assert_eq!(staged_content_ids, operation_content_ids);
+    for index in [0, VALUES - 1] {
         assert_eq!(
             writer
                 .reader()
@@ -505,15 +572,17 @@ async fn segment_fallback_keeps_operation_order_and_one_atomic_commit() {
                 .await
                 .expect("read")
                 .bytes,
-            expected.as_ref()
+            payloads[index]
         );
     }
     store.reset();
-    let error = writer
-        .commit_candidate(&namespace, candidate)
-        .await
-        .expect_err("unchanged retry exceeds the namespace admission budget");
-    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    assert_eq!(
+        writer
+            .commit_candidate(&namespace, candidate)
+            .await
+            .expect("retained receipt"),
+        published
+    );
     assert_eq!(store.count(OperationClass::Put), 0);
     writer.shutdown().await.expect("shutdown");
 }
@@ -601,8 +670,8 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
 }
 
 #[tokio::test]
-async fn an_absent_projection_allows_one_commit_to_exceed_the_tail_limit_without_replay() {
-    let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
+async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_overshoot() {
+    let (_directory, _store, writer, namespace) = writer_with_policy(InlineContentOptions {
         inline_content_fold_at_bytes: 4,
         inline_content_tail_limit_bytes: 4,
         ..policy()
@@ -614,80 +683,115 @@ async fn an_absent_projection_allows_one_commit_to_exceed_the_tail_limit_without
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
         .await
         .expect("hold folds");
-    writer
-        .put_file_bytes(&namespace, "/first", b"full", put_options("first"))
-        .await
-        .expect("fill tail");
-    writer.invalidate_namespace(&namespace);
     let registry = writer.publisher();
-    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, None);
-    let maintenance = writer
-        .maintenance_handle("maintenance")
-        .expect("maintenance");
-    store.reset();
-    let step = maintenance
-        .maintain_metadata(
+    for index in 0..4 {
+        writer.invalidate_namespace(&namespace);
+        writer
+            .put_file_bytes(
+                &namespace,
+                &format!("/file-{index}"),
+                b"full",
+                put_options(&format!("write-{index}")),
+            )
+            .await
+            .expect("publish");
+    }
+    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, Some(4));
+    drop(folds);
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn fold_completion_keeps_inline_bytes_published_while_it_ran() {
+    let directory = tempdir().expect("directory");
+    let namespace = NamespaceId::parse("inline-fold-race").expect("namespace");
+    let store = Arc::new(blocking_fold_store(
+        LocalFsStore::new(directory.path()).expect("store"),
+        metadata_manifest_prefix(&namespace),
+    ));
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("inline-writer")
+        .inline_content(InlineContentOptions {
+            inline_content_threshold_bytes: Some(4),
+            inline_content_fold_at_bytes: 4,
+            inline_content_tail_limit_bytes: 8,
+            ..Default::default()
+        })
+        .min_publish_interval_ms(0)
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
             &namespace,
-            MetadataMaintenanceOptions {
-                inline_content_fold_at_bytes: NonZeroUsize::new(4).expect("threshold"),
-                ..Default::default()
-            },
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .await
-        .expect("maintenance without a projection");
-    assert_eq!(step.wal_flush, crate::WalFlushStepOutcome::NotNeeded);
-    assert_eq!(
-        family_requests(&store, DurableObjectFamily::WalSegment),
-        8,
-        "two WAL tip checks without a byte-count replay"
-    );
-    let prepared = writer
-        .prepare_file_bytes(&namespace, b"next")
-        .await
-        .expect("prepare");
-    let candidate = CommitCandidate::prepared(
-        CommitRequest::single(
-            CommitId::parse("cold").expect("commit"),
-            loonfs_test_support::test_actor(),
-            None,
-            put_operation("/cold", &prepared),
-        ),
-        vec![prepared],
-    );
-    let slots = registry
-        .shared
-        .admission
-        .publications
-        .acquire_many(8)
-        .await
-        .expect("hold publications");
-    let publisher = registry.test_publisher_for(&namespace).expect("publisher");
-    store.reset();
-    let (published, ()) = tokio::join!(
-        registry.submit_candidate(namespace.clone(), candidate),
-        async {
-            timeout(Duration::from_secs(10), async {
-                while publisher.queued_commits() == 0 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("candidate admitted while publication is blocked");
-            assert!(store.snapshot().is_empty());
-            drop(slots);
-        }
-    );
-    published.expect("publish loads the projection");
-    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, Some(8));
-    assert_eq!(written_records(&store).await[0].inline_content.len(), 1);
-    store.reset();
+        .expect("namespace");
     writer
-        .put_file_bytes(&namespace, "/after", b"last", put_options("after"))
+        .create_directory(
+            &namespace,
+            "/warmup",
+            crate::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
         .await
-        .expect("later admission stages");
-    assert!(written_records(&store).await[0].inline_content.is_empty());
-    assert!(family_requests(&store, DurableObjectFamily::ContentBlob) > 0);
-    drop(folds);
+        .expect("acquire writer epoch");
+
+    store.block_next();
+    writer
+        .put_file_bytes(&namespace, "/first", b"four", put_options("first"))
+        .await
+        .expect("start fold");
+    store.wait_until_blocked().await;
+    writer
+        .put_file_bytes(&namespace, "/during", b"next", put_options("during"))
+        .await
+        .expect("publish during fold");
+    store.release();
+    writer.wait_for_fold(&namespace).await.expect("finish fold");
+    assert_eq!(
+        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        Some(4)
+    );
+
+    let fold_permits = writer
+        .bits
+        .wal_fold_permits
+        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
+        .await
+        .expect("hold next fold");
+    let prepared = vec![
+        writer
+            .prepare_file_bytes(&namespace, b"more")
+            .await
+            .expect("prepare first value"),
+        writer
+            .prepare_file_bytes(&namespace, b"last")
+            .await
+            .expect("prepare second value"),
+    ];
+    let request = CommitRequest {
+        commit_id: CommitId::parse("after-fold").expect("commit"),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        operations: vec![
+            put_operation("/after-fold-1", &prepared[0]),
+            put_operation("/after-fold-2", &prepared[1]),
+        ],
+        preconditions: Vec::new(),
+    };
+    writer
+        .commit_candidate(&namespace, CommitCandidate::prepared(request, prepared))
+        .await
+        .expect("publish after fold");
+    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        .await
+        .expect("tail usage");
+    assert_eq!(usage.wal_tail_inline_bytes, 8);
+
+    drop(fold_permits);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -759,6 +863,10 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
                 step.wal_flush,
                 crate::WalFlushStepOutcome::Flushed { .. }
             ));
+            assert_eq!(
+                writer.publisher().wal_tail_inline_bytes(&namespace).await,
+                Some(0)
+            );
         } else if mode == "scheduled" {
             let jobs = crate::MaintenanceRegistry::new();
             jobs.register(Arc::new(

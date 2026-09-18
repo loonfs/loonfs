@@ -375,10 +375,14 @@ and `InlineContentOptions`. These settings do not change reader format limits.
 | `inline_content_fold_at_bytes` | 2 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
 | `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when known unfolded and admitted inline bytes would exceed this size. |
 
-The tail limit is enforced against the writer's known tail. An absent projection
-counts as zero. After a process starts, the first inline commit in a namespace
-can exceed the limit by at most that commit's inline bytes, which is at most the
-segment budget, once per namespace per process start.
+The tail limit uses the loaded projection, or the last tail size this publisher
+observed after that projection is invalidated. Only a publisher that has never
+observed the namespace counts the tail as zero. Its first inline commit can
+exceed the limit by at most that commit's inline bytes, which is at most the
+segment budget, once during that publisher's lifetime. Another writer can make
+the remembered size stale until this publisher's next publish. The
+`MAX_UNFLUSHED_WAL_SEGMENTS` write stop refuses new commits regardless of the
+inline tail limit.
 
 If a commit already succeeded, retrying the same request returns the original
 result without uploading the file again, as long as the commit receipt is still
@@ -390,8 +394,8 @@ The segment budget, fold trigger, and tail limit must be positive, and the fold
 trigger cannot exceed the tail limit. Inline payloads count toward the existing
 publication byte limits. Explicit metadata maintenance uses
 `MetadataMaintenanceOptions::inline_content_fold_at_bytes`, also 2 MiB by default,
-when a writer-derived handle has a cached tail count. Maintenance probes use the
-segment threshold and manifest descriptors; they do not replay the tail.
+when a writer-derived handle has an observed tail count. Maintenance probes use
+the segment threshold and manifest descriptors; they do not replay the tail.
 
 ## Optional local cache
 

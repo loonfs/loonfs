@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const TOKEN_VERSION: &str = "vct1";
+const GENERATED_CONTENT_STORE_ID_BYTES: usize = "cs_00000000000000000000000000000000".len();
 
 /// Evidence read from a durable upload session in its completed state.
 ///
@@ -102,6 +103,18 @@ impl PreparedContent {
                 .saturating_add(content_ref.content_id.as_str().len())
                 .saturating_add(content_ref.checksum.value.len()),
         }
+    }
+
+    pub(crate) fn estimated_owned_staging_payload_bytes(
+        namespace_id: &NamespaceId,
+        content_ref: &ContentRef,
+    ) -> usize {
+        namespace_id
+            .as_str()
+            .len()
+            .saturating_add(GENERATED_CONTENT_STORE_ID_BYTES)
+            .saturating_add(content_ref.content_id.as_str().len())
+            .saturating_add(content_ref.checksum.value.len())
     }
 
     pub(crate) fn content_id(&self) -> &ContentId {
