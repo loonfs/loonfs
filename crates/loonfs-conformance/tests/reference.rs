@@ -999,7 +999,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 operations: vec![FilesystemOperation::CreateFileByInode {
                     parent_inode_id,
                     display_name: display_name(&request.inode_file_name),
-                    content_ref,
+                    content_ref: Some(content_ref),
+                    inline_content: None,
                 }],
             },
             &request.actor_id,
@@ -1064,7 +1065,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 content_tokens,
                 operations: vec![FilesystemOperation::PutFileRevisionByInode {
                     inode_id: file_inode_id,
-                    content_ref,
+                    content_ref: Some(content_ref),
+                    inline_content: None,
                     expected_revision_no,
                 }],
             },

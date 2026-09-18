@@ -70,20 +70,31 @@ pub(crate) struct UploadContinuity<'a> {
     pub(crate) journal: Option<&'a dyn PutFileJournal>,
 }
 
-/// Uploaded content and its publication token, ready for a file commit.
+/// Content ready for a file commit, kept inline or uploaded with its token.
 ///
 /// Clone this value to retry publication with the same commit ID and options.
-/// Preparation alone does not publish a file or extend the upload's lifetime.
+/// Inline content has no expiry. Preparation does not extend an upload's lifetime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedContent {
-    pub(crate) content_ref: ContentRef,
-    pub(crate) content_token: Option<ContentToken>,
+    pub(crate) kind: PreparedContentKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreparedContentKind {
+    Inline(Vec<u8>),
+    Staged {
+        content_ref: ContentRef,
+        content_token: Option<ContentToken>,
+    },
 }
 
 impl PreparedContent {
-    /// Returns the immutable content reference produced by the upload.
-    pub fn content_ref(&self) -> &ContentRef {
-        &self.content_ref
+    /// Returns the uploaded reference; inline content receives its reference at publication.
+    pub fn content_ref(&self) -> Option<&ContentRef> {
+        match &self.kind {
+            PreparedContentKind::Inline(_) => None,
+            PreparedContentKind::Staged { content_ref, .. } => Some(content_ref),
+        }
     }
 }
 
@@ -806,8 +817,10 @@ impl Client {
                 ..
             } => {
                 return Ok(PreparedContent {
-                    content_ref,
-                    content_token,
+                    kind: PreparedContentKind::Staged {
+                        content_ref,
+                        content_token,
+                    },
                 });
             }
             UploadSessionStatus::Open { .. } => "open",

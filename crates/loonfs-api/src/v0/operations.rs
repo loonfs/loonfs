@@ -499,13 +499,24 @@ pub enum FilesystemOperation {
         /// New directory name.
         display_name: DisplayName,
     },
-    /// Create or replace one file with an already-durable content ref.
+    /// Create or replace one file from uploaded or inline content.
+    /// Requires exactly one of `content_ref` and `inline_content`.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationPutFile"))]
     PutFile {
         /// Absolute destination path; missing ancestors are created automatically.
         path: AbsolutePath,
-        /// Immutable bytes that must be covered by a valid preparation proof.
-        content_ref: ContentRef,
+        /// Uploaded content covered by a token; mutually exclusive with `inline_content`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        content_ref: Option<ContentRef>,
+        /// Complete file bytes as base64; mutually exclusive with `content_ref`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::base64_bytes"
+        )]
+        #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
+        inline_content: Option<Vec<u8>>,
         /// Whether an existing file may receive a new revision instead of causing a conflict.
         #[serde(default)]
         behavior: DestinationBehavior,
@@ -523,6 +534,7 @@ pub enum FilesystemOperation {
         expected_revision_no: Option<RevisionNo>,
     },
     /// Create a file with an unused name under an existing parent inode.
+    /// Requires exactly one of `content_ref` and `inline_content`.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationCreateFileByInode")
@@ -533,10 +545,21 @@ pub enum FilesystemOperation {
         parent_inode_id: InodeId,
         /// New file name.
         display_name: DisplayName,
-        /// Immutable bytes that must be covered by a valid preparation proof.
-        content_ref: ContentRef,
+        /// Uploaded content covered by a token; mutually exclusive with `inline_content`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        content_ref: Option<ContentRef>,
+        /// Complete file bytes as base64; mutually exclusive with `content_ref`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::base64_bytes"
+        )]
+        #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
+        inline_content: Option<Vec<u8>>,
     },
     /// Append a revision to a file inode if its current revision matches.
+    /// Requires exactly one of `content_ref` and `inline_content`.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "FilesystemOperationPutFileRevisionByInode")
@@ -545,8 +568,18 @@ pub enum FilesystemOperation {
         /// File to update.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Immutable bytes that must be covered by a valid preparation proof.
-        content_ref: ContentRef,
+        /// Uploaded content covered by a token; mutually exclusive with `inline_content`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        content_ref: Option<ContentRef>,
+        /// Complete file bytes as base64; mutually exclusive with `content_ref`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::base64_bytes"
+        )]
+        #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
+        inline_content: Option<Vec<u8>>,
         /// Current revision required for the write.
         expected_revision_no: RevisionNo,
     },
@@ -704,7 +737,7 @@ impl FilesystemOperation {
         match self {
             Self::PutFile { content_ref, .. }
             | Self::CreateFileByInode { content_ref, .. }
-            | Self::PutFileRevisionByInode { content_ref, .. } => Some(content_ref),
+            | Self::PutFileRevisionByInode { content_ref, .. } => content_ref.as_ref(),
             Self::CreateDirectory { .. }
             | Self::CreateDirectoryByInode { .. }
             | Self::DeletePath { .. }
@@ -1965,7 +1998,8 @@ mod tests {
             (
                 FilesystemOperation::PutFile {
                     path: path("/docs/a.txt"),
-                    content_ref: content_ref.clone(),
+                    content_ref: Some(content_ref.clone()),
+                    inline_content: None,
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

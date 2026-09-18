@@ -111,7 +111,8 @@ async fn check_buffered_read_access(content_size: usize) {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/team/file").expect("path"),
-                        content_ref: prepared.content_ref().clone(),
+                        content_ref: Some(prepared.content_ref().clone()),
+                        inline_content: None,
                         behavior: DestinationBehavior::Replace,
                         expected_inode_id: None,
                         expected_revision_no: None,

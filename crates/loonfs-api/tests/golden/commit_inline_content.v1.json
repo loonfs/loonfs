@@ -1,0 +1,23 @@
+{
+  "commit_id": "inline-wire",
+  "operations": [
+    {
+      "kind": "put_file",
+      "path": "/binary",
+      "inline_content": "AP+AAQ==",
+      "behavior": "no_replace"
+    },
+    {
+      "kind": "create_file_by_inode",
+      "parent_inode_id": "ino_1",
+      "display_name": "empty",
+      "inline_content": ""
+    },
+    {
+      "kind": "put_file_revision_by_inode",
+      "inode_id": "ino_2",
+      "inline_content": "c2FtZQ==",
+      "expected_revision_no": 1
+    }
+  ]
+}

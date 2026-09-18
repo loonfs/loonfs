@@ -2690,6 +2690,90 @@ fn content_publication_rows_match_golden_bytes_and_lookup_grammar() {
 }
 
 #[test]
+fn inline_commit_wire_bytes_match_golden() {
+    use loonfs_api::{AbsolutePath, CommitRequest, FilesystemOperation};
+    let request = CommitRequest {
+        commit_id: CommitId::parse("inline-wire").expect("commit id"),
+        message: None,
+        content_tokens: Vec::new(),
+        preconditions: Vec::new(),
+        operations: vec![
+            FilesystemOperation::PutFile {
+                path: AbsolutePath::parse("/binary").expect("path"),
+                content_ref: None,
+                inline_content: Some(vec![0, 255, 128, 1]),
+                behavior: loonfs_api::DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+            FilesystemOperation::CreateFileByInode {
+                parent_inode_id: InodeId(1),
+                display_name: loonfs_api::DisplayName::parse("empty").expect("name"),
+                content_ref: None,
+                inline_content: Some(Vec::new()),
+            },
+            FilesystemOperation::PutFileRevisionByInode {
+                inode_id: InodeId(2),
+                content_ref: None,
+                inline_content: Some(b"same".to_vec()),
+                expected_revision_no: RevisionNo(1),
+            },
+        ],
+    };
+    let bytes = serde_json::to_vec_pretty(&request).expect("wire request");
+    assert_matches_golden("commit_inline_content.v1.json", &bytes);
+    assert_eq!(
+        serde_json::from_slice::<CommitRequest>(&bytes).expect("decode"),
+        request
+    );
+    let namespace = NamespaceId::parse("demo").expect("namespace");
+    let fingerprint = |operations: &[FilesystemOperation],
+                       ids: &std::collections::BTreeSet<ContentId>| {
+        loonfs_api::semantic_commit_fingerprint(
+            &namespace,
+            &loonfs_api::ActorId::loonfs(),
+            None,
+            None,
+            operations,
+            &[],
+            ids,
+        )
+        .expect("fingerprint")
+    };
+    let expected = fingerprint(&request.operations, &Default::default());
+    let mut resolved = request.operations;
+    let mut ids = std::collections::BTreeSet::new();
+    for operation in &mut resolved {
+        let (content_ref, inline_content) = match operation {
+            FilesystemOperation::PutFile {
+                content_ref,
+                inline_content,
+                ..
+            }
+            | FilesystemOperation::CreateFileByInode {
+                content_ref,
+                inline_content,
+                ..
+            }
+            | FilesystemOperation::PutFileRevisionByInode {
+                content_ref,
+                inline_content,
+                ..
+            } => (content_ref, inline_content),
+            _ => panic!("expected content operation"),
+        };
+        let id = ContentId::generate();
+        ids.insert(id.clone());
+        *content_ref = Some(ContentRef::blob_v1(
+            namespace.clone(),
+            id,
+            &inline_content.take().expect("inline bytes"),
+        ));
+    }
+    assert_eq!(fingerprint(&resolved, &ids), expected);
+}
+
+#[test]
 fn commit_precondition_wire_shapes_match_golden() {
     use loonfs_api::{
         AbsolutePath, CommitPrecondition, CommitRequest, ErrorDetails, FilesystemOperation,

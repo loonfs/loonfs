@@ -30,8 +30,8 @@ pub type PayloadStream = BoxStream<'static, io::Result<Bytes>>;
 /// source that does not know it — a pipe, a socket, standard input — takes
 /// exactly the same path and discovers the length as it goes.
 pub struct PayloadSource {
-    stream: PayloadStream,
-    size_bytes: Option<u64>,
+    pub(crate) stream: PayloadStream,
+    pub(crate) size_bytes: Option<u64>,
 }
 
 impl std::fmt::Debug for PayloadSource {

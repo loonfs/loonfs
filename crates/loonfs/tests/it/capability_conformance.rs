@@ -49,10 +49,11 @@ fn is_grep_key(key: &str) -> bool {
     key.starts_with("query.") || key.starts_with("maintenance.grep.")
 }
 
-fn is_host_transfer_key(key: &str) -> bool {
+fn is_host_feature_key(key: &str) -> bool {
     matches!(
         key,
-        "filesystem.uploads.direct_put"
+        "filesystem.commits.inline_content"
+            | "filesystem.uploads.direct_put"
             | "filesystem.uploads.direct_multipart"
             | "filesystem.downloads.direct_get"
     )
@@ -118,7 +119,7 @@ fn advertised_features_match_the_spec_feature_registry() {
 
     let runtime_registry: BTreeSet<String> = registry
         .into_iter()
-        .filter(|key| !is_grep_key(key) && !is_host_transfer_key(key))
+        .filter(|key| !is_grep_key(key) && !is_host_feature_key(key))
         .collect();
     let advertised: BTreeSet<String> = embedded_capabilities().features.into_keys().collect();
     assert_eq!(

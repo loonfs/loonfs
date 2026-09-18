@@ -16,6 +16,34 @@ use thiserror::Error;
 
 pub use loonfs_objectstore::StoreConfig;
 
+/// Overrides the embedded writer's inline content policy.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InlineContentOverrides {
+    pub inline_content_threshold_bytes: Option<usize>,
+    pub inline_content_segment_budget_bytes: Option<usize>,
+    pub inline_content_fold_at_bytes: Option<usize>,
+    pub inline_content_tail_limit_bytes: Option<usize>,
+}
+
+impl InlineContentOverrides {
+    pub(crate) fn resolve(&self) -> loonfs::InlineContentOptions {
+        let defaults = loonfs::InlineContentOptions::default();
+        loonfs::InlineContentOptions {
+            inline_content_threshold_bytes: self.inline_content_threshold_bytes,
+            inline_content_segment_budget_bytes: self
+                .inline_content_segment_budget_bytes
+                .unwrap_or(defaults.inline_content_segment_budget_bytes),
+            inline_content_fold_at_bytes: self
+                .inline_content_fold_at_bytes
+                .unwrap_or(defaults.inline_content_fold_at_bytes),
+            inline_content_tail_limit_bytes: self
+                .inline_content_tail_limit_bytes
+                .unwrap_or(defaults.inline_content_tail_limit_bytes),
+        }
+    }
+}
+
 /// Optional overrides for the writer's shared publication budget.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +113,9 @@ pub struct ServerConfig {
     /// Shared request and concurrency limits for namespace publications.
     #[serde(default)]
     pub publication: PublicationLimitsOverrides,
+    /// Disabled unless an inline threshold is configured.
+    #[serde(default)]
+    pub inline_content: InlineContentOverrides,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
     /// The node-local cache of encoded metadata blocks, if this deployment

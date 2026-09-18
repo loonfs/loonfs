@@ -359,6 +359,11 @@ slack, HTTP request buffers, and the metadata/working copies a publication
 loads. Size process memory for those costs and the separate fold/cache limits
 too. Embedded hosts set the same limits with `FsWriterBuilder::publication_limits`.
 
+Hosted servers use the `[inline_content]` table with the settings below. Omit
+`inline_content_threshold_bytes` to keep the policy off. When enabled, capability
+discovery advertises `filesystem.commits.inline_content` and
+`commit.max_inline_content_bytes`.
+
 Embedded hosts configure inline writes with `FsWriterBuilder::inline_content`
 and `InlineContentOptions`. These settings do not change reader format limits.
 

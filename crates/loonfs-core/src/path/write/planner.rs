@@ -49,7 +49,8 @@ pub(crate) fn commit_fingerprint(
         inline_content_ids,
     )
     .map_err(|error| match error {
-        loonfs_api::SemanticFingerprintError::InlineChecksumAlgorithm { .. } => {
+        loonfs_api::SemanticFingerprintError::InlineChecksumAlgorithm { .. }
+        | loonfs_api::SemanticFingerprintError::InvalidContentSource => {
             CoreError::InvalidCommitRequest(error.to_string())
         }
         error => CoreError::Internal(format!("failed to fingerprint mutation: {error}")),
@@ -143,13 +144,14 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::PutFile {
             path,
             content_ref,
+            inline_content,
             behavior,
             expected_inode_id,
             expected_revision_no,
         } => {
             plan_put_file_content_ref(
                 path,
-                content_ref.clone(),
+                prepared_reference(content_ref, inline_content)?.clone(),
                 *behavior,
                 DestinationPrecondition {
                     behavior: *behavior,
@@ -179,11 +181,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             parent_inode_id,
             display_name,
             content_ref,
+            inline_content,
         } => {
             plan_create_by_inode(
                 *parent_inode_id,
                 display_name,
-                NewChild::File(content_ref.clone()),
+                NewChild::File(prepared_reference(content_ref, inline_content)?.clone()),
                 view,
                 allocation,
             )
@@ -192,11 +195,12 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         FilesystemOperation::PutFileRevisionByInode {
             inode_id,
             content_ref,
+            inline_content,
             expected_revision_no,
         } => {
             plan_put_file_revision_by_inode(
                 *inode_id,
-                content_ref.clone(),
+                prepared_reference(content_ref, inline_content)?.clone(),
                 *expected_revision_no,
                 view,
             )
@@ -302,6 +306,18 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             )
             .await
         }
+    }
+}
+
+fn prepared_reference<'a>(
+    content_ref: &'a Option<loonfs_api::ContentRef>,
+    inline_content: &Option<Vec<u8>>,
+) -> Result<&'a loonfs_api::ContentRef> {
+    match (content_ref, inline_content) {
+        (Some(reference), None) => Ok(reference),
+        _ => Err(CoreError::InvalidCommitRequest(
+            "content must be prepared before planning".to_owned(),
+        )),
     }
 }
 
@@ -565,7 +581,8 @@ mod tests {
             &namespace_id,
             &request(FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/dead/new.txt").expect("path"),
-                content_ref: staged.into_content_ref(),
+                content_ref: Some(staged.into_content_ref()),
+                inline_content: None,
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -594,7 +611,8 @@ mod tests {
                     create_dir("/reports"),
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/reports/a.txt").expect("path"),
-                        content_ref: staged.content_ref().clone(),
+                        content_ref: Some(staged.content_ref().clone()),
+                        inline_content: None,
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -663,7 +681,8 @@ mod tests {
                     },
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
-                        content_ref: staged.content_ref().clone(),
+                        content_ref: Some(staged.content_ref().clone()),
+                        inline_content: None,
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

@@ -70,14 +70,16 @@ fn batch(first: &ContentRef, second: &ContentRef) -> Vec<FilesystemOperation> {
         },
         FilesystemOperation::PutFile {
             path: absolute(FIRST_FILE),
-            content_ref: first.clone(),
+            content_ref: Some(first.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
         },
         FilesystemOperation::PutFile {
             path: absolute(SECOND_FILE),
-            content_ref: second.clone(),
+            content_ref: Some(second.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -259,7 +261,8 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
         content_tokens: vec![content_token(&staged)],
         operations: vec![FilesystemOperation::PutFile {
             path: absolute(ROOT_FILE),
-            content_ref: staged.content_ref.clone(),
+            content_ref: Some(staged.content_ref.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -371,7 +374,8 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
         content_tokens: vec![content_token(&staged)],
         operations: vec![FilesystemOperation::PutFile {
             path: absolute(ROOT_FILE),
-            content_ref: staged.content_ref.clone(),
+            content_ref: Some(staged.content_ref.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -476,7 +480,8 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
                     },
                     FilesystemOperation::PutFile {
                         path: absolute(FIRST_FILE),
-                        content_ref: staged.content_ref.clone(),
+                        content_ref: Some(staged.content_ref.clone()),
+                        inline_content: None,
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -628,7 +633,8 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
                 content_tokens: vec![content_token(&content)],
                 operations: vec![FilesystemOperation::PutFile {
                     path: absolute(ROOT_FILE),
-                    content_ref: content.content_ref,
+                    content_ref: Some(content.content_ref),
+                    inline_content: None,
                     behavior: DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: Some(RevisionNo(1)),
@@ -1173,7 +1179,8 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
                 content_tokens: vec![content_token(&first)],
                 operations: vec![FilesystemOperation::PutFile {
                     path: absolute(FIRST_FILE),
-                    content_ref: first.content_ref.clone(),
+                    content_ref: Some(first.content_ref.clone()),
+                    inline_content: None,
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

@@ -57,7 +57,8 @@ fn inline(namespace_id: &NamespaceId, bytes: Bytes) -> InlineContent {
 fn put(path: &str, content_ref: &ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content_ref: content_ref.clone(),
+        content_ref: Some(content_ref.clone()),
+        inline_content: None,
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -290,8 +291,10 @@ async fn invalid_inline_candidates_write_nothing() {
             staged.content_ref().clone(),
         )]);
     let mut wrong_checksum = mismatched.clone();
-    if let FilesystemOperation::PutFile { content_ref, .. } =
-        &mut wrong_checksum.request.operations[0]
+    if let FilesystemOperation::PutFile {
+        content_ref: Some(content_ref),
+        ..
+    } = &mut wrong_checksum.request.operations[0]
     {
         content_ref.checksum = loonfs_api::Checksum::crc32c(b"inline bytes");
     }

@@ -118,7 +118,7 @@ pub mod publish {
     pub use loonfs_core::path::parse_mutation_path;
     pub use loonfs_core::publish::{
         CommitCandidate, CommitRequest, ContentPreparationError, FilesystemOperation,
-        PreparedContent,
+        InlineContent, PreparedContent,
     };
 }
 

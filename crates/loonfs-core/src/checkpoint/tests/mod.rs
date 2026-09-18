@@ -179,7 +179,8 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(path).expect("path"),
-                        content_ref,
+                        content_ref: Some(content_ref),
+                        inline_content: None,
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

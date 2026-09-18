@@ -146,7 +146,8 @@ async fn put_file_with_preconditions<S: ObjectStore + ?Sized>(
         CommitId::parse(commit_id).expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(absolute_path).expect("path"),
-            content_ref: content.into_content_ref(),
+            content_ref: Some(content.into_content_ref()),
+            inline_content: None,
             behavior: DestinationBehavior::Replace,
             expected_inode_id: preconditions.inode_id,
             expected_revision_no: preconditions.revision_no,
@@ -1128,7 +1129,8 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content_ref: content.into_content_ref(),
+                        content_ref: Some(content.into_content_ref()),
+                        inline_content: None,
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -1646,7 +1648,8 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
         test_commit_id(Some("no-replace-with_preconditions-put")),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/aba.txt").expect("path"),
-            content_ref: rejected_content.into_content_ref(),
+            content_ref: Some(rejected_content.into_content_ref()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: Some(recreated.inode_id),
             expected_revision_no: None,

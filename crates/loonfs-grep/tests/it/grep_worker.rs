@@ -2529,7 +2529,8 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(path).expect("path"),
-                        content_ref: content.content_ref().clone(),
+                        content_ref: Some(content.content_ref().clone()),
+                        inline_content: None,
                         behavior: loonfs::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

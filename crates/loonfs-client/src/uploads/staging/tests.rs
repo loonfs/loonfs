@@ -1080,7 +1080,8 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         saved.operations,
         vec![FilesystemOperation::PutFile {
             path: spec().absolute_path().clone(),
-            content_ref: uploaded,
+            content_ref: Some(uploaded),
+            inline_content: None,
             behavior: options.behavior,
             expected_inode_id: options.expected_inode_id,
             expected_revision_no: options.expected_revision_no,
@@ -1114,4 +1115,110 @@ async fn a_commit_journal_failure_prevents_submission_of_completed_content() {
         .expect_err("cannot save commit request");
     assert!(error.to_string().contains("before submission"));
     assert_eq!(transport.attempts(), 0);
+}
+
+fn inline_capabilities() -> Outcome {
+    json(&CapabilityDocument {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        api_groups: vec![API_GROUP_FILESYSTEM_V0.to_owned()],
+        features: [(loonfs_api::FEATURE_COMMIT_INLINE_CONTENT.to_owned(), true)].into(),
+        limits: [(
+            loonfs_api::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES.to_owned(),
+            4,
+        )]
+        .into(),
+    })
+}
+
+#[tokio::test]
+async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
+    for bytes in [b"".as_slice(), b"same".as_slice()] {
+        let transport = test_transport::script([
+            inline_capabilities(),
+            commit_landed(),
+            commit_landed(),
+            commit_landed(),
+        ]);
+        let client = client_without_retry();
+        client.get_capabilities().await.expect("capabilities");
+        let prepared = client
+            .prepare_file_bytes(&namespace_id(), bytes)
+            .await
+            .expect("prepare");
+        assert!(prepared.content_ref().is_none());
+        assert_eq!(transport.attempts(), 1);
+        let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+        options.commit.commit_id = Some(CommitId::parse("inline-retry").expect("id"));
+        client
+            .put_file_prepared(&spec(), prepared, &options)
+            .await
+            .expect("publish");
+        let journal = RecordingJournal::default();
+        client
+            .put_file_stream_resumable(
+                &spec(),
+                PayloadSource::stream(
+                    futures::stream::iter([Ok(Bytes::copy_from_slice(bytes))]).boxed(),
+                ),
+                &options,
+                &journal,
+                None,
+            )
+            .await
+            .expect("stream");
+        client
+            .put_file_bytes(&spec(), bytes, &options)
+            .await
+            .expect("put bytes");
+        assert_eq!(transport.attempts(), 4);
+        assert!(transport.sent()[1..]
+            .iter()
+            .all(|request| request.url.ends_with("/commits")));
+        let request = journal
+            .request
+            .lock()
+            .expect("journal")
+            .clone()
+            .expect("saved");
+        assert!(request.content_tokens.is_empty());
+        assert!(
+            matches!(&request.operations[0], FilesystemOperation::PutFile { content_ref: None, inline_content: Some(content), .. } if content == bytes)
+        );
+        let saved = serde_json::to_vec(&request).expect("encode journal");
+        let recovered: CommitRequest = serde_json::from_slice(&saved).expect("decode journal");
+        assert_eq!(recovered, request);
+        drop(transport);
+        let transport = test_transport::script([commit_landed()]);
+        client_without_retry()
+            .create_commit(&namespace_id(), &recovered, &options.commit.actor_id)
+            .await
+            .expect("recover");
+        assert_eq!(transport.attempts(), 1);
+    }
+}
+
+#[tokio::test]
+async fn streams_over_the_inline_limit_upload_the_buffered_prefix_and_remainder() {
+    let bytes = b"larger than the inline limit";
+    let transport = test_transport::script([
+        inline_capabilities(),
+        begin_proxied(),
+        completed(content_ref(bytes)),
+        completed(content_ref(bytes)),
+        commit_landed(),
+    ]);
+    let (source, _) = watched_source(bytes, 11);
+    client_without_retry()
+        .put_file_stream(
+            &spec(),
+            source,
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("put");
+    let sent = transport.sent();
+    assert_eq!(sent.len(), 5);
+    assert_eq!(sent[2].body_bytes(), bytes.len());
+    assert!(sent[1].url.ends_with("/uploads"));
+    assert!(sent[4].url.ends_with("/commits"));
 }

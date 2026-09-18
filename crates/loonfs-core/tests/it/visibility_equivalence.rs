@@ -120,7 +120,8 @@ impl VisibilityHarness {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(path).expect("valid path"),
-                    content_ref,
+                    content_ref: Some(content_ref),
+                    inline_content: None,
                     behavior,
                     expected_inode_id: None,
                     expected_revision_no: None,

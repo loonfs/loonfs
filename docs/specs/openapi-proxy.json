@@ -1560,15 +1560,20 @@
         "type": "object"
       },
       "FilesystemOperationCreateFileByInode": {
-        "description": "Create a file with an unused name under an existing parent inode.",
+        "description": "Create a file with an unused name under an existing parent inode.\nRequires exactly one of `content_ref` and `inline_content`.",
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Immutable bytes that must be covered by a valid preparation proof."
+            "description": "Uploaded content covered by a token; mutually exclusive with `inline_content`."
           },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
             "description": "New file name."
+          },
+          "inline_content": {
+            "description": "Complete file bytes as base64; mutually exclusive with `content_ref`.",
+            "format": "byte",
+            "type": "string"
           },
           "kind": {
             "enum": [
@@ -1584,7 +1589,6 @@
         "required": [
           "parent_inode_id",
           "display_name",
-          "content_ref",
           "kind"
         ],
         "type": "object"
@@ -1731,7 +1735,7 @@
         "type": "object"
       },
       "FilesystemOperationPutFile": {
-        "description": "Create or replace one file with an already-durable content ref.",
+        "description": "Create or replace one file from uploaded or inline content.\nRequires exactly one of `content_ref` and `inline_content`.",
         "properties": {
           "behavior": {
             "$ref": "#/components/schemas/DestinationBehavior",
@@ -1739,7 +1743,7 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Immutable bytes that must be covered by a valid preparation proof."
+            "description": "Uploaded content covered by a token; mutually exclusive with `inline_content`."
           },
           "expected_inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -1748,6 +1752,11 @@
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
             "description": "With `replace` behavior and an inode precondition, the request requires this content revision."
+          },
+          "inline_content": {
+            "description": "Complete file bytes as base64; mutually exclusive with `content_ref`.",
+            "format": "byte",
+            "type": "string"
           },
           "kind": {
             "enum": [
@@ -1762,21 +1771,25 @@
         },
         "required": [
           "path",
-          "content_ref",
           "kind"
         ],
         "type": "object"
       },
       "FilesystemOperationPutFileRevisionByInode": {
-        "description": "Append a revision to a file inode if its current revision matches.",
+        "description": "Append a revision to a file inode if its current revision matches.\nRequires exactly one of `content_ref` and `inline_content`.",
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Immutable bytes that must be covered by a valid preparation proof."
+            "description": "Uploaded content covered by a token; mutually exclusive with `inline_content`."
           },
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
             "description": "Current revision required for the write."
+          },
+          "inline_content": {
+            "description": "Complete file bytes as base64; mutually exclusive with `content_ref`.",
+            "format": "byte",
+            "type": "string"
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -1791,7 +1804,6 @@
         },
         "required": [
           "inode_id",
-          "content_ref",
           "expected_revision_no",
           "kind"
         ],
@@ -3127,6 +3139,16 @@
               }
             },
             "description": "Namespace deleted"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Inline content is disabled"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
