@@ -461,7 +461,8 @@ Prepared content belongs to one namespace and content store. Two namespaces
 cannot share a prepared value, even if they use the same content store: uploads
 and garbage collection are tracked separately for each namespace. Use
 `prepare_content_ref` to import content into another namespace. The result
-refers to the new copy owned by that namespace.
+refers to the new copy owned by that namespace. A subject must be an
+administrator of the reference's owner namespace to import it.
 
 ### 5.1 Commit identity and preconditions
 
@@ -2360,7 +2361,8 @@ with some right but without a required right receives `forbidden`.
 | Snapshot stat, listing, content, or download | `read` and `history` on the historical inode, evaluated at the current head. |
 | Trash listing | `read` on each deletion's saved original parent. |
 | Batch file resolution and grep candidates | `read` on the candidate inode; snapshot resolution also requires `history`. |
-| Change feed or bare content reference | Administrator. |
+| Change feed or bare content reference read | Administrator. |
+| Bare content reference import | Administrator on the reference's owner namespace. |
 
 Names belong to the directory. A subject with `read` on a directory sees every
 child in a listing. A child the subject cannot read keeps its entry fields but
@@ -2374,10 +2376,12 @@ original parent. A filtered page may be short and still carry `next_cursor`.
 Grep filters candidates the subject cannot read before reading their content;
 those candidates still count against the page's candidate budget.
 
-The change feed and bare content references require an administrator when a
-subject is supplied. With no subject headers, these two surfaces read as the
-token holder; every per-subject read surface instead answers `invalid_request`
-naming `Loonfs-Principals`. Checkpoints and maintenance continue to read as the
+The change feed and bare content reference reads and imports require an
+administrator when a subject is supplied. An import checks the reference's
+owner namespace, including when the owner is also the destination or has been
+deleted. With no subject headers, these surfaces act as the token holder; every
+per-subject read surface instead answers `invalid_request` naming
+`Loonfs-Principals`. Checkpoints and maintenance continue to read as the
 service.
 
 ### 6.9 Upload transport

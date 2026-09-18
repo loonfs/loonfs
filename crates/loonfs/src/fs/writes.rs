@@ -314,10 +314,11 @@ impl FsWriter {
         .await
     }
 
-    /// Publishes a file revision from an already-durable content ref.
+    /// Publishes a file revision by importing an already-durable content reference.
     ///
     /// This explicitly slow helper reads and verifies the full source object,
     /// then stages a fresh copy owned by this namespace before publication.
+    /// A subject must be an administrator of the reference's owner namespace.
     /// Callers that already hold same-namespace proof should prefer
     /// [`Self::put_file_prepared`]. The published revision points at the fresh
     /// prepared ref, not the input ref.
@@ -357,11 +358,12 @@ impl FsWriter {
             .await
     }
 
-    /// Imports an existing content ref for later publication.
+    /// Imports an existing content reference for later publication.
     ///
     /// Preparation verifies the source bytes and stages them under a fresh
     /// identity owned by this namespace. Later publication performs no content
-    /// I/O. See the API specification's content preparation contract.
+    /// I/O. A subject must be an administrator of the reference's owner namespace.
+    /// See the API specification's content preparation contract.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.prepare",
@@ -406,6 +408,7 @@ impl FsWriter {
             .core
             .pinned_metadata_read(&content_ref.owner_namespace_id)
             .await?;
+        owner.require_administrator(&context).await?;
         // Forks pin manifests, so inherited content from a deleted owner is already an object.
         if !context.head.status.is_deleted() {
             if let loonfs_core::content::ContentLocation::Tail { bytes, .. } = owner

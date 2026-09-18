@@ -12,6 +12,7 @@ pub use current_files::{CurrentFileState, MAX_RESOLVE_CURRENT_FILES};
 #[cfg(test)]
 pub(crate) use materialized_view::load_current_metadata_view;
 pub(crate) use materialized_view::{
-    ensure_within_read_limit, load_metadata_view, LoadedMetadataView, ReadLoadContext,
+    ensure_within_read_limit, load_metadata_view, load_metadata_view_for_authorization,
+    LoadedMetadataView, ReadLoadContext,
 };
 pub use materialized_view::{DirectDownloadByInodeTarget, DirectDownloadTarget};

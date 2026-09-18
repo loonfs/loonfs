@@ -85,6 +85,16 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: ReadLoadContext<'_, 'a>,
 ) -> Result<LoadedMetadataView<'a, S>> {
+    crate::namespace::control::ensure_namespace_live(context.head)?;
+    load_metadata_view_for_authorization(store, namespace_id, context).await
+}
+
+/// Loads access rows from a deleted head when deletion does not decide authorization.
+pub(crate) async fn load_metadata_view_for_authorization<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    namespace_id: &NamespaceId,
+    context: ReadLoadContext<'_, 'a>,
+) -> Result<LoadedMetadataView<'a, S>> {
     LoadedMetadataView::load_at_head(
         store,
         namespace_id,
@@ -184,7 +194,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 head.namespace_id, namespace_id
             )));
         }
-        crate::namespace::control::ensure_namespace_live(&head)?;
         let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
         let manifest_no = basis.manifest_no();
         let loaded_basis =

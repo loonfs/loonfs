@@ -14,8 +14,8 @@ use crate::namespace::state::NamespaceReadState;
 use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{
-    load_metadata_view, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget,
-    LoadedMetadataView, ReadLoadContext,
+    load_metadata_view, load_metadata_view_for_authorization, CurrentFileState,
+    DirectDownloadByInodeTarget, DirectDownloadTarget, LoadedMetadataView, ReadLoadContext,
 };
 use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
@@ -196,8 +196,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .map(|_| ())
     }
 
-    /// The change feed and bare content references read as today for the
-    /// token holder and for an administrator; any other subject is refused.
+    /// The change feed and bare content reference reads and imports work for
+    /// the token holder and for an administrator; any other subject is refused.
     pub async fn require_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
         if matches!(context.head.access, NamespaceAccess::Unrestricted {}) {
             return Ok(());
@@ -205,7 +205,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let Some(subject) = &self.subject else {
             return Ok(());
         };
-        let view = self.load_read_view(context).await?;
+        let view = load_metadata_view_for_authorization(
+            &self.store,
+            &self.namespace_id,
+            runtime_read_load_context(context),
+        )
+        .await?;
         if is_administrator(&mut view.metadata_view().session(), &subject.principals).await? {
             Ok(())
         } else {
@@ -662,7 +667,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Resolves a reference in the owner's pinned view and verifies resident bytes.
-    /// Holding the reference authorizes an import without namespace access rights.
     pub async fn resolve_content_location(
         &self,
         content_ref: &ContentRef,
