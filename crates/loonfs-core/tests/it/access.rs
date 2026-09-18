@@ -6,8 +6,8 @@ use loonfs_api::options::{ListPathEntriesOptions, StatPathOptions};
 use loonfs_api::v0::FilesystemChange;
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
-    DestinationBehavior, ErrorCode, InodeId, NamespaceAccess, NamespaceId, PrincipalId,
-    PrincipalScope, ROOT_INODE_ID,
+    CommitPrecondition, DestinationBehavior, DisplayName, ErrorCode, InodeId, NamespaceAccess,
+    NamespaceId, PrincipalId, PrincipalScope, ROOT_INODE_ID,
 };
 use loonfs_api::{
     AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, PaginationPolicy, RevisionNo,
@@ -1307,5 +1307,390 @@ async fn a_revocation_is_visible_to_the_next_read() {
                 .code(),
             ErrorCode::PathNotFound
         );
+    }
+}
+
+#[tokio::test]
+async fn unreadable_access_targets_are_hidden_before_structural_errors() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    for path in ["/team/secret/file", "/team/secret"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("viewer", &["viewer"]),
+            update_access(path, true, AccessGrants::default()),
+        )
+        .await
+        .expect_err("unreadable access target");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{path}");
+    }
+    for path in ["/team/secret/file/child", "/team/secret/child"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("viewer", &["viewer"]),
+            update_access(path, true, AccessGrants::default()),
+        )
+        .await
+        .expect_err("unreadable access parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{path}");
+    }
+
+    let error = commit_as(
+        &store,
+        &namespace_id,
+        &context,
+        subject("root", &["prn_root"]),
+        update_access("/team/secret/file", true, AccessGrants::default()),
+    )
+    .await
+    .expect_err("administrator receives the structural error");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_eq!(
+        error.to_string(),
+        "invalid commit request: a boundary applies only to a directory"
+    );
+}
+
+#[tokio::test]
+async fn directory_creation_hides_an_unreadable_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    for parents in [false, true] {
+        for path in ["/team/secret/file/child", "/team/secret/child"] {
+            let error = commit_as(
+                &store,
+                &namespace_id,
+                &context,
+                subject("team", &["team"]),
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse(path).expect("path"),
+                    parents,
+                },
+            )
+            .await
+            .expect_err("unreadable parent");
+            assert_eq!(error.code(), ErrorCode::PathNotFound, "{path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn path_put_hides_an_unreadable_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, content) = read_fixture().await;
+    for path in ["/team/secret/file/put", "/team/secret/put"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            put(path, &content),
+        )
+        .await
+        .expect_err("unreadable parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn inode_creation_hides_an_unreadable_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    let hidden_directory = resolve_path(&store, &namespace_id, "/team/secret")
+        .await
+        .expect("hidden directory");
+    let hidden_file = resolve_path(&store, &namespace_id, "/team/secret/file")
+        .await
+        .expect("hidden file");
+    for parent_inode_id in [hidden_file.inode_id, hidden_directory.inode_id] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            FilesystemOperation::CreateDirectoryByInode {
+                parent_inode_id,
+                display_name: DisplayName::parse("child").expect("display name"),
+            },
+        )
+        .await
+        .expect_err("unreadable parent");
+        assert_eq!(error.code(), ErrorCode::InodeNotFound, "{parent_inode_id}");
+    }
+}
+
+#[tokio::test]
+async fn path_move_hides_an_unreadable_destination_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    for destination in ["/team/secret/file/moved", "/team/secret/moved"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            move_path("/team/file", destination),
+        )
+        .await
+        .expect_err("unreadable destination parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{destination}");
+    }
+    for (source, destination) in [
+        ("/team/secret/file/child", "/team/moved-from-file"),
+        ("/team/secret/child", "/team/moved-from-directory"),
+    ] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            move_path(source, destination),
+        )
+        .await
+        .expect_err("unreadable source parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{source}");
+    }
+}
+
+#[tokio::test]
+async fn inode_move_authorizes_the_destination_before_state_errors() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    let source = resolve_path(&store, &namespace_id, "/team/file")
+        .await
+        .expect("source");
+    let other = resolve_path(&store, &namespace_id, "/team/kept")
+        .await
+        .expect("other source");
+    let hidden_directory = resolve_path(&store, &namespace_id, "/team/secret")
+        .await
+        .expect("hidden directory");
+    let hidden_file = resolve_path(&store, &namespace_id, "/team/secret/file")
+        .await
+        .expect("hidden file");
+    for (destination_parent_inode_id, expected_binding_generation) in [
+        (
+            hidden_file.inode_id,
+            source.binding_generation.clone().expect("source binding"),
+        ),
+        (
+            hidden_directory.inode_id,
+            other.binding_generation.expect("other binding"),
+        ),
+    ] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            FilesystemOperation::MoveByInode {
+                inode_id: source.inode_id,
+                expected_binding_generation,
+                destination_parent_inode_id,
+                destination_display_name: DisplayName::parse("moved").expect("display name"),
+                precondition: loonfs_api::DestinationPrecondition::default(),
+            },
+        )
+        .await
+        .expect_err("unreadable destination parent");
+        assert_eq!(
+            error.code(),
+            ErrorCode::InodeNotFound,
+            "{destination_parent_inode_id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn path_copy_hides_an_unreadable_destination_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    for destination in ["/team/secret/file/copied", "/team/secret/copied"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("viewer", &["viewer"]),
+            FilesystemOperation::CopyPath {
+                source_path: AbsolutePath::parse("/team/file").expect("source path"),
+                destination_path: AbsolutePath::parse(destination).expect("destination path"),
+                precondition: loonfs_api::DestinationPrecondition::default(),
+            },
+        )
+        .await
+        .expect_err("unreadable destination parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{destination}");
+    }
+    for (source, destination) in [
+        ("/team/secret/file/child", "/team/copied-from-file"),
+        ("/team/secret/child", "/team/copied-from-directory"),
+    ] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("viewer", &["viewer"]),
+            FilesystemOperation::CopyPath {
+                source_path: AbsolutePath::parse(source).expect("source path"),
+                destination_path: AbsolutePath::parse(destination).expect("destination path"),
+                precondition: loonfs_api::DestinationPrecondition::default(),
+            },
+        )
+        .await
+        .expect_err("unreadable source parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{source}");
+    }
+}
+
+#[tokio::test]
+async fn path_delete_hides_an_unreadable_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    for path in ["/team/secret/file/child", "/team/secret/child"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            delete(path),
+        )
+        .await
+        .expect_err("unreadable delete parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn attribute_updates_hide_an_unreadable_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    for path in ["/team/secret/file/child", "/team/secret/child"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            FilesystemOperation::UpdateAttributes {
+                path: AbsolutePath::parse(path).expect("path"),
+                set: std::collections::BTreeMap::from([(
+                    loonfs_api::AttributeKey::parse("owner").expect("key"),
+                    loonfs_api::AttributeValue::parse("ada").expect("value"),
+                )]),
+                remove: Vec::new(),
+                expected_inode_id: None,
+                expected_attributes_revision_no: None,
+            },
+        )
+        .await
+        .expect_err("unreadable attribute parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn revision_restores_hide_an_unreadable_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    for path in ["/team/secret/file/child", "/team/secret/child"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            FilesystemOperation::RestoreRevision {
+                path: AbsolutePath::parse(path).expect("path"),
+                source_revision_no: RevisionNo(1),
+            },
+        )
+        .await
+        .expect_err("unreadable restore parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn undelete_authorizes_state_and_destination_before_errors() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    let hidden_directory = resolve_path(&store, &namespace_id, "/team/secret")
+        .await
+        .expect("hidden directory");
+    let hidden_file = resolve_path(&store, &namespace_id, "/team/secret/file")
+        .await
+        .expect("hidden file");
+    let visible_file = resolve_path(&store, &namespace_id, "/team/kept")
+        .await
+        .expect("visible file");
+    let hidden_deletion = commit_as(
+        &store,
+        &namespace_id,
+        &context,
+        subject("root", &["prn_root"]),
+        delete("/team/secret/file"),
+    )
+    .await
+    .expect("delete hidden file");
+    let visible_deletion = commit_as(
+        &store,
+        &namespace_id,
+        &context,
+        subject("root", &["prn_root"]),
+        delete("/team/kept"),
+    )
+    .await
+    .expect("delete visible file");
+
+    for (inode_id, deletion_seq) in [
+        (hidden_file.inode_id, hidden_deletion.committed_seq),
+        (hidden_directory.inode_id, hidden_deletion.committed_seq),
+    ] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("stranger", &["stranger"]),
+            FilesystemOperation::Undelete {
+                inode_id,
+                deletion_seq,
+                destination_path: None,
+            },
+        )
+        .await
+        .expect_err("unreadable undelete target");
+        assert_eq!(error.code(), ErrorCode::InodeNotFound, "{inode_id}");
+    }
+
+    for destination_path in ["/team/secret/file/restored", "/team/secret/restored"] {
+        let error = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject("team", &["team"]),
+            FilesystemOperation::Undelete {
+                inode_id: visible_file.inode_id,
+                deletion_seq: visible_deletion.committed_seq,
+                destination_path: Some(AbsolutePath::parse(destination_path).expect("path")),
+            },
+        )
+        .await
+        .expect_err("unreadable undelete destination");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{destination_path}");
+    }
+}
+
+#[tokio::test]
+async fn path_absence_preconditions_hide_an_unreadable_parent_kind() {
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    for (precondition_path, output_path) in [
+        ("/team/secret/file/child", "/team/precondition-file"),
+        ("/team/secret/child", "/team/precondition-directory"),
+    ] {
+        let request = CommitRequest::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            create_directory(output_path),
+        )
+        .with_subject(subject("team", &["team"]))
+        .preconditions(vec![CommitPrecondition::PathAbsence {
+            path: AbsolutePath::parse(precondition_path).expect("precondition path"),
+        }]);
+        let error = submit_commit(&store, &namespace_id, request, &context)
+            .await
+            .expect_err("unreadable precondition parent");
+        assert_eq!(error.code(), ErrorCode::PathNotFound, "{precondition_path}");
     }
 }

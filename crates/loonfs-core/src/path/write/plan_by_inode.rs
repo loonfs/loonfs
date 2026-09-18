@@ -4,8 +4,8 @@ use super::plan_delete::plan_delete;
 use super::plan_transfer::plan_move;
 use super::publish_path_planning::{
     check_binding_generation, child_display_path, classify_replace_destination,
-    resolve_visible_child, resolve_visible_directory, resolve_visible_inode,
-    CompiledFilesystemOperation, PublishPathPlanningView,
+    resolve_visible_child, resolve_visible_inode, CompiledFilesystemOperation,
+    PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Replacement};
 use crate::commit::{CandidateAllocation, CommitOp};
@@ -28,13 +28,19 @@ pub(super) async fn plan_create_by_inode<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
-    let parent = resolve_visible_directory(view, parent_inode_id).await?;
+    let parent = resolve_visible_inode(view, parent_inode_id).await?;
     view.authorize(
         parent_inode_id,
         AccessRights::from_iter([AccessRight::Create]),
         Absence::Inode,
     )
     .await?;
+    if parent.inode_kind != InodeKind::Directory {
+        return Err(CoreError::ExpectedDirectory {
+            target: parent.absolute_path,
+            kind: parent.inode_kind,
+        });
+    }
     if let Some(existing) = resolve_visible_child(view, parent_inode_id, display_name).await? {
         return Err(CoreError::DestinationExists {
             path: child_display_path(&parent.absolute_path, display_name),
@@ -104,8 +110,19 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
         Absence::Inode,
     )
     .await?;
-    check_binding_generation(view, &source, expected_binding_generation)?;
-    let target_parent = resolve_visible_directory(view, to_parent_inode_id).await?;
+    let target_parent = resolve_visible_inode(view, to_parent_inode_id).await?;
+    if target_parent.inode_kind != InodeKind::Directory {
+        view.authorize(
+            to_parent_inode_id,
+            AccessRights::from_iter([AccessRight::Create]),
+            Absence::Inode,
+        )
+        .await?;
+        return Err(CoreError::ExpectedDirectory {
+            target: target_parent.absolute_path,
+            kind: target_parent.inode_kind,
+        });
+    }
     let destination_path = child_display_path(&target_parent.absolute_path, to_display_name);
     let occupant = resolve_visible_child(view, to_parent_inode_id, to_display_name).await?;
     view.authorize_destination(
@@ -117,6 +134,7 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
         Absence::Inode,
     )
     .await?;
+    check_binding_generation(view, &source, expected_binding_generation)?;
     let replaced = classify_replace_destination(occupant, behavior, inode_id, &destination_path)?;
     plan_move(
         view,

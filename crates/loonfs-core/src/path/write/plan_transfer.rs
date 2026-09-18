@@ -4,7 +4,8 @@ use super::ensure_expected_inode;
 use super::publish_path_planning::ReplaceDestination;
 use super::publish_path_planning::{
     classify_replace_destination, is_missing_visible_path, reject_tombstoned_path_ancestor,
-    resolve_parent_directory, source_binding, CompiledFilesystemOperation, PublishPathPlanningView,
+    resolve_parent_directory, resolve_visible_path_for_authorization, source_binding,
+    CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Replacement};
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
@@ -28,7 +29,13 @@ pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
     ensure_mutation_path(to_path)?;
     reject_tombstoned_path_ancestor(view, from_path).await?;
     reject_tombstoned_path_ancestor(view, to_path).await?;
-    let source = view.view.resolve_visible_path(from_path).await?;
+    let source = resolve_visible_path_for_authorization(
+        view,
+        from_path,
+        AccessRights::from_iter([AccessRight::Remove]),
+        Absence::Path(from_path.as_str()),
+    )
+    .await?;
     view.authorize(
         source
             .parent_inode_id
@@ -37,7 +44,8 @@ pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
         Absence::Path(from_path.as_str()),
     )
     .await?;
-    let target_parent = resolve_parent_directory(view, to_path).await?;
+    let target_parent =
+        resolve_parent_directory(view, to_path, Absence::Path(to_path.as_str())).await?;
     let target_name = final_component(to_path)?;
     // Replace compiles to an atomic delete-plus-rename: the destination
     // file's delete and the source's rebind land in one commit, and the
@@ -149,7 +157,13 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     reject_tombstoned_path_ancestor(view, from_path).await?;
     reject_tombstoned_path_ancestor(view, to_path).await?;
 
-    let source = view.view.resolve_visible_path(from_path).await?;
+    let source = resolve_visible_path_for_authorization(
+        view,
+        from_path,
+        AccessRights::from_iter([AccessRight::Read]),
+        Absence::Path(from_path.as_str()),
+    )
+    .await?;
     view.authorize(
         source.inode_id,
         AccessRights::from_iter([AccessRight::Read]),
@@ -167,7 +181,8 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     // revision to the destination inode, keeping its identity and revision
     // history. Only a file destination can be replaced, and a path never
     // replaces itself.
-    let target_parent = resolve_parent_directory(view, to_path).await?;
+    let target_parent =
+        resolve_parent_directory(view, to_path, Absence::Path(to_path.as_str())).await?;
     let occupant = match view.view.resolve_visible_path(to_path).await {
         Ok(existing) => Some(existing),
         Err(error) if is_missing_visible_path(&error) => None,

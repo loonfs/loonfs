@@ -1,7 +1,8 @@
 //! Publish plans that restore an earlier file revision.
 
 use super::publish_path_planning::{
-    reject_tombstoned_path_ancestor, CompiledFilesystemOperation, PublishPathPlanningView,
+    reject_tombstoned_path_ancestor, resolve_visible_path_for_authorization,
+    CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::Absence;
 use crate::commit::CommitOp;
@@ -17,10 +18,17 @@ pub(super) async fn plan_restore_revision<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     reject_tombstoned_path_ancestor(view, absolute_path).await?;
-    let target = view.view.resolve_visible_path(absolute_path).await?;
+    let required = AccessRights::from_iter([AccessRight::Write, AccessRight::History]);
+    let target = resolve_visible_path_for_authorization(
+        view,
+        absolute_path,
+        required,
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await?;
     view.authorize(
         target.inode_id,
-        AccessRights::from_iter([AccessRight::Write, AccessRight::History]),
+        required,
         Absence::Path(absolute_path.as_str()),
     )
     .await?;
