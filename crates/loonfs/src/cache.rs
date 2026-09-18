@@ -34,7 +34,6 @@ pub(crate) struct RuntimeControlCache {
 pub(crate) struct CachedNamespaceAnchor {
     pub(crate) head: NamespaceReadState,
     pub(crate) basis: MetadataBasis,
-    locally_published: bool,
     last_control_check_ms: u64,
     validation: Arc<NamespaceValidation>,
     validated_generation: u64,
@@ -157,9 +156,7 @@ impl RuntimeControlCache {
         &mut self,
         namespace_id: &NamespaceId,
     ) -> Option<CachedNamespaceAnchor> {
-        let cached = &mut self.namespaces.get_mut(namespace_id)?.0;
-        let head = cached.clone();
-        cached.locally_published = false;
+        let head = self.namespaces.get(namespace_id)?.0.clone();
         self.touch_namespace(namespace_id);
         Some(head)
     }
@@ -225,10 +222,11 @@ impl ReadCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> Option<RuntimeReadContext> {
-        let cache = self.inner.control_cache();
-        let (anchor, _) = cache.namespaces.get(namespace_id)?;
-        // A speculative lookup must not consume local publication evidence.
-        Some(self.runtime_read_context(anchor))
+        let anchor = self
+            .inner
+            .control_cache()
+            .cached_namespace_head(namespace_id)?;
+        Some(self.runtime_read_context(&anchor))
     }
 
     pub(crate) async fn load_namespace_head_cached(
@@ -272,13 +270,14 @@ impl ReadCore {
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
             .map(|previous| previous + 1)
             .unwrap_or(u64::MAX);
-        let result = self.refresh_namespace_head(namespace_id).await.map(
-            |(mut head, remotely_validated)| {
+        let result = self
+            .refresh_namespace_head(namespace_id)
+            .await
+            .map(|mut head| {
                 head.validation = Arc::clone(&validation);
-                head.validated_generation = if remotely_validated { generation } else { 0 };
+                head.validated_generation = generation;
                 head
-            },
-        );
+            });
         match &result {
             Ok(head) => self.inner.control_cache().insert_namespace_head(
                 namespace_id,
@@ -296,17 +295,13 @@ impl ReadCore {
     async fn refresh_namespace_head(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<(CachedNamespaceAnchor, bool), ControlObjectLoadError> {
+    ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
         let now_ms = self.inner.timer.monotonic_now_ms();
         let cached = self
             .inner
             .control_cache()
             .cached_namespace_head(namespace_id);
         if let Some(mut head) = cached {
-            if head.locally_published {
-                head.locally_published = false;
-                return Ok((head, false));
-            }
             let check_due = now_ms.saturating_sub(head.last_control_check_ms)
                 >= self
                     .runtime_cache_config()
@@ -319,13 +314,13 @@ impl ReadCore {
                 let mut context = self.runtime_read_context(&head);
                 if loonfs_core::control::probe_namespace_wal(self.store(), &mut context).await? {
                     head.head = context.head;
-                    return Ok((head, true));
+                    return Ok(head);
                 }
             }
         }
         load_namespace_read_anchor(self.store(), namespace_id)
             .await
-            .map(|loaded| (cached_anchor(loaded, now_ms), true))
+            .map(|loaded| cached_anchor(loaded, now_ms))
     }
 
     /// Loads the read anchor, mapping an absent head to the one answer it
@@ -459,7 +454,6 @@ impl ReadCore {
         let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
             head: pinned.head,
             basis: pinned.basis,
-            locally_published: false,
             last_control_check_ms: 0,
             validation: Arc::default(),
             validated_generation: 0,
@@ -528,7 +522,6 @@ impl ReadCore {
             CachedNamespaceAnchor {
                 head: state.head,
                 basis: state.basis,
-                locally_published: true,
                 last_control_check_ms,
                 validation,
                 validated_generation: 0,
@@ -581,7 +574,6 @@ fn cached_anchor(
     CachedNamespaceAnchor {
         head,
         basis,
-        locally_published: false,
         last_control_check_ms,
         validation: Arc::default(),
         validated_generation: 0,

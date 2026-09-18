@@ -255,3 +255,69 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
         .expect("second recovery");
     assert_eq!(again.access_revision_no, AccessRevisionNo(3));
 }
+
+#[tokio::test]
+async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_writer() {
+    let (_temp_dir, writer, namespace) = create_namespace().await;
+    let root = writer.as_subject(subject("root", "prn_root"));
+    let now_ms = loonfs_core::time::current_time_ms().expect("clock");
+    let snapshot = root
+        .create_snapshot_with_quota(
+            &namespace,
+            CreateSnapshotOptions {
+                name: "protected".to_owned(),
+                expires_at_ms: now_ms + 60_000,
+            },
+            now_ms,
+            10,
+        )
+        .await
+        .expect("create snapshot");
+    let snapshot_id = snapshot.checkpoint_id.into();
+    let mut options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
+    options.commit.subject = Some(subject("root", "prn_root"));
+    root.put_file_bytes(&namespace, "/file", b"private payload", options)
+        .await
+        .expect("publish after snapshot creation");
+    let peer = FsWriter::builder_with_store(writer.object_store())
+        .writer_id("peer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("peer");
+    commit_as(
+        &peer,
+        &namespace,
+        subject("root", "prn_root"),
+        FilesystemOperation::UpdateAccess {
+            path: AbsolutePath::root(),
+            boundary: false,
+            grants: AccessGrants::new(BTreeMap::from([(
+                PrincipalId::parse("prn_new_root").expect("principal"),
+                AccessRights::from_iter([AccessRight::Admin]),
+            )]))
+            .expect("grants"),
+            expected_inode_id: None,
+            expected_access_revision_no: None,
+        },
+    )
+    .await
+    .expect("replace administrator");
+    assert_eq!(
+        root.delete_snapshot(&namespace, &snapshot_id)
+            .await
+            .expect_err("revoked administrator cannot delete the snapshot")
+            .code(),
+        ErrorCode::Forbidden
+    );
+    let reader = loonfs::FsReader::builder_with_store(writer.object_store())
+        .build()
+        .await
+        .expect("fresh reader");
+    let _snapshot = reader
+        .pin_namespace_at_snapshot(&namespace, &snapshot_id)
+        .await
+        .expect("snapshot still exists");
+    peer.shutdown().await.expect("peer shutdown");
+    writer.shutdown().await.expect("old writer shutdown");
+}

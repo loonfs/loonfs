@@ -481,7 +481,7 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
 }
 
 #[tokio::test]
-async fn read_after_write_is_served_from_seeded_caches() {
+async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -490,7 +490,15 @@ async fn read_after_write_is_served_from_seeded_caches() {
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("seeded").expect("valid namespace id");
 
-    let writer = writer(&store, "seed-writer").await;
+    let writer = writer_with_cache(
+        &store,
+        "seed-writer",
+        RuntimeCacheConfig {
+            manifest_revalidation_interval_ms: u64::MAX,
+            ..Default::default()
+        },
+    )
+    .await;
     writer
         .create_namespace(
             &namespace_id,
@@ -530,14 +538,26 @@ async fn read_after_write_is_served_from_seeded_caches() {
         .drain()
         .await
         .expect("finish background hints");
+    let next_wal_no = head_state(&store, &namespace_id)
+        .await
+        .wal_no
+        .successor()
+        .expect("next WAL number");
     recording.reset();
+    let before_read = reader.runtime_cache_stats();
 
     reader
         .get_path_entry(&namespace_id, "/docs/fresh.txt", Default::default())
         .await
         .expect("read after write");
-    assert!(
-        recording.take().is_empty(),
-        "read-your-writes uses no store requests"
+    crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
+    let after_read = reader.runtime_cache_stats();
+    assert_eq!(
+        after_read.wal_tail_projection_cache_misses,
+        before_read.wal_tail_projection_cache_misses
+    );
+    assert_eq!(
+        after_read.wal_tail_projection_cache_hits,
+        before_read.wal_tail_projection_cache_hits + 1
     );
 }

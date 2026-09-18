@@ -237,3 +237,94 @@ async fn an_acl_namespace_is_created_over_the_wire() {
     assert_eq!(body["kind"], "recover_administrator");
     assert_eq!(body["access_revision_no"], 1);
 }
+
+#[tokio::test]
+async fn a_former_server_observes_revocation_on_its_first_read_after_publication() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config(temp_dir.path().join("store"), "old-writer", "revocation");
+    config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
+    let (old_router, old_state) =
+        loonfs_server::app(config.clone(), loonfs_server::AppOptions::default())
+            .await
+            .expect("old server");
+    let response = old_router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces",
+            Some(r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_demo","root_grants":{"prn_root":["admin"]}}}"#),
+            &[],
+        ))
+        .await
+        .expect("create namespace response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let administrator = [
+        ("Loonfs-Subject", "root"),
+        ("Loonfs-Principals", "prn_root"),
+    ];
+    let publication = serde_json::json!({
+        "commit_id": loonfs_api::CommitId::generate(),
+        "operations": [
+            {"kind": "create_directory", "path": "/team"},
+            {"kind": "update_access", "path": "/team", "boundary": true,
+             "grants": {"viewer": ["read"]}},
+            {"kind": "put_file", "path": "/team/file", "behavior": "replace",
+             "inline_content": "cHJpdmF0ZSBwYXlsb2Fk"}
+        ]
+    });
+    let response = old_router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo/commits",
+            Some(&publication.to_string()),
+            &administrator,
+        ))
+        .await
+        .expect("publish response");
+    assert_eq!(response.status(), StatusCode::OK);
+    config.writer_id = "peer".to_owned();
+    let (peer_router, peer_state) =
+        loonfs_server::app(config, loonfs_server::AppOptions::default())
+            .await
+            .expect("peer server");
+    let revocation = serde_json::json!({
+        "commit_id": loonfs_api::CommitId::generate(),
+        "operations": [
+            {"kind": "update_access", "path": "/team", "boundary": true, "grants": {}}
+        ]
+    });
+    let response = peer_router
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo/commits",
+            Some(&revocation.to_string()),
+            &administrator,
+        ))
+        .await
+        .expect("revoke response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = old_router
+        .oneshot(request(
+            "GET",
+            "/v0/namespaces/demo/filesystem/content?path=/team/file",
+            None,
+            &[
+                ("Loonfs-Subject", "viewer"),
+                ("Loonfs-Principals", "viewer"),
+            ],
+        ))
+        .await
+        .expect("first read response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(response).await["code"],
+        ErrorCode::PathNotFound.as_str()
+    );
+    peer_state.writer.shutdown().await.expect("peer shutdown");
+    old_state
+        .writer
+        .shutdown()
+        .await
+        .expect("old server shutdown");
+}

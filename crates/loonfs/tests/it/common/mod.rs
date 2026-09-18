@@ -23,6 +23,21 @@ use loonfs_test_support::stores::{
 use std::path::Path;
 use std::sync::Arc;
 
+pub(crate) fn assert_wal_probe(
+    operations: Vec<loonfs_test_support::stores::RecordedOperation>,
+    namespace_id: &NamespaceId,
+    wal_no: loonfs_api::WalNo,
+) {
+    assert_eq!(
+        operations,
+        vec![loonfs_test_support::stores::RecordedOperation::Get {
+            key: format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0),
+            range: None,
+            result_bytes: 0,
+        }]
+    );
+}
+
 pub(crate) fn data_wal_put_for(
     namespace_id: &NamespaceId,
 ) -> impl Fn(&loonfs_test_support::stores::OperationContext<'_>) -> bool + Send + Sync + 'static {

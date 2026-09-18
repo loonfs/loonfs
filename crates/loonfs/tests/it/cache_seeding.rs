@@ -22,8 +22,11 @@ use tempfile::tempdir;
 fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
-    let object_store = raw_store.store();
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-projection-cache-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
             manifest_revalidation_interval_ms: u64::MAX,
@@ -44,19 +47,21 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     )
     .expect("put file");
 
-    raw_store.reset_wal_get_count();
+    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    recording.reset();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read is served from the projection the put seeded");
-    assert_eq!(raw_store.wal_get_count(), 0);
+    assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
     let after_first = fs.runtime_cache_stats();
     assert_eq!(after_first.wal_tail_projection_cache_misses, 0);
     assert!(after_first.wal_tail_projection_cache_inserts >= 1);
     assert!(after_first.wal_tail_projection_cache_hits >= 1);
 
-    raw_store.reset_wal_get_count();
+    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    recording.reset();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should reuse cached WAL-tail projection");
-    assert_eq!(raw_store.wal_get_count(), 1);
+    assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
     let after_second = fs.runtime_cache_stats();
     assert!(
         after_second.wal_tail_projection_cache_hits > after_first.wal_tail_projection_cache_hits
@@ -69,13 +74,15 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put other");
-    raw_store.reset_wal_get_count();
+    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    recording.reset();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("read after local mutation reuses the newly seeded projection");
-    assert_eq!(
-        raw_store.wal_get_count(),
-        0,
-        "the put seeds the projection for its own resulting head"
+    assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(4));
+    let after_mutation = fs.runtime_cache_stats();
+    assert_eq!(after_mutation.wal_tail_projection_cache_misses, 0);
+    assert!(
+        after_mutation.wal_tail_projection_cache_hits > after_second.wal_tail_projection_cache_hits
     );
 }
 
@@ -401,8 +408,11 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
 fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
-    let object_store = raw_store.store();
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
             manifest_revalidation_interval_ms: u64::MAX,
@@ -425,12 +435,41 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     .expect("put file");
 
     block_on(fs.writer.publisher().drain()).expect("finish hints");
-    raw_store.reset_wal_get_count();
-    fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
-        .expect("first read projects oversized tail");
-    fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
-        .expect("second read projects oversized tail again");
-    assert_eq!(raw_store.wal_get_count(), 5);
+    recording.reset();
+    let _snapshot =
+        block_on(fs.reader.pin_namespace(&namespace_id)).expect("pin the seeded namespace");
+    assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
+    for _ in 0..2 {
+        fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
+            .expect("read replays the uncached tail");
+        let operations = recording.take();
+        assert_eq!(operations.len(), 3);
+        assert_wal_probe(
+            operations[2..].to_vec(),
+            &namespace_id,
+            loonfs_api::WalNo(3),
+        );
+        for (operation, wal_no) in operations[..2]
+            .iter()
+            .zip([loonfs_api::WalNo(1), loonfs_api::WalNo(2)])
+        {
+            match operation {
+                loonfs_test_support::stores::RecordedOperation::Get {
+                    key,
+                    range,
+                    result_bytes,
+                } => {
+                    assert_eq!(
+                        key,
+                        &format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0)
+                    );
+                    assert_eq!(*range, None);
+                    assert!(*result_bytes > 0);
+                }
+                other => panic!("expected WAL segment read, got {other:?}"),
+            }
+        }
+    }
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.wal_tail_projection_cache_misses, 2);
     assert_eq!(stats.wal_tail_projection_cache_hits, 0);
@@ -443,8 +482,13 @@ fn wal_publication_conflict_recovers_and_reseeds_caches() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
-    let object_store = raw_store.store();
-    let fs = open_runtime(object_store, "tail-cache-stale-test");
+    let recording = Arc::new(RecordingStore::new(raw_store.store(), KeyPredicate::any()));
+    let fs = open_runtime_with(recording.clone(), "tail-cache-stale-test", |builder| {
+        builder.runtime_cache(RuntimeCacheConfig {
+            manifest_revalidation_interval_ms: u64::MAX,
+            ..Default::default()
+        })
+    });
 
     fs.create_namespace_blocking(
         &namespace_id,
@@ -478,13 +522,20 @@ fn wal_publication_conflict_recovers_and_reseeds_caches() {
     )
     .expect("write succeeds after the WAL publication conflict");
 
-    raw_store.reset_wal_get_count();
+    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    recording.reset();
+    let before_read = fs.runtime_cache_stats();
     fs.stat_path_blocking(&namespace_id, "/after-stale")
         .expect("read after the recovered write");
+    assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(4));
+    let after_read = fs.runtime_cache_stats();
     assert_eq!(
-        raw_store.wal_get_count(),
-        0,
-        "the recovered write seeds the read caches like any landed publish"
+        after_read.wal_tail_projection_cache_misses,
+        before_read.wal_tail_projection_cache_misses
+    );
+    assert_eq!(
+        after_read.wal_tail_projection_cache_hits,
+        before_read.wal_tail_projection_cache_hits + 1
     );
 }
 
@@ -943,7 +994,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         )
         .expect("put file");
         fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
-            .expect("consume the published read state");
+            .expect("validate the published read state");
         block_on(fs.writer.publisher().drain()).expect("finish hints");
         let calls_before = stored_blocks.call_count();
         let step = fs

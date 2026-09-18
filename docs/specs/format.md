@@ -341,7 +341,7 @@ After WAL discovery, check for a successor to the selected manifest and reload i
 
 A read is evaluated at one sequence. Replaying the WAL produces a projection of its metadata changes and any file bytes stored inline. This is the *projected WAL tail*. An implementation may query verified metadata segments and this projection directly, without loading every metadata row into memory, provided it applies the same visibility rules.
 
-For a warm read, the reference runtime probes the next WAL number with GET. An absent object confirms the cached tip; a present object requires advancing the state and probing onward. On a monotonic revalidation interval, defaulting to one second, it also probes the next manifest number with HEAD. A successor triggers discovery again. This is how cached readers observe deletion and retention changes. The hint is not used to validate a cached view. A locally published read state can be consumed once without either probe.
+For a warm read, the reference runtime probes the next WAL number with GET. An absent object confirms the cached tip; a present object requires advancing the state and probing onward. On a monotonic revalidation interval, defaulting to one second, it also probes the next manifest number with HEAD. A successor triggers discovery again. This is how cached readers observe deletion and retention changes. The hint is not used to validate a cached view. The acknowledging runtime seeds its read caches from the publication. Its next read probes the next WAL number like any warm read. If the manifest and WAL tip are unchanged and the seeded projection is retained, it replays nothing and does not reload the manifest.
 
 ### 4.3 Visible metadata
 
@@ -380,7 +380,7 @@ For a streamed read, the full-file checksum is verified only after the complete 
 
 The embedded runtime can reduce latency by reading a small file while checking whether its cached view is still current. This optimization applies to nonempty files of at most 64 KiB and must respect any smaller configured limit on buffered reads.
 
-First, resolve the path in the cached view. This lookup must leave any local publication evidence available for the normal freshness check described in section 4.2. Start that check and the content read together. If the namespace read state and manifest are unchanged, the cached resolution is still valid. Otherwise, resolve the path again in the current view.
+First, resolve the path in the cached view. Start the normal freshness check described in section 4.2 and the content read together. If the namespace read state and manifest are unchanged, the cached resolution is still valid. Otherwise, resolve the path again in the current view.
 
 Use the speculative bytes only if the current path has the same content-store binding and complete content reference. Return the entry from the current view. If either the binding or reference changed, discard the earlier result, including any content error, before reading the current content once. An error resolving the current path takes precedence over the speculative result.
 
