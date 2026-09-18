@@ -3822,6 +3822,197 @@ mod direct_download {
     use std::time::SystemTime;
 
     #[tokio::test]
+    async fn inline_download_grants_name_readable_objects_and_report_refused_writes() {
+        use loonfs_core::publish::{
+            CommitCandidate, CommitRequest, FilesystemOperation, InlineContent,
+            NamespaceCommitEngine, PublishTailOptions,
+        };
+        use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
+        use loonfs_test_support::stores::{
+            FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+        };
+
+        let directory = tempdir().expect("directory");
+        let recording = Arc::new(RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::content_blob(),
+        ));
+        let failing = Arc::new(FailStore::new(
+            recording.clone(),
+            KeyPredicate::content_blob(),
+            OperationClass::Put,
+            InjectedError::PermissionDenied("read-only credentials".to_owned()),
+        ));
+        let store: SharedObjectStore = failing.clone();
+        let namespace = namespace_id("inline-download");
+        let writer_id = loonfs_api::WriterId::parse("inline-writer").expect("writer");
+        NamespaceEngine::writer(store.clone(), namespace.clone(), writer_id.clone())
+            .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
+            .await
+            .expect("namespace");
+        let values: Vec<_> = ["/path", "/inode"]
+            .into_iter()
+            .map(|path| {
+                (
+                    path,
+                    InlineContent::new(
+                        namespace.clone(),
+                        loonfs_api::ContentId::generate(),
+                        Bytes::from_static(b"inline download"),
+                    ),
+                )
+            })
+            .collect();
+        let request = CommitRequest {
+            commit_id: CommitId::generate(),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            preconditions: Vec::new(),
+            operations: values
+                .iter()
+                .map(|(path, value)| FilesystemOperation::PutFile {
+                    path: loonfs_api::AbsolutePath::parse(*path).expect("path"),
+                    content_ref: value.content_ref().clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                })
+                .collect(),
+        };
+        NamespaceCommitEngine::new(namespace.clone())
+            .publish_batch(
+                &store,
+                [CommitCandidate::with_inline_content(
+                    request,
+                    Vec::new(),
+                    values.iter().map(|(_, value)| value.clone()).collect(),
+                )],
+                &MutationContext {
+                    writer_id,
+                    now_ms: 1_000,
+                },
+                &PublishTailOptions::default(),
+            )
+            .await
+            .results
+            .pop()
+            .expect("result")
+            .expect("publish");
+        use tower::ServiceExt;
+        let objects = object_router(store.clone());
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at("http://objects"),
+            put: None,
+            multipart: None,
+        };
+        let (router, state) = app(
+            test_config(directory.path(), "download-server"),
+            AppOptions {
+                store: Some(store),
+                direct_transfers: Some(transfers),
+            },
+        )
+        .await
+        .expect("app");
+        for (index, (path, value)) in values.iter().enumerate() {
+            let entry = state
+                .reader
+                .get_path_entry(&namespace, path, Default::default())
+                .await
+                .expect("entry");
+            let (uri, body) = if index == 0 {
+                (
+                    format!("/v0/namespaces/{namespace}/filesystem/downloads"),
+                    serde_json::json!({"path": path}).to_string(),
+                )
+            } else {
+                (
+                    format!(
+                        "/v0/namespaces/{namespace}/inodes/ino_{}/revisions/1/downloads",
+                        entry.inode_id
+                    ),
+                    String::new(),
+                )
+            };
+            recording.reset();
+            for denied in [true, false, false] {
+                if denied {
+                    failing.fail_all();
+                } else {
+                    failing.clear();
+                }
+                let response = router
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri(&uri)
+                            .header("authorization", "Bearer test-token")
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(body.clone()))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                assert_eq!(
+                    status,
+                    if denied {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::OK
+                    },
+                    "{}: {}",
+                    uri,
+                    String::from_utf8_lossy(&bytes)
+                );
+                if denied {
+                    let error: loonfs_api::ApiError =
+                        serde_json::from_slice(&bytes).expect("error");
+                    assert_eq!(error.code, ErrorCode::ContentNotMaterialized.as_str());
+                    assert_eq!(recording.count(OperationClass::Put), 0);
+                    assert_eq!(
+                        state
+                            .reader
+                            .get_file_bytes(&namespace, path)
+                            .await
+                            .expect("proxied read")
+                            .bytes,
+                        value.bytes().as_ref()
+                    );
+                    continue;
+                }
+                let grant: serde_json::Value = serde_json::from_slice(&bytes).expect("grant");
+                let access: loonfs_api::v0::ObjectTransferAccess =
+                    serde_json::from_value(grant["access"].clone()).expect("access");
+                let loonfs_api::v0::ObjectTransferAccess::PresignedUrl { method, url, .. } = access;
+                assert_eq!(method, "GET");
+                let response = objects
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method.as_str())
+                            .uri(url.strip_prefix("http://objects").expect("object URL"))
+                            .body(axum::body::Body::empty())
+                            .expect("object request"),
+                    )
+                    .await
+                    .expect("object response");
+                assert_eq!(response.status(), StatusCode::OK);
+                let received = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("object bytes");
+                assert_eq!(received, value.bytes().as_ref());
+                assert_eq!(recording.count(OperationClass::Put), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn download_snapshot_selectors_use_the_body_and_exclude_revisions() {
         use tower::ServiceExt;
 
@@ -3975,9 +4166,7 @@ mod direct_download {
         }
     }
 
-    /// Serves objects out of the deployment's own store, the way a provider
-    /// answers a presigned transfer, and reports its base URL.
-    async fn serve_objects(store: SharedObjectStore) -> String {
+    fn object_router(store: SharedObjectStore) -> axum::Router {
         async fn read_object(
             axum::extract::State(store): axum::extract::State<SharedObjectStore>,
             axum::extract::Path(key): axum::extract::Path<String>,
@@ -4010,12 +4199,16 @@ mod direct_download {
             }
         }
 
-        let router = axum::Router::new()
+        axum::Router::new()
             .route("/{*key}", axum::routing::get(read_object).put(write_object))
             // A provider takes whatever the presigned write carries; this
             // double must not impose a limit of its own on top.
             .layer(axum::extract::DefaultBodyLimit::disable())
-            .with_state(store);
+            .with_state(store)
+    }
+
+    async fn serve_objects(store: SharedObjectStore) -> String {
+        let router = object_router(store);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind object listener");

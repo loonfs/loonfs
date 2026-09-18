@@ -17,8 +17,8 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectStore, ObjectStoreError,
-    PutMode,
+    ByteRange, ByteStream, ImmutableWriteError, MultipartCompletion, MultipartPart, ObjectStore,
+    ObjectStoreError, PutMode,
 };
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -697,6 +697,29 @@ async fn validate_content_size<S: ObjectStore + ?Sized>(
             actual: metadata.size_bytes,
         });
     }
+    Ok(())
+}
+
+pub(crate) async fn materialize_content<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    content_ref: &ContentRef,
+    bytes: Bytes,
+) -> Result<(), CoreError> {
+    validate_loaded_content_bytes(object_key.to_owned(), content_ref, &bytes)?;
+    store.put_immutable_verified(object_key, bytes).await.map_err(|error| {
+        tracing::error!(namespace_id = content_ref.owner_namespace_id.as_str(), object_key, %error, "inline content materialization failed");
+        match error {
+            ImmutableWriteError::Transport {
+                object_key,
+                source: ObjectStoreError::Transport { message, .. },
+            } => CoreError::store(
+                &object_key,
+                &ObjectStoreError::retryable_transport(&object_key, message),
+            ),
+            error => CoreError::from(error),
+        }
+    })?;
     Ok(())
 }
 

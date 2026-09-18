@@ -369,17 +369,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         )?)
     }
 
-    /// Resolves a path to the content object a direct read would fetch:
-    /// the reference that names those bytes, and the key that addresses
-    /// them.
-    ///
-    /// No bytes move and no read limit applies. The limit bounds what this
-    /// server buffers for one response, and this is the transport that
-    /// buffers nothing — which is the whole reason it exists, because a
-    /// deployment that allowed a direct upload past that limit has an
-    /// object it could not otherwise hand back.
     pub(crate) async fn direct_download_target(
         &self,
+        store: &S,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
         access: &ReadAccess<'_, S>,
@@ -419,7 +411,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
         let object_key = self
             .resolve_content_location(&content_ref)?
-            .direct_download_key()?;
+            .materialize_download_key(store, &content_ref)
+            .await?;
 
         Ok(DirectDownloadTarget {
             absolute_path: entry.path,
@@ -469,6 +462,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// Resolves retained inode content without requiring a current path.
     pub(crate) async fn direct_download_target_by_inode(
         &self,
+        store: &S,
         inode_id: InodeId,
         revision_no: RevisionNo,
         access: &ReadAccess<'_, S>,
@@ -478,7 +472,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?;
         let object_key = self
             .resolve_content_location(&revision.content_ref)?
-            .direct_download_key()?;
+            .materialize_download_key(store, &revision.content_ref)
+            .await?;
         Ok(DirectDownloadByInodeTarget {
             inode_id,
             revision_no: revision.revision_no,

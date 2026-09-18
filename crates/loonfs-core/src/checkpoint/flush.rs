@@ -20,7 +20,9 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
-use crate::storage::content::{content_object_key_for_ref, validate_loaded_content_bytes};
+use crate::storage::content::{
+    content_object_key_for_ref, materialize_content, validate_loaded_content_bytes,
+};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
@@ -31,7 +33,7 @@ use loonfs_api::{
     ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo, NamespaceId, RunNo,
     MAX_PUBLIC_INTEGER,
 };
-use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -214,26 +216,13 @@ async fn materialize_inline_content<S: ObjectStore + ?Sized>(
         .map(|value| {
             let key = content_object_key_for_ref(content_store_id, &value.content_ref)?;
             validate_loaded_content_bytes(key.clone(), &value.content_ref, &value.bytes)?;
-            Ok((key, value.bytes.clone()))
+            Ok((key, value))
         })
         .collect::<Result<Vec<_>>>()?;
     // In a live namespace, failed flushes leave committed content for the next flush.
     stream::iter(values.into_iter().map(Ok))
-        .try_for_each_concurrent(32, |(object_key, bytes)| async move {
-            store.put_immutable_verified(&object_key, bytes).await.map_err(|error| {
-                tracing::error!(namespace_id = projection.head.namespace_id.as_str(), object_key, %error, "inline content materialization failed");
-                match error {
-                    ImmutableWriteError::Transport {
-                        object_key,
-                        source: ObjectStoreError::Transport { message, .. },
-                    } => CoreError::store(
-                        &object_key,
-                        &ObjectStoreError::retryable_transport(&object_key, message),
-                    ),
-                    error => CoreError::from(error),
-                }
-            })?;
-            Ok(())
+        .try_for_each_concurrent(32, |(object_key, value)| async move {
+            materialize_content(store, &object_key, &value.content_ref, value.bytes.clone()).await
         })
         .await
 }

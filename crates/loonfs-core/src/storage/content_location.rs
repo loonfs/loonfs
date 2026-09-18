@@ -1,8 +1,8 @@
 //! Resolves published content to resident WAL bytes or an object key.
 
 use super::content::{
-    content_object_key_for_ref, load_required_object, validate_loaded_content_bytes,
-    DurableContentValidationError,
+    content_object_key_for_ref, load_required_object, materialize_content,
+    validate_loaded_content_bytes, DurableContentValidationError,
 };
 use crate::error::CoreError;
 use bytes::Bytes;
@@ -44,13 +44,41 @@ impl ContentLocation {
         }
     }
 
-    pub(crate) fn direct_download_key(self) -> crate::error::Result<String> {
+    pub(crate) async fn materialize_download_key<S: ObjectStore + ?Sized>(
+        self,
+        store: &S,
+        content_ref: &ContentRef,
+    ) -> crate::error::Result<String> {
         match self {
             Self::Object { object_key } => Ok(object_key),
-            // A direct download needs an object that already holds these bytes.
-            Self::Tail { .. } => Err(CoreError::Internal(
-                "inline content has no direct download object".to_owned(),
-            )),
+            Self::Tail { bytes, object_key } => {
+                validate_loaded_content_bytes(object_key.clone(), content_ref, &bytes)?;
+                if let Some(stored) = store
+                    .get(&object_key, None)
+                    .await
+                    .map_err(|error| CoreError::store(&object_key, &error))?
+                {
+                    if stored != bytes {
+                        return Err(loonfs_objectstore::ImmutableWriteError::DifferentObject {
+                            object_key,
+                        }
+                        .into());
+                    }
+                    return Ok(object_key);
+                }
+                materialize_content(store, &object_key, content_ref, bytes)
+                    .await
+                    .map_err(|error| match error {
+                        CoreError::Store {
+                            class: crate::error::StoreFailureClass::PermissionDenied,
+                            ..
+                        } => CoreError::ContentNotMaterialized {
+                            content_id: content_ref.content_id.clone(),
+                        },
+                        error => error,
+                    })?;
+                Ok(object_key)
+            }
         }
     }
 

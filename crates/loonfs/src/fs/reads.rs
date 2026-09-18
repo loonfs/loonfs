@@ -727,15 +727,10 @@ impl FsReader {
         Ok(stream)
     }
 
-    /// Resolves a path to the content object a direct read would fetch:
-    /// the reference that names those bytes, and the object key that
-    /// addresses them.
+    /// Prepares a content object for a direct download.
     ///
-    /// Metadata only — no content is read, and the handle's
-    /// `max_read_content_bytes` does not apply, because that limit bounds
-    /// what this process buffers and nothing here buffers anything. A host
-    /// signs a short-lived read of the returned key and hands the client
-    /// the reference to check the arriving bytes against.
+    /// See the API specification's download transport contract. The handle's
+    /// `max_read_content_bytes` does not apply to direct downloads.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.begin_download",

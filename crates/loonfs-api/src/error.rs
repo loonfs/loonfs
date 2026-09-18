@@ -148,6 +148,7 @@ error_codes! {
     ShuttingDown => "shutting_down",
     DeadlineExceeded => "deadline_exceeded",
     CheckpointUnavailable => "checkpoint_unavailable",
+    ContentNotMaterialized => "content_not_materialized",
     MaintenanceRequired => "maintenance_required",
     UploadNotFound => "upload_not_found",
     UploadAlreadyCompleted => "upload_already_completed",
@@ -196,6 +197,7 @@ impl ErrorCode {
             | ErrorCode::ServerBusy
             | ErrorCode::ShuttingDown
             | ErrorCode::CheckpointUnavailable
+            | ErrorCode::ContentNotMaterialized
             | ErrorCode::IndexLagging
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
             ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
@@ -278,6 +280,7 @@ impl ErrorCode {
             | ErrorCode::WriterCapacityExceeded
             | ErrorCode::DeadlineExceeded
             | ErrorCode::CheckpointUnavailable
+            | ErrorCode::ContentNotMaterialized
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound
             | ErrorCode::UploadAlreadyCompleted

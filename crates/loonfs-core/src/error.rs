@@ -155,6 +155,8 @@ pub enum CoreError {
     ShuttingDown,
     #[error("checkpoint unavailable: {0}")]
     CheckpointUnavailable(String),
+    #[error("content `{content_id}` is not yet materialized; read through the proxied route or retry after the next fold")]
+    ContentNotMaterialized { content_id: loonfs_api::ContentId },
     #[error("invalid checkpoint request: {0}")]
     InvalidCheckpointRequest(String),
     #[error("checkpoint `{checkpoint_id}` was not found")]
@@ -433,6 +435,7 @@ impl CoreError {
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
             CoreError::WriterCapacityExceeded { .. } => ErrorCode::WriterCapacityExceeded,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
+            CoreError::ContentNotMaterialized { .. } => ErrorCode::ContentNotMaterialized,
             // An over-budget publication aborts pre-CAS and is retryable
             // after maintenance, exactly the checkpoint_unavailable contract.
             CoreError::CheckpointUnavailable(_)
@@ -520,6 +523,7 @@ impl CoreError {
             | CoreError::WriterSessionClosed { .. }
             | CoreError::WriterCapacityExceeded { .. }
             | CoreError::ShuttingDown
+            | CoreError::ContentNotMaterialized { .. }
             | CoreError::CheckpointUnavailable(_)
             | CoreError::InvalidCheckpointRequest(_)
             | CoreError::CheckpointNotFound { .. }
