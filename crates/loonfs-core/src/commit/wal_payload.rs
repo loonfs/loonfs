@@ -14,6 +14,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
         semantic_commit_fingerprint: prepared.semantic_identity.clone(),
         committed_at_ms: commit.committed_at_ms,
         message: prepared.message.clone(),
+        inline_content: Vec::new(),
         deltas: commit
             .deltas
             .iter()

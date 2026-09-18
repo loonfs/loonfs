@@ -31,7 +31,7 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
-    WalCommitPayload, WalDelta, WalSegmentPayload,
+    WalCommitPayload, WalDelta, WalInlineContent, WalSegmentPayload,
 };
 use loonfs_api::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
@@ -326,8 +326,44 @@ fn sample_wal_payload() -> WalSegmentPayload {
             committed_at_ms: 4_000,
             message: Some("golden commit".to_owned()),
             deltas,
+            inline_content: Vec::new(),
         }],
     }
+}
+
+fn sample_wal_inline_content_payload() -> WalSegmentPayload {
+    let mut payload = sample_wal_payload();
+    let mut without_inline_content = payload.records[0].clone();
+    without_inline_content.seq = ChangeSeq(3);
+    without_inline_content.commit_id =
+        CommitId::parse("c_00000000000000000000000000000043").expect("valid commit id");
+    payload.records[0].inline_content = vec![
+        WalInlineContent {
+            content_id: sample_content_ref().content_id,
+            bytes: b"golden bytes".to_vec(),
+        },
+        WalInlineContent {
+            content_id: content_id("con_fedcba9876543210fedcba9876543210"),
+            bytes: Vec::new(),
+        },
+    ];
+    let empty_content_ref = ContentRef::blob_v1(
+        namespace_id(),
+        payload.records[0].inline_content[1].content_id.clone(),
+        b"",
+    );
+    payload.records[0].deltas.push(WalCommitDelta {
+        semantic_op_index: 5,
+        delta: WalDelta::AppendFileRevision {
+            delta_index: 6,
+            inode_id: InodeId(6),
+            revision_no: RevisionNo(1),
+            content_ref: empty_content_ref,
+        },
+    });
+    payload.end_seq = ChangeSeq(3);
+    payload.records.push(without_inline_content);
+    payload
 }
 
 fn sample_manifest_payload() -> NamespaceManifestPayload {
@@ -470,6 +506,23 @@ fn wal_segment_golden_decodes_to_sample() {
     let decoded = decode_wal_segment_envelope_zstd(&rezstd(&read_golden("wal_segment.v1.cbor")))
         .expect("decode golden wal segment");
     assert_eq!(decoded.into_payload(), sample_wal_payload());
+}
+
+#[test]
+fn wal_segment_inline_content_document_matches_golden_bytes() {
+    let encoded = encode_wal_segment_envelope_zstd(sample_wal_inline_content_payload())
+        .expect("encode wal with inline content")
+        .into_bytes();
+    assert_matches_golden("wal_segment_inline_content.v1.cbor", &unzstd(&encoded));
+}
+
+#[test]
+fn wal_segment_inline_content_golden_decodes_to_sample() {
+    let decoded = decode_wal_segment_envelope_zstd(&rezstd(&read_golden(
+        "wal_segment_inline_content.v1.cbor",
+    )))
+    .expect("decode golden wal segment with inline content");
+    assert_eq!(decoded.into_payload(), sample_wal_inline_content_payload());
 }
 
 /// Stores `payload` through the real codec and returns why decoding refused

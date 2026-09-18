@@ -6,11 +6,12 @@ use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{DeletedDirentry, TombstoneGeneration};
 use crate::{
     AccessGrants, AccessRevisionNo, AttributeRevisionNo, Attributes, ChangeSeq, CommitFingerprint,
-    CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo,
-    WriterEpoch,
+    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    RevisionNo, WalNo, WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
 /// Version 1: a zstd-compressed CBOR envelope document carrying the payload
@@ -21,6 +22,16 @@ pub const WAL_FORMAT_VERSION: u32 = 1;
 
 /// Largest decompressed WAL document allowed by [Appendix A.5](../../../docs/specs/format.md#a5-wal-records).
 pub const MAX_WAL_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
+
+/// Reader limit per inline value in
+/// [Appendix A.5](../../../docs/specs/format.md#a5-wal-records);
+/// writer thresholds are policy at or below this limit.
+pub const MAX_WAL_INLINE_CONTENT_BYTES: usize = 256 * 1024;
+
+/// Reader limit for total inline bytes in one WAL segment in
+/// [Appendix A.5](../../../docs/specs/format.md#a5-wal-records);
+/// writer thresholds are policy at or below this limit.
+pub const MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Upper bound for the document and payload fields outside commit records.
 pub const WAL_SEGMENT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
@@ -201,6 +212,17 @@ pub struct WalCommitDelta {
     pub delta: WalDelta,
 }
 
+/// Carries bytes named by a revision delta in the same commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalInlineContent {
+    /// Identity shared with the accompanying `blob_v1` reference.
+    pub content_id: ContentId,
+    /// Complete content encoded as a CBOR byte string.
+    #[serde(with = "serde_bytes")]
+    pub bytes: Vec<u8>,
+}
+
 /// Carries one accepted logical commit inside a WAL segment.
 ///
 /// See [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
@@ -225,6 +247,9 @@ pub struct WalCommitPayload {
     pub message: Option<String>,
     /// Materialized mutations in their authoritative `delta_index` order.
     pub deltas: Vec<WalCommitDelta>,
+    /// Content values governed by [Appendix A.5](../../../docs/specs/format.md#a5-wal-records).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_content: Vec<WalInlineContent>,
 }
 
 /// Carries the namespace identity, numbered range, and commits stored in one WAL object.
@@ -272,6 +297,7 @@ struct WalSegmentDocument {
 pub(crate) fn encode_wal_payload_cbor(
     payload: &WalSegmentPayload,
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
+    validate_wal_inline_content(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -341,6 +367,7 @@ fn decode_wal_segment_envelope_zstd_with_limit(
     envelope::verify_payload_checksum(&document.payload_checksum, &document.payload)?;
     let payload: WalSegmentPayload = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
+    validate_wal_inline_content(&payload)?;
 
     Ok(WalSegmentEnvelope {
         payload_checksum: document.payload_checksum,
@@ -348,9 +375,244 @@ fn decode_wal_segment_envelope_zstd_with_limit(
     })
 }
 
+fn validate_wal_inline_content(payload: &WalSegmentPayload) -> Result<(), EnvelopeCodecError> {
+    let mut total_bytes = 0;
+    for record in &payload.records {
+        if record.inline_content.is_empty() {
+            continue;
+        }
+        let mut reference_sizes: BTreeMap<&ContentId, Vec<u64>> = BTreeMap::new();
+        for delta in &record.deltas {
+            if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
+                if content_ref.owner_namespace_id == payload.namespace_id {
+                    reference_sizes
+                        .entry(&content_ref.content_id)
+                        .or_default()
+                        .push(content_ref.size_bytes);
+                }
+            }
+        }
+        let mut content_ids = BTreeSet::new();
+        for entry in &record.inline_content {
+            let invalid = |reason| EnvelopeCodecError::InvalidWalInlineContent {
+                seq: record.seq,
+                content_id: entry.content_id.clone(),
+                reason,
+            };
+            if !content_ids.insert(&entry.content_id) {
+                return Err(invalid("duplicate `content_id` in commit"));
+            }
+            if entry.bytes.len() > MAX_WAL_INLINE_CONTENT_BYTES {
+                return Err(invalid("value exceeds `MAX_WAL_INLINE_CONTENT_BYTES`"));
+            }
+            let sizes = reference_sizes.get(&entry.content_id).ok_or_else(|| {
+                invalid("no `append_file_revision` reference in the same commit owned by the segment's `namespace_id`")
+            })?;
+            if !sizes.iter().all(|&size| size == entry.bytes.len() as u64) {
+                return Err(invalid("length does not match reference `size_bytes`"));
+            }
+            total_bytes += entry.bytes.len();
+            if total_bytes > MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES {
+                return Err(invalid(
+                    "segment inline total exceeds `MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES`",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+
     use super::*;
+
+    fn inline_segment(lengths: &[usize]) -> WalSegmentPayload {
+        let namespace_id = NamespaceId::parse("bounded").expect("namespace");
+        let records = lengths
+            .iter()
+            .enumerate()
+            .map(|(index, &length)| {
+                let bytes = vec![42; length];
+                let content_id =
+                    ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id");
+                WalCommitPayload {
+                    seq: ChangeSeq(index as u64 + 1),
+                    commit_id: CommitId::parse(format!("c_{index:032x}")).expect("commit id"),
+                    committed_by: crate::ActorId::parse("test").expect("actor"),
+                    semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:test""#)
+                        .expect("fingerprint"),
+                    committed_at_ms: 0,
+                    message: None,
+                    deltas: vec![WalCommitDelta {
+                        semantic_op_index: 0,
+                        delta: WalDelta::AppendFileRevision {
+                            delta_index: 0,
+                            inode_id: InodeId(2),
+                            revision_no: RevisionNo(index as u64 + 1),
+                            content_ref: ContentRef::blob_v1(
+                                namespace_id.clone(),
+                                content_id.clone(),
+                                &bytes,
+                            ),
+                        },
+                    }],
+                    inline_content: vec![WalInlineContent { content_id, bytes }],
+                }
+            })
+            .collect();
+        WalSegmentPayload {
+            namespace_id,
+            wal_no: WalNo(1),
+            next_inode_id: InodeId(3),
+            writer_epoch: WriterEpoch(1),
+            base_head_seq: ChangeSeq(0),
+            start_seq: ChangeSeq(1),
+            end_seq: ChangeSeq(lengths.len() as u64),
+            records,
+        }
+    }
+
+    fn unchecked_segment_bytes(payload: &WalSegmentPayload) -> Vec<u8> {
+        let mut payload_bytes = Vec::new();
+        into_writer(payload, &mut payload_bytes).expect("encode payload directly");
+        let document = WalSegmentDocument {
+            kind: WalEnvelopeKind::NamespaceWalSegment.as_str().to_owned(),
+            format_version: WAL_FORMAT_VERSION,
+            payload_checksum: sha256_digest(&payload_bytes),
+            payload: payload_bytes,
+        };
+        let mut document_bytes = Vec::new();
+        into_writer(&document, &mut document_bytes).expect("encode document directly");
+        zstd::stream::encode_all(document_bytes.as_slice(), 0).expect("compress document")
+    }
+
+    fn assert_inline_content_rejected(
+        payload: WalSegmentPayload,
+        record_index: usize,
+        expected_reason: &str,
+    ) {
+        let expected_seq = payload.records[record_index].seq;
+        let expected_content_id = payload.records[record_index].inline_content[0]
+            .content_id
+            .clone();
+        let decoded_error = decode_wal_segment_envelope_zstd(&unchecked_segment_bytes(&payload))
+            .expect_err("invalid inline content should not decode");
+        let encoded_error = encode_wal_segment_envelope_zstd(payload)
+            .expect_err("invalid inline content should not encode");
+        for error in [decoded_error, encoded_error] {
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid wal inline content in commit `{expected_seq}` for `content_id` `{expected_content_id}`: {expected_reason}"
+                ),
+            );
+            match error {
+                EnvelopeCodecError::InvalidWalInlineContent {
+                    seq,
+                    content_id,
+                    reason,
+                } => {
+                    assert_eq!(seq, expected_seq);
+                    assert_eq!(content_id, expected_content_id);
+                    assert_eq!(reason, expected_reason);
+                }
+                other => panic!("expected invalid inline content, got {other:?}"),
+            }
+        }
+    }
+
+    fn assert_inline_content_accepted(payload: WalSegmentPayload) {
+        let encoded = encode_wal_segment_envelope_zstd(payload.clone()).expect("encode segment");
+        let decoded = decode_wal_segment_envelope_zstd(encoded.as_bytes()).expect("decode segment");
+        assert_eq!(decoded.into_payload(), payload);
+    }
+
+    #[test]
+    fn inline_content_requires_a_local_revision_reference_in_the_same_commit() {
+        let expected_reason = "no `append_file_revision` reference in the same commit owned by the segment's `namespace_id`";
+        let mut missing = inline_segment(&[3, 3]);
+        missing.records[0].deltas.clear();
+        assert_inline_content_rejected(missing, 0, expected_reason);
+
+        let mut wrong_id = inline_segment(&[3]);
+        wrong_id.records[0].inline_content[0].content_id =
+            ContentId::parse("con_fedcba9876543210fedcba9876543210").expect("content id");
+        assert_inline_content_rejected(wrong_id, 0, expected_reason);
+
+        let mut foreign = inline_segment(&[3]);
+        foreign.namespace_id = NamespaceId::parse("other").expect("namespace");
+        assert_inline_content_rejected(foreign, 0, expected_reason);
+    }
+
+    #[test]
+    fn inline_content_length_must_match_the_reference() {
+        let mut payload = inline_segment(&[3]);
+        payload.records[0].inline_content[0].bytes.push(42);
+        assert_inline_content_rejected(payload, 0, "length does not match reference `size_bytes`");
+
+        let mut payload = inline_segment(&[3]);
+        let mut other_reference = payload.records[0].deltas[0].clone();
+        other_reference.semantic_op_index = 1;
+        match &mut other_reference.delta {
+            WalDelta::AppendFileRevision {
+                delta_index,
+                revision_no,
+                content_ref,
+                ..
+            } => {
+                *delta_index = 1;
+                *revision_no = RevisionNo(2);
+                content_ref.size_bytes += 1;
+            }
+            other => panic!("expected file revision, got {other:?}"),
+        }
+        payload.records[0].deltas.push(other_reference);
+        assert_inline_content_rejected(payload, 0, "length does not match reference `size_bytes`");
+    }
+
+    #[test]
+    fn inline_content_ids_must_be_unique_within_each_commit() {
+        let mut payload = inline_segment(&[0]);
+        let entry = payload.records[0].inline_content[0].clone();
+        payload.records[0].inline_content.push(entry);
+        assert_inline_content_rejected(payload, 0, "duplicate `content_id` in commit");
+    }
+
+    #[test]
+    fn inline_content_accepts_the_value_limit_and_rejects_one_byte_more() {
+        assert_eq!(MAX_WAL_INLINE_CONTENT_BYTES, 262_144);
+        assert_inline_content_accepted(inline_segment(&[MAX_WAL_INLINE_CONTENT_BYTES]));
+        assert_inline_content_rejected(
+            inline_segment(&[MAX_WAL_INLINE_CONTENT_BYTES + 1]),
+            0,
+            "value exceeds `MAX_WAL_INLINE_CONTENT_BYTES`",
+        );
+    }
+
+    #[test]
+    fn inline_content_accepts_the_segment_limit_and_rejects_one_byte_more() {
+        assert_eq!(MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES, 4_194_304);
+        let mut lengths = vec![
+            MAX_WAL_INLINE_CONTENT_BYTES;
+            MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES
+        ];
+        assert_inline_content_accepted(inline_segment(&lengths));
+        lengths.push(1);
+        assert_inline_content_rejected(
+            inline_segment(&lengths),
+            lengths.len() - 1,
+            "segment inline total exceeds `MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES`",
+        );
+    }
+
+    #[test]
+    fn inline_content_is_not_hashed_against_the_reference_checksum() {
+        let mut payload = inline_segment(&[3]);
+        payload.records[0].inline_content[0].bytes[0] = 43;
+        assert_inline_content_accepted(payload);
+    }
 
     #[test]
     fn decoder_accepts_the_limit_and_rejects_the_next_byte_before_decoding() {

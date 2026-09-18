@@ -55,6 +55,18 @@ pub enum EnvelopeCodecError {
         /// Largest accepted decompressed document.
         max_bytes: usize,
     },
+    /// Reports inline content that violates the WAL format rules.
+    #[error(
+        "invalid wal inline content in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+    )]
+    InvalidWalInlineContent {
+        /// Commit containing the rejected entry.
+        seq: crate::ChangeSeq,
+        /// Content whose entry violates a rule or exceeds the segment total.
+        content_id: crate::ContentId,
+        /// Format rule violated by the entry.
+        reason: &'static str,
+    },
     /// Reports an unrecognized durable-family discriminator found during the envelope probe.
     #[error("unknown envelope kind `{found}`")]
     UnknownKind {
