@@ -392,17 +392,15 @@ impl PublisherRegistry {
             publisher.check_admission(&publisher.lock_state())?;
             publisher
         };
-        let candidate = self
-            .prepare_segment_candidate(&namespace_id, candidate, &publisher)
-            .await?;
+        let candidate = self.plan_inline_candidate(&namespace_id, candidate, &publisher)?;
         let permit = {
             publisher.check_admission(&publisher.lock_state())?;
             self.shared
                 .admission
-                .acquire_candidate(&namespace_id, &candidate)?
+                .acquire_candidate(&namespace_id, &candidate.candidate)?
         };
         let candidate = self
-            .admit_inline_candidate(&namespace_id, candidate, &publisher, &permit)
+            .stage_inline_candidate(&namespace_id, candidate, &publisher, &permit)
             .await?;
         PublicationAdmission::validate_candidate(&candidate)?;
         submit_with_admission(
@@ -605,6 +603,19 @@ impl PublisherRegistry {
             .as_ref()
             .and_then(|engine| engine.wal_fold_input())
             .map(|input| input.wal_tail_inline_bytes)
+            .or(slot.last_known_wal_tail_inline_bytes)
+    }
+
+    pub(crate) async fn record_fold_outcome(&self, namespace_id: &NamespaceId) {
+        let publisher = self
+            .shared
+            .lock_state()
+            .publishers
+            .get(namespace_id)
+            .cloned();
+        if let Some(publisher) = publisher {
+            publisher.engine.lock().await.record_successful_fold();
+        }
     }
 
     pub(crate) async fn wait_for_fold(
@@ -800,6 +811,18 @@ struct EngineSlot {
     engine: Option<NamespaceCommitEngine>,
     /// Never dropped or rebuilt while the publisher lives.
     session: SharedWriterSessionState,
+    /// Another writer can make this stale by publishing or folding, and a local
+    /// fold resets it to zero; the next publish corrects it.
+    last_known_wal_tail_inline_bytes: Option<usize>,
+}
+
+impl EngineSlot {
+    fn record_successful_fold(&mut self) {
+        self.last_known_wal_tail_inline_bytes = Some(0);
+        if let Some(engine) = self.engine.as_mut() {
+            engine.invalidate_projection();
+        }
+    }
 }
 
 /// Admission state for a namespace publisher.
@@ -923,6 +946,27 @@ impl PreparedCandidate {
             candidate,
         })
     }
+
+    fn with_inline_placement(
+        candidate: CommitCandidate,
+        namespace_id: &NamespaceId,
+        retained_inline_content: &[loonfs_core::publish::InlineContent],
+        staged_inline_content: &[loonfs_core::publish::InlineContent],
+    ) -> Result<Self, CoreError> {
+        Ok(Self {
+            estimated_retained_bytes: candidate.estimated_retained_bytes_after_inline_staging(
+                namespace_id,
+                retained_inline_content,
+                staged_inline_content,
+            )?,
+            wal_record_bytes_upper_bound: candidate
+                .wal_record_bytes_upper_bound_with_inline_content(retained_inline_content),
+            inline_content_bytes: retained_inline_content.iter().fold(0usize, |total, value| {
+                total.saturating_add(value.bytes().len())
+            }),
+            candidate,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -971,6 +1015,7 @@ impl NamespacePublisher {
             engine: Arc::new(AsyncMutex::new(EngineSlot {
                 engine: None,
                 session: Arc::clone(&session),
+                last_known_wal_tail_inline_bytes: None,
             })),
             session,
             shared: Arc::downgrade(&registry.shared),
@@ -1456,7 +1501,11 @@ impl NamespacePublisher {
         if !self.read_core.control_cache_enabled() {
             engine.invalidate_projection();
         }
-        self.settle_retained_projection(engine.retained_tail_weight());
+        let retained_tail_weight = engine.retained_tail_weight();
+        if publish.wal_tail_observed {
+            slot.last_known_wal_tail_inline_bytes = Some(publish.wal_tail_inline_bytes);
+        }
+        self.settle_retained_projection(retained_tail_weight);
         drop(slot);
         if let Some(start) = fold_start {
             let _ = start.send(());
@@ -1574,9 +1623,8 @@ impl NamespacePublisher {
                 // The fold moved the folded number. The next batch counts its
                 // tail from the new manifest instead of starting another fold
                 // over a stale count.
-                if let Some(engine) = self.engine.lock().await.engine.as_mut() {
-                    engine.invalidate_projection();
-                }
+                let mut slot = self.engine.lock().await;
+                slot.record_successful_fold();
             }
             Err(error) => {
                 let error = RuntimeError::Core(error);

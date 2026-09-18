@@ -850,6 +850,9 @@ impl FsMaintenance {
                 .flush_wal()
                 .await
                 .map_err(RuntimeError::from);
+            if let (Ok(_), Some(publisher)) = (&result, &self.publisher) {
+                publisher.record_fold_outcome(namespace_id).await;
+            }
             self.finish_namespace_mutation(namespace_id, result)
                 .inspect_err(|error| tracing::debug!(%error))
         }

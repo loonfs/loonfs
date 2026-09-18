@@ -874,6 +874,7 @@ pub(crate) struct EnginePublishResult {
     pub(crate) results: Vec<Result<Commit>>,
     pub(crate) wal_tail_segments: u64,
     pub(crate) wal_tail_inline_bytes: usize,
+    pub(crate) wal_tail_observed: bool,
 }
 
 /// Publishes already-classified candidates as one batch — one WAL
@@ -900,6 +901,7 @@ pub(crate) async fn publish_batch_with_engine(
                 results: candidates.iter().map(|_| Err(error.clone())).collect(),
                 wal_tail_segments: 0,
                 wal_tail_inline_bytes: 0,
+                wal_tail_observed: false,
             };
         }
     };
@@ -941,6 +943,7 @@ pub(crate) async fn publish_batch_with_engine(
     }
     let wal_tail_segments = publish.wal_tail_segments;
     let wal_tail_inline_bytes = publish.wal_tail_inline_bytes;
+    let wal_tail_observed = publish.wal_tail_observed;
     let results = publish
         .results
         .into_iter()
@@ -959,6 +962,7 @@ pub(crate) async fn publish_batch_with_engine(
         results,
         wal_tail_segments,
         wal_tail_inline_bytes,
+        wal_tail_observed,
     }
 }
 
