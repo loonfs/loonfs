@@ -3,6 +3,7 @@
 
 mod discover;
 mod frame;
+mod projected_tail;
 mod publish;
 mod reader;
 mod reclaim;
@@ -16,6 +17,7 @@ use self::frame::{
     DecodedWalRecord, PreparedWalSegment, ReplayedWalTail, ValidatedWalSegment, ValidatedWalTail,
 };
 pub(crate) use self::frame::{WalSegmentError, WalTailLoadError};
+pub use self::projected_tail::ProjectedWalTail;
 pub(crate) use self::publish::publish_segment;
 pub(crate) use self::reader::{load_replayed_wal_tail, load_retained_wal_tail};
 pub(crate) use self::reclaim::{object_is_required, required_from};

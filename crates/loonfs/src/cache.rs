@@ -543,7 +543,7 @@ impl ReadCore {
                 manifest_head_seq: state.manifest_head_seq,
                 head_seq,
             },
-            state.tail_rows,
+            state.tail,
         );
     }
 

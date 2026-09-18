@@ -1,34 +1,32 @@
 //! Replays a validated WAL tail onto metadata state, record by record.
 
 pub(crate) use super::frame::WalSegmentError;
+use super::ProjectedWalTail;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalTail};
 use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
-use crate::metadata::{CommitReceiptRecord, MetadataState};
+use crate::metadata::CommitReceiptRecord;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, InodeId, NamespaceId, WriterEpoch};
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,
-    base_metadata_state: &MetadataState,
+    base_tail: &ProjectedWalTail,
     expected_writer_epoch: Option<WriterEpoch>,
     wal_tail: &ValidatedWalTail,
 ) -> Result<ReplayedWalTail, WalSegmentError> {
     let mut replayed = ReplayedWalTail {
         resulting_head: base_head.clone(),
-        resulting_metadata_state: base_metadata_state.clone(),
-        wal_tail_inline_values: 0,
+        projected_tail: base_tail.clone(),
     };
     for segment in wal_tail.segments() {
-        let previous_inline_values = replayed.wal_tail_inline_values;
         replayed = replay_wal_records(
             &replayed.resulting_head,
-            &replayed.resulting_metadata_state,
+            &replayed.projected_tail,
             expected_writer_epoch,
             segment.decoded_records(),
         )?;
-        replayed.wal_tail_inline_values += previous_inline_values;
         let payload = segment.envelope().payload();
         if replayed.resulting_head.next_inode_id != payload.next_inode_id {
             return Err(WalSegmentError::SegmentSummaryMismatch);
@@ -62,7 +60,7 @@ pub(crate) fn ensure_replayed_head_matches(
 
 pub(crate) fn replay_wal_records<'a, I>(
     base_head: &NamespaceReadState,
-    base_metadata_state: &MetadataState,
+    base_tail: &ProjectedWalTail,
     expected_writer_epoch: Option<WriterEpoch>,
     records: I,
 ) -> Result<ReplayedWalTail, WalSegmentError>
@@ -70,17 +68,16 @@ where
     I: IntoIterator<Item = DecodedWalRecord<'a>>,
 {
     let mut current_head = base_head.clone();
-    let mut current_metadata_state = base_metadata_state.clone();
+    let mut current_tail = base_tail.clone();
 
-    let mut wal_tail_inline_values = 0;
     for record in records {
         validate_replay_record(&current_head, expected_writer_epoch, &record)?;
-        wal_tail_inline_values += record.inline_content.len() as u64;
+        current_tail.extend_inline_content(record.inline_content);
         current_head.seq = record.seq;
         current_head.head_commit_id = record.commit_id.clone();
         current_head.next_inode_id =
             replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-        current_metadata_state.apply_committed_wal_record_parts_mut(
+        current_tail.rows.apply_committed_wal_record_parts_mut(
             CommitReceiptRecord {
                 commit_id: record.commit_id.clone(),
                 committed_by: record.committed_by.clone(),
@@ -95,8 +92,7 @@ where
 
     Ok(ReplayedWalTail {
         resulting_head: current_head,
-        resulting_metadata_state: current_metadata_state,
-        wal_tail_inline_values,
+        projected_tail: current_tail,
     })
 }
 

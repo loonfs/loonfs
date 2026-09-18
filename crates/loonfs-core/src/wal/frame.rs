@@ -178,6 +178,5 @@ impl WalTailLoadError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReplayedWalTail {
     pub resulting_head: NamespaceReadState,
-    pub resulting_metadata_state: crate::metadata::MetadataState,
-    pub wal_tail_inline_values: u64,
+    pub projected_tail: super::ProjectedWalTail,
 }

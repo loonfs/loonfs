@@ -106,6 +106,7 @@ pub mod cache {
         SegmentCacheKey,
     };
     pub use crate::recency::Recency;
+    pub use crate::wal::ProjectedWalTail;
 
     pub use crate::checkpoint::metadata_maintenance_due;
     pub use crate::checkpoint::{

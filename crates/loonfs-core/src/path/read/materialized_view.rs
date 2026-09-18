@@ -12,7 +12,7 @@ use crate::checkpoint::{
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::{
-    binding_generation, LeafRevisionPrefetch, MetadataState, MetadataView, MetadataViewSession,
+    binding_generation, LeafRevisionPrefetch, MetadataView, MetadataViewSession,
     ResolvedVisiblePath, RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
@@ -21,8 +21,9 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
-use crate::storage::content::{content_object_key_for_ref, get_durable_content_bytes};
+use crate::storage::content::ContentLocation;
 use crate::wal::load_replayed_wal_tail;
+use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
@@ -147,7 +148,7 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) content_store_id: ContentStoreId,
     pub(super) head: NamespaceReadState,
     pub(super) segments: VerifiedMetadataSegments<'a, S>,
-    wal_tail_rows: Arc<MetadataState>,
+    wal_tail: Arc<ProjectedWalTail>,
     anchor: ReadAnchor,
 }
 
@@ -194,13 +195,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             head_seq: head.seq,
         };
         if let Some(cache) = load_context.tail_cache {
-            if let Some(wal_tail_rows) = cache.get(&cache_key) {
+            if let Some(wal_tail) = cache.get(&cache_key) {
                 return Ok(Self {
                     namespace_id: namespace_id.clone(),
                     content_store_id: catalog_entry.content_store_id().clone(),
                     head,
                     segments,
-                    wal_tail_rows,
+                    wal_tail,
                     anchor,
                 });
             }
@@ -214,16 +215,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         )
         .await
         .map_err(CoreError::MetadataProjection)?;
-        let wal_tail_rows = Arc::new(replayed.resulting_metadata_state);
+        let wal_tail = Arc::new(replayed.projected_tail);
         if let Some(cache) = load_context.tail_cache {
-            cache.insert(cache_key, Arc::clone(&wal_tail_rows));
+            cache.insert(cache_key, Arc::clone(&wal_tail));
         }
         Ok(Self {
             namespace_id: namespace_id.clone(),
             content_store_id: catalog_entry.content_store_id().clone(),
             head,
             segments,
-            wal_tail_rows,
+            wal_tail,
             anchor,
         })
     }
@@ -302,7 +303,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .resolve_file_content(absolute_path, None, access)
             .await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
-        let bytes = get_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
+        let bytes = self
+            .resolve_content_location(&content_ref)?
+            .get_bytes(store, &content_ref)
+            .await?;
         Ok(FileBytes { entry, bytes })
     }
 
@@ -353,9 +357,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok((entry, content_ref))
     }
 
-    /// The content store this view's namespace is bound to.
-    pub(crate) fn content_store_id(&self) -> &ContentStoreId {
-        &self.content_store_id
+    pub(crate) fn resolve_content_location(
+        &self,
+        content_ref: &ContentRef,
+    ) -> Result<ContentLocation> {
+        Ok(ContentLocation::resolve(
+            &self.namespace_id,
+            &self.content_store_id,
+            Some(&self.wal_tail),
+            content_ref,
+        )?)
     }
 
     /// Resolves a path to the content object a direct read would fetch:
@@ -406,7 +417,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
             None => current_revision,
         };
-        let object_key = content_object_key_for_ref(&self.content_store_id, &content_ref)?;
+        let object_key = self
+            .resolve_content_location(&content_ref)?
+            .direct_download_key()?;
 
         Ok(DirectDownloadTarget {
             absolute_path: entry.path,
@@ -416,13 +429,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })
     }
 
-    /// Resolves retained inode content without requiring a current path.
-    pub(crate) async fn direct_download_target_by_inode(
+    /// Resolves one retained revision after the access checks a direct read
+    /// of it needs: `read` on the inode, and `history` when the revision is
+    /// not the current one.
+    pub(crate) async fn authorized_revision_for_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
         access: &ReadAccess<'_, S>,
-    ) -> Result<DirectDownloadByInodeTarget> {
+    ) -> Result<RevisionRecord> {
         let mut session = self.metadata_view().session();
         access
             .require(
@@ -448,8 +463,22 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 )
                 .await?;
         }
-        let revision = self.revision_for_inode(inode_id, revision_no).await?;
-        let object_key = content_object_key_for_ref(&self.content_store_id, &revision.content_ref)?;
+        self.revision_for_inode(inode_id, revision_no).await
+    }
+
+    /// Resolves retained inode content without requiring a current path.
+    pub(crate) async fn direct_download_target_by_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        access: &ReadAccess<'_, S>,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        let revision = self
+            .authorized_revision_for_inode(inode_id, revision_no, access)
+            .await?;
+        let object_key = self
+            .resolve_content_location(&revision.content_ref)?
+            .direct_download_key()?;
         Ok(DirectDownloadByInodeTarget {
             inode_id,
             revision_no: revision.revision_no,
@@ -669,7 +698,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .resolve_file_content(absolute_path, Some(revision_no), access)
             .await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
-        let bytes = get_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
+        let bytes = self
+            .resolve_content_location(&content_ref)?
+            .get_bytes(store, &content_ref)
+            .await?;
         Ok(FileBytes { entry, bytes })
     }
 
@@ -708,7 +740,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         }
         let revision = self.revision_for_inode(inode_id, revision_no).await?;
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
-        Ok(get_durable_content_bytes(store, &self.content_store_id, &revision.content_ref).await?)
+        Ok(self
+            .resolve_content_location(&revision.content_ref)?
+            .get_bytes(store, &revision.content_ref)
+            .await?)
     }
 
     #[tracing::instrument(
@@ -1027,7 +1062,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         .await
     }
 
-    async fn revision_for_inode(
+    pub(crate) async fn revision_for_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -1038,7 +1073,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.segments, self.wal_tail_rows.as_ref())
+        MetadataView::from_loaded_head(&self.head, &self.segments, &self.wal_tail.rows)
     }
 }
 

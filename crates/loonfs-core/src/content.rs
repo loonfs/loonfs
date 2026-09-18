@@ -13,3 +13,4 @@ pub use crate::storage::content_admission::{
     mint_content_token, verify_content_token, CompletedUploadReceipt, ContentTokenError,
     PreparedContent,
 };
+pub use crate::storage::content_location::ContentLocation;

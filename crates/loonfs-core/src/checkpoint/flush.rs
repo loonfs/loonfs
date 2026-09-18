@@ -22,6 +22,7 @@ use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::load_replayed_wal_tail;
+use crate::wal::ProjectedWalTail;
 use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_api::{
@@ -137,7 +138,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
 
     // Inline content is not materialized yet, so a covering manifest would
     // let collection delete the only copy.
-    if projection.wal_tail_inline_values != 0 {
+    if projection.tail_state.has_inline_content() {
         return Err(CoreError::Internal(
             "cannot flush a WAL tail with inline content before materialization".to_owned(),
         ));
@@ -224,7 +225,6 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         floor_seq: input.retention_floor_seq,
         manifest_segments: loaded_basis.segments,
         tail_state: input.tail_state,
-        wal_tail_inline_values: input.wal_tail_inline_values,
     };
     // A fold publishes metadata without updating the namespace head.
     match try_flush_wal_projection(store, namespace_id, &manifest_projection, timer).await? {
@@ -247,21 +247,23 @@ pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     pub(super) basis: MetadataBasis,
     pub(super) floor_seq: ChangeSeq,
-    pub(super) wal_tail_inline_values: u64,
     pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
-    pub(super) tail_state: Arc<MetadataState>,
+    pub(super) tail_state: Arc<ProjectedWalTail>,
 }
 
 impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
     pub(super) async fn tail_with_deletion_inodes(
         &self,
     ) -> Result<std::borrow::Cow<'_, MetadataState>> {
-        let mut tail = std::borrow::Cow::Borrowed(self.tail_state.as_ref());
-        let view =
-            MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state);
-        for tombstone in self.tail_state.subtree_tombstones() {
+        let mut tail = std::borrow::Cow::Borrowed(&self.tail_state.rows);
+        let view = MetadataView::from_loaded_head(
+            &self.head,
+            &self.manifest_segments,
+            &self.tail_state.rows,
+        );
+        for tombstone in self.tail_state.rows.subtree_tombstones() {
             if tail
                 .inode_at_seq(tombstone.root_inode_id, self.head.seq)
                 .is_some()
@@ -317,8 +319,7 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
         basis,
         floor_seq,
         manifest_segments,
-        tail_state: Arc::new(replayed.resulting_metadata_state),
-        wal_tail_inline_values: replayed.wal_tail_inline_values,
+        tail_state: Arc::new(replayed.projected_tail),
     })
 }
 
