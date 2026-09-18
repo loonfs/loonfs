@@ -7,6 +7,7 @@ use crate::limits::{MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
+use crate::storage::inline_content::InlineContent;
 use crate::wal::prepare_wal_segment;
 use loonfs_api::wire::wal::{WalDelta, MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{
@@ -97,8 +98,13 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             },
         ],
     );
-    for kind in ["attributes", "copy", "put"] {
-        let operation_count = if kind == "put" {
+    for kind in ["attributes", "copy", "put", "inline"] {
+        let inline = InlineContent::new(
+            namespace_id.clone(),
+            ContentId::generate(),
+            bytes::Bytes::from(vec![0; loonfs_api::wire::wal::MAX_WAL_INLINE_CONTENT_BYTES]),
+        );
+        let operation_count = if kind == "put" || kind == "inline" {
             1
         } else {
             MAX_COMMIT_OPERATIONS
@@ -133,7 +139,11 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                             "d/".repeat(loonfs_api::MAX_PATH_DEPTH - 1)
                         ))
                         .expect("path"),
-                        content_ref: content_ref.clone(),
+                        content_ref: if kind == "inline" {
+                            inline.content_ref().clone()
+                        } else {
+                            content_ref.clone()
+                        },
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -141,7 +151,25 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 })
                 .collect(),
         };
-        let candidate = CommitCandidate::new(request);
+        let baseline = CommitCandidate::new(request.clone());
+        let candidate = if kind == "inline" {
+            let candidate =
+                CommitCandidate::with_inline_content(request, Vec::new(), vec![inline.clone()]);
+            assert!(
+                candidate.estimated_retained_bytes().expect("weight")
+                    >= baseline
+                        .estimated_retained_bytes()
+                        .expect("baseline weight")
+                        + inline.bytes().len()
+            );
+            assert!(
+                candidate.wal_record_bytes_upper_bound()
+                    >= baseline.wal_record_bytes_upper_bound() + inline.bytes().len()
+            );
+            candidate
+        } else {
+            baseline
+        };
         candidate.validate_request_limits().expect("request limits");
         let estimate = candidate.wal_record_bytes_upper_bound() + WAL_SEGMENT_OVERHEAD_BYTES;
         assert!(estimate <= MAX_WAL_SEGMENT_BYTES, "{kind}");
@@ -160,7 +188,11 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             .await
             .expect("plan");
         let next_inode_id = session.commit_candidate(allocation).expect("allocation");
-        let materialized = materialize_commit(plan.finish(next_inode_id), u64::MAX);
+        let materialized = materialize_commit(
+            plan.finish(next_inode_id),
+            u64::MAX,
+            candidate.inline_content(),
+        );
         let encoded = prepare_wal_segment(
             namespace_id.clone(),
             head.writer_epoch,

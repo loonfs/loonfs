@@ -518,6 +518,8 @@ Every WAL commit and commit receipt stores a `semantic_commit_fingerprint`. It r
 
 While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
 
+Content a commit carries inline is identified by its bytes. While the receipt is retained, a retry with the same inline bytes replays the original commit, even with a different content ID. Different inline bytes conflict.
+
 The guarantee is bounded by retention. Receipts below the retention floor can be removed during compaction. Once a receipt is gone, the old ID cannot be distinguished from an unused ID and a later request can execute as a new mutation. A receipt that has not yet been compacted may still be available, but callers must not depend on that extra lifetime.
 
 Receipt lookup remains available at the WAL write-stop threshold. A retained matching receipt returns the original result, and a retained conflicting receipt returns `commit_id_reuse_conflict`. Only new commits are rejected with `maintenance_required`. Writer-session, availability, and corruption checks still apply.
@@ -1388,6 +1390,14 @@ A content reference is represented by exactly these fields, in this order:
 The owner namespace and checksum are excluded from the preimage. Every reference a commit can admit is owned by the committing namespace: an upload records its session's namespace as the owner, and admission requires the reference to match the prepared content exactly, so the owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
 
 Two uploads of identical bytes have different IDs and different fingerprints. A retry reuses the original reference rather than repeating the upload and substituting a new one.
+
+Content that a commit carries inline has no object to name, so it is identified by its bytes. Each operation whose reference names inline content uses this form in its `content_ref` member instead:
+
+```json
+{"kind":"inline_v1","sha256":"<64 lowercase hex>","size_bytes":15}
+```
+
+`sha256` is the lowercase hexadecimal SHA-256 of the complete content, and the fields appear in the order shown. A reference that accompanies inline content carries a SHA-256 checksum, which the writer computes from the bytes. The content ID and owner are excluded. The form follows how the request supplied the content, not where the bytes are stored: content supplied inline keeps this form if the writer stages it instead, and staged or uploaded content always keeps the reference form. The same bytes sent once inline and once as an uploaded object produce different fingerprints.
 
 ### B.3 Preconditions
 

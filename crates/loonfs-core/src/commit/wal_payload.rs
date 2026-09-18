@@ -1,7 +1,7 @@
 //! Converts a materialized commit into the durable WAL payload shape.
 
 use super::MaterializedCommit;
-use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload};
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalInlineContent};
 
 pub(crate) fn wal_payload_from_materialized_commit(
     commit: &MaterializedCommit,
@@ -14,7 +14,14 @@ pub(crate) fn wal_payload_from_materialized_commit(
         semantic_commit_fingerprint: prepared.semantic_identity.clone(),
         committed_at_ms: commit.committed_at_ms,
         message: prepared.message.clone(),
-        inline_content: Vec::new(),
+        inline_content: commit
+            .inline_content
+            .iter()
+            .map(|value| WalInlineContent {
+                content_id: value.content_ref().content_id.clone(),
+                bytes: value.bytes().to_vec(),
+            })
+            .collect(),
         deltas: commit
             .deltas
             .iter()
@@ -59,7 +66,7 @@ mod tests {
             }],
             resulting_next_inode_id: InodeId(3),
         };
-        let materialized = materialize_commit(plan, 4_200);
+        let materialized = materialize_commit(plan, 4_200, &[]);
 
         let payload = wal_payload_from_materialized_commit(&materialized);
 
@@ -71,7 +78,7 @@ mod tests {
         // commit under different clocks share a semantic fingerprint, so
         // replay identity is untouched by wall time. Only the stamp differs
         // in the durable payload.
-        let restamped = materialize_commit(materialized.commit.clone(), 9_900);
+        let restamped = materialize_commit(materialized.commit.clone(), 9_900, &[]);
         assert_eq!(
             restamped.commit.semantic_identity,
             materialized.commit.semantic_identity

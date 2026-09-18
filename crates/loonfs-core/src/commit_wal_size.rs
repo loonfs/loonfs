@@ -1,6 +1,7 @@
 //! Bounds the WAL records produced by a request before metadata planning.
 
 use crate::path::write::CommitRequest;
+use crate::storage::inline_content::InlineContent;
 use loonfs_api::{
     AbsolutePath, AccessRight, FilesystemOperation, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES,
     MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES,
@@ -148,7 +149,10 @@ const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
         - 9
 }
 
-pub(crate) fn estimated_wal_record_bytes(request: &CommitRequest) -> usize {
+pub(crate) fn estimated_wal_record_bytes(
+    request: &CommitRequest,
+    inline_content: &[InlineContent],
+) -> usize {
     let fixed_bytes = map_bytes(&[
         ("seq", INTEGER_BYTES),
         ("commit_id", string_bytes(request.commit_id.as_str().len())),
@@ -167,12 +171,25 @@ pub(crate) fn estimated_wal_record_bytes(request: &CommitRequest) -> usize {
         ),
         ("deltas", 9),
     ]);
-    request
-        .operations
-        .iter()
-        .fold(fixed_bytes, |bytes, operation| {
-            bytes.saturating_add(operation_bytes(operation))
-        })
+    let inline_bytes = if inline_content.is_empty() {
+        0
+    } else {
+        inline_content
+            .iter()
+            .fold(string_bytes("inline_content".len()) + 9, |bytes, value| {
+                bytes.saturating_add(map_bytes(&[
+                    (
+                        "content_id",
+                        string_bytes(value.content_ref().content_id.as_str().len()),
+                    ),
+                    ("bytes", string_bytes(value.bytes().len())),
+                ]))
+            })
+    };
+    request.operations.iter().fold(
+        fixed_bytes.saturating_add(inline_bytes),
+        |bytes, operation| bytes.saturating_add(operation_bytes(operation)),
+    )
 }
 
 fn operation_bytes(operation: &FilesystemOperation) -> usize {

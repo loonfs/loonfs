@@ -162,7 +162,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             let materialized = {
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "materialize_commit").entered();
-                materialize_commit(plan, context.now_ms)
+                materialize_commit(plan, context.now_ms, candidate.inline_content())
             };
             let preview = {
                 let _span =

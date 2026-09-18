@@ -21,7 +21,9 @@ use crate::{
 use admission::{AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
 use loonfs_api::v0::Commit;
-use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
+use loonfs_api::wire::wal::{
+    MAX_WAL_SEGMENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES,
+};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::cache::Recency;
 use loonfs_core::commit::{CommitFingerprint, WalPublishError};
@@ -878,12 +880,14 @@ enum WorkItem {
 struct OpenBatch {
     candidates: Vec<BatchCandidate>,
     wal_record_bytes_upper_bound: usize,
+    inline_content_bytes: usize,
 }
 
 struct PreparedCandidate {
     candidate: CommitCandidate,
     estimated_retained_bytes: usize,
     wal_record_bytes_upper_bound: usize,
+    inline_content_bytes: usize,
 }
 
 impl PreparedCandidate {
@@ -891,6 +895,7 @@ impl PreparedCandidate {
         Ok(Self {
             estimated_retained_bytes: candidate.estimated_retained_bytes()?,
             wal_record_bytes_upper_bound: candidate.wal_record_bytes_upper_bound(),
+            inline_content_bytes: candidate.inline_content_bytes(),
             candidate,
         })
     }
@@ -1096,6 +1101,7 @@ impl NamespacePublisher {
 
         let queued = queued_candidates(&state);
         let wal_record_bytes_upper_bound = candidate.wal_record_bytes_upper_bound;
+        let inline_content_bytes = candidate.inline_content_bytes;
         let candidate = BatchCandidate {
             commit_id: commit_id.clone(),
             candidate: candidate.candidate,
@@ -1111,14 +1117,20 @@ impl NamespacePublisher {
                     .wal_record_bytes_upper_bound
                     .saturating_add(wal_record_bytes_upper_bound)
                     .saturating_add(WAL_SEGMENT_OVERHEAD_BYTES)
-                    <= MAX_WAL_SEGMENT_BYTES =>
+                    <= MAX_WAL_SEGMENT_BYTES
+                    && batch
+                        .inline_content_bytes
+                        .saturating_add(inline_content_bytes)
+                        <= MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES =>
             {
                 batch.wal_record_bytes_upper_bound += wal_record_bytes_upper_bound;
+                batch.inline_content_bytes += inline_content_bytes;
                 batch.candidates.push(candidate);
             }
             _ => state.queue.push_back(WorkItem::Batch(OpenBatch {
                 candidates: vec![candidate],
                 wal_record_bytes_upper_bound,
+                inline_content_bytes,
             })),
         }
         self.trace_enqueue(queued + 1, "new");
