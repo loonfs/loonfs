@@ -339,7 +339,7 @@ Each data segment must contain contiguous commits following its `base_head_seq`.
 
 After WAL discovery, check for a successor to the selected manifest and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read.
 
-A read is evaluated at one sequence. An implementation may query verified segments and a projected WAL tail directly instead of materializing every row in memory, but must apply the same visibility rules.
+A read is evaluated at one sequence. Replaying the WAL produces a projection of its metadata changes and any file bytes stored inline. This is the *projected WAL tail*. An implementation may query verified metadata segments and this projection directly, without loading every metadata row into memory, provided it applies the same visibility rules.
 
 For a warm read, the reference runtime probes the next WAL number with GET. An absent object confirms the cached tip; a present object requires advancing the state and probing onward. On a monotonic revalidation interval, defaulting to one second, it also probes the next manifest number with HEAD. A successor triggers discovery again. This is how cached readers observe deletion and retention changes. The hint is not used to validate a cached view. A locally published read state can be consumed once without either probe.
 
@@ -361,17 +361,34 @@ A path-based revision read first resolves the current inode at that path, then l
 
 ### 4.5 Content verification
 
-A published reference names content, not its current location. Resolve the content store from the reading namespace's manifest. If the reference belongs to this namespace and the projected WAL tail holds its content ID, read the resident inline bytes. Otherwise read the content object keyed by the reference's original owner and content ID. Content inherited through a fork always resolves to an object. Both sources use the same supported-kind, byte-length, and checksum checks.
+File bytes can be stored in a content object or included directly in a WAL commit. In either case, the file revision contains a content reference with the owner namespace, content ID, size, and checksum. Use the read view to determine where to read the bytes:
 
-A reader that replays the tail already holds its inline bytes, so reading them needs no content request. Replay does not hash them. Every read verifies them as it verifies an object. A pinned view whose WAL segments have been reclaimed fails as a stale view does. There is no fallback to a content object.
+| Condition | Where to read |
+| --- | --- |
+| The reference belongs to the namespace being read, and its content ID is present in the projected WAL tail | Use the inline bytes already in that projection. |
+| Otherwise | Read the content object using the manifest's content-store ID and the reference's original owner and content ID. |
 
-A missing object, wrong size, unsupported algorithm, or checksum mismatch fails the read. A HEAD request may check existence and size before the download, but does not replace checksum verification of the bytes read.
+Content inherited through a fork is always read from a content object. WAL replay loads inline bytes along with the metadata, so reading them from the resulting projection needs no separate content request.
 
-The embedded runtime may overlap a small buffered content read with current-path validation. It resolves a candidate from a cached view without consuming local publication evidence, then performs the ordinary freshness check. When that check returns the same read state and manifest, the candidate is the current resolution; otherwise the path is resolved again in the current view. Speculative bytes are usable only when the current path resolves to the same namespace-bound content store and complete content reference; the returned entry comes from the current view. Current metadata errors take precedence. An obsolete content result is discarded before fetching a changed reference once.
+Every content read must validate the reference's kind and checksum algorithm, then verify the complete byte length and checksum. These checks apply to both sources. WAL replay verifies the record envelope but does not recompute each file's checksum. A HEAD request can check an object's existence and size, but the content read must still verify the bytes. A missing required object or a failed validation must fail the read.
 
-Speculation is limited to nonempty files of at most 64 KiB and respects smaller configured buffered-read limits. For object content, a ranged GET requests the declared size plus one byte and verifies exact length and checksum. Tail content uses verified resident bytes without a content request. A length error on an oversized ranged response reports the observed lower bound, not the full object size. No speculative result advances freshness evidence or changes retention.
+Reclaiming a WAL object does not remove bytes already held in a read view's projection. If that projection must be rebuilt and the required WAL objects are gone, the read must fail. Finding a content object is insufficient because the missing WAL is also required to reconstruct the view's metadata.
 
-For streamed full-file reads, the complete checksum can only be established after the full stream has been processed. The transport must preserve a late read failure; receiving an initial portion of a stream does not establish successful whole-file verification. For provider-direct downloads, bytes pass directly to the client. The [API specification][api-spec] defines the client's verification responsibilities.
+For a streamed read, the full-file checksum is verified only after the complete stream has been processed. The transport must report a verification failure even if some bytes have already reached the client. For provider-direct downloads, the client receives bytes directly from object storage; the [API specification][api-spec] defines its verification responsibilities.
+
+### 4.6 Speculative reads
+
+The embedded runtime can reduce latency by reading a small file while checking whether its cached view is still current. This optimization applies to nonempty files of at most 64 KiB and must respect any smaller configured limit on buffered reads.
+
+First, resolve the path in the cached view. This lookup must leave any local publication evidence available for the normal freshness check described in section 4.2. Start that check and the content read together. If the namespace read state and manifest are unchanged, the cached resolution is still valid. Otherwise, resolve the path again in the current view.
+
+Use the speculative bytes only if the current path has the same content-store binding and complete content reference. Return the entry from the current view. If either the binding or reference changed, discard the earlier result, including any content error, before reading the current content once. An error resolving the current path takes precedence over the speculative result.
+
+For example, if `/report.txt` now refers to different content, discard the old file bytes and read the replacement. If the path was deleted, return the current metadata error even if the old bytes were read successfully.
+
+For content objects, request a byte range covering the declared size plus one extra byte. The extra byte detects an object larger than its reference claims; the read must still verify the exact length and checksum. A size error reports the length observed in that range, which may be less than the full object size. Inline content uses the bytes in the projected tail and requires no content request.
+
+Reading speculative bytes does not by itself establish freshness or change retention. The ordinary metadata checks remain required.
 
 ## 5. Uploading content
 
