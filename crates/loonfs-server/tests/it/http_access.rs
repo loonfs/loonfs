@@ -301,6 +301,58 @@ async fn an_acl_namespace_is_created_over_the_wire() {
 }
 
 #[tokio::test]
+async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, state) = loonfs_server::app(
+        test_config(
+            temp_dir.path().join("store"),
+            "repeated-grant-principal",
+            "repeated-grant-principal",
+        ),
+        loonfs_server::AppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces",
+            Some(r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_demo","root_grants":{"administrator":["admin"]}}}"#),
+            &[],
+        ))
+        .await
+        .expect("create namespace response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo/commits",
+            Some(
+                r#"{"commit_id":"repeated-grant-principal","operations":[{"kind":"update_access","path":"/","boundary":false,"grants":{"viewer":["read"],"viewer":["manage"]}}]}"#,
+            ),
+            &[
+                ("Loonfs-Subject", "administrator"),
+                ("Loonfs-Principals", "administrator"),
+            ],
+        ))
+        .await
+        .expect("commit response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+    assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+
+    let namespace = state
+        .writer
+        .reader()
+        .get_namespace(&namespace_id("demo"))
+        .await
+        .expect("namespace");
+    assert_eq!(namespace.head_seq, loonfs_api::ChangeSeq(0));
+}
+
+#[tokio::test]
 async fn a_former_server_observes_revocation_on_its_first_read_after_publication() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config(temp_dir.path().join("store"), "old-writer", "revocation");

@@ -3,6 +3,7 @@
 //! the nearest boundary.
 
 use super::visibility::MetadataVisibilityReads;
+use crate::error::CoreError;
 use loonfs_api::wire::manifest::{AccessRevisionRecord, TombstoneRowAction};
 use loonfs_api::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
 use std::collections::BTreeSet;
@@ -43,13 +44,18 @@ impl AccessChain {
 pub(crate) async fn access_chain<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
-) -> Result<AccessChain, R::Error> {
+) -> Result<AccessChain, CoreError>
+where
+    CoreError: From<R::Error>,
+{
     let mut rows = Vec::new();
     let mut visited = BTreeSet::new();
     let mut current = inode_id;
     loop {
-        if !visited.insert(current.0) {
-            break;
+        if !visited.insert(current) {
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "access inheritance cycle revisits inode `{current}`"
+            )));
         }
         let mut boundary = false;
         if let Some(row) = reads.find_access_row(current).await? {
@@ -97,7 +103,10 @@ pub(crate) async fn effective_rights<R: MetadataVisibilityReads>(
     reads: &mut R,
     principals: &PrincipalSet,
     inode_id: InodeId,
-) -> Result<AccessRights, R::Error> {
+) -> Result<AccessRights, CoreError>
+where
+    CoreError: From<R::Error>,
+{
     if is_administrator(reads, principals).await? {
         return Ok(AccessRights::ALL);
     }
@@ -269,5 +278,45 @@ mod tests {
             .expect("access chain")
             .rights_for(&ops)
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_access_inheritance_cycle_is_namespace_corruption() {
+        let mut builder = MetadataStateBuilder::default();
+        let commit_id = CommitId::parse("c_access_cycle").expect("commit id");
+        for inode_id in [InodeId(2), InodeId(3)] {
+            builder.push_inode(InodeRecord {
+                inode_id,
+                inode_kind: InodeKind::Directory,
+                created_seq: ChangeSeq(1),
+                commit_id: commit_id.clone(),
+                created_by: ActorId::loonfs(),
+                created_at_ms: 1_000,
+            });
+        }
+        for (parent_inode_id, child_inode_id, name) in [
+            (InodeId(2), InodeId(3), "three"),
+            (InodeId(3), InodeId(2), "two"),
+        ] {
+            let display_name = DisplayName::parse(name).expect("display name");
+            builder.push_direntry_bind(DirentryBindRecord {
+                parent_inode_id,
+                name_key: NameKey::for_display_name(&display_name),
+                display_name,
+                child_inode_id,
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: 0,
+            });
+        }
+        let state = builder.finish();
+        let error = effective_rights(
+            &mut state.reads_at_seq(ChangeSeq(1)),
+            &principals(&["viewer"]),
+            InodeId(2),
+        )
+        .await
+        .expect_err("inheritance cycle");
+        assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
+        assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
     }
 }

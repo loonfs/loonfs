@@ -28,13 +28,16 @@ validation_error!(
 
 string_id! {
     /// The stable identity a request acts as, used for upload ownership
-    /// and commit replay. Same grammar as an actor id.
+    /// and commit replay.
+    ///
+    /// Subject IDs contain 1 to 256 visible ASCII characters (0x21 through 0x7E)
+    /// other than the comma, which separates ids on the wire.
     SubjectId,
     error = SubjectIdValidationError,
     validate = validate_subject_id,
     schema(
         description = "Stable opaque subject id containing 1 to 256 visible ASCII characters other than the comma.",
-        pattern = r"^[\x21-\x7E]{1,256}$",
+        pattern = r"^[\x21-\x2B\x2D-\x7E]{1,256}$",
         example = "usr_8f3c"
     )
 }
@@ -63,7 +66,7 @@ string_id! {
     validate = validate_principal_id,
     schema(
         description = "Stable opaque principal id containing 1 to 256 visible ASCII characters other than the comma.",
-        pattern = r"^[\x21-\x7E]{1,256}$",
+        pattern = r"^[\x21-\x2B\x2D-\x7E]{1,256}$",
         example = "prn_8f3c"
     )
 }
@@ -78,7 +81,7 @@ string_id! {
     validate = validate_principal_scope,
     schema(
         description = "Opaque identity-domain id containing 1 to 256 visible ASCII characters other than the comma.",
-        pattern = r"^[\x21-\x7E]{1,256}$",
+        pattern = r"^[\x21-\x2B\x2D-\x7E]{1,256}$",
         example = "org_acme"
     )
 }
@@ -179,7 +182,9 @@ impl AccessRight {
     }
 }
 
-/// A set of rights. Encoded as a sorted list of distinct right names.
+/// A set of rights. Encoded as distinct names in `read`, `history`, `write`,
+/// `create`, `remove`, `share`, `manage`, `admin` order. Decoding accepts any
+/// order and rejects repeated names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "openapi", schema(value_type = Vec<AccessRight>))]
@@ -266,7 +271,8 @@ impl<'de> Deserialize<'de> for AccessRights {
 
 /// A validated map from principal to rights, limited to
 /// [`MAX_ACCESS_GRANT_ENTRIES`] entries and [`MAX_ACCESS_GRANTS_PRINCIPAL_BYTES`]
-/// bytes of principal ids. No entry has an empty set of rights.
+/// bytes of principal ids. No entry has an empty set of rights. Decoding
+/// rejects repeated principals.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "openapi", schema(value_type = std::collections::BTreeMap<String, AccessRights>))]
@@ -338,14 +344,51 @@ impl TryFrom<BTreeMap<PrincipalId, AccessRights>> for AccessGrants {
 
 impl<'de> Deserialize<'de> for AccessGrants {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let entries = BTreeMap::<PrincipalId, AccessRights>::deserialize(deserializer)?;
-        Self::new(entries).map_err(serde::de::Error::custom)
+        struct AccessGrantsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AccessGrantsVisitor {
+            type Value = AccessGrants;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a map from principal ids to access rights")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries: BTreeMap<PrincipalId, AccessRights> = BTreeMap::new();
+                while let Some((principal_id, rights)) = map.next_entry()? {
+                    match entries.entry(principal_id) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(rights);
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry) => {
+                            return Err(serde::de::Error::custom(
+                                AccessGrantsError::DuplicatePrincipal {
+                                    principal_id: entry.key().clone(),
+                                },
+                            ));
+                        }
+                    }
+                }
+                AccessGrants::new(entries).map_err(serde::de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_map(AccessGrantsVisitor)
     }
 }
 
 /// Why a grant map was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AccessGrantsError {
+    /// A principal appeared more than once.
+    #[error("access grants name principal `{principal_id}` more than once")]
+    DuplicatePrincipal {
+        /// The repeated principal.
+        principal_id: PrincipalId,
+    },
     /// More principals than [`MAX_ACCESS_GRANT_ENTRIES`].
     #[error("access grants name {entries} principals, which exceeds the maximum of {MAX_ACCESS_GRANT_ENTRIES}")]
     TooManyEntries {
@@ -434,13 +477,23 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn access_rights_encode_as_sorted_names_and_reject_repeats_and_unknown_names() {
-        let rights: AccessRights = [AccessRight::Manage, AccessRight::Read]
-            .into_iter()
-            .collect();
+    fn access_rights_encode_in_declaration_order_and_decode_any_order() {
+        let rights: AccessRights = AccessRight::ALL.into_iter().rev().collect();
+        let encoded = serde_json::to_string(&rights).expect("serialize rights");
         assert_eq!(
-            serde_json::to_string(&rights).expect("serialize rights"),
-            r#"["read","manage"]"#
+            encoded,
+            r#"["read","history","write","create","remove","share","manage","admin"]"#
+        );
+        assert_eq!(
+            serde_json::from_str::<AccessRights>(&encoded).expect("decode encoded rights"),
+            AccessRights::ALL
+        );
+        assert_eq!(
+            serde_json::from_str::<AccessRights>(r#"["manage","read"]"#)
+                .expect("decode rights in another order"),
+            [AccessRight::Read, AccessRight::Manage]
+                .into_iter()
+                .collect()
         );
         assert!(serde_json::from_str::<AccessRights>(r#"["read","read"]"#).is_err());
         assert!(serde_json::from_str::<AccessRights>(r#"["owner"]"#).is_err());
@@ -449,6 +502,46 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AccessRights>(&empty).expect("empty rights"),
             AccessRights::EMPTY
+        );
+    }
+
+    #[test]
+    fn access_grants_json_rejects_a_repeated_principal() {
+        let error =
+            serde_json::from_str::<AccessGrants>(r#"{"viewer":["read"],"viewer":["manage"]}"#)
+                .expect_err("repeated principal");
+        assert!(
+            error
+                .to_string()
+                .contains("access grants name principal `viewer` more than once"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn access_grants_cbor_rejects_a_repeated_principal() {
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(
+            &ciborium::Value::Map(vec![
+                (
+                    ciborium::Value::Text("viewer".to_owned()),
+                    ciborium::Value::Array(vec![ciborium::Value::Text("read".to_owned())]),
+                ),
+                (
+                    ciborium::Value::Text("viewer".to_owned()),
+                    ciborium::Value::Array(vec![ciborium::Value::Text("manage".to_owned())]),
+                ),
+            ]),
+            &mut encoded,
+        )
+        .expect("encode repeated principal");
+        let error = ciborium::de::from_reader::<AccessGrants, _>(encoded.as_slice())
+            .expect_err("repeated principal");
+        assert!(
+            error
+                .to_string()
+                .contains("access grants name principal `viewer` more than once"),
+            "{error}"
         );
     }
 

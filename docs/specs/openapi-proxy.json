@@ -53,7 +53,7 @@
         "additionalProperties": {
           "$ref": "#/components/schemas/AccessRights"
         },
-        "description": "A validated map from principal to rights, limited to\n[`MAX_ACCESS_GRANT_ENTRIES`] entries and [`MAX_ACCESS_GRANTS_PRINCIPAL_BYTES`]\nbytes of principal ids. No entry has an empty set of rights.",
+        "description": "A validated map from principal to rights, limited to\n[`MAX_ACCESS_GRANT_ENTRIES`] entries and [`MAX_ACCESS_GRANTS_PRINCIPAL_BYTES`]\nbytes of principal ids. No entry has an empty set of rights. Decoding\nrejects repeated principals.",
         "propertyNames": {
           "type": "string"
         },
@@ -81,7 +81,7 @@
         "type": "string"
       },
       "AccessRights": {
-        "description": "A set of rights. Encoded as a sorted list of distinct right names.",
+        "description": "A set of rights. Encoded as distinct names in `read`, `history`, `write`,\n`create`, `remove`, `share`, `manage`, `admin` order. Decoding accepts any\norder and rejects repeated names.",
         "items": {
           "$ref": "#/components/schemas/AccessRight"
         },
