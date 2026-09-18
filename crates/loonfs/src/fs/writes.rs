@@ -375,23 +375,21 @@ impl FsWriter {
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
         let engine = self.engine(namespace_id);
-        let source_content_store_id = if content_ref.owner_namespace_id != *namespace_id {
-            let (owner, context) = self
-                .core
-                .pinned_metadata_read(&content_ref.owner_namespace_id)
-                .await?;
+        let (owner, context) = self
+            .core
+            .pinned_metadata_read(&content_ref.owner_namespace_id)
+            .await?;
+        // Forks pin manifests, so inherited content from a deleted owner is already an object.
+        if !context.head.status.is_deleted() {
             if let loonfs_core::content::ContentLocation::Tail { bytes, .. } = owner
                 .resolve_content_location(&content_ref, &context)
                 .await?
             {
                 return Ok(engine.stage_owned_bytes(&catalog, &bytes).await?);
             }
-            context.head.content_store_id
-        } else {
-            catalog.content_store_id().clone()
-        };
+        }
         Ok(engine
-            .import_content_ref(&catalog, &source_content_store_id, &content_ref)
+            .import_content_ref(&catalog, &context.head.content_store_id, &content_ref)
             .await?)
     }
 

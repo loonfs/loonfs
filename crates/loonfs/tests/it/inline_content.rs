@@ -1,7 +1,10 @@
-//! Downloads and cross-namespace imports of committed inline content.
+//! Downloads and imports of committed inline content.
 
 use bytes::Bytes;
-use loonfs::{CreateNamespaceOptions, FsReader, FsWriter, PutFileOptions, SharedObjectStore};
+use loonfs::{
+    CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, FsReader, FsWriter,
+    PutFileOptions, SharedObjectStore,
+};
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, ContentRef,
     DestinationBehavior, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet,
@@ -254,6 +257,152 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
             .expect("imported bytes");
         assert_eq!(file.bytes, b"inline content");
         let imported_ref = file.entry.content_ref().expect("reference");
+        assert_eq!(imported_ref.owner_namespace_id, destination);
+        assert_ne!(imported_ref.content_id, content_ref.content_id);
+    }
+}
+
+#[tokio::test]
+async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
+    let directory = tempfile::tempdir().expect("directory");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::content_blob(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("runtime-writer")
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = NamespaceId::parse("same-namespace").expect("namespace");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let content_ref = publish_inline(&store, &namespace_id, None).await;
+    recording.reset();
+    writer
+        .put_file_content_ref(
+            &namespace_id,
+            "/file",
+            content_ref.clone(),
+            PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                ..PutFileOptions::new(loonfs_test_support::test_actor())
+            },
+        )
+        .await
+        .expect("import before folding");
+    assert_eq!(recording.count(OperationClass::Head), 0);
+    assert_eq!(recording.count(OperationClass::Read), 0);
+    let file = writer
+        .reader()
+        .get_file_bytes(&namespace_id, "/file")
+        .await
+        .expect("imported bytes");
+    assert_eq!(file.bytes, b"inline content");
+    assert_eq!(file.entry.revision_no(), Some(RevisionNo(2)));
+    let imported_ref = file.entry.content_ref().expect("reference");
+    assert_eq!(imported_ref.owner_namespace_id, namespace_id);
+    assert_ne!(imported_ref.content_id, content_ref.content_id);
+}
+
+#[tokio::test]
+async fn imports_of_fork_content_read_the_deleted_owners_content_store() {
+    for inline in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let recording = Arc::new(RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::content_blob(),
+        ));
+        let store: SharedObjectStore = recording.clone();
+        let writer = FsWriter::builder_with_store(store.clone())
+            .writer_id("runtime-writer")
+            .build()
+            .await
+            .expect("writer");
+        let source = NamespaceId::parse("source").expect("source");
+        let fork = NamespaceId::parse("fork").expect("fork");
+        let destination = NamespaceId::parse("destination").expect("destination");
+        for namespace_id in [&source, &destination] {
+            writer
+                .create_namespace(
+                    namespace_id,
+                    CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("namespace");
+        }
+        if inline {
+            publish_inline(&store, &source, None).await;
+        } else {
+            writer
+                .put_file_bytes(
+                    &source,
+                    "/file",
+                    b"inline content",
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("publish object");
+        }
+        writer
+            .fork_namespace(
+                &source,
+                &fork,
+                ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("fork");
+        writer
+            .delete_namespace(&source, DeleteNamespaceOptions::default())
+            .await
+            .expect("delete source");
+        let entry = writer
+            .reader()
+            .get_path_entry(&fork, "/file", Default::default())
+            .await
+            .expect("fork entry");
+        let content_ref = entry.content_ref().expect("fork reference");
+        assert_eq!(content_ref.owner_namespace_id, source);
+        let source_catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &source)
+            .await
+            .expect("deleted source catalog");
+        let destination_catalog =
+            loonfs_core::control::load_namespace_catalog_entry(&store, &destination)
+                .await
+                .expect("destination catalog");
+        assert_ne!(
+            source_catalog.content_store_id(),
+            destination_catalog.content_store_id()
+        );
+        let source_key = content_blob(
+            source_catalog.content_store_id(),
+            &source,
+            &content_ref.content_id,
+        );
+        recording.reset();
+        writer
+            .put_file_content_ref(
+                &destination,
+                "/imported",
+                content_ref.clone(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("import after owner deletion");
+        assert_eq!(recording.take_get_keys(), vec![source_key]);
+        let file = writer
+            .reader()
+            .get_file_bytes(&destination, "/imported")
+            .await
+            .expect("imported bytes");
+        assert_eq!(file.bytes, b"inline content");
+        let imported_ref = file.entry.content_ref().expect("imported reference");
         assert_eq!(imported_ref.owner_namespace_id, destination);
         assert_ne!(imported_ref.content_id, content_ref.content_id);
     }
