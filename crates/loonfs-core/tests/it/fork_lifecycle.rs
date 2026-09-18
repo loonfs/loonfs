@@ -639,7 +639,8 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         test_commit_id(Some("seed-shared")),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
-            content_ref: source_ref,
+            content_ref: Some(source_ref),
+            inline_content: None,
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -780,7 +781,8 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         test_commit_id(Some("clone-after-fork")),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
-            content_ref: uploaded_ref.clone(),
+            content_ref: Some(uploaded_ref.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1230,7 +1232,8 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         CommitId::parse("before-delete").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/keep.txt").expect("path"),
-            content_ref: content.content_ref().clone(),
+            content_ref: Some(content.content_ref().clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1268,7 +1271,8 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         CommitId::parse("after-delete").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/late.txt").expect("path"),
-            content_ref: content.content_ref().clone(),
+            content_ref: Some(content.content_ref().clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

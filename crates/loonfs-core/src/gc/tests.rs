@@ -934,7 +934,8 @@ async fn publish_completed_content<S: ObjectStore>(
                     None,
                     FilesystemOperation::PutFile {
                         path: loonfs_api::AbsolutePath::parse(path).expect("path"),
-                        content_ref,
+                        content_ref: Some(content_ref),
+                        inline_content: None,
                         behavior: loonfs_api::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

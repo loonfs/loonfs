@@ -711,6 +711,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_writer_sessions: loonfs::DEFAULT_MAX_WRITER_SESSIONS,
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         publication: Default::default(),
+        inline_content: Default::default(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: GrepConfig {

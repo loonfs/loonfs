@@ -122,7 +122,8 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
                     loonfs::publish::FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/tree/dir-000000/file-{index:09}.txt"))
                             .expect("path"),
-                        content_ref: content_ref.clone(),
+                        content_ref: Some(content_ref.clone()),
+                        inline_content: None,
                         behavior: loonfs::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

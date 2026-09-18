@@ -113,7 +113,8 @@ async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
         normalized_commit_id(commit_id),
         FilesystemOperation::PutFile {
             path: parse_mutation_path(absolute_path)?,
-            content_ref,
+            content_ref: Some(content_ref),
+            inline_content: None,
             behavior,
             expected_inode_id: None,
             expected_revision_no: None,

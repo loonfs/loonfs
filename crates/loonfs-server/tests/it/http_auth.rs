@@ -51,7 +51,11 @@ fn assert_content_not_prepared_response(
 }
 
 fn missing_content_proof_message(request: &CommitRequest) -> String {
-    let [FilesystemOperation::PutFile { content_ref, .. }] = &request.operations[..] else {
+    let [FilesystemOperation::PutFile {
+        content_ref: Some(content_ref),
+        ..
+    }] = &request.operations[..]
+    else {
         panic!("content preparation assertion requires a one-put request");
     };
     format!(
@@ -63,7 +67,11 @@ fn missing_content_proof_message(request: &CommitRequest) -> String {
 /// The message a wholly rejected batch of content tokens answers with: one
 /// entry per content ref, naming the ref and why its token was refused.
 fn rejected_content_token_message(request: &CommitRequest, reason: &str) -> String {
-    let [FilesystemOperation::PutFile { content_ref, .. }] = &request.operations[..] else {
+    let [FilesystemOperation::PutFile {
+        content_ref: Some(content_ref),
+        ..
+    }] = &request.operations[..]
+    else {
         panic!("content preparation assertion requires a one-put request");
     };
     format!(
@@ -104,7 +112,8 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
         }],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/bad-token.txt").expect("path"),
-            content_ref: completed.content_ref,
+            content_ref: Some(completed.content_ref),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -149,7 +158,8 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
         content_tokens: Vec::new(),
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/missing-token.txt").expect("path"),
-            content_ref: completed.content_ref,
+            content_ref: Some(completed.content_ref),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -194,7 +204,8 @@ async fn path_put_with_valid_content_token_succeeds() {
         content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/valid-token.txt").expect("path"),
-            content_ref: completed.content_ref,
+            content_ref: Some(completed.content_ref),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -247,7 +258,8 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
         content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/token-replay.txt").expect("path"),
-            content_ref: completed.content_ref,
+            content_ref: Some(completed.content_ref),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -321,7 +333,8 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
         content_tokens: vec![content_token(&irrelevant)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/irrelevant-token.txt").expect("path"),
-            content_ref: target.content_ref,
+            content_ref: Some(target.content_ref),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -377,7 +390,8 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         ],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/first.txt").expect("path"),
-            content_ref: first.content_ref.clone(),
+            content_ref: Some(first.content_ref.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -398,7 +412,8 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         content_tokens: vec![content_token(&first)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/first-copy.txt").expect("path"),
-            content_ref: first.content_ref.clone(),
+            content_ref: Some(first.content_ref.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

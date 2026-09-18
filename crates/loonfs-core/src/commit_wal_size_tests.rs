@@ -139,11 +139,12 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                             "d/".repeat(loonfs_api::MAX_PATH_DEPTH - 1)
                         ))
                         .expect("path"),
-                        content_ref: if kind == "inline" {
+                        content_ref: Some(if kind == "inline" {
                             inline.content_ref().clone()
                         } else {
                             content_ref.clone()
-                        },
+                        }),
+                        inline_content: None,
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

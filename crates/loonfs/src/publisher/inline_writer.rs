@@ -287,7 +287,8 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
 fn put_operation(path: &str, prepared: &crate::publish::PreparedContent) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content_ref: prepared.content_ref().clone(),
+        content_ref: Some(prepared.content_ref().clone()),
+        inline_content: None,
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,

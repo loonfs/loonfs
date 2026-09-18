@@ -540,7 +540,8 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                         None,
                         FilesystemOperation::PutFile {
                             path: parse_mutation_path(path).expect("valid mutation path"),
-                            content_ref,
+                            content_ref: Some(content_ref),
+                            inline_content: None,
                             behavior: DestinationBehavior::NoReplace,
                             expected_inode_id: None,
                             expected_revision_no: None,

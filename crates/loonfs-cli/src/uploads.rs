@@ -400,7 +400,8 @@ mod tests {
             options.commit.message,
             FilesystemOperation::PutFile {
                 path: loonfs_api::AbsolutePath::parse("/file").expect("path"),
-                content_ref: loonfs_test_support::ids::content_ref(b"data"),
+                content_ref: Some(loonfs_test_support::ids::content_ref(b"data")),
+                inline_content: None,
                 behavior: options.behavior,
                 expected_inode_id: options.expected_inode_id,
                 expected_revision_no: options.expected_revision_no,

@@ -18,6 +18,7 @@ use crate::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -45,6 +46,9 @@ impl CommitFingerprint {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SemanticFingerprintError {
+    /// An operation supplies both content sources or neither.
+    #[error("exactly one of `content_ref` and `inline_content` is required")]
+    InvalidContentSource,
     /// Canonical JSON encoding failed.
     #[error("failed to encode the commit fingerprint preimage: {0}")]
     Encode(#[from] serde_json::Error),
@@ -270,7 +274,7 @@ enum ContentRefFingerprintInput<'a> {
         size_bytes: u64,
     },
     InlineV1 {
-        sha256: &'a str,
+        sha256: Cow<'a, str>,
         size_bytes: u64,
     },
 }
@@ -287,7 +291,7 @@ fn content_ref_fingerprint_input<'a>(
             });
         }
         Ok(ContentRefFingerprintInput::InlineV1 {
-            sha256: &content_ref.checksum.value,
+            sha256: Cow::Borrowed(&content_ref.checksum.value),
             size_bytes: content_ref.size_bytes,
         })
     } else {
@@ -297,6 +301,21 @@ fn content_ref_fingerprint_input<'a>(
                 size_bytes: content_ref.size_bytes,
             }),
         }
+    }
+}
+
+fn content_fingerprint_input<'a>(
+    content_ref: Option<&'a ContentRef>,
+    inline_content: Option<&[u8]>,
+    inline_content_ids: &BTreeSet<ContentId>,
+) -> Result<ContentRefFingerprintInput<'a>, SemanticFingerprintError> {
+    match (content_ref, inline_content) {
+        (Some(reference), None) => content_ref_fingerprint_input(reference, inline_content_ids),
+        (None, Some(bytes)) => Ok(ContentRefFingerprintInput::InlineV1 {
+            sha256: Cow::Owned(crate::Checksum::sha256(bytes).value),
+            size_bytes: bytes.len() as u64,
+        }),
+        _ => Err(SemanticFingerprintError::InvalidContentSource),
     }
 }
 
@@ -317,13 +336,18 @@ fn operation_fingerprint_input<'a>(
         FilesystemOperation::PutFile {
             path,
             content_ref,
+            inline_content,
             behavior,
             expected_inode_id,
             expected_revision_no,
         } => OperationFingerprintInput::PutFile {
             path: path.as_str(),
             behavior: *behavior,
-            content_ref: content_ref_fingerprint_input(content_ref, inline_content_ids)?,
+            content_ref: content_fingerprint_input(
+                content_ref.as_ref(),
+                inline_content.as_deref(),
+                inline_content_ids,
+            )?,
             expected_inode_id: *expected_inode_id,
             expected_revision_no: *expected_revision_no,
         },
@@ -338,18 +362,28 @@ fn operation_fingerprint_input<'a>(
             parent_inode_id,
             display_name,
             content_ref,
+            inline_content,
         } => OperationFingerprintInput::CreateFileByInode {
             parent_inode_id: *parent_inode_id,
             display_name: display_name.as_str(),
-            content_ref: content_ref_fingerprint_input(content_ref, inline_content_ids)?,
+            content_ref: content_fingerprint_input(
+                content_ref.as_ref(),
+                inline_content.as_deref(),
+                inline_content_ids,
+            )?,
         },
         FilesystemOperation::PutFileRevisionByInode {
             inode_id,
             content_ref,
+            inline_content,
             expected_revision_no,
         } => OperationFingerprintInput::PutFileRevisionByInode {
             inode_id: *inode_id,
-            content_ref: content_ref_fingerprint_input(content_ref, inline_content_ids)?,
+            content_ref: content_fingerprint_input(
+                content_ref.as_ref(),
+                inline_content.as_deref(),
+                inline_content_ids,
+            )?,
             expected_revision_no: *expected_revision_no,
         },
         FilesystemOperation::MoveByInode {
@@ -627,7 +661,8 @@ mod tests {
         content_ref.checksum = Checksum::crc32c(b"bytes");
         let operation = FilesystemOperation::PutFileRevisionByInode {
             inode_id: InodeId(2),
-            content_ref,
+            content_ref: Some(content_ref),
+            inline_content: None,
             expected_revision_no: RevisionNo(1),
         };
         match semantic_commit_fingerprint(
@@ -939,7 +974,8 @@ mod tests {
         );
         let operation = |expected_inode_id, expected_revision_no| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            content_ref: content_ref.clone(),
+            content_ref: Some(content_ref.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::Replace,
             expected_inode_id,
             expected_revision_no,
@@ -1059,7 +1095,8 @@ mod tests {
     fn put(path: &str, content_ref: ContentRef) -> FilesystemOperation {
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(path).expect("path"),
-            content_ref,
+            content_ref: Some(content_ref),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1183,7 +1220,8 @@ mod tests {
                     options.commit.message.as_deref(),
                     &[FilesystemOperation::PutFile {
                         path: path.clone(),
-                        content_ref: content_ref.clone(),
+                        content_ref: Some(content_ref.clone()),
+                        inline_content: None,
                         behavior: options.behavior,
                         expected_inode_id: options.expected_inode_id,
                         expected_revision_no: options.expected_revision_no,

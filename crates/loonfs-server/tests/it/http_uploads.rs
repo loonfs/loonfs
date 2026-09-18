@@ -344,7 +344,8 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/uploaded.txt").expect("path"),
-            content_ref: content_ref.clone(),
+            content_ref: Some(content_ref.clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -507,7 +508,8 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
             content_tokens: vec![re_minted],
             operations: vec![FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/re-minted.txt").expect("path"),
-                content_ref,
+                content_ref: Some(content_ref),
+                inline_content: None,
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

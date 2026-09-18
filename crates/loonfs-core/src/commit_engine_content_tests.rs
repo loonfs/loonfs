@@ -77,7 +77,8 @@ fn put_candidate(completed: &CompletedUpload) -> CommitCandidate {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/content").expect("path"),
-                content_ref: completed.prepared.content_ref().clone(),
+                content_ref: Some(completed.prepared.content_ref().clone()),
+                inline_content: None,
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

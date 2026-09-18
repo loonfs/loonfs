@@ -171,7 +171,8 @@ mod tests {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(absolute_path).expect("path"),
-                    content_ref: content_ref.clone(),
+                    content_ref: Some(content_ref.clone()),
+                    inline_content: None,
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -315,7 +316,8 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: staged.content_ref().clone(),
+                content_ref: Some(staged.content_ref().clone()),
+                inline_content: None,
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -340,7 +342,8 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                content_ref: staged.content_ref().clone(),
+                content_ref: Some(staged.content_ref().clone()),
+                inline_content: None,
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

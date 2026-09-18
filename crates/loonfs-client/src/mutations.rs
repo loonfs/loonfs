@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::transport::SendPolicy;
-use crate::uploads::staging::{PreparedContent, UploadContinuity};
+use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
 
 fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
     commit.commit_id.clone().unwrap_or_else(CommitId::generate)
@@ -31,33 +31,35 @@ impl Client {
         .await
     }
 
-    /// Uploads bytes and commits them at a path.
+    /// Writes file bytes to a path.
     ///
-    /// Each call uploads a new content object. To retry publication, retain
-    /// the result of [`Self::prepare_file_bytes`] and call
-    /// [`Self::put_file_prepared`] with the same explicit commit ID and options.
+    /// Content at or under the advertised inline limit is identified by its bytes.
+    /// A rerun with the same bytes and commit ID replays. Larger content, or content
+    /// prepared without inline support, uploads a new object, so a rerun conflicts.
+    /// At every size, retain [`Self::prepare_file_bytes`]'s result and retry with
+    /// [`Self::put_file_prepared`], the same commit ID, and unchanged options.
     pub async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        let staged = self
-            .stage_bytes_as_content_ref(spec.namespace(), bytes)
-            .await?;
-        self.commit_staged_file(spec, staged, options, None).await
+        let prepared = self.prepare_file_bytes(spec.namespace(), bytes).await?;
+        self.put_file_prepared(spec, prepared, options).await
     }
 
-    /// Uploads a payload read once from its source and commits it at a path.
+    /// Writes a file from a payload read once from its source.
     ///
-    /// The source is read once in bounded chunks and is never assembled in
-    /// memory. Memory use depends on the transport window, not payload size.
+    /// Buffers up to the advertised inline limit plus one byte to choose the
+    /// content kind, then forwards larger payloads in bounded chunks.
     ///
     /// Direct multipart uploads support at most 10,000 parts. Payloads larger
     /// than `part_size_bytes × 10_000` require a larger configured part size.
     ///
-    /// Each call uploads new content. For retries, retain the result of
-    /// [`Self::prepare_file_stream`] and use [`Self::put_file_prepared`].
+    /// Inline content is identified by its bytes, so a rerun with the same bytes
+    /// and commit ID replays. Larger content uploads, so a rerun conflicts.
+    /// At every size, retain [`Self::prepare_file_stream`]'s result and retry with
+    /// [`Self::put_file_prepared`], the same commit ID, and unchanged options.
     pub async fn put_file_stream(
         &self,
         spec: &NamespacePath,
@@ -68,12 +70,12 @@ impl Client {
             .await
     }
 
-    /// Uploads a stream with optional multipart resume state.
+    /// Writes a stream with optional multipart resume state.
     ///
     /// The journal records the complete commit request before submission for
     /// every transport. Multipart uploads also record session geometry and parts.
     /// Save the request and actor and replay them with [`Self::create_commit`] after an
-    /// interruption; it carries the original content reference and commit ID.
+    /// interruption; it carries the inline bytes or uploaded reference and commit ID.
     ///
     /// A resumed multipart attempt still receives the source from the
     /// beginning because the final checksum covers the complete object.
@@ -104,27 +106,37 @@ impl Client {
         options: &PutFileOptions,
         continuity: UploadContinuity<'_>,
     ) -> Result<Commit> {
-        let staged = self
-            .stage_source_as_content_ref(spec.namespace(), source, continuity)
+        let prepared_content = self
+            .prepare_file_source(spec.namespace(), source, continuity)
             .await?;
-        self.commit_staged_file(spec, staged, options, continuity.journal)
+        self.commit_prepared_file(spec, prepared_content, options, continuity.journal)
             .await
     }
 
-    /// Uploads bytes and returns content ready for publication.
+    /// Prepares file bytes for publication.
     ///
-    /// Retain this value and an explicit commit ID to retry
-    /// [`Self::put_file_prepared`] without uploading again. Unpublished content
-    /// expires after the upload's receipt horizon.
+    /// Content at or under the advertised inline limit needs no upload and has
+    /// no expiry. Larger content uploads; its proof expires at the upload's
+    /// receipt horizon. Retain this value and an explicit commit ID to retry
+    /// [`Self::put_file_prepared`] at every size.
     pub async fn prepare_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
+        if self
+            .inline_content_limit()
+            .await?
+            .is_some_and(|limit| bytes.len() <= limit)
+        {
+            return Ok(PreparedContent {
+                kind: PreparedContentKind::Inline(bytes.to_vec()),
+            });
+        }
         self.stage_bytes_as_content_ref(namespace_id, bytes).await
     }
 
-    /// Uploads a stream once, in bounded chunks, for later publication.
+    /// Prepares a stream, buffering up to the advertised inline limit plus one byte.
     ///
     /// The result has the same retry contract as [`Self::prepare_file_bytes`].
     pub async fn prepare_file_stream(
@@ -132,7 +144,7 @@ impl Client {
         namespace_id: &NamespaceId,
         source: PayloadSource,
     ) -> Result<PreparedContent> {
-        self.stage_source_as_content_ref(namespace_id, source, UploadContinuity::default())
+        self.prepare_file_source(namespace_id, source, UploadContinuity::default())
             .await
     }
 
@@ -149,7 +161,7 @@ impl Client {
         prepared_content: PreparedContent,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        self.commit_staged_file(spec, prepared_content, options, None)
+        self.commit_prepared_file(spec, prepared_content, options, None)
             .await
     }
 
@@ -167,30 +179,40 @@ impl Client {
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<Commit> {
         let staged = PreparedContent {
-            content_token,
-            content_ref,
+            kind: PreparedContentKind::Staged {
+                content_ref,
+                content_token,
+            },
         };
-        self.commit_staged_file(spec, staged, options, journal)
+        self.commit_prepared_file(spec, staged, options, journal)
             .await
     }
 
     /// Saves an exact request when journaled, then submits it unchanged.
-    async fn commit_staged_file(
+    async fn commit_prepared_file(
         &self,
         spec: &NamespacePath,
-        staged: PreparedContent,
+        prepared_content: PreparedContent,
         options: &PutFileOptions,
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<Commit> {
         let commit_id = commit_id_or_generated(&options.commit);
+        let (content_ref, inline_content, content_token) = match prepared_content.kind {
+            PreparedContentKind::Inline(bytes) => (None, Some(bytes), None),
+            PreparedContentKind::Staged {
+                content_ref,
+                content_token,
+            } => (Some(content_ref), None, content_token),
+        };
         let request = CommitRequest {
             preconditions: options.commit.preconditions.clone(),
             commit_id: commit_id.clone(),
             message: options.commit.message.clone(),
-            content_tokens: staged.content_token.into_iter().collect(),
+            content_tokens: content_token.into_iter().collect(),
             operations: vec![FilesystemOperation::PutFile {
                 path: spec.absolute_path().clone(),
-                content_ref: staged.content_ref,
+                content_ref,
+                inline_content,
                 behavior: options.behavior,
                 expected_inode_id: options.expected_inode_id,
                 expected_revision_no: options.expected_revision_no,

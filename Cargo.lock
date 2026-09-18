@@ -1843,6 +1843,7 @@ dependencies = [
 name = "loonfs-api"
 version = "0.3.0"
 dependencies = [
+ "base64",
  "ciborium",
  "crc32c",
  "crc64fast-nvme",

@@ -301,7 +301,8 @@ impl FsWriter {
                     &options.commit,
                     FilesystemOperation::PutFile {
                         path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                        content_ref,
+                        content_ref: Some(content_ref),
+                        inline_content: None,
                         behavior: options.behavior,
                         expected_inode_id: options.expected_inode_id,
                         expected_revision_no: options.expected_revision_no,

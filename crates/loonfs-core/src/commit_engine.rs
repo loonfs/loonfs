@@ -37,7 +37,7 @@ pub struct CommitCandidate {
     content: ContentPreparation,
     maintenance: bool,
     inline_content: Vec<InlineContent>,
-    staged_inline_content_ids: HashSet<ContentId>,
+    inline_identity_content_ids: HashSet<ContentId>,
 }
 
 /// The result of preparing external content referenced by a mutation.
@@ -78,7 +78,7 @@ impl CommitCandidate {
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: true,
             inline_content: Vec::new(),
-            staged_inline_content_ids: HashSet::new(),
+            inline_identity_content_ids: HashSet::new(),
         }
     }
 
@@ -97,7 +97,7 @@ impl CommitCandidate {
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: false,
             inline_content: Vec::new(),
-            staged_inline_content_ids: HashSet::new(),
+            inline_identity_content_ids: HashSet::new(),
         }
     }
 
@@ -117,13 +117,18 @@ impl CommitCandidate {
 
     /// Wraps a mutation request whose content preparation failed.
     pub fn rejected(request: CommitRequest, error: ContentPreparationError) -> Self {
-        Self {
-            request,
-            content: ContentPreparation::Rejected(error),
-            maintenance: false,
-            inline_content: Vec::new(),
-            staged_inline_content_ids: HashSet::new(),
-        }
+        Self::new(request).reject_content_preparation(error)
+    }
+
+    /// Rejects new publication while preserving the identity needed for receipt replay.
+    pub fn reject_content_preparation(mut self, error: ContentPreparationError) -> Self {
+        self.inline_identity_content_ids.extend(
+            self.inline_content
+                .drain(..)
+                .map(|value| value.content_ref().content_id.clone()),
+        );
+        self.content = ContentPreparation::Rejected(error);
+        self
     }
 
     /// Takes `inline_content` as the content bytes carried by the commit.
@@ -168,19 +173,24 @@ impl CommitCandidate {
         let reference = proof.content_ref();
         for operation in &mut self.request.operations {
             match operation {
-                FilesystemOperation::PutFile { content_ref, .. }
-                | FilesystemOperation::CreateFileByInode { content_ref, .. }
-                | FilesystemOperation::PutFileRevisionByInode { content_ref, .. }
-                    if &content_ref.content_id == content_id =>
-                {
-                    *content_ref = reference.clone()
+                FilesystemOperation::PutFile {
+                    content_ref: Some(content_ref),
+                    ..
                 }
+                | FilesystemOperation::CreateFileByInode {
+                    content_ref: Some(content_ref),
+                    ..
+                }
+                | FilesystemOperation::PutFileRevisionByInode {
+                    content_ref: Some(content_ref),
+                    ..
+                } if &content_ref.content_id == content_id => *content_ref = reference.clone(),
                 _ => {}
             }
         }
         self.inline_content
             .retain(|value| &value.content_ref().content_id != content_id);
-        self.staged_inline_content_ids
+        self.inline_identity_content_ids
             .insert(reference.content_id.clone());
         if let ContentPreparation::Ready(proofs) = &mut self.content {
             proofs.push(proof);
@@ -215,7 +225,7 @@ impl CommitCandidate {
                 .inline_content
                 .iter()
                 .map(|value| value.content_ref().content_id.clone())
-                .chain(self.staged_inline_content_ids.iter().cloned())
+                .chain(self.inline_identity_content_ids.iter().cloned())
                 .collect(),
         )
     }
@@ -275,7 +285,7 @@ impl CommitCandidate {
             serde_json::to_writer(&mut bytes, value.content_ref())
                 .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
         }
-        for content_id in &self.staged_inline_content_ids {
+        for content_id in &self.inline_identity_content_ids {
             bytes.0 = bytes
                 .0
                 .saturating_add(std::mem::size_of::<ContentId>())

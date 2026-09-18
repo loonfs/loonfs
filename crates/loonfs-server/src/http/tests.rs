@@ -1,6 +1,7 @@
 #![allow(clippy::panic)]
 // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
+mod inline_commits;
 mod pin_deletion;
 
 use super::error::{status_for_core_error_code, ServedErrorCode};
@@ -3677,6 +3678,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_writer_sessions: loonfs::DEFAULT_MAX_WRITER_SESSIONS,
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         publication: Default::default(),
+        inline_content: Default::default(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {
@@ -3873,7 +3875,8 @@ mod direct_download {
                 .iter()
                 .map(|(path, value)| FilesystemOperation::PutFile {
                     path: loonfs_api::AbsolutePath::parse(*path).expect("path"),
-                    content_ref: value.content_ref().clone(),
+                    content_ref: Some(value.content_ref().clone()),
+                    inline_content: None,
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

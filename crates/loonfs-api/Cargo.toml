@@ -8,6 +8,7 @@ description = "Wire types and durable-format codecs for LoonFS."
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 ciborium.workspace = true
 # Durable-format checksums and filter hashing: both algorithm choices are
 # frozen format constants (docs/design/metadata-block-storage.md).

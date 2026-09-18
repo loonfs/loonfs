@@ -519,6 +519,7 @@ pub(super) async fn list_file_revisions(
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 409, description = "Operation conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 501, description = "Inline content is disabled", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -536,8 +537,14 @@ pub(super) async fn create_commit(
         commit_id,
         message,
         content_tokens,
-        operations,
+        mut operations,
     } = request;
+    let inline_content = super::commit_content::prepare_inline_content(
+        &namespace_id,
+        &mut operations,
+        state.config.inline_content.inline_content_threshold_bytes,
+    )
+    .map_err(|error| error.with_commit_id(&commit_id))?;
     // Failed and uncertain outcomes echo the idempotency key the caller can
     // resubmit under (API spec, "Commit responses and safe retry").
     let commit_id_for_errors = commit_id.clone();
@@ -587,14 +594,18 @@ pub(super) async fn create_commit(
         );
         async {
             let candidate = match preparation {
-                PutContentPreparation::Absent => CommitCandidate::new(request),
-                PutContentPreparation::Ready(prepared_content) => {
-                    CommitCandidate::prepared(request, prepared_content)
+                PutContentPreparation::Absent => {
+                    CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
                 }
-                PutContentPreparation::Rejected(rejections) => CommitCandidate::rejected(
-                    request,
-                    ContentPreparationError::ContentToken(rejections),
-                ),
+                PutContentPreparation::Ready(prepared_content) => {
+                    CommitCandidate::with_inline_content(request, prepared_content, inline_content)
+                }
+                PutContentPreparation::Rejected(rejections) => {
+                    CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
+                        .reject_content_preparation(ContentPreparationError::ContentToken(
+                            rejections,
+                        ))
+                }
             };
             state
                 .writer

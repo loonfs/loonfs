@@ -137,6 +137,7 @@ Registered limit keys:
 | `upload.max_concurrent` | How many service-proxied upload streams the deployment accepts at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content streams the deployment serves at once; requests past the cap answer `server_busy`. |
 | `access.max_principals` | Most principal ids one request may act as. Over-limit headers answer `invalid_request`. |
+| `commit.max_inline_content_bytes` | Largest decoded inline value accepted on a commit operation. Advertised only with `filesystem.commits.inline_content`. Larger values answer `invalid_request` before planning. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_preconditions` | Most precondition entries one commit may carry, counting entries rather than resources. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_content_tokens` | Most content tokens one commit may carry. Over-limit requests answer `invalid_request` before planning. |
@@ -166,6 +167,7 @@ hoc.
 | `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
 | `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
+| `filesystem.commits.inline_content` | Inline bytes on `put_file`, `create_file_by_inode`, and `put_file_revision_by_inode` commit operations. | Present only when the writer inline policy is enabled. Its per-value threshold is `commit.max_inline_content_bytes`. An absent flag means clients upload content before committing. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `filesystem.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
 | `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
@@ -695,7 +697,9 @@ is unchanged. Inline content and uploaded objects use different identity forms.
 with the same explicit commit ID, path, actor, and options on each attempt.
 This works for both inline and staged prepared content. Embedded preparation
 at or under the configured inline threshold makes no store request and has no
-expiry. Inline writes are disabled by default. Preparation alone does not publish
+expiry. The Rust HTTP client prepares inline when the server advertises
+`filesystem.commits.inline_content` and the bytes fit `commit.max_inline_content_bytes`.
+With capabilities cached, a small put needs only the commit HTTP request. Inline writes are disabled by default. Preparation alone does not publish
 a file or extend a completed upload's lifetime.
 
 | Client | Prepare content | Publish retained content |
@@ -711,7 +715,7 @@ on the commit; the actor may be set once on the client.
 The whole-file convenience calls (`files.upload` / `files.uploadStream` /
 `files.upload_stream` / `Files.Upload` / `Files.UploadStream` in generated SDKs,
 `put_file_bytes()` / `put_file_stream()` in Rust) prepare content on each
-invocation. Embedded content at or under the inline threshold uses byte identity,
+invocation. Embedded and Rust HTTP content at or under their enabled inline threshold uses byte identity,
 so the same bytes and commit ID replay. Larger content, and content prepared with
 inline writes disabled, stages a new object. Reusing an already-committed ID with
 a fresh object returns `commit_id_reuse_conflict`, even for identical bytes. The
@@ -1977,6 +1981,34 @@ create a directory and write into it:
 
 One `content_tokens` proof covers every operation that names its
 `content_ref`; tokens naming a ref no operation puts are ignored.
+
+These three operations accept either uploaded or inline content:
+
+| Operation | Fields |
+| --- | --- |
+| `put_file` | `path`, `content_ref?`, `inline_content?`, `behavior?`, `expected_inode_id?`, `expected_revision_no?` |
+| `create_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref?`, `inline_content?` |
+| `put_file_revision_by_inode` | `inode_id`, `content_ref?`, `inline_content?`, `expected_revision_no` |
+
+Each operation requires exactly one of `content_ref` and `inline_content`.
+Both or neither returns `invalid_request` before planning. Requests reject
+unknown fields. `content_ref` keeps its proof in `content_tokens`.
+`inline_content` is the complete file as a standard padded base64 JSON string;
+an empty string writes an empty file. It needs no token. The server draws a
+fresh content ID and computes the byte length and SHA-256 itself.
+
+The 2 MiB JSON request-body limit includes base64 and all other request fields.
+An inline value above `commit.max_inline_content_bytes` returns `invalid_request`
+before any store write. If the request's inline total exceeds the writer's
+segment budget, shared submission stages the excess and keeps the commit atomic
+and its inline retry identity. Inline writes are disabled by default. When
+disabled, an inline request returns `not_supported` with `feature` set to
+`filesystem.commits.inline_content`; the capability flag and inline limit are absent.
+
+Resending the same inline bytes under the same commit ID replays the original
+`committed_seq`. Different bytes, even of the same length, conflict. Sending the
+same bytes as an uploaded reference under that ID also conflicts.
+
 
 The first operation that fails aborts the whole request — nothing it or its
 predecessors would have written becomes visible — and the error names the

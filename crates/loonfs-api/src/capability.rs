@@ -31,6 +31,8 @@ pub const FEATURE_ATTRIBUTES: &str = "filesystem.attributes";
 /// the key exists so inode-driven sync clients can gate on deployments built
 /// before the route.
 pub const FEATURE_INODES_LIST_CHILDREN: &str = "filesystem.inodes.list_children";
+/// Gates inline bytes on commit operations.
+pub const FEATURE_COMMIT_INLINE_CONTENT: &str = "filesystem.commits.inline_content";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "filesystem.uploads.direct_put";
 /// Starting presigned `direct_multipart` upload sessions. Independent of
@@ -104,6 +106,8 @@ limit_keys! {
     /// Advisory limit: the most path operations one commit may carry; a longer
     /// list answers `invalid_request` before planning.
     LIMIT_COMMIT_MAX_OPERATIONS = "commit.max_operations";
+    /// Largest inline value accepted on a commit operation.
+    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES = "commit.max_inline_content_bytes";
     /// Most principal ids one request may act as.
     LIMIT_ACCESS_MAX_PRINCIPALS = "access.max_principals";
     /// Counts precondition entries, not resources; a longer list answers

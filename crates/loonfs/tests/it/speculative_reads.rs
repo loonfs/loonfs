@@ -189,7 +189,8 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
                 .enumerate()
                 .map(|(index, value)| FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(format!("/file-{index}")).expect("path"),
-                    content_ref: value.content_ref().clone(),
+                    content_ref: Some(value.content_ref().clone()),
+                    inline_content: None,
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

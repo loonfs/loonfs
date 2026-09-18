@@ -40,7 +40,8 @@ async fn publish_inline(
         None,
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/file").expect("path"),
-            content_ref: value.content_ref().clone(),
+            content_ref: Some(value.content_ref().clone()),
+            inline_content: None,
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

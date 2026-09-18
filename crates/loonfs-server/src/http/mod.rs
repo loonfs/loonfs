@@ -4,6 +4,7 @@
 //! [`extractors`], and handle construction and listener ownership live in
 //! [`serve`].
 
+mod commit_content;
 mod download_body;
 mod error;
 mod extractors;
