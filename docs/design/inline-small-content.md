@@ -1,6 +1,6 @@
 # Inline small content
 
-**Status: proposal.** Nothing here is implemented. Constants are starting points to tune by measurement.
+**Status: implemented behind a default-off policy.** The seven steps below are open as a stack of pull requests, #968 through #974, each reviewed and gated. Writers stay off until the lab sweep picks a threshold. Constants are starting points to tune by measurement.
 
 LoonFS writes file bytes to a content object before it commits the metadata that names them. For a large file that is the right order: the transfer can be direct, resumable, and independent of the commit. For a small file it is most of the cost. A 1 KiB write spends three object-store writes making the bytes durable and owned, then a fourth to commit.
 
@@ -236,7 +236,7 @@ The threshold starts low on purpose. The evidence so far is a request sequence f
 
 Durable formats are at version 1 and carry no compatibility paths before the stable release. If this lands before that release, the record field is added to the WAL family, the golden fixtures regenerate, and writers emit inline content only when the runtime enables it. After the release, the same change needs a new WAL family version and a manifest capability so that older binaries refuse the namespace rather than report missing content. An unchanged reference shape does not remove the need for every reader and folder to understand the field. Adding the field and the read side before the release, even with writers disabled, keeps the later step small.
 
-Suggested order:
+Order, as landed in #968 (record field), #969 (core publish), #970 (tail reads), #971 (fold materialization), #972 (downloads and imports), #973 (embedded writer), and #974 (hosted):
 
 1. The read side, with writers disabled, in slices: the record field with its format limits and validation; the projected tail carrying its inline content, with one content location resolver and reads from the tail; fold materialization with its deletion rule; on-demand materialization for direct downloads and the byte-based fold trigger.
 2. The embedded writer: inline prepared content with its inline fingerprint form, admission accounting, and the inline policy with its fallback. The lab sweep runs here.
