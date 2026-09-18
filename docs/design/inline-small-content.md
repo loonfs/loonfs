@@ -102,7 +102,7 @@ Inline bytes sit inside the WAL payload, so the envelope's existing validation c
 **Where the choice is made.** Content is never staged inside the publication loop.
 
 - *When the candidate is built.* The value threshold and the commit's own inline total are known here. A commit must fit in one WAL object. A commit whose inline total would pass the per-object budget keeps values inline in operation order until the budget is reached and stages the rest. The commit stays atomic.
-- *At admission.* The tail ceiling is checked against the unfolded inline bytes, plus every admitted commit not yet published, plus this commit. The writer reserves its bytes before it submits, so concurrent writes cannot pass the ceiling together. The writer owns the tail, so its count is exact.
+- *At admission.* The tail ceiling is checked against the unfolded inline bytes the writer knows, plus every admitted commit not yet published, plus this commit. The writer reserves its bytes before it submits, so concurrent writes cannot pass the ceiling together. A writer that has not yet loaded a namespace's tail counts it as empty rather than replaying it, so the first inline commit after a process start can pass the ceiling by at most its own inline bytes, once per namespace. The ceiling bounds reader replay, and that overshoot is at most one segment budget.
 - *In the publisher.* A WAL object whose inline budget is full closes, and the next commit starts the next object. Independent commits are split between objects. One commit is never split.
 
 The model in the API specification has three stages: make content durable, make metadata visible, observe changes. Inline content merges the first two. Durability and visibility arrive in the same conditional write.
@@ -192,7 +192,7 @@ An import reads a reference owned by another namespace and writes the bytes unde
 | Inline threshold per value | 4 KiB to start | The lab sweeps 4, 16, and 64 KiB before the default rises |
 | Inline budget per WAL object | 1 MiB | Every commit in a batch waits for the object's PUT, including commits with no content |
 | Tail inline bytes that make a fold due | 8 MiB | Bounds what a cold reader downloads |
-| Tail inline bytes beyond which writes use the staged path | 32 MiB | Hard ceiling when folding falls behind; checked at admission, counting this commit |
+| Tail inline bytes beyond which writes use the staged path | 32 MiB | Ceiling when folding falls behind; checked at admission against the writer's known tail, counting this commit. After a process start the first inline commit in a namespace can pass it by at most its own inline bytes, at most the segment budget, once |
 | Inline bytes in flight per runtime | Byte budget | Charges queued payloads, encoding copies, and materialization buffers. A write that cannot reserve uses the staged path |
 | Resident tail bytes | The existing projection budgets | The reader's tail cache and the writer's projection count inline bytes |
 | Materialization concurrency | 32 | Matches WAL prefetch concurrency |
