@@ -621,7 +621,11 @@ Principal, subject, and scope ids never contain a comma, so the list is
 unambiguous.
 `Loonfs-Subject` identifies the subject the request acts as and defaults to
 `Loonfs-Actor`. The principal count is capped by the advertised
-`access.max_principals` limit. An unrestricted namespace ignores both headers.
+`access.max_principals` limit. `Loonfs-Subject` without `Loonfs-Principals`
+answers `invalid_request` with `param` set to `Loonfs-Principals`. Omitting both
+headers uses the token holder's service authority; `Loonfs-Actor` alone remains
+valid for service attribution. An unrestricted namespace does not enforce
+principal grants, but still rejects an incomplete subject context.
 In an ACL namespace, per-subject reads, commits, and upload operations require
 `Loonfs-Principals`; its absence answers `invalid_request` with `param` set to
 `Loonfs-Principals`, while administrator-only surfaces and maintenance act as
@@ -796,9 +800,10 @@ requests must keep the actor beside the body. Request headers reach access logs,
 so the value must be an opaque identifier, never an email or a display name.
 
 `Loonfs-Principals` and `Loonfs-Subject` are optional headers on every operation
-in the transport schema. Their requirement follows the namespace access mode,
-rather than the operation's schema: ACL commits and uploads require principals,
-with the subject id defaulting to the actor.
+in the transport schema. Their requirements are enforced while handling the
+request rather than by the operation's schema. When `Loonfs-Subject` is
+present, `Loonfs-Principals` is required. When principals are present, the
+subject id defaults to the actor.
 
 Request bodies reject unknown fields, at every level of nesting, with 400
 `invalid_request`. Most request fields are optional and several of those are

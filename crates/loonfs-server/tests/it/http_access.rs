@@ -76,6 +76,68 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
 }
 
 #[tokio::test]
+async fn subject_headers_distinguish_service_and_subject_authority() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, _state) = loonfs_server::app(
+        test_config(
+            temp_dir.path().join("store"),
+            "subject-authority",
+            "subject-authority",
+        ),
+        loonfs_server::AppOptions::default(),
+    )
+    .await
+    .expect("build app");
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces",
+            Some(
+                r#"{"namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
+            ),
+            &[],
+        ))
+        .await
+        .expect("create namespace response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo-acl/snapshots",
+            Some(r#"{"name":"pin","ttl_ms":60000}"#),
+            &[("Loonfs-Subject", "usr_ada")],
+        ))
+        .await
+        .expect("partial subject response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+    assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+    assert_eq!(error.message, "missing required header Loonfs-Principals");
+    assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
+
+    for headers in [
+        vec![],
+        vec![("Loonfs-Subject", "usr_ada"), ("Loonfs-Principals", "team")],
+        vec![("Loonfs-Principals", "team")],
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/v0/namespaces/demo-acl/snapshots",
+                Some(r#"{"name":"pin","ttl_ms":60000}"#),
+                &headers,
+            ))
+            .await
+            .expect("snapshot response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
 async fn read_handlers_accept_the_subject_headers() {
     let temp_dir = tempdir().expect("tempdir");
     let (router, state) = loonfs_server::app(
