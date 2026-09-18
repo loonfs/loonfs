@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 fn subject(principal: &str) -> Subject {
     Subject {
+        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(std::collections::BTreeSet::from([PrincipalId::parse(
             principal,

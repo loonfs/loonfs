@@ -293,6 +293,7 @@ async fn access_rows_survive_a_flush_and_the_counter_keeps_going() {
 
 fn subject(id: &str, principals: &[&str]) -> loonfs_api::Subject {
     loonfs_api::Subject {
+        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: loonfs_api::SubjectId::parse(id).expect("subject id"),
         principals: loonfs_api::PrincipalSet::new(
             principals
@@ -812,8 +813,8 @@ async fn upload_sessions_belong_to_their_subject() {
             .code(),
         ErrorCode::InvalidRequest
     );
-    let ada = loonfs_api::SubjectId::parse("usr_ada").expect("subject");
-    let bob = loonfs_api::SubjectId::parse("usr_bob").expect("subject");
+    let ada = subject("usr_ada", &[]);
+    let bob = subject("usr_bob", &[]);
     let session = engine.begin_upload(Some(&ada)).await.expect("begin");
     assert_eq!(
         engine

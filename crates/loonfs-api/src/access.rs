@@ -42,9 +42,14 @@ string_id! {
     )
 }
 
-/// Who a request acts as: a stable id and the principals whose grants apply.
+/// Who a request acts as: a principal scope, stable id, and applicable principals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subject {
+    /// Identity domain for the subject's principals.
+    ///
+    /// Commit fingerprints and upload ownership use the subject id alone because a namespace
+    /// has one scope and refuses subjects from any other scope.
+    pub principal_scope: PrincipalScope,
     /// Stable identity for upload ownership and commit replay.
     pub subject_id: SubjectId,
     /// Principals whose grants apply to the request.

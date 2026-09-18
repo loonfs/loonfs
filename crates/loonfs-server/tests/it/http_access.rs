@@ -33,10 +33,21 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
         .map(|index| format!("principal_{index}"))
         .collect::<Vec<_>>()
         .join(",");
-    for (principals, subject, expected_param) in [
-        ("team", None, "Loonfs-Subject"),
-        ("bad principal", Some("usr_ada"), "Loonfs-Principals"),
-        (too_many.as_str(), Some("usr_ada"), "Loonfs-Principals"),
+    for (principals, scope, subject, expected_param) in [
+        ("team", Some("org"), None, "Loonfs-Subject"),
+        (
+            "bad principal",
+            Some("org"),
+            Some("usr_ada"),
+            "Loonfs-Principals",
+        ),
+        (
+            too_many.as_str(),
+            Some("org"),
+            Some("usr_ada"),
+            "Loonfs-Principals",
+        ),
+        ("team", None, Some("usr_ada"), "Loonfs-Principal-Scope"),
     ] {
         let mut request = Request::builder()
             .method("POST")
@@ -44,6 +55,9 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
             .header("authorization", "Bearer test-token")
             .header("content-type", "application/json")
             .header("Loonfs-Principals", principals);
+        if let Some(scope) = scope {
+            request = request.header("Loonfs-Principal-Scope", scope);
+        }
         if let Some(subject) = subject {
             request = request.header("Loonfs-Subject", subject);
         }
@@ -64,11 +78,29 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
         assert_eq!(error.param.as_deref(), Some(expected_param));
     }
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v0/namespaces/demo/uploads")
+                .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .header("Loonfs-Principal-Scope", "org")
+                .body(Body::from(r#"{"mode":"service_proxied"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+    assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
     let response = router.oneshot(Request::builder().method("POST").uri("/v0/namespaces/demo/commits")
         .header("authorization", "Bearer test-token")
         .header("content-type", "application/json")
         .header("Loonfs-Actor", "service")
         .header("Loonfs-Subject", "usr_ada")
+        .header("Loonfs-Principal-Scope", "org")
         .header("Loonfs-Principals", "team")
         .body(Body::from(r#"{"commit_id":"subject-commit","operations":[{"kind":"create_directory","path":"/docs"}]}"#))
         .expect("request")).await.expect("response");
@@ -120,8 +152,15 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
 
     for headers in [
         vec![],
-        vec![("Loonfs-Subject", "usr_ada"), ("Loonfs-Principals", "team")],
-        vec![("Loonfs-Principals", "team")],
+        vec![
+            ("Loonfs-Subject", "usr_ada"),
+            ("Loonfs-Principal-Scope", "org"),
+            ("Loonfs-Principals", "team"),
+        ],
+        vec![
+            ("Loonfs-Principal-Scope", "org"),
+            ("Loonfs-Principals", "team"),
+        ],
     ] {
         let response = router
             .clone()
@@ -135,6 +174,89 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
             .expect("snapshot response");
         assert_eq!(response.status(), StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, _state) = loonfs_server::app(
+        test_config(
+            temp_dir.path().join("store"),
+            "subject-scope",
+            "subject-scope",
+        ),
+        loonfs_server::AppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces",
+            Some(
+                r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_expected","root_grants":{"team":["admin"]}}}"#,
+            ),
+            &[],
+        ))
+        .await
+        .expect("create namespace response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let wrong_scope = [
+        ("Loonfs-Subject", "usr_ada"),
+        ("Loonfs-Principal-Scope", "org_actual"),
+        ("Loonfs-Principals", "team"),
+    ];
+    let expected_message = "subject principal scope `org_actual` does not match namespace principal scope `org_expected`";
+    for (method, uri, body) in [
+        ("GET", "/v0/namespaces/demo/filesystem/entry?path=/", None),
+        (
+            "POST",
+            "/v0/namespaces/demo/commits",
+            Some(
+                r#"{"commit_id":"wrong-scope","operations":[{"kind":"create_directory","path":"/wrong"}]}"#,
+            ),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(method, uri, body, &wrong_scope))
+            .await
+            .expect("wrong-scope response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+        assert_eq!(error.code, ErrorCode::Forbidden.as_str());
+        assert_eq!(error.message, expected_message);
+    }
+
+    let matching_scope = [
+        ("Loonfs-Subject", "usr_ada"),
+        ("Loonfs-Principal-Scope", "org_expected"),
+        ("Loonfs-Principals", "team"),
+    ];
+    let response = router
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v0/namespaces/demo/filesystem/entry?path=/",
+            None,
+            &matching_scope,
+        ))
+        .await
+        .expect("matching read response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo/commits",
+            Some(
+                r#"{"commit_id":"matching-scope","operations":[{"kind":"create_directory","path":"/matching"}]}"#,
+            ),
+            &matching_scope,
+        ))
+        .await
+        .expect("matching commit response");
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -169,6 +291,7 @@ async fn read_handlers_accept_the_subject_headers() {
                     .uri("/v0/namespaces/demo/filesystem/entry?path=/")
                     .header("authorization", "Bearer test-token")
                     .header("Loonfs-Subject", "usr_ada")
+                    .header("Loonfs-Principal-Scope", "org")
                     .header("Loonfs-Principals", principals)
                     .body(Body::empty())
                     .expect("request"),
@@ -268,7 +391,11 @@ async fn an_acl_namespace_is_created_over_the_wire() {
             "POST",
             "/v0/namespaces/demo-acl/snapshots",
             snapshot,
-            &[("Loonfs-Subject", "usr_x"), ("Loonfs-Principals", "nobody")],
+            &[
+                ("Loonfs-Subject", "usr_x"),
+                ("Loonfs-Principal-Scope", "org"),
+                ("Loonfs-Principals", "nobody"),
+            ],
         ))
         .await
         .expect("response");
@@ -374,6 +501,7 @@ async fn a_former_server_observes_revocation_on_its_first_read_after_publication
     assert_eq!(response.status(), StatusCode::OK);
     let administrator = [
         ("Loonfs-Subject", "root"),
+        ("Loonfs-Principal-Scope", "org_demo"),
         ("Loonfs-Principals", "prn_root"),
     ];
     let publication = serde_json::json!({
@@ -425,6 +553,7 @@ async fn a_former_server_observes_revocation_on_its_first_read_after_publication
             None,
             &[
                 ("Loonfs-Subject", "viewer"),
+                ("Loonfs-Principal-Scope", "org_demo"),
                 ("Loonfs-Principals", "viewer"),
             ],
         ))

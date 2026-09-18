@@ -5,7 +5,7 @@ use crate::backend::EmbeddedBackend;
 use crate::backend_error::map_runtime_error;
 use crate::config::{
     load_config, non_empty_env, remote_client_config, CliConfig, ProfileConfig, StoreConfig,
-    ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, SUBJECT_ID_ENV,
+    ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, PRINCIPAL_SCOPE_ENV, SUBJECT_ID_ENV,
 };
 use crate::error::CliError;
 use crate::profiles::default_namespace;
@@ -15,7 +15,8 @@ use loonfs::{
     SharedObjectStore, TraceStoreKind,
 };
 use loonfs_api::{
-    ActorId, NamespaceId, PrincipalId, PrincipalSet, SecretString, Subject, SubjectId,
+    ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, Subject,
+    SubjectId,
 };
 use loonfs_client::Client;
 use loonfs_grep::{
@@ -88,6 +89,7 @@ pub(crate) fn resolve_subject(
     profile: &ProfileConfig,
     actor_id: &ActorId,
     explicit_subject_id: Option<&str>,
+    explicit_principal_scope: Option<&str>,
     explicit_principals: Option<&str>,
 ) -> Result<Option<Subject>, CliError> {
     let environment_principals = non_empty_env(PRINCIPALS_ENV);
@@ -119,6 +121,46 @@ pub(crate) fn resolve_subject(
     };
     let principals = PrincipalSet::new(principals)
         .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))?;
+    let environment_principal_scope = non_empty_env(PRINCIPAL_SCOPE_ENV);
+    let (scope_name, principal_scope) = if let Some(value) = explicit_principal_scope {
+        ("--principal-scope", Some(value))
+    } else if let Some(value) = environment_principal_scope.as_deref() {
+        (PRINCIPAL_SCOPE_ENV, Some(value))
+    } else {
+        ("principal_scope", None)
+    };
+    let principal_scope = match principal_scope {
+        Some(value) => Some(PrincipalScope::parse(value).map_err(|error| {
+            named_cli_input_error(scope_name, format!("invalid {scope_name}: {error}"))
+        })?),
+        None => profile.principal_scope(),
+    };
+    let principal_scope = match (principal_scope, principals.is_empty()) {
+        (Some(_), true) => {
+            let required = match scope_name {
+                "--principal-scope" => "--principals",
+                PRINCIPAL_SCOPE_ENV => PRINCIPALS_ENV,
+                _ => "principals",
+            };
+            return Err(named_cli_input_error(
+                required,
+                format!("{required} is required with {scope_name}"),
+            ));
+        }
+        (None, false) => {
+            let required = match name {
+                "--principals" => "--principal-scope",
+                PRINCIPALS_ENV => PRINCIPAL_SCOPE_ENV,
+                _ => "principal_scope",
+            };
+            return Err(named_cli_input_error(
+                required,
+                format!("{required} is required with {name}"),
+            ));
+        }
+        (Some(principal_scope), false) => principal_scope,
+        (None, true) => return Ok(None),
+    };
     let environment_subject_id = non_empty_env(SUBJECT_ID_ENV);
     let (name, subject_id) = if let Some(value) = explicit_subject_id {
         ("--subject-id", Some(value))
@@ -135,7 +177,8 @@ pub(crate) fn resolve_subject(
             })?,
         },
     };
-    Ok((!principals.is_empty()).then_some(Subject {
+    Ok(Some(Subject {
+        principal_scope,
         subject_id,
         principals,
     }))
@@ -172,7 +215,7 @@ fn default_writer_id() -> String {
 
 pub(crate) enum ResolvedTarget {
     Embedded(Box<EmbeddedTarget>),
-    Remote(RemoteTarget),
+    Remote(Box<RemoteTarget>),
 }
 
 pub(crate) struct EmbeddedTarget {
@@ -196,12 +239,12 @@ impl ResolvedTarget {
                 auth_token,
                 ca_cert_path,
                 ..
-            } => Ok(Self::Remote(RemoteTarget::new(
+            } => Ok(Self::Remote(Box::new(RemoteTarget::new(
                 server_url,
                 auth_token.as_ref(),
                 ca_cert_path.as_deref(),
                 no_retry,
-            )?)),
+            )?))),
         }
     }
 

@@ -25,6 +25,7 @@ class ProxyRouteContext:
 class ProxyAuthorization:
     actor_id: str | None = None
     subject_id: str | None = None
+    principal_scope: str | None = None
     principals: list[str] | None = None
 
 
@@ -112,6 +113,7 @@ _REQUEST_EXCLUDED_HEADERS = frozenset(
         b"authorization",
         b"loonfs-actor",
         b"loonfs-subject",
+        b"loonfs-principal-scope",
         b"loonfs-principals",
     }
 )
@@ -180,6 +182,16 @@ class LoonFSProxy:
             if isinstance(authorization, ProxyRefusal):
                 await self._refuse(send, authorization)
                 return
+        if (authorization.principal_scope is None) != (authorization.principals is None):
+            await self._refuse(
+                send,
+                ProxyRefusal(
+                    500,
+                    b"proxy authorization must set principal_scope and principals together",
+                    "text/plain",
+                ),
+            )
+            return
 
         target = httpx.URL(f"{self._server_base_url}{rewritten_path}").copy_with(
             query=scope.get("query_string", b"")
@@ -190,6 +202,10 @@ class LoonFSProxy:
             headers.append((b"loonfs-actor", authorization.actor_id.encode("ascii")))
         if authorization.subject_id is not None:
             headers.append((b"loonfs-subject", authorization.subject_id.encode("ascii")))
+        if authorization.principal_scope is not None:
+            headers.append(
+                (b"loonfs-principal-scope", authorization.principal_scope.encode("ascii"))
+            )
         if authorization.principals is not None:
             headers.append(
                 (b"loonfs-principals", ",".join(authorization.principals).encode("ascii"))

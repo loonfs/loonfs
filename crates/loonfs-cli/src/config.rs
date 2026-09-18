@@ -2,7 +2,7 @@
 
 use crate::error::CliError;
 use loonfs_api::env::AUTH_TOKEN_ENV;
-use loonfs_api::{ActorId, NamespaceId, PrincipalId, SecretString, SubjectId};
+use loonfs_api::{ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use loonfs_client::{ClientConfig, ClientError};
 use loonfs_objectstore::StoreConfigError;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ pub(crate) const PROFILE_ENV: &str = "LOONFS_PROFILE";
 pub(crate) const NAMESPACE_ENV: &str = "LOONFS_NAMESPACE";
 pub(crate) const ACTOR_ID_ENV: &str = "LOONFS_ACTOR_ID";
 pub(crate) const SUBJECT_ID_ENV: &str = "LOONFS_SUBJECT_ID";
+pub(crate) const PRINCIPAL_SCOPE_ENV: &str = "LOONFS_PRINCIPAL_SCOPE";
 pub(crate) const PRINCIPALS_ENV: &str = "LOONFS_PRINCIPALS";
 
 /// A blank environment value carries no usable setting, so treat it as unset
@@ -71,6 +72,8 @@ pub(crate) enum ProfileConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject_id: Option<SubjectId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        principal_scope: Option<PrincipalScope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         principals: Option<Vec<PrincipalId>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
@@ -83,6 +86,8 @@ pub(crate) enum ProfileConfig {
         actor_id: Option<ActorId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject_id: Option<SubjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        principal_scope: Option<PrincipalScope>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         principals: Option<Vec<PrincipalId>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,6 +166,17 @@ impl ProfileConfig {
         }
     }
 
+    pub(crate) fn principal_scope(&self) -> Option<PrincipalScope> {
+        match self {
+            Self::Embedded {
+                principal_scope, ..
+            }
+            | Self::Remote {
+                principal_scope, ..
+            } => principal_scope.clone(),
+        }
+    }
+
     pub(crate) fn principals(&self) -> Option<Vec<PrincipalId>> {
         match self {
             Self::Embedded { principals, .. } | Self::Remote { principals, .. } => {
@@ -187,10 +203,13 @@ impl ProfileConfig {
         match self {
             ProfileConfig::Embedded {
                 store,
+                principal_scope,
+                principals,
                 default_namespace,
                 ..
             } => {
                 validate_profile_default_namespace(name, default_namespace.as_deref())?;
+                validate_profile_subject(name, principal_scope.as_ref(), principals.as_deref())?;
                 store
                     .validate()
                     .map_err(|error| profile_store_error(name, &error))
@@ -199,12 +218,14 @@ impl ProfileConfig {
                 server_url,
                 actor_id: _,
                 subject_id: _,
-                principals: _,
+                principal_scope,
+                principals,
                 default_namespace,
                 auth_token,
                 ca_cert_path,
             } => {
                 validate_profile_default_namespace(name, default_namespace.as_deref())?;
+                validate_profile_subject(name, principal_scope.as_ref(), principals.as_deref())?;
                 validate_stored_remote_client_config(
                     name,
                     server_url,
@@ -222,6 +243,7 @@ impl ProfileConfig {
                 store,
                 actor_id,
                 subject_id,
+                principal_scope,
                 principals,
                 default_namespace,
                 writer_id,
@@ -229,6 +251,7 @@ impl ProfileConfig {
                 store: store.redacted(),
                 actor_id: actor_id.clone(),
                 subject_id: subject_id.clone(),
+                principal_scope: principal_scope.clone(),
                 principals: principals.clone(),
                 default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
@@ -237,6 +260,7 @@ impl ProfileConfig {
                 server_url,
                 actor_id,
                 subject_id,
+                principal_scope,
                 principals,
                 default_namespace,
                 auth_token,
@@ -245,12 +269,29 @@ impl ProfileConfig {
                 server_url: server_url.clone(),
                 actor_id: actor_id.clone(),
                 subject_id: subject_id.clone(),
+                principal_scope: principal_scope.clone(),
                 principals: principals.clone(),
                 default_namespace: default_namespace.clone(),
                 auth_token: auth_token.as_ref().map(SecretString::masked),
                 ca_cert_path: ca_cert_path.clone(),
             },
         }
+    }
+}
+
+fn validate_profile_subject(
+    profile_name: &str,
+    principal_scope: Option<&PrincipalScope>,
+    principals: Option<&[PrincipalId]>,
+) -> Result<(), CliError> {
+    match (principal_scope, principals) {
+        (Some(_), None) => Err(CliError::invalid_config(format!(
+            "`profiles.{profile_name}.principal_scope` requires `profiles.{profile_name}.principals`"
+        ))),
+        (None, Some(_)) => Err(CliError::invalid_config(format!(
+            "`profiles.{profile_name}.principal_scope` is required with `profiles.{profile_name}.principals`"
+        ))),
+        (Some(_), Some(_)) | (None, None) => Ok(()),
     }
 }
 
@@ -1066,6 +1107,7 @@ secret_access_key = "secret"
                                     ),
                                     actor_id: None,
                                     subject_id: None,
+                                    principal_scope: None,
                                     principals: None,
                                     default_namespace: Some(namespace),
                                     auth_token: None,

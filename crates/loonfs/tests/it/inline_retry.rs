@@ -26,6 +26,7 @@ fn namespace() -> NamespaceId {
 
 fn subject(name: &str) -> Subject {
     Subject {
+        principal_scope: PrincipalScope::parse("scope").expect("scope"),
         subject_id: SubjectId::parse(name).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(name).expect("principal")

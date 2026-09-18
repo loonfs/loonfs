@@ -9,6 +9,7 @@
 //! references the object, the session record gives garbage collection a
 //! durable owner and status.
 
+use crate::authorize::{Authorizer, CommitAuthority};
 use crate::context::MutationContext;
 use crate::control_object::LoadedControl;
 use crate::control_update::{
@@ -44,7 +45,7 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId,
-    NamespaceAccess, NamespaceId, SubjectId, UploadId,
+    NamespaceAccess, NamespaceId, Subject, SubjectId, UploadId,
 };
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
@@ -121,12 +122,11 @@ pub struct MultipartPartTargets {
 pub(crate) async fn begin_service_proxied_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     context: &MutationContext,
 ) -> Result<UploadSession> {
-    ensure_upload_namespace_available(store, namespace_id).await?;
-    let catalog = load_namespace_catalog_entry(store, namespace_id).await?;
-    let recorded = recorded_subject(&catalog, subject_id)?;
+    let access = ensure_upload_namespace_available(store, namespace_id).await?;
+    let recorded = recorded_subject(namespace_id, &access, subject)?;
     create_upload_session(
         store,
         namespace_id,
@@ -141,13 +141,13 @@ pub(crate) async fn begin_service_proxied_upload<S: ObjectStore + ?Sized>(
 pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     checksum_algorithm: ChecksumAlgorithm,
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse> {
-    ensure_upload_namespace_available(store, namespace_id).await?;
+    let access = ensure_upload_namespace_available(store, namespace_id).await?;
     let catalog = load_namespace_catalog_entry(store, namespace_id).await?;
-    let recorded = recorded_subject(&catalog, subject_id)?;
+    let recorded = recorded_subject(namespace_id, &access, subject)?;
     let content_store_id = catalog.content_store_id().clone();
     let content_id = ContentId::generate();
     let object_key = content_blob(&content_store_id, namespace_id, &content_id);
@@ -174,14 +174,14 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
 pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     options: DirectMultipartUploadOptions,
     context: &MutationContext,
 ) -> Result<BeginDirectMultipartUploadTargetResponse> {
-    ensure_upload_namespace_available(store, namespace_id).await?;
+    let access = ensure_upload_namespace_available(store, namespace_id).await?;
     let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
     let catalog = load_namespace_catalog_entry(store, namespace_id).await?;
-    let recorded = recorded_subject(&catalog, subject_id)?;
+    let recorded = recorded_subject(namespace_id, &access, subject)?;
     let content_store_id = catalog.content_store_id().clone();
     let content_id = ContentId::generate();
     let object_key = content_blob(&content_store_id, namespace_id, &content_id);
@@ -245,10 +245,11 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     requested: &[UploadPartChecksumClaim],
 ) -> Result<MultipartPartTargets> {
-    ensure_upload_namespace_available(store, namespace_id).await?;
+    let access = ensure_upload_namespace_available(store, namespace_id).await?;
+    authorize_upload_subject(namespace_id, &access, subject)?;
     if requested.is_empty() {
         return Err(CoreError::InvalidUploadContent(
             "a part-signing request names at least one part".to_owned(),
@@ -261,7 +262,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     }
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let session = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&session, subject_id)?;
+    ensure_session_subject(&session, subject)?;
     if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
         return Err(error);
     }
@@ -474,23 +475,30 @@ async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
 }
 
 fn recorded_subject(
-    catalog: &VerifiedNamespaceCatalogEntry,
-    subject_id: Option<&SubjectId>,
+    namespace_id: &NamespaceId,
+    access: &NamespaceAccess,
+    subject: Option<&Subject>,
 ) -> Result<Option<SubjectId>> {
-    match (catalog.access(), subject_id) {
-        (NamespaceAccess::Unrestricted {}, _) => Ok(None),
-        (NamespaceAccess::Acl { .. }, Some(id)) => Ok(Some(id.clone())),
-        (NamespaceAccess::Acl { .. }, None) => Err(CoreError::SubjectRequired {
-            namespace_id: catalog.namespace_id().clone(),
-        }),
-    }
+    authorize_upload_subject(namespace_id, access, subject)?;
+    Ok(match access {
+        NamespaceAccess::Unrestricted {} => None,
+        NamespaceAccess::Acl { .. } => subject.map(|subject| subject.subject_id.clone()),
+    })
 }
 
-fn ensure_session_subject(
-    session: &UploadSessionState,
-    subject_id: Option<&SubjectId>,
+fn authorize_upload_subject(
+    namespace_id: &NamespaceId,
+    access: &NamespaceAccess,
+    subject: Option<&Subject>,
 ) -> Result<()> {
-    match (&session.subject_id, subject_id) {
+    Authorizer::for_request(namespace_id, access, CommitAuthority::Subject(subject)).map(|_| ())
+}
+
+fn ensure_session_subject(session: &UploadSessionState, subject: Option<&Subject>) -> Result<()> {
+    match (
+        &session.subject_id,
+        subject.map(|subject| &subject.subject_id),
+    ) {
         (None, _) => Ok(()),
         (Some(_), None) => Err(CoreError::SubjectRequired {
             namespace_id: session.namespace_id.clone(),
@@ -505,12 +513,12 @@ fn ensure_session_subject(
 async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<()> {
+) -> Result<NamespaceAccess> {
     let manifest = load_current_manifest(store, namespace_id).await?;
     crate::namespace::control::ensure_namespace_live(
         &crate::namespace::state::NamespaceReadState::from(manifest.envelope.payload()),
     )?;
-    Ok(())
+    Ok(manifest.envelope.payload().access.clone())
 }
 
 /// Converts a terminal upload status into the error returned by an operation
@@ -627,11 +635,11 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
 ) -> Result<(ContentStoreId, UploadSessionState)> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let session = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&session, subject_id)?;
+    ensure_session_subject(&session, subject)?;
     if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
         return Err(error);
     }
@@ -658,14 +666,14 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     bytes: &[u8],
 ) -> Result<UploadSession> {
     upload_proxied_content(
         store,
         namespace_id,
         upload_id,
-        subject_id,
+        subject,
         ProxiedPayload::Bytes(bytes),
     )
     .await
@@ -675,14 +683,14 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     body: ByteStream,
 ) -> Result<UploadSession> {
     upload_proxied_content(
         store,
         namespace_id,
         upload_id,
-        subject_id,
+        subject,
         ProxiedPayload::Stream(body),
     )
     .await
@@ -692,12 +700,13 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     payload: ProxiedPayload<'_>,
 ) -> Result<UploadSession> {
-    ensure_upload_namespace_available(store, namespace_id).await?;
+    let access = ensure_upload_namespace_available(store, namespace_id).await?;
+    authorize_upload_subject(namespace_id, &access, subject)?;
     let (content_store_id, mut loaded) =
-        read_open_proxied_session(store, namespace_id, upload_id, subject_id).await?;
+        read_open_proxied_session(store, namespace_id, upload_id, subject).await?;
 
     // The claim is what makes the write exclusive, so it is taken before any
     // byte is written and released by the same swap that records the result.
@@ -825,7 +834,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     completion: ResolvedUploadCompletion,
     context: &MutationContext,
 ) -> Result<CompletedUpload> {
@@ -834,7 +843,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
         namespace_id,
         content_store_id,
         upload_id,
-        subject_id,
+        subject,
         |_| Ok(completion),
         context,
     )
@@ -848,7 +857,7 @@ pub(crate) async fn complete_upload_for_mode<S, F>(
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     resolve: F,
     context: &MutationContext,
 ) -> Result<CompletedUpload>
@@ -856,10 +865,11 @@ where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
 {
-    ensure_upload_namespace_available(store, namespace_id).await?;
+    let access = ensure_upload_namespace_available(store, namespace_id).await?;
+    authorize_upload_subject(namespace_id, &access, subject)?;
     let now_ms = context.now_ms;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&loaded, subject_id)?;
+    ensure_session_subject(&loaded, subject)?;
     // An aborted session answers the same absence its physical deletion
     // will, before anything about the request's shape is examined.
     if matches!(loaded.status, UploadSessionRecordStatus::Aborted { .. }) {
@@ -903,7 +913,8 @@ where
                 namespace_id,
                 content_store_id,
                 upload_id,
-                subject_id,
+                &access,
+                subject,
                 context,
             )
             .await
@@ -1163,16 +1174,18 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    access: &NamespaceAccess,
+    subject: Option<&Subject>,
     context: &MutationContext,
 ) -> Result<UploadSession> {
+    authorize_upload_subject(namespace_id, access, subject)?;
     let now_ms = context.now_ms;
     let (response, abandoned) =
         update_upload_session(store, namespace_id, upload_id, |mut state| {
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
             async move {
-                ensure_session_subject(&state, subject_id)?;
+                ensure_session_subject(&state, subject)?;
                 let mode = upload_mode(&state.mode);
                 let abandoned = AbandonedUpload::of(&state);
                 let aborted = |aborted_at_ms| UploadSession {
@@ -1291,12 +1304,13 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
-    subject_id: Option<&SubjectId>,
+    subject: Option<&Subject>,
     now_ms: u64,
 ) -> Result<UploadSessionView> {
-    ensure_upload_namespace_available(store, namespace_id).await?;
+    let access = ensure_upload_namespace_available(store, namespace_id).await?;
+    authorize_upload_subject(namespace_id, &access, subject)?;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_subject(&loaded, subject_id)?;
+    ensure_session_subject(&loaded, subject)?;
     let receipt = match &loaded.status {
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
@@ -1878,6 +1892,7 @@ mod tests {
                     &namespace_id,
                     &content_store_id,
                     &upload_id,
+                    &NamespaceAccess::Unrestricted {},
                     None,
                     &context(2_000),
                 )
@@ -2149,6 +2164,7 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &upload_id,
+            &NamespaceAccess::Unrestricted {},
             None,
             &context(2_000),
         )
@@ -2289,6 +2305,7 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &upload_id,
+            &NamespaceAccess::Unrestricted {},
             None,
             &context(3_000),
         )
@@ -2314,6 +2331,7 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &upload_id,
+            &NamespaceAccess::Unrestricted {},
             None,
             &context(2_000),
         )
@@ -2324,6 +2342,7 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &upload_id,
+            &NamespaceAccess::Unrestricted {},
             None,
             &context(9_000),
         )
@@ -2369,6 +2388,7 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &aborted.upload_id,
+            &NamespaceAccess::Unrestricted {},
             None,
             &context(3_000),
         )
@@ -2446,6 +2466,7 @@ mod tests {
             &namespace_id,
             &content_store_id,
             &begin.upload_id,
+            &NamespaceAccess::Unrestricted {},
             None,
             &context(3_000),
         )

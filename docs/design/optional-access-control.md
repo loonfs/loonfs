@@ -16,19 +16,20 @@ Core access control defends against backend authorization bugs at item granulari
 
 ## Principals, subjects, and actors
 
-Grants name principals by opaque ids that the application assigns. Core does not distinguish a user from a group from a public audience; the application resolves membership and sends the applicable principal ids with each request. Ids are never recycled. Each ACL-enabled namespace records a principal scope string in its manifest, so a deployment that did not issue a namespace's grants refuses to interpret them.
+Grants name principals by opaque ids that the application assigns. Core does not distinguish a user from a group from a public audience; the application resolves membership and sends the applicable principal ids with each request. Ids are never recycled. Each ACL-enabled namespace records a principal scope string in its manifest. Core refuses a subject from another scope before it reads any grant.
 
-Three request headers carry identity on an ACL-enabled namespace.
+Four request headers carry identity on an ACL-enabled namespace.
 
 | Header | Meaning | When required |
 | --- | --- | --- |
 | `Loonfs-Actor` | Attribution, recorded on rows as today. It is also the subject id unless a subject header is present. | Every operation. |
 | `Loonfs-Subject` | A stable, host-asserted identity used for upload ownership and commit replay. | Only when it differs from the actor, such as support impersonation. |
+| `Loonfs-Principal-Scope` | The identity domain that issued the subject's principal ids. | With `Loonfs-Principals`. |
 | `Loonfs-Principals` | The subject's applicable principal ids, comma-separated. | Every operation. |
 
 Core does not assume the subject id appears in the principal set; the application includes it when the subject holds direct grants. The principal header has a fixed cap on count and total bytes, advertised in capabilities. The application fits under it. Core makes no promise that any reduction always fits and needs no index to admit a request.
 
-Unrestricted namespaces ignore the subject and principal headers, as reads ignore the actor today. An ACL-enabled namespace answers `invalid_request` with the header as `param` when one is missing or malformed.
+Unrestricted namespaces ignore a complete subject context, as reads ignore the actor today. The HTTP binding answers `invalid_request` with the header as `param` when the context is incomplete or malformed. An ACL namespace answers `forbidden` with both scopes when the subject scope does not match its manifest.
 
 Upload sessions record the subject id at creation. Only that subject may put, sign, complete, abort, or read the session. The subject id joins the semantic commit fingerprint beside the actor id: a retry with the same commit id and a different subject answers `commit_id_reuse_conflict`, and a retained receipt is returned to the same subject and actor regardless of their current rights, because the write already committed and the receipt reveals nothing that subject did not author.
 
@@ -337,11 +338,12 @@ Unrestricted namespaces and headers:
 
 24. Every operation on an unrestricted namespace performs no additional object-store operations compared with the baseline before this design, and ignores the subject and principal headers.
 25. An ACL-enabled namespace without the headers answers `invalid_request` naming the header.
+26. An ACL-enabled namespace refuses a subject from another scope before reading a grant.
 
 Uploads and replay:
 
-26. Upload session actions by a different subject are refused.
-27. A commit retry with the same commit id and a different subject answers `commit_id_reuse_conflict`. The same subject retrying after revocation receives the original receipt.
+27. Upload session actions by a different subject are refused.
+28. A commit retry with the same commit id and a different subject answers `commit_id_reuse_conflict`. The same subject retrying after revocation receives the original receipt.
 
 ## Not in this version
 

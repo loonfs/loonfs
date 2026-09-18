@@ -228,10 +228,11 @@ Writing
   LOONFS_ACTOR_ID, then the profile actor_id. Without any of them,
   loonfs-cli identifies the tool, not the human running it.
 
-  Every command that reaches a namespace accepts --subject-id <id> and
-  --principals <a,b>. The flags override LOONFS_SUBJECT_ID and
-  LOONFS_PRINCIPALS, then the profile's subject_id and principals. Without
-  principals the CLI acts as the token holder, and the subject id defaults
+  Every command that reaches a namespace accepts --subject-id <id>,
+  --principal-scope <scope>, and --principals <a,b>. The flags override
+  LOONFS_SUBJECT_ID, LOONFS_PRINCIPAL_SCOPE, and LOONFS_PRINCIPALS, then the
+  matching profile fields. Scope and principals are required together.
+  Without them the CLI acts as the token holder, and the subject id defaults
   to the actor id.
 
   loonfs put <local-path|-> [remote-path] [-r] [--force]

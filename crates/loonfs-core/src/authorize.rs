@@ -37,11 +37,23 @@ impl<'a> Authorizer<'a> {
             (NamespaceAccess::Unrestricted {}, _) | (_, CommitAuthority::Maintenance) => {
                 Ok(Self::Unrestricted)
             }
-            (NamespaceAccess::Acl { .. }, CommitAuthority::Subject(Some(subject))) => {
-                Ok(Self::Subject {
-                    principals: &subject.principals,
-                })
-            }
+            (
+                NamespaceAccess::Acl {
+                    principal_scope, ..
+                },
+                CommitAuthority::Subject(Some(subject)),
+            ) if subject.principal_scope == *principal_scope => Ok(Self::Subject {
+                principals: &subject.principals,
+            }),
+            (
+                NamespaceAccess::Acl {
+                    principal_scope, ..
+                },
+                CommitAuthority::Subject(Some(subject)),
+            ) => Err(CoreError::PrincipalScopeMismatch {
+                expected_principal_scope: principal_scope.clone(),
+                actual_principal_scope: subject.principal_scope.clone(),
+            }),
             (NamespaceAccess::Acl { .. }, CommitAuthority::Subject(None)) => {
                 Err(CoreError::SubjectRequired {
                     namespace_id: namespace_id.clone(),

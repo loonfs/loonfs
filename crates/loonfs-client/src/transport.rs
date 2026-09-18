@@ -49,6 +49,7 @@ impl Client {
             return request;
         };
         request
+            .header("Loonfs-Principal-Scope", subject.principal_scope.as_str())
             .header("Loonfs-Subject", subject.subject_id.as_str())
             .header(
                 "Loonfs-Principals",

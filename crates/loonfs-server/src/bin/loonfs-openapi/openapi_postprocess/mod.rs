@@ -60,6 +60,7 @@ pub(crate) fn openapi_json_pretty(
     document["x-fern-global-headers"] = serde_json::json!([
         {"header": "Loonfs-Actor", "name": "actorId", "optional": true},
         {"header": "Loonfs-Subject", "name": "subjectId", "optional": true},
+        {"header": "Loonfs-Principal-Scope", "name": "principalScope", "optional": true},
         {"header": "Loonfs-Principals", "name": "principals", "optional": true}
     ]);
     validate_operation_retry_classes(&document)?;

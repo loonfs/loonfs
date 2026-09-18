@@ -77,6 +77,10 @@ pub(crate) struct Cli {
     /// `LOONFS_SUBJECT_ID`, the profile, then the actor id.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
     pub(crate) subject_id: Option<String>,
+    /// Principal scope for an ACL namespace or a subject's principal ids.
+    /// Subject precedence is the flag, `LOONFS_PRINCIPAL_SCOPE`, then the profile.
+    #[arg(long, global = true, value_hint = ValueHint::Other)]
+    pub(crate) principal_scope: Option<String>,
     /// Comma-separated principal ids whose grants apply. Precedence is
     /// `--principals`, `LOONFS_PRINCIPALS`, then the profile. Without
     /// principals the CLI acts as the token holder.
@@ -360,6 +364,8 @@ pub(crate) struct ProfileCreateActorArgs {
     #[arg(from_global)]
     pub subject_id: Option<String>,
     #[arg(from_global)]
+    pub principal_scope: Option<String>,
+    #[arg(from_global)]
     pub principals: Option<String>,
 }
 
@@ -522,6 +528,8 @@ pub(crate) struct ProfileUpdateActorArgs {
     #[arg(from_global)]
     pub subject_id: Option<String>,
     #[arg(from_global)]
+    pub principal_scope: Option<String>,
+    #[arg(from_global)]
     pub principals: Option<String>,
 }
 
@@ -677,6 +685,8 @@ pub(crate) struct SubjectSelectorArgs {
     #[arg(from_global)]
     pub subject_id: Option<String>,
     #[arg(from_global)]
+    pub principal_scope: Option<String>,
+    #[arg(from_global)]
     pub principals: Option<String>,
 }
 
@@ -774,7 +784,7 @@ pub(crate) struct NamespaceCreateArgs {
     #[arg(long, value_enum, default_value_t = NamespaceAccessArg::Unrestricted)]
     pub access: NamespaceAccessArg,
     /// Principal scope of an ACL namespace.
-    #[arg(long, required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
+    #[arg(from_global)]
     pub principal_scope: Option<String>,
     /// A principal granted `admin` on the root at creation; repeatable.
     #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]

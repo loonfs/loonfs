@@ -135,30 +135,16 @@ pub(super) async fn create_upload(
     // to check before dispatching on it.
     match request {
         CreateUploadBody::DirectPut { size_bytes } => {
-            begin_direct_put_upload(
-                state,
-                namespace_id,
-                subject.as_ref().map(|subject| &subject.subject_id),
-                size_bytes,
-            )
-            .await
+            begin_direct_put_upload(state, namespace_id, subject.as_ref(), size_bytes).await
         }
         CreateUploadBody::DirectMultipart { part_size_bytes } => {
-            begin_direct_multipart_upload(
-                state,
-                namespace_id,
-                subject.as_ref().map(|subject| &subject.subject_id),
-                part_size_bytes,
-            )
-            .await
+            begin_direct_multipart_upload(state, namespace_id, subject.as_ref(), part_size_bytes)
+                .await
         }
         CreateUploadBody::ServiceProxied {} => {
             let response = state
                 .writer
-                .create_upload(
-                    &namespace_id,
-                    subject.as_ref().map(|subject| &subject.subject_id),
-                )
+                .create_upload(&namespace_id, subject.as_ref())
                 .await
                 .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             Ok(Json(response))
@@ -169,7 +155,7 @@ pub(super) async fn create_upload(
 async fn begin_direct_put_upload(
     state: AppState,
     namespace_id: NamespaceId,
-    subject_id: Option<&loonfs_api::SubjectId>,
+    subject: Option<&loonfs_api::Subject>,
     size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let Some(issuer) = state
@@ -202,7 +188,7 @@ async fn begin_direct_put_upload(
     let checksum_algorithm = issuer.stored_checksum_algorithm();
     let mut prepared = state
         .writer
-        .create_direct_put_upload_target(&namespace_id, subject_id, checksum_algorithm)
+        .create_direct_put_upload_target(&namespace_id, subject, checksum_algorithm)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
@@ -238,7 +224,7 @@ async fn fill_direct_put_access(
 async fn begin_direct_multipart_upload(
     state: AppState,
     namespace_id: NamespaceId,
-    subject_id: Option<&loonfs_api::SubjectId>,
+    subject: Option<&loonfs_api::Subject>,
     part_size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     if state
@@ -258,7 +244,7 @@ async fn begin_direct_multipart_upload(
         .writer
         .create_direct_multipart_upload_target(
             &namespace_id,
-            subject_id,
+            subject,
             DirectMultipartUploadOptions { part_size_bytes },
         )
         .await
@@ -323,12 +309,7 @@ pub(super) async fn sign_upload_parts(
 
     let targets = state
         .writer
-        .sign_upload_parts(
-            &namespace_id,
-            &upload_id,
-            subject.as_ref().map(|subject| &subject.subject_id),
-            &request.parts,
-        )
+        .sign_upload_parts(&namespace_id, &upload_id, subject.as_ref(), &request.parts)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let parts = sign_parts(issuer.as_ref(), &targets).await?;
@@ -561,12 +542,7 @@ pub(super) async fn put_upload_content(
     let (stream, outcome) = body.into_stream();
     match state
         .writer
-        .put_upload_content_stream(
-            &namespace_id,
-            &upload_id,
-            subject.as_ref().map(|subject| &subject.subject_id),
-            stream,
-        )
+        .put_upload_content_stream(&namespace_id, &upload_id, subject.as_ref(), stream)
         .await
     {
         Ok(response) => Ok(Json(response)),
@@ -618,12 +594,9 @@ pub(super) async fn complete_upload(
     let body = body.into_bytes();
     let completed = state
         .writer
-        .complete_upload_for_mode(
-            &namespace_id,
-            &upload_id,
-            subject.as_ref().map(|subject| &subject.subject_id),
-            |mode| decode_completion_body(mode, &body),
-        )
+        .complete_upload_for_mode(&namespace_id, &upload_id, subject.as_ref(), |mode| {
+            decode_completion_body(mode, &body)
+        })
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(with_content_token(
@@ -693,11 +666,7 @@ pub(super) async fn get_upload(
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let mut view = state
         .writer
-        .get_upload(
-            &namespace_id,
-            &upload_id,
-            subject.as_ref().map(|subject| &subject.subject_id),
-        )
+        .get_upload(&namespace_id, &upload_id, subject.as_ref())
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     if let Some(object_key) = &view.direct_put_object_key {
@@ -756,11 +725,7 @@ pub(super) async fn abort_upload(
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let response = state
         .writer
-        .abort_upload(
-            &namespace_id,
-            &upload_id,
-            subject.as_ref().map(|subject| &subject.subject_id),
-        )
+        .abort_upload(&namespace_id, &upload_id, subject.as_ref())
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
