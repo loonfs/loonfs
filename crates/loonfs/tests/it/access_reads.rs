@@ -176,3 +176,103 @@ async fn check_buffered_read_access(content_size: usize) {
         ErrorCode::PathNotFound
     );
 }
+
+#[tokio::test]
+async fn a_former_writer_sees_revocation_on_its_first_read_after_publication() {
+    check_former_writer_read(false).await;
+}
+
+#[tokio::test]
+async fn a_former_writer_sees_revocation_after_a_warm_read_before_handoff() {
+    check_former_writer_read(true).await;
+}
+
+async fn check_former_writer_read(warm_before_handoff: bool) {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let old_writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("old-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("old writer");
+    let namespace_id = namespace_id("access-handoff");
+    old_writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions {
+                access: NamespaceAccess::Acl {
+                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
+                    root_grants: grants("prn_root", AccessRight::Admin),
+                },
+                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+            },
+        )
+        .await
+        .expect("namespace");
+    let mut options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
+    options.commit.subject = Some(subject("prn_root"));
+    old_writer
+        .put_file_bytes(&namespace_id, "/team/file", b"private payload", options)
+        .await
+        .expect("publish file");
+    let access = |grants| FilesystemOperation::UpdateAccess {
+        path: AbsolutePath::parse("/team").expect("path"),
+        boundary: true,
+        grants,
+        expected_inode_id: None,
+        expected_access_revision_no: None,
+    };
+    old_writer
+        .create_commit(
+            &namespace_id,
+            CommitRequest::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                access(grants("viewer", AccessRight::Read)),
+            )
+            .with_subject(subject("prn_root")),
+        )
+        .await
+        .expect("grant read access");
+    let reader = old_writer.reader().as_subject(subject("viewer"));
+    if warm_before_handoff {
+        assert_eq!(
+            reader
+                .get_file_bytes(&namespace_id, "/team/file")
+                .await
+                .expect("warm read")
+                .bytes,
+            b"private payload"
+        );
+    }
+    let peer = FsWriter::builder_with_store(store)
+        .writer_id("peer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("peer");
+    peer.create_commit(
+        &namespace_id,
+        CommitRequest::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            access(AccessGrants::default()),
+        )
+        .with_subject(subject("prn_root")),
+    )
+    .await
+    .expect("revoke read access");
+    assert_eq!(
+        reader
+            .get_file_bytes(&namespace_id, "/team/file")
+            .await
+            .expect_err("first read observes revocation")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    peer.shutdown().await.expect("peer shutdown");
+    old_writer.shutdown().await.expect("old writer shutdown");
+}

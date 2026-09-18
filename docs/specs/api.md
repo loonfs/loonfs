@@ -1557,7 +1557,10 @@ WAL tip. A cold read follows a lagging hint by probing forward. A missing
 hint reads as an absent namespace. A cached runtime probes the next WAL
 number with GET, applies any new segments, and continues until 404. Commits
 are visible on the next read even when the hint has not been raised. The
-acknowledging runtime supplies read-your-writes state without a store request.
+acknowledging runtime seeds its read caches from the publication. Its next
+read probes the next WAL number like any warm read. If the manifest and WAL
+tip are unchanged and the seeded projection is retained, it replays nothing
+and does not reload the manifest.
 
 `RuntimeCacheConfig::manifest_revalidation_interval_ms` sets the minimum
 monotonic interval between checks for a successor to the cached manifest.
