@@ -120,8 +120,7 @@ fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
     NamespaceId::parse(&value).map_err(ApiResponseError::invalid_namespace_id)
 }
 
-/// The subject a request acts as, from `Loonfs-Principals` and
-/// `Loonfs-Subject`, or `None` when no principals are sent.
+/// The subject a request acts as, or `None` for service authority.
 pub(super) struct SubjectHeaders(pub(super) Option<Subject>);
 
 impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
@@ -132,6 +131,12 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
             ApiResponseError::new(ErrorCode::InvalidRequest, &message).with_param(header)
         };
         let Some(value) = parts.headers.get("Loonfs-Principals") else {
+            if parts.headers.contains_key("Loonfs-Subject") {
+                return Err(invalid(
+                    "Loonfs-Principals",
+                    "missing required header Loonfs-Principals".to_owned(),
+                ));
+            }
             return Ok(Self(None));
         };
         let value = String::from_utf8_lossy(value.as_bytes());
