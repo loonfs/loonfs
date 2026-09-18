@@ -174,7 +174,7 @@ Checkpoints, snapshots, and forks pin a manifest and never replay a later tail. 
 
 A copy or restore within the unfolded tail records the same content reference in a new revision. It adds no bytes, and the fold writes the object once.
 
-An import reads a reference owned by another namespace and writes the bytes under a target-owned identity, as it does today. It reads the source by object key. If the source content is still in its owner's unfolded tail, no object exists yet, so the import resolves the reference through the owner namespace's view.
+An import reads a reference owned by another namespace and writes the bytes under a target-owned identity, as it does today. A subject must be an administrator of the owner namespace. It reads the source by object key. If the source content is still in its owner's unfolded tail, no object exists yet, so the import resolves the reference through the owner namespace's view.
 
 ## Resource bounds
 

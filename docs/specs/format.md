@@ -748,6 +748,8 @@ Sharing a content store does not authorize arbitrary reference reuse. A fork can
 
 An import resolves the source reference through its owner's current view, including imports within that namespace. It verifies resident inline bytes or streams the content object, then stages the bytes under a fresh destination-owned identity. If the owner is deleted, the import reads the object using the content-store binding in the surviving head. Forks pin manifests, so inherited content is always materialized.
 
+A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. A deleted owner uses the access state in its surviving head.
+
 ## 10. Retention and compaction
 
 Retention determines which historical views remain available under the format guarantee. Compaction rewrites the physical representation while preserving those views. Neither operation publishes new filesystem changes.
