@@ -20,16 +20,18 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
+use crate::storage::content::{content_object_key_for_ref, validate_loaded_content_bytes};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
+use futures::{stream, TryStreamExt};
 use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_api::{
     ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo, NamespaceId, RunNo,
     MAX_PUBLIC_INTEGER,
 };
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -92,9 +94,10 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
 /// One flush attempt against one fresh projection.
 ///
 /// The metadata publication budget covers this attempt end to end: the
-/// measurement starts before any segment object is written and gates the manifest
-/// put-if-absent, so an over-budget build aborts with only unreachable
-/// immutable outputs behind it.
+/// measurement starts before inline content is materialized or any segment
+/// object is written, and it gates both the segment build and the manifest
+/// put-if-absent, so an over-budget attempt aborts with only committed content
+/// objects and unreachable immutable outputs behind it.
 pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -136,13 +139,8 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         })));
     }
 
-    // Inline content is not materialized yet, so a covering manifest would
-    // let collection delete the only copy.
-    if projection.tail_state.has_inline_content() {
-        return Err(CoreError::Internal(
-            "cannot flush a WAL tail with inline content before materialization".to_owned(),
-        ));
-    }
+    materialize_inline_content(store, projection).await?;
+    ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
     let manifest_no = next_manifest_no_after(basis_manifest_no)?;
     let manifest =
         build_namespace_manifest_for_projection(store, namespace_id, projection, manifest_no)
@@ -199,6 +197,45 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         target_head_seq: head_seq,
         outcome,
     })))
+}
+
+async fn materialize_inline_content<S: ObjectStore + ?Sized>(
+    store: &S,
+    projection: &ManifestProjection<'_, S>,
+) -> Result<()> {
+    let content_store_id = &projection
+        .manifest_segments
+        .manifest()
+        .payload()
+        .content_store_id;
+    let values = projection
+        .tail_state
+        .inline_values()
+        .map(|value| {
+            let key = content_object_key_for_ref(content_store_id, &value.content_ref)?;
+            validate_loaded_content_bytes(key.clone(), &value.content_ref, &value.bytes)?;
+            Ok((key, value.bytes.clone()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // In a live namespace, failed flushes leave committed content for the next flush.
+    stream::iter(values.into_iter().map(Ok))
+        .try_for_each_concurrent(32, |(object_key, bytes)| async move {
+            store.put_immutable_verified(&object_key, bytes).await.map_err(|error| {
+                tracing::error!(namespace_id = projection.head.namespace_id.as_str(), object_key, %error, "inline content materialization failed");
+                match error {
+                    ImmutableWriteError::Transport {
+                        object_key,
+                        source: ObjectStoreError::Transport { message, .. },
+                    } => CoreError::store(
+                        &object_key,
+                        &ObjectStoreError::retryable_transport(&object_key, message),
+                    ),
+                    error => CoreError::from(error),
+                }
+            })?;
+            Ok(())
+        })
+        .await
 }
 
 pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(

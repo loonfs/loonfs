@@ -2,8 +2,7 @@
 
 use crate::metadata::MetadataState;
 use bytes::Bytes;
-use loonfs_api::wire::wal::WalInlineContent;
-use loonfs_api::ContentId;
+use loonfs_api::{ContentId, ContentRef};
 use std::collections::HashMap;
 
 /// Holds the WAL tail after a manifest as rows and the inline content they name.
@@ -12,8 +11,14 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectedWalTail {
     pub(crate) rows: MetadataState,
-    inline_content: HashMap<ContentId, Bytes>,
+    inline_content: HashMap<ContentId, ProjectedInlineContent>,
     inline_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectedInlineContent {
+    pub(crate) content_ref: ContentRef,
+    pub(crate) bytes: Bytes,
 }
 
 impl ProjectedWalTail {
@@ -25,11 +30,13 @@ impl ProjectedWalTail {
     }
 
     pub(crate) fn inline_content(&self, content_id: &ContentId) -> Option<&Bytes> {
-        self.inline_content.get(content_id)
+        self.inline_content
+            .get(content_id)
+            .map(|value| &value.bytes)
     }
 
-    pub(crate) fn has_inline_content(&self) -> bool {
-        !self.inline_content.is_empty()
+    pub(crate) fn inline_values(&self) -> impl Iterator<Item = &ProjectedInlineContent> {
+        self.inline_content.values()
     }
 
     pub(crate) fn inline_bytes(&self) -> usize {
@@ -42,13 +49,12 @@ impl ProjectedWalTail {
             .saturating_add(self.inline_bytes())
     }
 
-    pub(crate) fn extend_inline_content(&mut self, values: &[WalInlineContent]) {
-        for value in values {
-            let bytes = Bytes::copy_from_slice(&value.bytes);
-            self.inline_bytes += bytes.len();
-            if let Some(previous) = self.inline_content.insert(value.content_id.clone(), bytes) {
-                self.inline_bytes -= previous.len();
-            }
+    pub(crate) fn insert_inline_content(&mut self, content_ref: ContentRef, bytes: Bytes) {
+        self.inline_bytes += bytes.len();
+        let content_id = content_ref.content_id.clone();
+        let value = ProjectedInlineContent { content_ref, bytes };
+        if let Some(previous) = self.inline_content.insert(content_id, value) {
+            self.inline_bytes -= previous.bytes.len();
         }
     }
 }

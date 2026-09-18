@@ -7,6 +7,7 @@ use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
 use crate::metadata::CommitReceiptRecord;
 use crate::namespace::state::NamespaceReadState;
+use bytes::Bytes;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, InodeId, NamespaceId, WriterEpoch};
 
@@ -72,7 +73,23 @@ where
 
     for record in records {
         validate_replay_record(&current_head, expected_writer_epoch, &record)?;
-        current_tail.extend_inline_content(record.inline_content);
+        for value in record.inline_content {
+            let content_ref = record
+                .deltas
+                .iter()
+                .find_map(|delta| match &delta.delta {
+                    WalDelta::AppendFileRevision { content_ref, .. }
+                        if content_ref.content_id == value.content_id
+                            && content_ref.owner_namespace_id == *record.namespace_id =>
+                    {
+                        Some(content_ref)
+                    }
+                    _ => None,
+                })
+                .expect("decoded inline content should have a same-commit reference");
+            current_tail
+                .insert_inline_content(content_ref.clone(), Bytes::copy_from_slice(&value.bytes));
+        }
         current_head.seq = record.seq;
         current_head.head_commit_id = record.commit_id.clone();
         current_head.next_inode_id =

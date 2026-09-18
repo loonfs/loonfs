@@ -587,6 +587,8 @@ Metadata rows describe immutable facts at specific positions. Reads merge those 
 
 A flush starts from the verified manifest and discovered WAL tip. It materializes the required numbers after `last_folded_wal_no`, writes new segments, and publishes the next manifest with `last_folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change.
 
+Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `last_folded_wal_no` is `n` implies a content object exists for every inline value in WAL segments up to `n`. WAL collection's rule is unchanged because it already requires each segment to be at or below `last_folded_wal_no`.
+
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A flush already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Reorganization and compaction additionally require their selected inputs to remain valid.
 
 Successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, or either retention floor. Compaction must also use the current compactor epoch. Deletion is terminal, and an established retirement deadline never changes.

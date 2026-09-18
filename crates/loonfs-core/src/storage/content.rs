@@ -636,7 +636,7 @@ pub(crate) fn content_object_key_for_ref(
 ///
 /// The reference's checksum is recomputed over the complete payload for every
 /// supported algorithm.
-pub(super) fn validate_loaded_content_bytes(
+pub(crate) fn validate_loaded_content_bytes(
     object_key: String,
     content_ref: &ContentRef,
     bytes: &[u8],

@@ -496,6 +496,13 @@ async fn inline_checksum_failures_match_object_validation() {
         .await
         .expect_err("checksum mismatch");
     assert_no_content_requests(&store);
+    store.reset();
+    let flush_error = flush_wal(&store, &publisher.namespace_id)
+        .await
+        .expect_err("corrupt tail");
+    assert_eq!(flush_error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
+    assert_eq!(flush_error.to_string(), error.to_string());
+    assert_no_writes(&store);
     let key = content_blob(
         &context.head.content_store_id,
         &publisher.namespace_id,
@@ -517,21 +524,53 @@ async fn inline_checksum_failures_match_object_validation() {
 }
 
 #[tokio::test]
-async fn an_empty_inline_value_also_prevents_flush_writes() {
+async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() {
     let (_directory, store, mut publisher, context) = setup().await;
-    let value = inline(&publisher.namespace_id, Bytes::new());
+    let values = vec![
+        inline(&publisher.namespace_id, Bytes::new()),
+        inline(&publisher.namespace_id, Bytes::from_static(b"materialized")),
+    ];
     publish(
         &mut publisher,
         &store,
         &context,
-        candidate("empty", vec![value]),
+        candidate("fold", values.clone()),
     )
     .await
     .expect("publish");
-    store.reset();
-    assert!(matches!(
-        flush_wal(&store, &publisher.namespace_id).await,
-        Err(CoreError::Internal(_))
-    ));
-    assert_no_writes(&store);
+    let flushed = flush_wal(&store, &publisher.namespace_id)
+        .await
+        .expect("flush");
+    assert_eq!(flushed.outcome, FlushWalOutcome::Published);
+    for delete_wal in [false, true] {
+        if delete_wal {
+            for object in store
+                .list_prefix(&wal_segment_prefix(&publisher.namespace_id))
+                .await
+                .expect("WAL")
+            {
+                store.delete(&object).await.expect("delete folded WAL");
+            }
+        }
+        let context = fresh_context(&store, &publisher.namespace_id).await;
+        let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
+        for (index, value) in values.iter().enumerate() {
+            let path = format!("/fold-{index}");
+            let target = engine
+                .resolve_file_content(&path, &context, None)
+                .await
+                .expect("target");
+            assert!(matches!(target.location, ContentLocation::Object { .. }));
+            store.reset();
+            assert_eq!(
+                engine
+                    .get_file(&path, &context, None)
+                    .await
+                    .expect("read")
+                    .bytes,
+                value.bytes().as_ref()
+            );
+            assert!(store.snapshot().iter().any(|operation| matches!(operation, RecordedOperation::Get { key, .. } if key == target.location.object_key())));
+        }
+    }
 }
