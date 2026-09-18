@@ -2295,7 +2295,8 @@ The root path is a valid target; its row is where administrators are named.
 update that names no principals clears every direct grant, and one with
 `boundary` false resumes inheritance. Grants are a map from principal id to
 a list of distinct right names; the format specification gives the rights,
-the size limits, and the rule that no entry has an empty list. Two rules
+the size limits, and the rule that no entry has an empty list. A repeated
+principal key or right name answers `invalid_request`. Two rules
 answer `invalid_request`: `admin` is valid only on the root inode, and a
 boundary applies only to a directory.
 

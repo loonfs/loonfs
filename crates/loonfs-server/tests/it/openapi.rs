@@ -1922,6 +1922,34 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
 }
 
 #[test]
+fn access_id_schemas_exclude_commas() {
+    use utoipa::PartialSchema as _;
+
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let schemas = spec
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+    let subject_schema =
+        serde_json::to_value(loonfs_api::SubjectId::schema()).expect("subject id schema");
+    assert_eq!(
+        subject_schema.get("pattern").and_then(Value::as_str),
+        Some(r"^[\x21-\x2B\x2D-\x7E]{1,256}$"),
+        "SubjectId pattern"
+    );
+    for name in ["PrincipalId", "PrincipalScope"] {
+        assert_eq!(
+            schemas[name].get("pattern").and_then(Value::as_str),
+            Some(r"^[\x21-\x2B\x2D-\x7E]{1,256}$"),
+            "{name} pattern"
+        );
+    }
+}
+
+#[test]
 fn openapi_flattens_the_path_entry_attribute_projection() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
