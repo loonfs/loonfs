@@ -4,6 +4,8 @@
 
 mod batch;
 mod candidates;
+
+pub(crate) use candidates::validate_inline_content_references;
 mod changes;
 mod publish_view;
 mod uploads;

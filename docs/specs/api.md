@@ -673,8 +673,8 @@ id would require remembering every id forever.
 Write preconditions are part of the commit's identity. Reusing a `commit_id` after
 changing a precondition fails with `commit_id_reuse_conflict`.
 
-A put's content is part of that identity too, and identity means *which
-content object*, not what bytes it holds. So:
+A put's content is part of that identity too. For uploaded content, identity
+means *which content object*, not what bytes it holds. So:
 
 - **Retrying a commit means resending the same `content_ref`.** That is a
   semantically identical commit and it replays.
@@ -686,10 +686,17 @@ Keep the `content_ref` a completed upload returned and reuse it across
 commit retries; that is the cheapest retry and the one the server can
 answer on its own.
 
+Content a commit supplies inline is identified by its bytes. A rerun with the
+same bytes replays, even if the writer stages the content because an inline
+policy limit was reached. Different bytes conflict, including when their length
+is unchanged. Inline content and uploaded objects use different identity forms.
+
 **Prepared content.** Prepare bytes once, retain the returned content, then publish
 with the same explicit commit ID, path, actor, and options on each attempt.
-Preparation alone does not publish a file or extend the completed upload's
-lifetime.
+This works for both inline and staged prepared content. Embedded preparation
+at or under the configured inline threshold makes no store request and has no
+expiry. Inline writes are disabled by default. Preparation alone does not publish
+a file or extend a completed upload's lifetime.
 
 | Client | Prepare content | Publish retained content |
 | --- | --- | --- |
@@ -703,10 +710,12 @@ on the commit; the actor may be set once on the client.
 
 The whole-file convenience calls (`files.upload` / `files.uploadStream` /
 `files.upload_stream` / `Files.Upload` / `Files.UploadStream` in generated SDKs,
-`put_file_bytes()` / `put_file_stream()` in Rust) prepare a new object on each
-invocation. Reusing an already-committed ID with fresh content therefore returns
-`commit_id_reuse_conflict`, even for identical bytes. The unused upload can be
-reclaimed after its grace period. These helpers do not read the change feed or
+`put_file_bytes()` / `put_file_stream()` in Rust) prepare content on each
+invocation. Embedded content at or under the inline threshold uses byte identity,
+so the same bytes and commit ID replay. Larger content, and content prepared with
+inline writes disabled, stages a new object. Reusing an already-committed ID with
+a fresh object returns `commit_id_reuse_conflict`, even for identical bytes. The
+unused upload can be reclaimed after its grace period. These helpers do not read the change feed or
 substitute an earlier content reference. To recover across processes, retain the
 complete publication request; the remote CLI saves that request before
 submission and resends it directly.

@@ -92,6 +92,8 @@ pub struct NamespacePublication {
     pub committed_through_seq: Option<ChangeSeq>,
     /// WAL segments visible after the attempt.
     pub wal_tail_segments: u64,
+    /// Inline bytes visible in the unfolded tail after the attempt.
+    pub wal_tail_inline_bytes: usize,
 }
 
 /// Result of checking whether a job has durable work.

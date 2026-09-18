@@ -270,15 +270,22 @@ impl FsMaintenance {
         }
     }
 
-    /// Flushes the WAL tail once it reaches `options.max_wal_tail_segments`, then runs
-    /// one bounded reorganization step.
+    /// Flushes the WAL tail at the segment threshold or, when the writer knows
+    /// the count, the inline byte threshold. Then runs one bounded reorganization step.
     pub async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
         options: MetadataMaintenanceOptions,
     ) -> Result<MetadataMaintenanceResponse> {
         let status = self.load_maintenance_status(namespace_id, false).await?;
-        let flush = options.flush_is_due(status.wal_tail_segments);
+        let inline_bytes = match &self.publisher {
+            Some(publisher) if status.wal_tail_segments > 0 => publisher
+                .wal_tail_inline_bytes(namespace_id)
+                .await
+                .unwrap_or(0),
+            _ => 0,
+        };
+        let flush = options.flush_is_due(status.wal_tail_segments, inline_bytes);
         let response = self
             .flush_then_reorganize(
                 namespace_id,
@@ -296,10 +303,9 @@ impl FsMaintenance {
         Ok(response)
     }
 
-    /// Whether the WAL tail or metadata manifest has work under these options.
+    /// Checks the WAL segment threshold and manifest descriptors without replaying the tail.
     ///
-    /// Use the same options as [`Self::maintain_metadata`] so recovery probes
-    /// and scheduled steps agree on when work is due. Active leases may still
+    /// Inline byte thresholds use publication hints instead. Active leases may
     /// prevent an eligible merge from running until their expiry.
     pub async fn metadata_probe(
         &self,

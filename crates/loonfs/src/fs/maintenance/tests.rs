@@ -505,6 +505,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
             crate::MetadataMaintenanceOptions {
                 max_wal_tail_segments: std::num::NonZeroU64::MIN,
                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
+                ..Default::default()
             },
         )
         .await

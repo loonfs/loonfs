@@ -221,9 +221,9 @@ impl FsWriter {
     // and upload operations in `fs/writes.rs` and `fs/uploads.rs`.
 
     /// Builds a maintenance handle over this writer's read core and caches.
-    /// It shares no publisher or scheduler state.
+    /// Uses the publisher's cached inline byte count for flush decisions.
     pub fn maintenance_handle(&self, actor_id: impl Into<String>) -> Result<FsMaintenance> {
-        FsMaintenance::from_read_core(self.core.clone(), actor_id.into())
+        FsMaintenance::from_read_core(self.core.clone(), self.publisher.clone(), actor_id.into())
     }
 
     /// Stops publication and drains accepted work.
@@ -254,6 +254,7 @@ pub struct FsWriterBuilder {
     namespace_session_policy: NamespaceSessionPolicy,
     max_writer_sessions: NonZeroUsize,
     publication_limits: crate::PublicationLimits,
+    inline_content: crate::InlineContentOptions,
     max_concurrent_folds: NonZeroUsize,
     namespace_advance_observer: Option<NamespaceAdvanceObserver>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
@@ -271,6 +272,7 @@ impl FsWriterBuilder {
             max_concurrent_folds: NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS)
                 .expect("default maximum concurrent folds should be nonzero"),
             publication_limits: crate::PublicationLimits::default(),
+            inline_content: crate::InlineContentOptions::default(),
             namespace_advance_observer: None,
             maintenance_hint_observer: None,
         }
@@ -331,6 +333,12 @@ impl FsWriterBuilder {
     /// Sets the shared admission and concurrency limits for publications.
     pub fn publication_limits(mut self, limits: crate::PublicationLimits) -> Self {
         self.publication_limits = limits;
+        self
+    }
+
+    /// Sets inline preparation, segment, fold, and tail limits.
+    pub fn inline_content(mut self, options: crate::InlineContentOptions) -> Self {
+        self.inline_content = options;
         self
     }
 
@@ -435,6 +443,7 @@ impl FsWriterBuilder {
     /// publication service is created last, holding the core strongly and
     /// the bits weakly.
     pub async fn build(self) -> Result<FsWriter> {
+        self.inline_content.validate()?;
         let writer_id = self
             .writer_id
             .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
@@ -448,6 +457,7 @@ impl FsWriterBuilder {
         let runtime = owning_runtime()?;
         let core = self.core.open_read_core()?;
         let bits = Arc::new(WriterBits {
+            inline_content: self.inline_content,
             hint_raise: crate::hint_raise::DiscoveryHints::default(),
             identity,
             wal_fold_permits: Semaphore::new(self.max_concurrent_folds.get()),

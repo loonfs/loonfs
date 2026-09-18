@@ -9,7 +9,7 @@
 use crate::{EffectiveLimit, GcConfig, MetadataCompactionPolicy, Result, RuntimeError};
 use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};
 use loonfs_core::limits::{FOLD_AT_WAL_SEGMENTS, MAX_UNFLUSHED_WAL_SEGMENTS};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 pub use loonfs_api::options::{
     CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
@@ -23,6 +23,9 @@ pub use loonfs_api::options::{
 pub struct MetadataMaintenanceOptions {
     /// Flush the visible WAL tail once it reaches this many segments.
     pub max_wal_tail_segments: NonZeroU64,
+    /// Flush once unfolded inline bytes reach this size; defaults to 8 MiB.
+    /// Applies only when the writer's publisher knows the count.
+    pub inline_content_fold_at_bytes: NonZeroUsize,
     /// Whether run sizes must justify the rewrite before maintenance merges them.
     pub compaction_policy: MetadataCompactionPolicy,
 }
@@ -31,6 +34,10 @@ impl Default for MetadataMaintenanceOptions {
     fn default() -> Self {
         Self {
             max_wal_tail_segments: const { NonZeroU64::new(FOLD_AT_WAL_SEGMENTS).unwrap() },
+            inline_content_fold_at_bytes: NonZeroUsize::new(
+                crate::InlineContentOptions::default().inline_content_fold_at_bytes,
+            )
+            .expect("default inline fold threshold should be nonzero"),
             compaction_policy: MetadataCompactionPolicy::SizeTiered,
         }
     }
@@ -61,8 +68,9 @@ impl MetadataMaintenanceOptions {
     }
 
     /// Returns whether the WAL tail has reached the flush threshold.
-    pub fn flush_is_due(&self, wal_tail_segments: u64) -> bool {
+    pub fn flush_is_due(&self, wal_tail_segments: u64, wal_tail_inline_bytes: usize) -> bool {
         wal_tail_segments >= self.max_wal_tail_segments.get()
+            || wal_tail_inline_bytes >= self.inline_content_fold_at_bytes.get()
     }
 }
 

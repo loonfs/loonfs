@@ -37,6 +37,7 @@ pub struct CommitCandidate {
     content: ContentPreparation,
     maintenance: bool,
     inline_content: Vec<InlineContent>,
+    staged_inline_content_ids: HashSet<ContentId>,
 }
 
 /// The result of preparing external content referenced by a mutation.
@@ -77,6 +78,7 @@ impl CommitCandidate {
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: true,
             inline_content: Vec::new(),
+            staged_inline_content_ids: HashSet::new(),
         }
     }
 
@@ -95,17 +97,22 @@ impl CommitCandidate {
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: false,
             inline_content: Vec::new(),
+            staged_inline_content_ids: HashSet::new(),
         }
     }
 
     /// Wraps a mutation request with opaque proofs for its prepared content.
     pub fn prepared(request: CommitRequest, content: Vec<PreparedContent>) -> Self {
-        Self {
-            request,
-            content: ContentPreparation::Ready(content),
-            maintenance: false,
-            inline_content: Vec::new(),
+        let mut candidate = Self::new(request);
+        let mut proofs = Vec::new();
+        for value in content {
+            match value.inline_content() {
+                Some(inline) => candidate.inline_content.push(inline.clone()),
+                None => proofs.push(value),
+            }
         }
+        candidate.content = ContentPreparation::Ready(proofs);
+        candidate
     }
 
     /// Wraps a mutation request whose content preparation failed.
@@ -115,6 +122,7 @@ impl CommitCandidate {
             content: ContentPreparation::Rejected(error),
             maintenance: false,
             inline_content: Vec::new(),
+            staged_inline_content_ids: HashSet::new(),
         }
     }
 
@@ -124,16 +132,59 @@ impl CommitCandidate {
         content: Vec<PreparedContent>,
         inline_content: Vec<InlineContent>,
     ) -> Self {
-        Self {
-            request,
-            content: ContentPreparation::Ready(content),
-            maintenance: false,
-            inline_content,
-        }
+        let mut candidate = Self::prepared(request, content);
+        candidate.inline_content.extend(inline_content);
+        candidate
     }
 
-    pub(crate) fn inline_content(&self) -> &[InlineContent] {
+    /// Returns values that publication still needs to carry in the WAL.
+    pub fn inline_content(&self) -> &[InlineContent] {
         &self.inline_content
+    }
+
+    /// Lists inline values in the order their operations first name them.
+    pub fn ordered_inline_content(&self, namespace_id: &NamespaceId) -> Result<Vec<InlineContent>> {
+        crate::protocol::validate_inline_content_references(
+            &self.request,
+            &self.inline_content,
+            namespace_id,
+        )?;
+        let mut values: std::collections::HashMap<_, _> = self
+            .inline_content
+            .iter()
+            .map(|value| (&value.content_ref().content_id, value))
+            .collect();
+        Ok(self
+            .request
+            .operations
+            .iter()
+            .filter_map(FilesystemOperation::content_ref)
+            .filter_map(|reference| values.remove(&reference.content_id).cloned())
+            .collect())
+    }
+
+    /// Replaces an inline value with a staged proof without changing its identity form.
+    pub fn stage_inline_content(&mut self, content_id: &ContentId, proof: PreparedContent) {
+        let reference = proof.content_ref();
+        for operation in &mut self.request.operations {
+            match operation {
+                FilesystemOperation::PutFile { content_ref, .. }
+                | FilesystemOperation::CreateFileByInode { content_ref, .. }
+                | FilesystemOperation::PutFileRevisionByInode { content_ref, .. }
+                    if &content_ref.content_id == content_id =>
+                {
+                    *content_ref = reference.clone()
+                }
+                _ => {}
+            }
+        }
+        self.inline_content
+            .retain(|value| &value.content_ref().content_id != content_id);
+        self.staged_inline_content_ids
+            .insert(reference.content_id.clone());
+        if let ContentPreparation::Ready(proofs) = &mut self.content {
+            proofs.push(proof);
+        }
     }
 
     pub fn inline_content_bytes(&self) -> usize {
@@ -164,6 +215,7 @@ impl CommitCandidate {
                 .inline_content
                 .iter()
                 .map(|value| value.content_ref().content_id.clone())
+                .chain(self.staged_inline_content_ids.iter().cloned())
                 .collect(),
         )
     }
@@ -222,6 +274,12 @@ impl CommitCandidate {
             bytes.0 = bytes.0.saturating_add(value.bytes().len());
             serde_json::to_writer(&mut bytes, value.content_ref())
                 .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
+        }
+        for content_id in &self.staged_inline_content_ids {
+            bytes.0 = bytes
+                .0
+                .saturating_add(std::mem::size_of::<ContentId>())
+                .saturating_add(content_id.as_str().len());
         }
         Ok(bytes.0)
     }
@@ -331,6 +389,7 @@ pub struct NamespaceCommitEnginePublishResult {
     /// WAL tail length observed by this publish, for opportunistic
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
+    pub wal_tail_inline_bytes: usize,
     /// Read state produced by a successful, unambiguous WAL put. Callers can
     /// use it to update read caches without reloading from object storage.
     pub resulting_read_state: Option<ResultingReadState>,
@@ -346,6 +405,7 @@ pub struct WalFoldInput {
     pub retention_floor_seq: ChangeSeq,
     pub tail_state: Arc<ProjectedWalTail>,
     pub wal_tail_segments: u64,
+    pub wal_tail_inline_bytes: usize,
 }
 
 /// A read anchor plus the projected WAL tail as of one landed publish.
@@ -452,6 +512,19 @@ impl NamespaceCommitEngine {
             .map(PublishTailProjection::weight)
     }
 
+    /// Whether the retained tail contains a receipt, without loading a projection.
+    pub fn has_retained_commit_receipt(&self, commit_id: &CommitId) -> bool {
+        self.publish_tail_projection
+            .as_ref()
+            .is_some_and(|projection| {
+                projection
+                    .tail_state
+                    .rows
+                    .find_commit_receipt(commit_id)
+                    .is_some()
+            })
+    }
+
     /// The retained projection as a fold input, or `None` when the engine
     /// holds no projection.
     ///
@@ -464,6 +537,7 @@ impl NamespaceCommitEngine {
                 retention_floor_seq: projection.retention_floor_seq,
                 tail_state: Arc::clone(&projection.tail_state),
                 wal_tail_segments: projection.wal_tail_segments,
+                wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
             })
     }
 
@@ -563,6 +637,7 @@ impl NamespaceCommitEngine {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
                 wal_tail_segments: 0,
+                wal_tail_inline_bytes: 0,
                 resulting_read_state: None,
             };
         }
@@ -574,6 +649,7 @@ impl NamespaceCommitEngine {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
                     wal_tail_segments: 0,
+                    wal_tail_inline_bytes: 0,
                     resulting_read_state: None,
                 };
             }
@@ -610,6 +686,7 @@ impl NamespaceCommitEngine {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
                     wal_tail_segments: 0,
+                    wal_tail_inline_bytes: 0,
                     resulting_read_state: None,
                 };
             }
@@ -629,11 +706,12 @@ impl NamespaceCommitEngine {
         )
         .await;
         self.projection_loaded_ms = Some(projection_loaded_ms);
-        let (wal_tail_segments, resulting_read_state) =
+        let (wal_tail_segments, wal_tail_inline_bytes, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, tail_options);
         NamespaceCommitEnginePublishResult {
             results: published.results,
             wal_tail_segments,
+            wal_tail_inline_bytes,
             resulting_read_state,
         }
     }
@@ -645,12 +723,16 @@ impl NamespaceCommitEngine {
         mut projection: PublishTailProjection,
         effect: PublishViewEffect,
         tail_options: &PublishTailOptions,
-    ) -> (u64, Option<ResultingReadState>) {
+    ) -> (u64, usize, Option<ResultingReadState>) {
         let state = match effect {
             PublishViewEffect::Unchanged => None,
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
-                return (projection.wal_tail_segments, None);
+                return (
+                    projection.wal_tail_segments,
+                    projection.tail_state.inline_bytes(),
+                    None,
+                );
             }
             PublishViewEffect::Advanced {
                 records,
@@ -676,12 +758,13 @@ impl NamespaceCommitEngine {
             }
         };
         let count = projection.wal_tail_segments;
+        let inline_bytes = projection.tail_state.inline_bytes();
         if projection.within_limits(tail_options) {
             self.publish_tail_projection = Some(projection);
         } else {
             self.invalidate_projection();
         }
-        (count, state)
+        (count, inline_bytes, state)
     }
 }
 

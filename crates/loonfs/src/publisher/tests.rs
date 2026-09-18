@@ -213,6 +213,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
 
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
+        inline_content: crate::InlineContentOptions::default(),
         hint_raise: crate::hint_raise::DiscoveryHints::default(),
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
         wal_fold_permits: tokio::sync::Semaphore::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS),
@@ -653,6 +654,8 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
         create_namespace(&runtime, &namespace_id).await;
         let mut publisher = standalone_publisher(&namespace_id, &runtime);
         publisher.min_publish_interval = Duration::ZERO;
+        publisher.inline_content.inline_content_segment_budget_bytes =
+            MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES;
         recv_commit(
             admit_commit(
                 &publisher,
@@ -3264,3 +3267,5 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         1
     );
 }
+
+mod inline_writer;

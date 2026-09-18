@@ -68,6 +68,68 @@ impl Default for PublicationLimits {
     }
 }
 
+/// Writer policy for content carried in WAL segments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineContentOptions {
+    /// Maximum size prepared inline; `None` disables inline preparation by default.
+    pub inline_content_threshold_bytes: Option<usize>,
+    /// Maximum inline bytes in one WAL segment; defaults to 1 MiB.
+    pub inline_content_segment_budget_bytes: usize,
+    /// Unfolded inline bytes that make a fold due; defaults to 8 MiB.
+    pub inline_content_fold_at_bytes: usize,
+    /// Limit on known unfolded and admitted inline bytes; defaults to 32 MiB.
+    /// An absent projection counts as zero. After a process starts, the first
+    /// inline commit in a namespace can exceed this limit by at most its own
+    /// inline bytes, at most the segment budget, once per namespace per process start.
+    pub inline_content_tail_limit_bytes: usize,
+}
+
+impl Default for InlineContentOptions {
+    fn default() -> Self {
+        Self {
+            inline_content_threshold_bytes: None,
+            inline_content_segment_budget_bytes: 1024 * 1024,
+            inline_content_fold_at_bytes: 8 * 1024 * 1024,
+            inline_content_tail_limit_bytes: 32 * 1024 * 1024,
+        }
+    }
+}
+
+impl InlineContentOptions {
+    pub(crate) fn validate(&self) -> crate::Result<()> {
+        use loonfs_api::wire::wal::{
+            MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES,
+        };
+        if self
+            .inline_content_threshold_bytes
+            .is_some_and(|value| value > MAX_WAL_INLINE_CONTENT_BYTES)
+        {
+            return Err(crate::RuntimeError::Config(format!(
+                "`inline_content_threshold_bytes` must not exceed {MAX_WAL_INLINE_CONTENT_BYTES}"
+            )));
+        }
+        if self.inline_content_segment_budget_bytes == 0
+            || self.inline_content_segment_budget_bytes > MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES
+        {
+            return Err(crate::RuntimeError::Config(format!(
+                "`inline_content_segment_budget_bytes` must be between 1 and {MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES}"
+            )));
+        }
+        if self.inline_content_fold_at_bytes == 0 || self.inline_content_tail_limit_bytes == 0 {
+            return Err(crate::RuntimeError::Config(
+                "`inline_content_fold_at_bytes` and `inline_content_tail_limit_bytes` must be greater than zero".to_owned()
+            ));
+        }
+        if self.inline_content_fold_at_bytes > self.inline_content_tail_limit_bytes {
+            return Err(crate::RuntimeError::Config(
+                "`inline_content_fold_at_bytes` must not exceed `inline_content_tail_limit_bytes`"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Read and cache configuration shared by all handles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadConfig {

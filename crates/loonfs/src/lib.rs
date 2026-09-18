@@ -173,8 +173,9 @@ pub use loonfs_objectstore::{
 
 pub use cache::RuntimeCacheStats;
 pub use config::{
-    PublicationLimits, RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_COMPACTIONS,
-    DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_WRITER_SESSIONS,
+    InlineContentOptions, PublicationLimits, RuntimeCacheConfig,
+    DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS,
+    DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_WRITER_SESSIONS,
 };
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
