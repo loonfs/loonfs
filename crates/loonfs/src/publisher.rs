@@ -606,7 +606,11 @@ impl PublisherRegistry {
             .or(slot.last_known_wal_tail_inline_bytes)
     }
 
-    pub(crate) async fn record_fold_outcome(&self, namespace_id: &NamespaceId) {
+    pub(crate) async fn record_fold_outcome(
+        &self,
+        namespace_id: &NamespaceId,
+        folded_inline_bytes: Option<usize>,
+    ) {
         let publisher = self
             .shared
             .lock_state()
@@ -614,7 +618,11 @@ impl PublisherRegistry {
             .get(namespace_id)
             .cloned();
         if let Some(publisher) = publisher {
-            publisher.engine.lock().await.record_successful_fold();
+            publisher
+                .engine
+                .lock()
+                .await
+                .record_successful_fold(folded_inline_bytes);
         }
     }
 
@@ -812,13 +820,17 @@ struct EngineSlot {
     /// Never dropped or rebuilt while the publisher lives.
     session: SharedWriterSessionState,
     /// Another writer can make this stale by publishing or folding, and a local
-    /// fold resets it to zero; the next publish corrects it.
+    /// fold subtracts what it covered; the next publish corrects it.
     last_known_wal_tail_inline_bytes: Option<usize>,
 }
 
 impl EngineSlot {
-    fn record_successful_fold(&mut self) {
-        self.last_known_wal_tail_inline_bytes = Some(0);
+    fn record_successful_fold(&mut self, folded_inline_bytes: Option<usize>) {
+        if let (Some(known), Some(folded)) =
+            (self.last_known_wal_tail_inline_bytes, folded_inline_bytes)
+        {
+            self.last_known_wal_tail_inline_bytes = Some(known.saturating_sub(folded));
+        }
         if let Some(engine) = self.engine.as_mut() {
             engine.invalidate_projection();
         }
@@ -1589,6 +1601,7 @@ impl NamespacePublisher {
             }
             input
         };
+        let folded_inline_bytes = input.as_ref().map(|input| input.wal_tail_inline_bytes);
         match writer.identity.mutation_context() {
             Ok(_) => {}
             Err(error) => {
@@ -1624,7 +1637,7 @@ impl NamespacePublisher {
                 // tail from the new manifest instead of starting another fold
                 // over a stale count.
                 let mut slot = self.engine.lock().await;
-                slot.record_successful_fold();
+                slot.record_successful_fold(folded_inline_bytes);
             }
             Err(error) => {
                 let error = RuntimeError::Core(error);

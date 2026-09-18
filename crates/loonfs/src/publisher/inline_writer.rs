@@ -702,6 +702,100 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
 }
 
 #[tokio::test]
+async fn fold_completion_keeps_inline_bytes_published_while_it_ran() {
+    let directory = tempdir().expect("directory");
+    let namespace = NamespaceId::parse("inline-fold-race").expect("namespace");
+    let store = Arc::new(blocking_fold_store(
+        LocalFsStore::new(directory.path()).expect("store"),
+        metadata_manifest_prefix(&namespace),
+    ));
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("inline-writer")
+        .inline_content(InlineContentOptions {
+            inline_content_threshold_bytes: Some(4),
+            inline_content_fold_at_bytes: 4,
+            inline_content_tail_limit_bytes: 8,
+            ..Default::default()
+        })
+        .min_publish_interval_ms(0)
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    writer
+        .create_directory(
+            &namespace,
+            "/warmup",
+            crate::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("acquire writer epoch");
+
+    store.block_next();
+    writer
+        .put_file_bytes(&namespace, "/first", b"four", put_options("first"))
+        .await
+        .expect("start fold");
+    store.wait_until_blocked().await;
+    writer
+        .put_file_bytes(&namespace, "/during", b"next", put_options("during"))
+        .await
+        .expect("publish during fold");
+    store.release();
+    writer.wait_for_fold(&namespace).await.expect("finish fold");
+    assert_eq!(
+        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        Some(4)
+    );
+
+    let fold_permits = writer
+        .bits
+        .wal_fold_permits
+        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
+        .await
+        .expect("hold next fold");
+    let prepared = vec![
+        writer
+            .prepare_file_bytes(&namespace, b"more")
+            .await
+            .expect("prepare first value"),
+        writer
+            .prepare_file_bytes(&namespace, b"last")
+            .await
+            .expect("prepare second value"),
+    ];
+    let request = CommitRequest {
+        commit_id: CommitId::parse("after-fold").expect("commit"),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        operations: vec![
+            put_operation("/after-fold-1", &prepared[0]),
+            put_operation("/after-fold-2", &prepared[1]),
+        ],
+        preconditions: Vec::new(),
+    };
+    writer
+        .commit_candidate(&namespace, CommitCandidate::prepared(request, prepared))
+        .await
+        .expect("publish after fold");
+    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        .await
+        .expect("tail usage");
+    assert_eq!(usage.wal_tail_inline_bytes, 8);
+
+    drop(fold_permits);
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count() {
     for mode in ["automatic", "explicit", "scheduled"] {
         let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
