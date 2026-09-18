@@ -3,8 +3,8 @@
 use super::ensure_expected_inode;
 use super::publish_path_planning::{
     ensure_parent_directories, is_missing_visible_path, reject_tombstoned_path_ancestor,
-    require_vacant_path, resolve_parent_directory, CompiledFilesystemOperation,
-    PublishPathPlanningView, ResolvedParents,
+    require_vacant_path, resolve_parent_directory, resolve_visible_path_for_authorization,
+    CompiledFilesystemOperation, PublishPathPlanningView, ResolvedParents,
 };
 use crate::authorize::Absence;
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
@@ -29,7 +29,9 @@ pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
     let parents = if parents {
         ensure_parent_directories(absolute_path, view, &mut ops, allocation).await?
     } else {
-        let parent_inode_id = resolve_parent_directory(view, absolute_path).await?;
+        let parent_inode_id =
+            resolve_parent_directory(view, absolute_path, Absence::Path(absolute_path.as_str()))
+                .await?;
         ResolvedParents {
             parent_inode_id,
             deepest_existing: parent_inode_id,
@@ -58,11 +60,23 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
     absolute_path: Option<&AbsolutePath>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
-    let Some(active) = view.view.active_subtree_tombstone(inode_id).await? else {
-        return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
-    };
-    let TombstoneRowAction::Set { deleted_direntry } = active.action else {
-        return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+    let active = view.view.active_subtree_tombstone(inode_id).await?;
+    let deleted_direntry = match active.map(|record| record.action) {
+        Some(TombstoneRowAction::Set { deleted_direntry }) => deleted_direntry,
+        _ => {
+            let authorization_target = view
+                .view
+                .current_parent_binding_for_child(inode_id)
+                .await?
+                .map_or(inode_id, |binding| binding.parent_inode_id);
+            view.authorize(
+                authorization_target,
+                AccessRights::from_iter([AccessRight::Remove]),
+                Absence::Inode,
+            )
+            .await?;
+            return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+        }
     };
     let saved_parent = deleted_direntry.parent_inode_id;
     view.authorize(
@@ -75,7 +89,12 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
         Some(absolute_path) => {
             ensure_mutation_path(absolute_path)?;
             reject_tombstoned_path_ancestor(view, absolute_path).await?;
-            let parent_inode_id = resolve_parent_directory(view, absolute_path).await?;
+            let parent_inode_id = resolve_parent_directory(
+                view,
+                absolute_path,
+                Absence::Path(absolute_path.as_str()),
+            )
+            .await?;
             view.authorize(
                 parent_inode_id,
                 AccessRights::from_iter([AccessRight::Create]),
@@ -115,10 +134,15 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     reject_tombstoned_path_ancestor(view, absolute_path).await?;
-    let target = view.view.resolve_visible_path(absolute_path).await;
+    let target = resolve_visible_path_for_authorization(
+        view,
+        absolute_path,
+        AccessRights::from_iter([AccessRight::Create]),
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await;
 
     let mut ops = Vec::new();
-    let parents = ensure_parent_directories(absolute_path, view, &mut ops, allocation).await?;
     let final_name = final_component(absolute_path)?;
 
     match target {
@@ -167,6 +191,8 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
             });
         }
         Err(error) if is_missing_visible_path(&error) => {
+            let parents =
+                ensure_parent_directories(absolute_path, view, &mut ops, allocation).await?;
             view.authorize(
                 parents.deepest_existing,
                 AccessRights::from_iter([AccessRight::Create]),

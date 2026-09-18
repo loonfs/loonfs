@@ -5,6 +5,7 @@ use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlann
 use crate::authorize::Absence;
 use crate::commit::{CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
+use crate::metadata::VisiblePathError;
 use crate::path::mutation_path::final_component;
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, InodeId, InodeKind, ROOT_INODE_ID,
@@ -26,7 +27,34 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
         });
     }
 
-    let target = view.view.resolve_visible_path(absolute_path).await?;
+    // A file in the middle of the path is authorized like a target, so the
+    // error that names it reaches only a subject allowed to learn of it.
+    let (authorized_inode_id, resolved) = match view.view.resolve_visible_path(absolute_path).await
+    {
+        Ok(target) => (target.inode_id, Ok(target)),
+        Err(
+            error @ CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
+                inode_id,
+                ..
+            }),
+        ) => (inode_id, Err(error)),
+        Err(error) => return Err(error),
+    };
+    let current = view
+        .view
+        .latest_access_revision(authorized_inode_id)
+        .await?;
+    let empty = AccessGrants::default();
+    view.authorize_access_update(
+        authorized_inode_id,
+        current
+            .as_ref()
+            .map_or((false, &empty), |row| (row.boundary, &row.grants)),
+        (boundary, grants),
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await?;
+    let target = resolved?;
     if target.inode_id != ROOT_INODE_ID
         && grants
             .iter()
@@ -42,17 +70,6 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
         ));
     }
 
-    let current = view.view.latest_access_revision(target.inode_id).await?;
-    let empty = AccessGrants::default();
-    view.authorize_access_update(
-        target.inode_id,
-        current
-            .as_ref()
-            .map_or((false, &empty), |row| (row.boundary, &row.grants)),
-        (boundary, grants),
-        Absence::Path(absolute_path.as_str()),
-    )
-    .await?;
     if absolute_path.is_root() {
         if let Some(expected) = expected_inode_id {
             if target.inode_id != expected {

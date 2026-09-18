@@ -1,7 +1,9 @@
 //! The publish plan for one attribute update.
 
 use super::ensure_expected_inode;
-use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
+use super::publish_path_planning::{
+    resolve_visible_path_for_authorization, CompiledFilesystemOperation, PublishPathPlanningView,
+};
 use crate::authorize::Absence;
 use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
@@ -30,7 +32,13 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
 
     // Attributes belong to the resource, so a directory is as valid a target
     // as a file; nothing here looks at the inode kind.
-    let target = view.view.resolve_visible_path(absolute_path).await?;
+    let target = resolve_visible_path_for_authorization(
+        view,
+        absolute_path,
+        AccessRights::from_iter([AccessRight::Write]),
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await?;
     view.authorize(
         target.inode_id,
         AccessRights::from_iter([AccessRight::Write]),

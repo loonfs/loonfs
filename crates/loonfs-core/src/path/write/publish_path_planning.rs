@@ -67,18 +67,24 @@ pub(super) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
         .ok_or(CoreError::InodeNotFound(inode_id))
 }
 
-pub(super) async fn resolve_visible_directory<S: ObjectStore + ?Sized>(
+pub(super) async fn resolve_visible_path_for_authorization<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    inode_id: InodeId,
+    absolute_path: &AbsolutePath,
+    rights: AccessRights,
+    absence: Absence<'_>,
 ) -> Result<ResolvedVisiblePath> {
-    let resolved = resolve_visible_inode(view, inode_id).await?;
-    if resolved.inode_kind != InodeKind::Directory {
-        return Err(CoreError::ExpectedDirectory {
-            target: resolved.absolute_path,
-            kind: resolved.inode_kind,
-        });
+    match view.view.resolve_visible_path(absolute_path).await {
+        Err(
+            error @ CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
+                inode_id,
+                ..
+            }),
+        ) => {
+            view.authorize(inode_id, rights, absence).await?;
+            Err(error)
+        }
+        result => result,
     }
-    Ok(resolved)
 }
 
 pub(super) async fn resolve_visible_child<S: ObjectStore + ?Sized>(
@@ -281,6 +287,12 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(component.as_str().to_owned()))?;
                 if inode.inode_kind != InodeKind::Directory {
+                    view.authorize(
+                        child.child_inode_id,
+                        AccessRights::from_iter([AccessRight::Create]),
+                        Absence::Path(absolute_path.as_str()),
+                    )
+                    .await?;
                     return Err(CoreError::NonDirectoryPathComponent(
                         component.as_str().to_owned(),
                     ));
@@ -312,6 +324,7 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
 pub(super) async fn resolve_parent_directory<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     absolute_path: &AbsolutePath,
+    absence: Absence<'_>,
 ) -> Result<InodeId> {
     let Some(parent_path) = absolute_path.parent() else {
         return Ok(ROOT_INODE_ID);
@@ -319,8 +332,20 @@ pub(super) async fn resolve_parent_directory<S: ObjectStore + ?Sized>(
     if parent_path.is_root() {
         return Ok(ROOT_INODE_ID);
     }
-    let resolved = view.view.resolve_visible_path(&parent_path).await?;
+    let resolved = resolve_visible_path_for_authorization(
+        view,
+        &parent_path,
+        AccessRights::from_iter([AccessRight::Create]),
+        absence,
+    )
+    .await?;
     if resolved.inode_kind != InodeKind::Directory {
+        view.authorize(
+            resolved.inode_id,
+            AccessRights::from_iter([AccessRight::Create]),
+            absence,
+        )
+        .await?;
         return Err(CoreError::ExpectedDirectory {
             target: parent_path.as_str().to_owned(),
             kind: resolved.inode_kind,

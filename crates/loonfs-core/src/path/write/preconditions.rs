@@ -1,8 +1,8 @@
 //! Request preconditions against the candidate pre-state.
 
 use super::publish_path_planning::{
-    check_binding_generation, is_missing_visible_path, resolve_parent_directory,
-    resolve_visible_inode, PublishPathPlanningView,
+    check_binding_generation, is_missing_visible_path, resolve_visible_inode,
+    PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Authorizer, CommitAuthority};
 use crate::commit::CommitValidationError;
@@ -11,7 +11,7 @@ use crate::metadata::{MetadataView, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{
     AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingGeneration,
-    CommitPrecondition, InodeId,
+    CommitPrecondition, InodeId, InodeKind,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -83,22 +83,32 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 .await?;
             }
             CommitPrecondition::PathAbsence { path } => {
-                match resolve_parent_directory(&view, path).await {
+                let parent_path = path.parent().unwrap_or_else(AbsolutePath::root);
+                match view.view.resolve_visible_path(&parent_path).await {
                     Ok(parent) => {
                         view.authorize(
-                            parent,
+                            parent.inode_id,
                             AccessRights::from_iter([AccessRight::Read]),
                             Absence::Path(path.as_str()),
                         )
                         .await?;
+                        if parent.inode_kind != InodeKind::Directory {
+                            continue;
+                        }
                     }
                     Err(error) if is_missing_visible_path(&error) => continue,
-                    Err(
-                        CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
-                            ..
-                        })
-                        | CoreError::ExpectedDirectory { .. },
-                    ) => continue,
+                    Err(CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
+                        inode_id,
+                        ..
+                    })) => {
+                        view.authorize(
+                            inode_id,
+                            AccessRights::from_iter([AccessRight::Read]),
+                            Absence::Path(path.as_str()),
+                        )
+                        .await?;
+                        continue;
+                    }
                     Err(error) => return Err(error),
                 }
                 evaluate_binding(&view, path, None, None, precondition_index).await?;

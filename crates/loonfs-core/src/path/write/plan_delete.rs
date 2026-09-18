@@ -2,7 +2,8 @@
 
 use super::ensure_expected_inode;
 use super::publish_path_planning::{
-    source_binding, CompiledFilesystemOperation, PublishPathPlanningView,
+    resolve_visible_path_for_authorization, source_binding, CompiledFilesystemOperation,
+    PublishPathPlanningView,
 };
 use crate::authorize::Absence;
 use crate::commit::CommitOp;
@@ -21,7 +22,13 @@ pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
-    let resolved = view.view.resolve_visible_path(absolute_path).await?;
+    let resolved = resolve_visible_path_for_authorization(
+        view,
+        absolute_path,
+        AccessRights::from_iter([AccessRight::Remove]),
+        Absence::Path(absolute_path.as_str()),
+    )
+    .await?;
     let name = final_component(absolute_path)?;
     plan_delete(
         view,
