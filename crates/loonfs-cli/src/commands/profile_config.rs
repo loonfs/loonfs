@@ -10,7 +10,7 @@ use crate::args::{
 use crate::config::{validate_remote_client_config, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
-use loonfs_api::{ActorId, PrincipalId, SecretString, SubjectId};
+use loonfs_api::{ActorId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use loonfs_objectstore::{
     AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials,
 };
@@ -166,6 +166,7 @@ fn update_actor_spec(actor: ProfileUpdateActorArgs) -> CreateActorSpec {
     CreateActorSpec {
         id: actor.actor_id,
         subject_id: actor.subject_id,
+        principal_scope: actor.principal_scope,
         principals: actor.principals,
     }
 }
@@ -173,6 +174,7 @@ fn update_actor_spec(actor: ProfileUpdateActorArgs) -> CreateActorSpec {
 pub(super) fn has_update_flags(spec: &ProfileUpdateSpec) -> bool {
     spec.actor.id.is_some()
         || spec.actor.subject_id.is_some()
+        || spec.actor.principal_scope.is_some()
         || spec.actor.principals.is_some()
         || match &spec.provider {
             CreateProviderSpec::S3(args) => {
@@ -228,7 +230,15 @@ pub(super) struct CreateProfileSpec {
 struct CreateActorSpec {
     id: Option<String>,
     subject_id: Option<String>,
+    principal_scope: Option<String>,
     principals: Option<String>,
+}
+
+struct ProfileActor {
+    actor_id: Option<ActorId>,
+    subject_id: Option<SubjectId>,
+    principal_scope: Option<PrincipalScope>,
+    principals: Option<Vec<PrincipalId>>,
 }
 
 impl From<ProfileCreateActorArgs> for CreateActorSpec {
@@ -236,6 +246,7 @@ impl From<ProfileCreateActorArgs> for CreateActorSpec {
         Self {
             id: value.actor_id,
             subject_id: value.subject_id,
+            principal_scope: value.principal_scope,
             principals: value.principals,
         }
     }
@@ -474,6 +485,7 @@ pub(super) fn build_profile_interactive(
             actor: CreateActorSpec {
                 id: None,
                 subject_id: None,
+                principal_scope: None,
                 principals: None,
             },
         },
@@ -486,58 +498,35 @@ pub(super) fn build_profile_from_create_spec(
     spec: CreateProfileSpec,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
-    let actor = parse_profile_actor_id(spec.actor.id.as_deref())?;
-    let subject_id = parse_profile_subject_id(spec.actor.subject_id.as_deref())?;
-    let principals = parse_profile_principals(spec.actor.principals.as_deref())?;
+    let actor = ProfileActor {
+        actor_id: parse_profile_actor_id(spec.actor.id.as_deref())?,
+        subject_id: parse_profile_subject_id(spec.actor.subject_id.as_deref())?,
+        principal_scope: parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?,
+        principals: parse_profile_principals(spec.actor.principals.as_deref())?,
+    };
+    validate_profile_subject_fields(actor.principal_scope.as_ref(), actor.principals.as_deref())?;
     let source = FieldSource::from_runtime(runtime);
     match spec.provider {
-        CreateProviderSpec::Local(spec) => embedded_profile(
-            local_store(None, &spec, source)?,
-            actor,
-            subject_id,
-            principals,
-        ),
-        CreateProviderSpec::S3(spec) => embedded_profile(
-            s3_store(None, &spec, source)?,
-            actor,
-            subject_id,
-            principals,
-        ),
-        CreateProviderSpec::R2(spec) => embedded_profile(
-            r2_store(None, &spec, source)?,
-            actor,
-            subject_id,
-            principals,
-        ),
-        CreateProviderSpec::Gcs(spec) => embedded_profile(
-            gcs_store(None, &spec, source)?,
-            actor,
-            subject_id,
-            principals,
-        ),
-        CreateProviderSpec::Azure(spec) => embedded_profile(
-            azure_store(None, &spec, source)?,
-            actor,
-            subject_id,
-            principals,
-        ),
-        CreateProviderSpec::Remote(spec) => {
-            remote_profile(name, None, &spec, actor, subject_id, principals, source)
+        CreateProviderSpec::Local(spec) => {
+            embedded_profile(local_store(None, &spec, source)?, actor)
         }
+        CreateProviderSpec::S3(spec) => embedded_profile(s3_store(None, &spec, source)?, actor),
+        CreateProviderSpec::R2(spec) => embedded_profile(r2_store(None, &spec, source)?, actor),
+        CreateProviderSpec::Gcs(spec) => embedded_profile(gcs_store(None, &spec, source)?, actor),
+        CreateProviderSpec::Azure(spec) => {
+            embedded_profile(azure_store(None, &spec, source)?, actor)
+        }
+        CreateProviderSpec::Remote(spec) => remote_profile(name, None, &spec, actor, source),
     }
 }
 
-fn embedded_profile(
-    store: StoreConfig,
-    actor: Option<ActorId>,
-    subject_id: Option<SubjectId>,
-    principals: Option<Vec<PrincipalId>>,
-) -> Result<ProfileConfig, CliError> {
+fn embedded_profile(store: StoreConfig, actor: ProfileActor) -> Result<ProfileConfig, CliError> {
     Ok(ProfileConfig::Embedded {
         store,
-        actor_id: actor,
-        subject_id,
-        principals,
+        actor_id: actor.actor_id,
+        subject_id: actor.subject_id,
+        principal_scope: actor.principal_scope,
+        principals: actor.principals,
         default_namespace: None,
         writer_id: None,
     })
@@ -955,9 +944,7 @@ fn remote_profile(
     name: &str,
     current: Option<&ProfileConfig>,
     args: &ProfileCreateRemoteSpec,
-    actor: Option<ActorId>,
-    subject_id: Option<SubjectId>,
-    principals: Option<Vec<PrincipalId>>,
+    actor: ProfileActor,
     source: FieldSource,
 ) -> Result<ProfileConfig, CliError> {
     let current = current
@@ -1012,9 +999,10 @@ fn remote_profile(
     )?;
     Ok(ProfileConfig::Remote {
         server_url,
-        actor_id: actor,
-        subject_id,
-        principals,
+        actor_id: actor.actor_id,
+        subject_id: actor.subject_id,
+        principal_scope: actor.principal_scope,
+        principals: actor.principals,
         default_namespace: current.and_then(|value| value.1.as_ref()).cloned(),
         auth_token,
         ca_cert_path,
@@ -1041,6 +1029,19 @@ fn parse_profile_subject_id(id: Option<&str>) -> Result<Option<SubjectId>, CliEr
     .transpose()
 }
 
+fn parse_profile_principal_scope(
+    principal_scope: Option<&str>,
+) -> Result<Option<PrincipalScope>, CliError> {
+    principal_scope
+        .map(|principal_scope| {
+            PrincipalScope::parse(principal_scope).map_err(|error| {
+                CliError::invalid_request(format!("invalid --principal-scope: {error}"))
+                    .with_param("--principal-scope")
+            })
+        })
+        .transpose()
+}
+
 fn parse_profile_principals(
     principals: Option<&str>,
 ) -> Result<Option<Vec<PrincipalId>>, CliError> {
@@ -1057,6 +1058,23 @@ fn parse_profile_principals(
                 .collect()
         })
         .transpose()
+}
+
+fn validate_profile_subject_fields(
+    principal_scope: Option<&PrincipalScope>,
+    principals: Option<&[PrincipalId]>,
+) -> Result<(), CliError> {
+    match (principal_scope, principals) {
+        (None, Some(_)) => Err(CliError::invalid_request(
+            "--principal-scope is required with --principals",
+        )
+        .with_param("--principal-scope")),
+        (Some(_), None) => Err(CliError::invalid_request(
+            "--principal-scope requires --principals",
+        )
+        .with_param("--principals")),
+        (Some(_), Some(_)) | (None, None) => Ok(()),
+    }
 }
 
 fn updated_actor(
@@ -1120,6 +1138,7 @@ pub(super) fn apply_update_flags(
                 store,
                 actor_id: actor,
                 subject_id,
+                principal_scope,
                 principals,
                 default_namespace,
                 writer_id,
@@ -1144,13 +1163,22 @@ pub(super) fn apply_update_flags(
                 }
                 _ => return Err(provider_mismatch(name, stored_provider, requested_provider)),
             };
+            let updated_principal_scope =
+                parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?
+                    .or(principal_scope);
+            let updated_principals =
+                parse_profile_principals(spec.actor.principals.as_deref())?.or(principals);
+            validate_profile_subject_fields(
+                updated_principal_scope.as_ref(),
+                updated_principals.as_deref(),
+            )?;
             Ok(ProfileConfig::Embedded {
                 store,
                 actor_id: updated_actor(actor, &spec.actor)?,
                 subject_id: parse_profile_subject_id(spec.actor.subject_id.as_deref())?
                     .or(subject_id),
-                principals: parse_profile_principals(spec.actor.principals.as_deref())?
-                    .or(principals),
+                principal_scope: updated_principal_scope,
+                principals: updated_principals,
                 default_namespace,
                 writer_id,
             })
@@ -1160,6 +1188,7 @@ pub(super) fn apply_update_flags(
                 server_url,
                 actor_id: actor,
                 subject_id,
+                principal_scope,
                 principals,
                 default_namespace,
                 auth_token,
@@ -1170,12 +1199,20 @@ pub(super) fn apply_update_flags(
             let updated_actor = updated_actor(actor.clone(), &spec.actor)?;
             let updated_subject_id = parse_profile_subject_id(spec.actor.subject_id.as_deref())?
                 .or_else(|| subject_id.clone());
+            let updated_principal_scope =
+                parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?
+                    .or_else(|| principal_scope.clone());
             let updated_principals = parse_profile_principals(spec.actor.principals.as_deref())?
                 .or_else(|| principals.clone());
+            validate_profile_subject_fields(
+                updated_principal_scope.as_ref(),
+                updated_principals.as_deref(),
+            )?;
             let current = ProfileConfig::Remote {
                 server_url,
                 actor_id: actor,
                 subject_id,
+                principal_scope,
                 principals,
                 default_namespace,
                 auth_token,
@@ -1185,9 +1222,12 @@ pub(super) fn apply_update_flags(
                 name,
                 Some(&current),
                 args,
-                updated_actor,
-                updated_subject_id,
-                updated_principals,
+                ProfileActor {
+                    actor_id: updated_actor,
+                    subject_id: updated_subject_id,
+                    principal_scope: updated_principal_scope,
+                    principals: updated_principals,
+                },
                 FieldSource::Fail,
             )
         }
@@ -1293,6 +1333,7 @@ pub(super) fn apply_update_interactive(
             store,
             actor_id: actor,
             subject_id,
+            principal_scope,
             principals,
             default_namespace,
             writer_id,
@@ -1328,6 +1369,7 @@ pub(super) fn apply_update_interactive(
                 store,
                 actor_id: actor,
                 subject_id,
+                principal_scope,
                 principals,
                 default_namespace,
                 writer_id,
@@ -1340,9 +1382,12 @@ pub(super) fn apply_update_interactive(
             name,
             Some(current),
             &ProfileCreateRemoteSpec::default(),
-            actor.clone(),
-            current.subject_id(),
-            current.principals(),
+            ProfileActor {
+                actor_id: actor.clone(),
+                subject_id: current.subject_id(),
+                principal_scope: current.principal_scope(),
+                principals: current.principals(),
+            },
             FieldSource::Prompt,
         ),
     }
@@ -1707,6 +1752,7 @@ mod tests {
             },
             actor_id: None,
             subject_id: None,
+            principal_scope: None,
             principals: None,
             default_namespace: None,
             writer_id: None,
@@ -1727,6 +1773,7 @@ mod tests {
             server_url: "http://127.0.0.1:9400".to_owned(),
             actor_id: None,
             subject_id: None,
+            principal_scope: None,
             principals: None,
             default_namespace: None,
             auth_token: None,
@@ -1757,6 +1804,7 @@ mod tests {
             },
             actor_id: None,
             subject_id: None,
+            principal_scope: None,
             principals: None,
             default_namespace: None,
             writer_id: None,
@@ -1783,6 +1831,7 @@ mod tests {
             server_url: "https://example.internal".to_owned(),
             actor_id: None,
             subject_id: None,
+            principal_scope: None,
             principals: None,
             default_namespace: None,
             auth_token: None,
@@ -1820,6 +1869,7 @@ mod tests {
             },
             actor_id: None,
             subject_id: None,
+            principal_scope: None,
             principals: None,
             default_namespace: None,
             writer_id: None,
@@ -1867,6 +1917,7 @@ mod tests {
         CreateActorSpec {
             id: None,
             subject_id: None,
+            principal_scope: None,
             principals: None,
         }
     }

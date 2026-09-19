@@ -169,7 +169,7 @@ The rights are `read`, `history`, `write`, `create`, `remove`, `share`, `manage`
 
 An inode begins at access revision `0` with no boundary and no grants; that initial state has no persisted access row. The root inode of an ACL namespace is the exception: it begins with a row at revision `0` holding the manifest's `root_grants`, materialized at genesis like the root inode row itself. Each accepted update increments `access_revision_no` by one and stores the complete resulting state. A row with no boundary and no grants is a real revision, distinguishable from an inode whose access was never changed.
 
-Each namespace records an access mode in its manifest, fixed at creation: `unrestricted`, or `acl` with a `principal_scope` naming the identity domain of its principal ids and the `root_grants` the root inode holds at genesis, normally `admin` for each initial administrator. An inode's effective rights for a set of principals are the union of those principals' grants on the inode's own row and on each ancestor's row, walking current parent bindings and stopping after a row whose boundary is set or at the root. A deletion root has no current binding; its tombstone's saved parent supplies that edge. Revisiting an inode during the walk is namespace corruption. `admin` on the root row confers every right everywhere and is never inherited. The `update_access` operation replaces an inode's row; the API specification defines it.
+Each namespace records an access mode in its manifest, fixed at creation: `unrestricted`, or `acl` with a `principal_scope` naming the identity domain of its principal ids and the `root_grants` the root inode holds at genesis, normally `admin` for each initial administrator. Before authorization reads a grant, the request's subject scope must match this value. A fork copies the source access mode and scope. An inode's effective rights for a set of principals are the union of those principals' grants on the inode's own row and on each ancestor's row, walking current parent bindings and stopping after a row whose boundary is set or at the root. A deletion root has no current binding; its tombstone's saved parent supplies that edge. Revisiting an inode during the walk is namespace corruption. `admin` on the root row confers every right everywhere and is never inherited. The `update_access` operation replaces an inode's row; the API specification defines it.
 
 ## 2. Objects and references
 
@@ -1379,7 +1379,7 @@ The fingerprint is the SHA-256 of compact UTF-8 JSON with the following top-leve
 
 The layout above is a schema illustration. Actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present and is `[]` for an empty list; `message` and `subject_id` are always present and are `null` when absent.
 
-The `namespace_id`, `actor_id`, `subject_id`, message, operation order, and caller preconditions are significant. A changed `actor_id` is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The commit ID itself, writer epoch, and committed timestamp are excluded.
+The `namespace_id`, `actor_id`, `subject_id`, message, operation order, and caller preconditions are significant. A changed `actor_id` is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The principal scope is excluded because the namespace has one scope and refuses every other. The commit ID itself, writer epoch, and committed timestamp are excluded.
 
 ### B.1 Operation fields
 

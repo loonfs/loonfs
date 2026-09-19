@@ -12,7 +12,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
 use loonfs_api::{
-    AbsolutePath, ActorId, NamespaceId, PrincipalId, PrincipalSet, Subject, SubjectId,
+    AbsolutePath, ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, Subject,
+    SubjectId,
 };
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -131,7 +132,9 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
             ApiResponseError::new(ErrorCode::InvalidRequest, &message).with_param(header)
         };
         let Some(value) = parts.headers.get("Loonfs-Principals") else {
-            if parts.headers.contains_key("Loonfs-Subject") {
+            if parts.headers.contains_key("Loonfs-Subject")
+                || parts.headers.contains_key("Loonfs-Principal-Scope")
+            {
                 return Err(invalid(
                     "Loonfs-Principals",
                     "missing required header Loonfs-Principals".to_owned(),
@@ -147,6 +150,15 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
             .map_err(|error| invalid("Loonfs-Principals", error.to_string()))?;
         let principals = PrincipalSet::new(principals)
             .map_err(|error| invalid("Loonfs-Principals", error.to_string()))?;
+        let principal_scope = parts.headers.get("Loonfs-Principal-Scope").ok_or_else(|| {
+            invalid(
+                "Loonfs-Principal-Scope",
+                "missing required header Loonfs-Principal-Scope".to_owned(),
+            )
+        })?;
+        let principal_scope = String::from_utf8_lossy(principal_scope.as_bytes());
+        let principal_scope = PrincipalScope::parse(&principal_scope)
+            .map_err(|error| invalid("Loonfs-Principal-Scope", error.to_string()))?;
         let (header, value) = if let Some(value) = parts.headers.get("Loonfs-Subject") {
             ("Loonfs-Subject", value)
         } else if let Some(value) = parts.headers.get("Loonfs-Actor") {
@@ -161,6 +173,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
         let subject_id =
             SubjectId::parse(&value).map_err(|error| invalid(header, error.to_string()))?;
         Ok(Self(Some(Subject {
+            principal_scope,
             subject_id,
             principals,
         })))

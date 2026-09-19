@@ -575,6 +575,17 @@ def _byte_pattern(pattern: BytePattern) -> bytes:
     return bytes(offset % pattern.modulus for offset in range(pattern.length))
 
 
+@pytest.mark.parametrize(
+    "options",
+    [{"principals": "prn_team"}, {"principal_scope": "org_demo"}],
+)
+def test_server_client_rejects_a_partial_subject_context(options: dict[str, str]) -> None:
+    with pytest.raises(
+        ValueError, match="principal_scope and principals must be configured together"
+    ):
+        LoonFS(base_url="http://127.0.0.1", **options)
+
+
 def _checksum(algorithm: str, content: bytes) -> Checksum:
     if algorithm == "sha256":
         value = hashlib.sha256(content).hexdigest()
@@ -1589,6 +1600,7 @@ def _proxy_acl(request: ProxyRequest, expected: ProxyExpected) -> None:
         return ProxyAuthorization(
             actor_id=request.actor_id,
             subject_id=acl.member_subject_id,
+            principal_scope=acl.principal_scope,
             principals=[acl.member],
         )
 
@@ -1598,7 +1610,10 @@ def _proxy_acl(request: ProxyRequest, expected: ProxyExpected) -> None:
     with _serve_asgi(app, "loonfs-python-acl-proxy") as base_url:
         with httpx.Client(base_url=base_url) as client:
             commits = f"/v0/namespace-aliases/{acl.namespace_alias}/commits"
-            headers = {"Loonfs-Principals": acl.browser_principals}
+            headers = {
+                "Loonfs-Principal-Scope": acl.principal_scope,
+                "Loonfs-Principals": acl.browser_principals,
+            }
             stamped_response = client.post(
                 commits,
                 headers=headers,

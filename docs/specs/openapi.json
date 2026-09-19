@@ -8821,6 +8821,11 @@
       "optional": true
     },
     {
+      "header": "Loonfs-Principal-Scope",
+      "name": "principalScope",
+      "optional": true
+    },
+    {
       "header": "Loonfs-Principals",
       "name": "principals",
       "optional": true

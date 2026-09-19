@@ -252,6 +252,9 @@ export class LoonFSClient extends GeneratedLoonFSClient {
     private _transferFiles: FilesClient | undefined;
 
     constructor(options: LoonFSClient.Options) {
+        if ((options.principalScope === undefined) !== (options.principals === undefined)) {
+            throw new Error("principalScope and principals must be configured together");
+        }
         super({
             ...options,
             environment: options.baseUrl,

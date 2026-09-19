@@ -166,6 +166,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
     let destination = NamespaceId::parse("destination").expect("destination");
     let principal = PrincipalId::parse("owner").expect("principal");
     let subject = Subject {
+        principal_scope: PrincipalScope::parse("scope").expect("scope"),
         subject_id: SubjectId::parse("owner").expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([principal.clone()])).expect("principals"),
     };

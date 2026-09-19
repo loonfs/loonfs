@@ -18,9 +18,10 @@ type RouteContext struct {
 }
 
 type Authorization struct {
-	ActorID    string // Sent upstream in Loonfs-Actor when non-empty.
-	SubjectID  string
-	Principals []string
+	ActorID        string // Sent upstream in Loonfs-Actor when non-empty.
+	SubjectID      string
+	PrincipalScope string
+	Principals     []string
 }
 
 // Refusal is returned from Authorize as the error to send the refusal back.
@@ -184,6 +185,10 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 			return
 		}
 	}
+	if (authorization.PrincipalScope == "") != (authorization.Principals == nil) {
+		responseWriter.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	outgoing := request.Clone(request.Context())
 	outgoing.URL.Scheme = h.target.Scheme
@@ -204,6 +209,7 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 	}
 	outgoing.Header.Del("Loonfs-Actor")
 	outgoing.Header.Del("Loonfs-Subject")
+	outgoing.Header.Del("Loonfs-Principal-Scope")
 	outgoing.Header.Del("Loonfs-Principals")
 	if authorization.ActorID != "" {
 		outgoing.Header.Set("Loonfs-Actor", authorization.ActorID)
@@ -211,6 +217,9 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 
 	if authorization.SubjectID != "" {
 		outgoing.Header.Set("Loonfs-Subject", authorization.SubjectID)
+	}
+	if authorization.PrincipalScope != "" {
+		outgoing.Header.Set("Loonfs-Principal-Scope", authorization.PrincipalScope)
 	}
 	if authorization.Principals != nil {
 		outgoing.Header.Set("Loonfs-Principals", strings.Join(authorization.Principals, ","))

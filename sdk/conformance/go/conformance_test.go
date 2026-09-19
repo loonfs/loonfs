@@ -2282,9 +2282,10 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 		NamespaceAliases: map[string]string{acl.NamespaceAlias: acl.NamespaceID},
 		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
 			return loonfsproxy.Authorization{
-				ActorID:    string(request.ActorID),
-				SubjectID:  acl.MemberSubjectID,
-				Principals: []string{acl.Member},
+				ActorID:        string(request.ActorID),
+				SubjectID:      acl.MemberSubjectID,
+				PrincipalScope: acl.PrincipalScope,
+				Principals:     []string{acl.Member},
 			}, nil
 		},
 	})
@@ -2294,7 +2295,10 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 	proxyServer := httptest.NewServer(proxyHandler)
 	defer proxyServer.Close()
 	namespaceAliasBaseURL := proxyServer.URL + "/v0/namespace-aliases/" + url.PathEscape(acl.NamespaceAlias)
-	headers := http.Header{"Loonfs-Principals": []string{acl.BrowserPrincipals}}
+	headers := http.Header{
+		"Loonfs-Principal-Scope": []string{acl.PrincipalScope},
+		"Loonfs-Principals":      []string{acl.BrowserPrincipals},
+	}
 	stamped := proxyCreateCommit(t, proxyServer.Client(), namespaceAliasBaseURL,
 		createDirectoryCommit(acl.NamespaceID, acl.CommitID, acl.Directory, nil), request.ActorID, headers)
 	if int64(stamped.CommittedSeq) != expected.ACLStampedCommittedSeq {

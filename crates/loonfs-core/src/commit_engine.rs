@@ -886,8 +886,8 @@ mod tests {
     use crate::namespace::control::load_namespace_read_state;
     use futures::StreamExt;
     use loonfs_api::{
-        ChangeSeq, ContentRef, ContentStoreId, PrincipalId, PrincipalSet, Subject, SubjectId,
-        WriterEpoch,
+        ChangeSeq, ContentRef, ContentStoreId, PrincipalId, PrincipalScope, PrincipalSet, Subject,
+        SubjectId, WriterEpoch,
     };
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -971,6 +971,7 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         candidate.request.subject = Some(Subject {
+            principal_scope: PrincipalScope::parse("scope").expect("scope"),
             subject_id: SubjectId::parse("subject").expect("subject"),
             principals: PrincipalSet::new(principals).expect("principals"),
         });

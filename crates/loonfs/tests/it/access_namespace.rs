@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 fn subject(name: &str, principal: &str) -> Subject {
     Subject {
+        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(name).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
@@ -174,6 +175,64 @@ async fn commit_as(
             .with_subject(subject),
         )
         .await
+}
+
+#[tokio::test]
+async fn subject_scope_is_enforced_only_for_acl_namespaces() {
+    let (_temp_dir, writer, namespace) = create_namespace().await;
+    let mut wrong_scope = subject("root", "prn_root");
+    wrong_scope.principal_scope = PrincipalScope::parse("org_other").expect("scope");
+    let expected_message =
+        "subject principal scope `org_other` does not match namespace principal scope `org_demo`";
+    let error = writer
+        .reader()
+        .as_subject(wrong_scope.clone())
+        .get_path_entry(&namespace, "/", StatPathOptions::default())
+        .await
+        .expect_err("wrong-scope read");
+    assert_eq!(error.code(), ErrorCode::Forbidden);
+    assert_eq!(error.to_string(), expected_message);
+    let error = commit_as(
+        &writer,
+        &namespace,
+        wrong_scope.clone(),
+        create_directory("/wrong"),
+    )
+    .await
+    .expect_err("wrong-scope commit");
+    assert_eq!(error.code(), ErrorCode::Forbidden);
+    assert_eq!(error.to_string(), expected_message);
+    commit_as(
+        &writer,
+        &namespace,
+        subject("root", "prn_root"),
+        create_directory("/matching"),
+    )
+    .await
+    .expect("matching-scope commit");
+
+    let unrestricted = namespace_id("unrestricted-scope");
+    writer
+        .create_namespace(
+            &unrestricted,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("unrestricted namespace");
+    writer
+        .reader()
+        .as_subject(wrong_scope.clone())
+        .get_path_entry(&unrestricted, "/", StatPathOptions::default())
+        .await
+        .expect("unrestricted read");
+    commit_as(
+        &writer,
+        &unrestricted,
+        wrong_scope,
+        create_directory("/accepted"),
+    )
+    .await
+    .expect("unrestricted commit");
 }
 
 fn create_directory(path: &str) -> FilesystemOperation {

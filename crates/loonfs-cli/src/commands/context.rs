@@ -174,6 +174,7 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
                 profile,
                 &actor,
                 selector.subject_id.as_deref(),
+                selector.principal_scope.as_deref(),
                 selector.principals.as_deref(),
             )
             .map_err(attribute)?
@@ -237,6 +238,7 @@ async fn resolve_command_context_with_actor(
         profile,
         &actor,
         target.subject.subject_id.as_deref(),
+        target.subject.principal_scope.as_deref(),
         target.subject.principals.as_deref(),
     )
     .map_err(&attribute)?;

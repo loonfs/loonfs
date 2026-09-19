@@ -617,25 +617,32 @@ Responses expose attribution through these fields:
 
 ### Subject and principals
 
-`Loonfs-Principals` carries comma-separated principal ids without whitespace.
+`Loonfs-Principal-Scope` identifies the domain that issued the subject's
+principal ids. `Loonfs-Principals` carries comma-separated principal ids without whitespace.
 Principal, subject, and scope ids never contain a comma, so the list is
 unambiguous.
 `Loonfs-Subject` identifies the subject the request acts as and defaults to
 `Loonfs-Actor`. The principal count is capped by the advertised
-`access.max_principals` limit. `Loonfs-Subject` without `Loonfs-Principals`
-answers `invalid_request` with `param` set to `Loonfs-Principals`. Omitting both
-headers uses the token holder's service authority; `Loonfs-Actor` alone remains
-valid for service attribution. An unrestricted namespace does not enforce
-principal grants, but still rejects an incomplete subject context.
+`access.max_principals` limit. `Loonfs-Subject` or `Loonfs-Principal-Scope`
+without `Loonfs-Principals` answers `invalid_request` with `param` set to
+`Loonfs-Principals`. Principals without scope answer `invalid_request` with
+`param` set to `Loonfs-Principal-Scope`. Omitting all three headers uses the
+token holder's service authority; `Loonfs-Actor` alone remains valid for service
+attribution. An unrestricted namespace ignores a complete subject context, but
+the HTTP binding still rejects an incomplete one.
 In an ACL namespace, per-subject reads, commits, and upload operations require
-`Loonfs-Principals`; its absence answers `invalid_request` with `param` set to
-`Loonfs-Principals`, while administrator-only surfaces and maintenance act as
-the token holder without principals. When principals are present, a subject or actor is required.
+scope and principals. A subject scope that differs from the namespace's
+`principal_scope` answers `forbidden`, naming the expected and actual scopes,
+before any grant is read. Administrator-only surfaces and maintenance act as
+the token holder when the subject context is absent. When principals are
+present, a subject or actor is required.
 These ids are opaque and reach access logs like the actor id; use internal ids,
 never email addresses or display names.
 
 The subject id is part of a commit's semantic identity. Retrying a commit id
-from another subject answers `commit_id_reuse_conflict`.
+from another subject answers `commit_id_reuse_conflict`. The scope is not part
+of the fingerprint or upload ownership: a namespace has one scope and refuses
+subjects from every other scope.
 
 ### 5.2 Commit responses and safe retry
 
@@ -800,11 +807,12 @@ first. Retries and replayed requests must carry the same header value, so saved
 requests must keep the actor beside the body. Request headers reach access logs,
 so the value must be an opaque identifier, never an email or a display name.
 
-`Loonfs-Principals` and `Loonfs-Subject` are optional headers on every operation
-in the transport schema. Their requirements are enforced while handling the
-request rather than by the operation's schema. When `Loonfs-Subject` is
-present, `Loonfs-Principals` is required. When principals are present, the
-subject id defaults to the actor.
+`Loonfs-Principal-Scope`, `Loonfs-Principals`, and `Loonfs-Subject` are optional
+headers on every operation in the transport schema. Their requirements are
+enforced while handling the request rather than by the operation's schema.
+Scope and principals must be present together. When `Loonfs-Subject` is
+present, they are required. When principals are present, the subject id
+defaults to the actor.
 
 Request bodies reject unknown fields, at every level of nesting, with 400
 `invalid_request`. Most request fields are optional and several of those are
@@ -2392,8 +2400,9 @@ byte path. In v0, uploads are whole-file uploads: the staged body is the
 complete file content, not a separate metadata document or multipart strategy.
 
 A session in an ACL namespace belongs to the subject that opened it. Every
-upload operation requires principals; any other subject receives
-`upload_not_found`. An unrestricted namespace records no subject ownership.
+upload operation requires the namespace's scope and principals; any other
+subject receives `upload_not_found`. An unrestricted namespace records no
+subject ownership.
 
 The semantic rule is:
 

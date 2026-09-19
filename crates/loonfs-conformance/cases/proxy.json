@@ -1,6 +1,6 @@
 {
   "name": "proxy",
-  "intent": "A proxy maps namespace aliases, adds server credentials, streams bodies, rejects routes outside the proxy API, and lets an authorization hook refuse requests or replace browser-claimed actor headers and principals with the hook's.",
+  "intent": "A proxy maps namespace aliases, adds server credentials, streams bodies, rejects routes outside the proxy API, and lets an authorization hook refuse requests or replace browser-claimed actor, subject, scope, and principal headers with the hook's.",
   "request": {
     "namespace_alias": "team-files",
     "namespace_id": "conf-proxy-namespace",

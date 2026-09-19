@@ -496,10 +496,16 @@ class FilesClient(_GeneratedFilesClient):
             )
 
 
+def _validate_subject_context(options: typing.Mapping[str, typing.Any]) -> None:
+    if (options.get("principal_scope") is None) != (options.get("principals") is None):
+        raise ValueError("principal_scope and principals must be configured together")
+
+
 class LoonFS(_GeneratedLoonFS):
     """The generated client with ``files.upload`` and ``files.download``."""
 
     def __init__(self, **kwargs: typing.Any) -> None:
+        _validate_subject_context(kwargs)
         super().__init__(**kwargs)
         self._transfer_files: FilesClient | None = None
 
@@ -888,6 +894,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
 
 class AsyncLoonFS(_GeneratedAsyncLoonFS):
     def __init__(self, **kwargs: typing.Any) -> None:
+        _validate_subject_context(kwargs)
         super().__init__(**kwargs)
         self._transfer_files: AsyncFilesClient | None = None
 

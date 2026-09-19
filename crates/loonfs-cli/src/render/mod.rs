@@ -487,6 +487,7 @@ mod tests {
                 },
                 actor_id: None,
                 subject_id: None,
+                principal_scope: None,
                 principals: None,
                 default_namespace: Some("demo".to_owned()),
                 writer_id: None,

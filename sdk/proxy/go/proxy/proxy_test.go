@@ -15,6 +15,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		contentType string
 		actor       string
 		subject     string
+		scope       string
 		principals  string
 	}
 	forwarded := make(chan forwardedRequest, 3)
@@ -23,7 +24,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		if err != nil {
 			t.Errorf("read forwarded body: %v", err)
 		}
-		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor"), r.Header.Get("Loonfs-Subject"), r.Header.Get("Loonfs-Principals")}
+		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor"), r.Header.Get("Loonfs-Subject"), r.Header.Get("Loonfs-Principal-Scope"), r.Header.Get("Loonfs-Principals")}
 		w.WriteHeader(http.StatusAccepted)
 	})}
 	refusal := &Refusal{Status: http.StatusForbidden, ContentType: "application/json", Body: []byte(`{"code":"unauthorized","message":"refused"}`)}
@@ -39,7 +40,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 			if r.Header.Get("X-Refuse") != "" {
 				return Authorization{}, refusal
 			}
-			return Authorization{ActorID: "proxy-actor", SubjectID: "proxy-subject", Principals: []string{"prn_ada", "prn_team"}}, nil
+			return Authorization{ActorID: "proxy-actor", SubjectID: "proxy-subject", PrincipalScope: "org_proxy", Principals: []string{"prn_ada", "prn_team"}}, nil
 		},
 	})
 	if err != nil {
@@ -61,6 +62,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 			request.Header.Set("Content-Type", "text/plain")
 			request.Header.Set("Loonfs-Actor", "browser-actor")
 			request.Header.Set("Loonfs-Subject", "browser-subject")
+			request.Header.Set("Loonfs-Principal-Scope", "org_browser")
 			request.Header.Set("Loonfs-Principals", "prn_browser")
 			if testCase.refuse {
 				request.Header.Set("X-Refuse", "1")
@@ -79,11 +81,50 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		t.Fatalf("forwarded request count = %d, want 1", len(forwarded))
 	}
 	actual := <-forwarded
-	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" || actual.subject != "proxy-subject" || actual.principals != "prn_ada,prn_team" {
+	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" || actual.subject != "proxy-subject" || actual.scope != "org_proxy" || actual.principals != "prn_ada,prn_team" {
 		t.Errorf("forwarded request = %#v", actual)
 	}
 	if string(actual.body) != `{"expected_head_seq":9007199254740993}` {
 		t.Errorf("forwarded body = %s", actual.body)
+	}
+}
+
+func TestAuthorizeRejectsPartialSubjectContextBeforeForwarding(t *testing.T) {
+	forwarded := 0
+	upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		forwarded++
+		w.WriteHeader(http.StatusAccepted)
+	})}
+	tests := []struct {
+		name          string
+		authorization Authorization
+	}{
+		{"principals without a scope", Authorization{Principals: []string{"prn_team"}}},
+		{"scope without principals", Authorization{PrincipalScope: "org_demo"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			proxy, err := NewHandler(Config{
+				ServerBaseURL: "http://upstream.invalid",
+				Token:         "server-token",
+				Authorize: func(_ *http.Request, _ RouteContext) (Authorization, error) {
+					return test.authorization, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("create proxy: %v", err)
+			}
+			proxy.(*handler).transport = upstream
+			response := httptest.NewRecorder()
+			proxy.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v0/capabilities", nil))
+			if response.Code != http.StatusInternalServerError {
+				t.Errorf("response status = %d, want %d", response.Code, http.StatusInternalServerError)
+			}
+		})
+	}
+	if forwarded != 0 {
+		t.Errorf("forwarded request count = %d, want 0", forwarded)
 	}
 }
 

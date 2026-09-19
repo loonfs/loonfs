@@ -1168,6 +1168,28 @@ const environmentSkip = baseUrl == null || baseUrl === "" ? RUNNER_SKIP : undefi
 let harness: Harness | undefined;
 let cases: Map<string, ConformanceCase> | undefined;
 
+test("server client rejects a partial subject context", () => {
+    const expected = /principalScope and principals must be configured together/;
+    assert.throws(
+        () =>
+            new LoonFSClient({
+                baseUrl: "http://127.0.0.1",
+                token: "unused-token",
+                principals: "prn_team",
+            }),
+        expected,
+    );
+    assert.throws(
+        () =>
+            new LoonFSClient({
+                baseUrl: "http://127.0.0.1",
+                token: "unused-token",
+                principalScope: "org_demo",
+            }),
+        expected,
+    );
+});
+
 if (environmentSkip === undefined) {
     const configuredBaseUrl = requiredEnvironment("LOONFS_CONFORMANCE_URL");
     const token = requiredEnvironment("LOONFS_CONFORMANCE_TOKEN");
@@ -2235,6 +2257,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             authorize: () => ({
                 actorId: request.actor_id,
                 subjectId: acl.member_subject_id,
+                principalScope: acl.principal_scope,
                 principals: [acl.member],
             }),
         }),
@@ -2243,6 +2266,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const aclCommits = `${aclProxy.baseUrl}/v0/namespace-aliases/${encodeURIComponent(acl.namespace_alias)}/commits`;
     const aclHeaders = {
         "content-type": "application/json",
+        "Loonfs-Principal-Scope": acl.principal_scope,
         "Loonfs-Principals": acl.browser_principals,
     };
     const aclStamped = await proxyJson<LoonFS.Commit>(

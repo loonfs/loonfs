@@ -18,6 +18,7 @@ use tower::ServiceExt as _;
 
 fn subject(principal: &str) -> Subject {
     Subject {
+        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
@@ -44,6 +45,7 @@ fn request(method: &str, uri: &str, body: Option<String>) -> Request<Body> {
         .header("authorization", "Bearer test-token")
         .header("Loonfs-Actor", "hosted-test")
         .header("Loonfs-Subject", "stranger")
+        .header("Loonfs-Principal-Scope", "org_demo")
         .header("Loonfs-Principals", "stranger");
     if body.is_some() {
         request = request.header("content-type", "application/json");

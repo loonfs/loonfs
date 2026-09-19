@@ -293,6 +293,7 @@ async fn access_rows_survive_a_flush_and_the_counter_keeps_going() {
 
 fn subject(id: &str, principals: &[&str]) -> loonfs_api::Subject {
     loonfs_api::Subject {
+        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: loonfs_api::SubjectId::parse(id).expect("subject id"),
         principals: loonfs_api::PrincipalSet::new(
             principals
@@ -801,6 +802,40 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
 }
 
 #[tokio::test]
+async fn a_replay_from_another_principal_scope_is_refused() {
+    let (_temp_dir, store, namespace_id, context) = setup().await;
+    let request = CommitRequest::single(
+        CommitId::parse("scope-replay").expect("commit id"),
+        loonfs_test_support::test_actor(),
+        None,
+        create_directory("/docs"),
+    )
+    .with_subject(subject("root", &["prn_root"]));
+    submit_commit(&store, &namespace_id, request.clone(), &context)
+        .await
+        .expect("commit");
+
+    let mut wrong_scope = subject("root", &["prn_root"]);
+    wrong_scope.principal_scope = PrincipalScope::parse("org_other").expect("scope");
+    let error = submit_commit(
+        &store,
+        &namespace_id,
+        request.with_subject(wrong_scope),
+        &context,
+    )
+    .await
+    .expect_err("wrong-scope replay");
+    assert!(matches!(
+        error,
+        loonfs_core::Error::PrincipalScopeMismatch {
+            expected_principal_scope,
+            actual_principal_scope,
+        } if expected_principal_scope.as_str() == "org_demo"
+            && actual_principal_scope.as_str() == "org_other"
+    ));
+}
+
+#[tokio::test]
 async fn upload_sessions_belong_to_their_subject() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     let engine = namespace_engine(&store, &namespace_id, &context);
@@ -812,8 +847,8 @@ async fn upload_sessions_belong_to_their_subject() {
             .code(),
         ErrorCode::InvalidRequest
     );
-    let ada = loonfs_api::SubjectId::parse("usr_ada").expect("subject");
-    let bob = loonfs_api::SubjectId::parse("usr_bob").expect("subject");
+    let ada = subject("usr_ada", &[]);
+    let bob = subject("usr_bob", &[]);
     let session = engine.begin_upload(Some(&ada)).await.expect("begin");
     assert_eq!(
         engine

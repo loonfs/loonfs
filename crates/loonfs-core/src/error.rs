@@ -15,7 +15,7 @@ use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalSegmentError, WalTailLoadError};
 use loonfs_api::{
     BindingGeneration, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId,
-    RevisionNo, UploadId, WriterEpoch, WriterId,
+    PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
 };
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use thiserror::Error;
@@ -241,6 +241,13 @@ pub enum CoreError {
     NamespaceUnrestricted { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` requires a subject; send Loonfs-Principals")]
     SubjectRequired { namespace_id: NamespaceId },
+    #[error(
+        "subject principal scope `{actual_principal_scope}` does not match namespace principal scope `{expected_principal_scope}`"
+    )]
+    PrincipalScopeMismatch {
+        expected_principal_scope: PrincipalScope,
+        actual_principal_scope: PrincipalScope,
+    },
     #[error("the subject lacks a right the operation needs on inode `{inode_id}`")]
     Forbidden { inode_id: InodeId },
     /// A caller-supplied `expected_head_seq` did not match the current head.
@@ -426,7 +433,9 @@ impl CoreError {
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespaceUnrestricted { .. } => ErrorCode::NamespaceUnrestricted,
-            CoreError::Forbidden { .. } => ErrorCode::Forbidden,
+            CoreError::Forbidden { .. } | CoreError::PrincipalScopeMismatch { .. } => {
+                ErrorCode::Forbidden
+            }
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
             CoreError::BindingGenerationMismatch { .. } => ErrorCode::BindingGenerationMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
@@ -502,6 +511,7 @@ impl CoreError {
             | CoreError::CommitValidation(_)
             | CoreError::InvalidPath(_)
             | CoreError::SubjectRequired { .. }
+            | CoreError::PrincipalScopeMismatch { .. }
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
             | CoreError::PathNotFound(_)
