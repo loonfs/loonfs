@@ -24,6 +24,8 @@ mod serve;
 mod tests;
 mod tls;
 
+pub use self::error::api_error_response;
+
 #[cfg(feature = "openapi")]
 pub use self::openapi::openapi_document;
 pub use self::serve::{
