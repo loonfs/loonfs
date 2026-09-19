@@ -1,6 +1,7 @@
 #![allow(clippy::panic)]
 // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
+mod filesystem_app;
 mod inline_commits;
 mod pin_deletion;
 

@@ -20,6 +20,17 @@ pub(super) struct ApiResponseError {
     retry_after_seconds: Option<u32>,
 }
 
+/// Render an already sanitized API error using the server's status and retry
+/// semantics. Composing hosts can preserve a runtime error's public details
+/// without maintaining a second error-code-to-HTTP registry. The typed code
+/// takes precedence over `body.code`; the caller supplies its correlation ID.
+pub fn api_error_response(code: ErrorCode, mut body: ApiError) -> Response {
+    body.code = code.as_str().to_owned();
+    let mut error = ApiResponseError::new(code, &body.message);
+    error.body = Box::new(body);
+    error.into_response()
+}
+
 impl ApiResponseError {
     pub(super) fn new(code: ErrorCode, message: &str) -> Self {
         let response = Self {
@@ -172,7 +183,9 @@ impl IntoResponse for ApiResponseError {
         // The correlation id is scoped by the request-id middleware; a body
         // rendered outside a request scope (tests constructing errors
         // directly) simply omits it.
-        self.body.request_id = super::REQUEST_ID.try_with(|id| id.clone()).ok();
+        if let Ok(request_id) = super::REQUEST_ID.try_with(|id| id.clone()) {
+            self.body.request_id = Some(request_id);
+        }
         let mut response = (self.status, Json(self.body)).into_response();
         response.extensions_mut().insert(ServedErrorCode(self.code));
         if let Some(seconds) = self.retry_after_seconds {
@@ -189,6 +202,29 @@ impl IntoResponse for ApiResponseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn composed_errors_reuse_status_retry_and_preserve_caller_envelope() {
+        for code in ErrorCode::ALL {
+            let mut body = ApiResponseError::new(code, "public message").body;
+            body.code = "untrusted-code".into();
+            body.request_id = Some("host-request".into());
+            body.param = Some("path".into());
+            let response = api_error_response(code, *body);
+            assert_eq!(response.status(), status_for_core_error_code(code));
+            assert_eq!(
+                response.headers().contains_key("retry-after"),
+                code.retryable_without_operator_action()
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .expect("error body");
+            let body: ApiError = serde_json::from_slice(&bytes).expect("API error");
+            assert_eq!(body.code, code.as_str());
+            assert_eq!(body.request_id.as_deref(), Some("host-request"));
+            assert_eq!(body.param.as_deref(), Some("path"));
+        }
+    }
 
     #[test]
     fn every_immediately_retryable_code_answers_with_retry_after() {

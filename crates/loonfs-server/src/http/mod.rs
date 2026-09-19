@@ -24,10 +24,13 @@ mod serve;
 mod tests;
 mod tls;
 
+pub use self::error::api_error_response;
+
 #[cfg(feature = "openapi")]
 pub use self::openapi::openapi_document;
 pub use self::serve::{
-    app, check_config, probe_store, serve, serve_with_shutdown, AppOptions, AppState, ServeError,
+    app, check_config, filesystem_app, probe_store, serve, serve_with_shutdown, AppOptions,
+    AppState, ServeError,
 };
 pub use self::tls::TlsConfigError;
 
@@ -253,7 +256,13 @@ fn gated(
     }
 }
 
-fn router(state: AppState) -> Router {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RouterSurface {
+    Standalone,
+    Filesystem,
+}
+
+fn router(state: AppState, surface: RouterSurface) -> Router {
     // Searching an index and keeping one built are separate jobs, so they
     // are separately deployable: the query route exists where this server
     // serves grep, and the three routes that mutate a grep manifest exist where
@@ -261,11 +270,13 @@ fn router(state: AppState) -> Router {
     let serves_grep = state.config.grep.mode.serves_grep();
     let maintains_index = state.config.grep.mode.maintains_index();
     let request_deadline_ms = state.config.request_deadline_ms;
-    let public = Router::new()
-        .route("/health", get(get_health))
-        .route("/readiness", get(get_readiness));
+    let public = match surface {
+        RouterSurface::Standalone => Router::new()
+            .route("/health", get(get_health))
+            .route("/readiness", get(get_readiness)),
+        RouterSurface::Filesystem => Router::new(),
+    };
     let mut authenticated = Router::new()
-        .route("/metrics", get(get_metrics))
         .route(
             "/v0/capabilities",
             get(handlers_namespace::get_capabilities),
@@ -371,7 +382,10 @@ fn router(state: AppState) -> Router {
             get(get_upload),
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes));
-    if state.config.maintenance.serves() {
+    if surface == RouterSurface::Standalone {
+        authenticated = authenticated.route("/metrics", get(get_metrics));
+    }
+    if surface == RouterSurface::Standalone && state.config.maintenance.serves() {
         authenticated = authenticated
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
@@ -427,7 +441,7 @@ fn router(state: AppState) -> Router {
                 "/v0/maintenance/store/probe",
                 post(handlers_store::probe_store),
             );
-    } else {
+    } else if surface == RouterSurface::Standalone {
         authenticated = authenticated.route("/v0/maintenance/{*path}", any(maintenance_not_served));
     }
     let authenticated = authenticated

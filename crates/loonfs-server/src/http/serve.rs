@@ -2,9 +2,9 @@
 //! graceful shutdown is triggered from.
 
 use super::metrics::ServerMetrics;
-use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
-use crate::config::{ServerConfig, ServerConfigError};
+use super::{router, RouterSurface};
+use crate::config::{MaintenanceMode, ServerConfig, ServerConfigError};
 use crate::local_cache::FoyerStoredMetadataBlockCache;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -240,6 +240,37 @@ pub async fn app(
     config: ServerConfig,
     options: AppOptions,
 ) -> Result<(Router, AppState), ServerConfigError> {
+    build_app(config, options, RouterSurface::Standalone).await
+}
+
+/// Builds the filesystem and query API for composition into another server.
+///
+/// Uses the same handlers, authentication, limits, and error contract as [`app`],
+/// but registers no health, readiness, metrics, or maintenance routes (including
+/// the disabled-maintenance wildcard). The host owns those operational surfaces.
+/// Capabilities describe only the served API groups. Configured background
+/// maintenance is preserved; its HTTP serving flag is ignored.
+///
+/// The host must drain requests and shut down the returned handles as described
+/// by [`app`]. This constructor does not supply tenant admission or isolation;
+/// callers remain responsible for selecting the store and trusted request context.
+pub async fn filesystem_app(
+    mut config: ServerConfig,
+    options: AppOptions,
+) -> Result<(Router, AppState), ServerConfigError> {
+    config.maintenance = if config.maintenance.maintains() {
+        MaintenanceMode::MaintainOnly
+    } else {
+        MaintenanceMode::Disabled
+    };
+    build_app(config, options, RouterSurface::Filesystem).await
+}
+
+async fn build_app(
+    config: ServerConfig,
+    options: AppOptions,
+    surface: RouterSurface,
+) -> Result<(Router, AppState), ServerConfigError> {
     // The one unavoidable validation point: configs that skipped
     // `load_server_config` (direct Rust construction) fail here exactly as
     // file-loaded ones fail at load.
@@ -379,7 +410,7 @@ pub async fn app(
         metrics,
         local_cache,
     };
-    Ok((router(state.clone()), state))
+    Ok((router(state.clone(), surface), state))
 }
 
 fn maintenance_config_error(error: impl std::fmt::Display) -> ServerConfigError {

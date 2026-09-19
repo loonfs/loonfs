@@ -18,8 +18,8 @@ pub use config::{
 #[cfg(feature = "openapi")]
 pub use http::openapi_document;
 pub use http::{
-    app, check_config, probe_store, serve, serve_with_shutdown, AppOptions, AppState, ServeError,
-    TlsConfigError,
+    api_error_response, app, check_config, filesystem_app, probe_store, serve, serve_with_shutdown,
+    AppOptions, AppState, ServeError, TlsConfigError,
 };
 pub use local_cache::FoyerStoredMetadataBlockCache;
 pub use trace::{init_tracing_from_env, TraceInitError};
