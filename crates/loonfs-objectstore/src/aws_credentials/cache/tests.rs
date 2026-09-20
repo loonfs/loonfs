@@ -258,6 +258,66 @@ async fn credentials_without_expiry_remain_uncached_including_after_an_expiring_
 }
 
 #[tokio::test]
+async fn non_expiring_lookups_overlap_even_when_queued_before_discovery() {
+    for queued in [false, true] {
+        let cache = CredentialCache::default();
+        let discovery = Arc::new(Semaphore::new(0));
+        let gate = Arc::new(Semaphore::new(0));
+        let provider = Provider::new([
+            Step::Wait(discovery.clone(), credentials("first", None)),
+            Step::Wait(gate.clone(), credentials("second", None)),
+            Step::Wait(gate.clone(), credentials("third", None)),
+        ]);
+        let clock = Clock::default();
+        let mut first = Box::pin(get(&cache, &provider, &clock));
+        let mut second = Box::pin(get(&cache, &provider, &clock));
+        let mut third = Box::pin(get(&cache, &provider, &clock));
+        assert!(futures::poll!(&mut first).is_pending());
+        if queued {
+            assert!(futures::poll!(&mut second).is_pending());
+            assert!(futures::poll!(&mut third).is_pending());
+        }
+        discovery.add_permits(1);
+        assert_eq!(first.await.access_key_id(), "access-first");
+        // Drive queued read/write lock handoffs, then both blocked providers.
+        for _ in 0..2 {
+            assert!(futures::poll!(&mut second).is_pending());
+            assert!(futures::poll!(&mut third).is_pending());
+        }
+        assert_eq!(
+            provider.calls(),
+            3,
+            "both lookups must start before release"
+        );
+        gate.add_permits(2);
+        assert_eq!(second.await.access_key_id(), "access-second");
+        assert_eq!(third.await.access_key_id(), "access-third");
+    }
+}
+
+#[tokio::test]
+async fn uncached_sources_still_check_expiry_if_the_provider_later_supplies_it() {
+    let cache = CredentialCache::default();
+    let provider = Provider::new([
+        Step::Return(credentials("unbounded", None)),
+        Step::Return(credentials("temporary", Some(120))),
+        Step::Return(credentials("expired", Some(0))),
+        Step::Fail,
+        Step::Return(credentials("recovered", Some(3600))),
+    ]);
+    let clock = Clock::default();
+    get(&cache, &provider, &clock).await;
+    assert_eq!(get(&cache, &provider, &clock).await.expiry(), Some(at(120)));
+    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
+    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
+    assert_eq!(
+        get(&cache, &provider, &clock).await.access_key_id(),
+        "access-recovered"
+    );
+    assert_eq!(provider.calls(), 5);
+}
+
+#[tokio::test]
 async fn expired_results_and_cold_errors_are_rejected_without_poisoning_the_cache() {
     let cache = CredentialCache::default();
     let provider = Provider::new([

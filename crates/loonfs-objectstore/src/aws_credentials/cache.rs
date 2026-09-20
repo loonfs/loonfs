@@ -2,6 +2,7 @@
 
 use aws_credential_types::provider::{error::CredentialsError, ProvideCredentials};
 use aws_credential_types::Credentials;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 
@@ -14,6 +15,8 @@ const REFRESH_RETRY_DELAY: Duration = Duration::from_secs(1);
 #[derive(Default)]
 pub(super) struct CredentialCache {
     entry: RwLock<Option<Entry>>,
+    // Once observed, preserve uncached lookup behavior for this source's lifetime.
+    uncached: AtomicBool,
 }
 
 struct Entry {
@@ -49,26 +52,34 @@ impl CredentialCache {
         now: impl Fn() -> SystemTime + Send,
         valid_until: Option<SystemTime>,
     ) -> Result<Credentials, CredentialsError> {
-        if let Some(credentials) = self
-            .entry
-            .read()
-            .await
-            .as_ref()
-            .and_then(|entry| entry.cached(now(), valid_until))
-        {
-            return Ok(credentials);
-        }
+        let entry = if self.uncached.load(Ordering::Acquire) {
+            None
+        } else {
+            if let Some(credentials) = self
+                .entry
+                .read()
+                .await
+                .as_ref()
+                .and_then(|entry| entry.cached(now(), valid_until))
+            {
+                return Ok(credentials);
+            }
 
-        // Hold only this source's write lock while refreshing. A cancelled load
-        // drops the guard without removing the previous value. Waiting callers
-        // recheck the cache and the current time after acquiring the lock.
-        let mut entry = self.entry.write().await;
-        if let Some(credentials) = entry
-            .as_ref()
-            .and_then(|entry| entry.cached(now(), valid_until))
-        {
-            return Ok(credentials);
-        }
+            // A cancelled refresh preserves the previous value. Recheck both
+            // cache and mode after waiting: discovery may have disabled caching.
+            let entry = self.entry.write().await;
+            if self.uncached.load(Ordering::Acquire) {
+                None
+            } else {
+                if let Some(credentials) = entry
+                    .as_ref()
+                    .and_then(|entry| entry.cached(now(), valid_until))
+                {
+                    return Ok(credentials);
+                }
+                Some(entry)
+            }
+        };
         let loaded = provider.provide_credentials().await;
         let now = now();
         let loaded = loaded.and_then(|credentials| {
@@ -81,6 +92,9 @@ impl CredentialCache {
             }
         });
 
+        let Some(mut entry) = entry else {
+            return loaded;
+        };
         match loaded {
             Ok(credentials) => {
                 // Preserve the existing lookup/rotation behavior of ambient
@@ -95,6 +109,9 @@ impl CredentialCache {
                     next.defer_refresh(now);
                     next
                 });
+                if entry.is_none() {
+                    self.uncached.store(true, Ordering::Release);
+                }
                 Ok(credentials)
             }
             Err(error) => {
