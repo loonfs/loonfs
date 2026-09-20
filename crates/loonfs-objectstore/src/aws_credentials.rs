@@ -129,6 +129,14 @@ impl AmbientAwsCredentialsSource {
         }
     }
 
+    // AWS credentials expire at an absolute wall-clock time. This boundary
+    // affects only process-local credential reuse; the cache takes an explicit
+    // clock so refresh and cancellation tests remain deterministic.
+    #[allow(clippy::disallowed_methods)]
+    fn credential_time() -> SystemTime {
+        SystemTime::now()
+    }
+
     async fn provider(&self) -> &SharedCredentialsProvider {
         self.provider
             .get_or_init(|| async {
@@ -147,7 +155,7 @@ impl AwsCredentialsSource for AmbientAwsCredentialsSource {
     async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
         let credentials = self
             .cache
-            .get(self.provider().await, SystemTime::now)
+            .get(self.provider().await, Self::credential_time)
             .await
             .map_err(|_| {
                 ObjectStoreError::Configuration(
@@ -351,7 +359,7 @@ mod shared_cache_tests {
 
     #[tokio::test]
     async fn ambient_cache_is_shared_by_requests_and_presigners_and_debug_is_redacted() {
-        let now = SystemTime::now();
+        let now = AmbientAwsCredentialsSource::credential_time();
         let expires_at = now + Duration::from_secs(3600);
         let calls = Arc::new(AtomicUsize::new(0));
         let source = Arc::new(AmbientAwsCredentialsSource::new("us-east-1"));
