@@ -117,7 +117,22 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
             continue;
         }
         if let Some(cache) = segment_cache {
-            if let Some(DecodedMetadataSegmentBlock::Data { block, .. }) = cache.get(&probe_key) {
+            if let Some(DecodedMetadataSegmentBlock::Data {
+                block,
+                decoded_bytes,
+            }) = cache.get(&probe_key)
+            {
+                if let Some(memo) = memo {
+                    // Keep shared hits just like point loads, so this view's
+                    // later scans do not repeat shared-cache recency work.
+                    memo.record(
+                        &probe_key,
+                        &DecodedMetadataSegmentBlock::Data {
+                            block: Arc::clone(&block),
+                            decoded_bytes,
+                        },
+                    );
+                }
                 blocks[position] = Some(block);
                 continue;
             }

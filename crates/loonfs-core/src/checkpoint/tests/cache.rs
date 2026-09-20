@@ -1178,6 +1178,65 @@ async fn wide_read(
 }
 
 #[tokio::test]
+async fn a_warm_span_remembers_shared_hits_in_its_bounded_memo() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    let cache = MetadataSegmentCache::new(Default::default());
+    let (expected, _) = wide_read(&store, Some(&cache), &descriptor, &index).await;
+    let memo = load::SessionBlockMemo::default();
+    store.reset();
+    let before = cache.stats();
+
+    let first = data_block_load::load_segment_data_block_span(
+        &store,
+        Some(&cache),
+        Some(&memo),
+        &descriptor,
+        &index,
+    )
+    .await
+    .expect("first warm span");
+    let after_first = cache.stats();
+    assert_eq!(after_first.hits - before.hits, index.len());
+    assert_eq!(first, expected);
+
+    let repeated = data_block_load::load_segment_data_block_span(
+        &store,
+        Some(&cache),
+        Some(&memo),
+        &descriptor,
+        &index,
+    )
+    .await
+    .expect("repeated span");
+    assert_eq!(
+        cache.stats().hits,
+        after_first.hits,
+        "memo avoids repeated shared-cache access"
+    );
+    assert_eq!(store.count(OperationClass::Read), 0);
+    for (first, repeated) in first.iter().zip(&repeated) {
+        assert!(
+            Arc::ptr_eq(first, repeated),
+            "memo shares decoded blocks, not copies"
+        );
+    }
+
+    // Maintenance callers without a memo still use the shared cache normally.
+    let without_memo = data_block_load::load_segment_data_block_span(
+        &store,
+        Some(&cache),
+        None,
+        &descriptor,
+        &index,
+    )
+    .await
+    .expect("span without memo");
+    assert_eq!(without_memo, expected);
+    assert_eq!(cache.stats().hits - after_first.hits, index.len());
+    assert_eq!(store.count(OperationClass::Read), 0);
+}
+
+#[tokio::test]
 async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
     let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
