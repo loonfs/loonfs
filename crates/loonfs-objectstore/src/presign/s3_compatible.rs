@@ -12,8 +12,8 @@ use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
-    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
-    V4RequestParts, V4Scheme,
+    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, unix_ms,
+    V4Endpoint, V4RequestParts, V4Scheme,
 };
 use crate::ObjectStoreError;
 use async_trait::async_trait;
@@ -273,12 +273,9 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        if credentials
-            .expires_at
-            .is_some_and(|expiry| now.checked_add(expires_in).is_none_or(|end| end > expiry))
-        {
+        if credentials.expires_at.is_some_and(|expiry| expiry <= now) {
             return Err(ObjectStoreError::Configuration(
-                "presigned URL lifetime exceeds AWS credential expiry".to_owned(),
+                "resolved AWS signing credentials have expired".to_owned(),
             ));
         }
         let endpoint = self.endpoint(object_key)?;
@@ -301,7 +298,7 @@ impl S3CompatiblePresigner {
             &dates.short_date,
             &self.config.region,
         );
-        presign_v4(
+        let mut signed = presign_v4(
             V4Scheme {
                 algorithm: "AWS4-HMAC-SHA256",
                 query_prefix: "X-Amz",
@@ -320,7 +317,14 @@ impl S3CompatiblePresigner {
             expires_in,
             now,
             |message| Ok(hex_lower(&hmac_sha256(&signing_key, message))),
-        )
+        )?;
+        // AWS also expires the capability when its session credentials expire.
+        // Report that effective lifetime even when refresh returned the same
+        // still-valid credentials; rotation must not make issuance unavailable.
+        if let Some(expiry) = credentials.expires_at {
+            signed.expires_at_ms = signed.expires_at_ms.min(unix_ms(object_key, expiry)?);
+        }
+        Ok(signed)
     }
 
     fn endpoint(&self, object_key: &str) -> Result<V4Endpoint> {
@@ -592,7 +596,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn presigned_capabilities_cannot_outlive_the_signing_credentials() {
+    async fn presigned_capabilities_report_effective_credential_expiry_without_rejecting_valid_keys(
+    ) {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let expiry = now + Duration::from_secs(300);
         let signer = S3CompatiblePresigner::with_credentials(
@@ -612,27 +617,34 @@ mod tests {
             .expect("URL fits credential lifetime");
         assert!(signed.url.contains("X-Amz-Expires=300"));
         assert_eq!(signed.expires_at_ms, 1_700_000_300_000);
-        let error = signer
+        let signed = signer
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
-                    expires_in: Duration::from_secs(301),
+                    expires_in: Duration::from_secs(900),
                 },
                 now,
             )
             .await
-            .expect_err("URL would outlive credentials");
-        assert_eq!(error.to_string(), "invalid object store configuration: presigned URL lifetime exceeds AWS credential expiry");
-        assert!(signer
+            .expect("still-valid credentials can issue a shorter-lived URL");
+        assert!(signed.url.contains("X-Amz-Expires=900"));
+        assert_eq!(signed.expires_at_ms, 1_700_000_300_000);
+        let signed = signer
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    expires_in: Duration::from_secs(301),
+                    expires_in: Duration::from_secs(900),
                 },
-                now
+                now,
             )
             .await
-            .is_err());
+            .expect("uploads also report effective expiry");
+        assert_eq!(signed.expires_at_ms, 1_700_000_300_000);
+        let signed = signer
+            .presign_head_stored_checksum(CONTENT_KEY, Duration::from_secs(60), now)
+            .await
+            .expect("shorter requested lifetime is preserved");
+        assert_eq!(signed.expires_at_ms, 1_700_000_060_000);
         assert!(signer
             .presign_head_stored_checksum(CONTENT_KEY, Duration::from_secs(1), expiry)
             .await

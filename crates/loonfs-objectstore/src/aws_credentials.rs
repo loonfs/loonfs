@@ -43,7 +43,7 @@ pub(crate) trait AwsCredentialsSource: Send + Sync + fmt::Debug {
     async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError>;
 
     /// Gives refreshable sources the opportunity to satisfy a signing lifetime.
-    /// The signer must still validate the resolved expiration before issuance.
+    /// The signer must still account for the resolved expiration at issuance.
     async fn credentials_for(
         &self,
         _valid_until: SystemTime,
