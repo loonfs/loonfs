@@ -370,6 +370,7 @@ pub(super) async fn get_file_bytes(
         .transpose()?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
+    let _resolution = loonfs_objectstore::content_timing::ContentReadTiming::current().resolving();
     let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target

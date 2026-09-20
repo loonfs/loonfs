@@ -15,6 +15,7 @@ use loonfs_api::{
     Checksum, ContentId, ContentRef, ContentRefValidationError, ContentStoreId, ErrorCode,
     NamespaceId, PathEntry, Sha256, StreamingChecksum,
 };
+use loonfs_objectstore::content_timing::{ContentIo, ContentReadTiming, ContentSource};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{
     ByteRange, ByteStream, ImmutableWriteError, MultipartCompletion, MultipartPart, ObjectStore,
@@ -332,6 +333,7 @@ pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// that stops earlier has not verified the complete object.
 pub struct FileContentStream<S> {
     store: S,
+    timing: ContentReadTiming,
     entry: Option<PathEntry>,
     location: ContentLocation,
     content_ref: ContentRef,
@@ -401,18 +403,27 @@ impl<S: ObjectStore> FileContentStream<S> {
         chunk_bytes: NonZeroU64,
         start_offset: u64,
     ) -> Result<Self, DurableContentValidationError> {
+        let timing = ContentReadTiming::current();
         match &location {
             ContentLocation::Tail { bytes, object_key } => {
+                timing.resolved(ContentSource::Inline);
                 validate_loaded_content_bytes(object_key.clone(), &content_ref, bytes)?;
             }
             ContentLocation::Object { object_key } => {
-                validate_content_size(&store, object_key, &content_ref).await?;
+                timing.resolved(ContentSource::Object);
+                timing
+                    .io(
+                        ContentIo::Head,
+                        validate_content_size(&store, object_key, &content_ref),
+                    )
+                    .await?;
             }
         }
         let expected = content_ref.checksum.clone();
         let digest = StreamingChecksum::for_algorithm(expected.algorithm);
         Ok(Self {
             store,
+            timing,
             entry,
             location,
             content_ref,
@@ -483,6 +494,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// A resumed stream must receive its complete prefix before this method is
     /// called.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, CoreError> {
+        let _chunk = self.timing.chunk();
         if self.prefix_folded != self.resumed_from {
             return Err(CoreError::ResumePrefixIncomplete {
                 start_offset: self.resumed_from,
@@ -507,13 +519,16 @@ impl<S: ObjectStore> FileContentStream<S> {
                 bytes.slice(self.next_offset as usize..end_exclusive as usize)
             }
             ContentLocation::Object { .. } => match self
-                .store
-                .get(
-                    self.location.object_key(),
-                    Some(ByteRange {
-                        start_inclusive: self.next_offset,
-                        end_exclusive,
-                    }),
+                .timing
+                .io(
+                    ContentIo::Get,
+                    self.store.get(
+                        self.location.object_key(),
+                        Some(ByteRange {
+                            start_inclusive: self.next_offset,
+                            end_exclusive,
+                        }),
+                    ),
                 )
                 .await
             {
@@ -566,6 +581,7 @@ impl<S: ObjectStore> FileContentStream<S> {
 
     /// Closes the digest over everything read and holds it to the reference.
     fn verify_complete(&mut self) -> Result<(), DurableContentValidationError> {
+        let _verification = self.timing.verification();
         // Closing consumes the digest, which is why this runs exactly once.
         let digest = std::mem::replace(
             &mut self.digest,
@@ -1283,6 +1299,104 @@ mod tests {
             start_offset,
         )
         .await
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn content_attribution_separates_delayed_head_and_get_after_stream_handoff() {
+        use loonfs_objectstore::content_timing::{ContentReadTiming, ContentSource};
+        use loonfs_test_support::stores::BlockingStore;
+        use std::{sync::Arc, time::Duration};
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = Arc::new(BlockingStore::new(
+            inner,
+            KeyPredicate::content_blob(),
+            OperationClass::Any,
+        ));
+        let reference = content_ref(b"hello");
+        put_content_object(&store, &content_store_id, &reference, b"hello").await;
+        let timing = ContentReadTiming::new();
+        store.block_next();
+        let opening = tokio::spawn({
+            let timing = timing.clone();
+            let store = store.clone();
+            async move {
+                timing
+                    .scope(async {
+                        let _resolution = ContentReadTiming::current().resolving();
+                        open_stream(store, &content_store_id, &reference)
+                            .await
+                            .expect("open")
+                    })
+                    .await
+            }
+        });
+        store.wait_until_blocked().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        store.release();
+        let mut stream = opening.await.expect("opening task");
+        assert!(matches!(timing.snapshot().source, ContentSource::Object));
+        assert!(timing.snapshot().head.elapsed_us >= 20_000);
+        assert_eq!(timing.snapshot().get.calls, 0);
+
+        store.block_next();
+        let reading = tokio::spawn(async move {
+            assert_eq!(
+                stream.next_chunk().await.expect("read").expect("chunk"),
+                "hello"
+            );
+            stream
+        });
+        store.wait_until_blocked().await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        store.release();
+        let mut stream = reading.await.expect("reading task");
+        assert!(stream.next_chunk().await.expect("verified EOF").is_none());
+        let stats = timing.snapshot();
+        assert!(stats.get.elapsed_us >= 30_000);
+        assert_eq!(
+            (
+                stats.head.calls,
+                stats.get.calls,
+                stats.chunk_calls,
+                stats.verification_calls
+            ),
+            (1, 1, 2, 1)
+        );
+        assert_eq!(
+            stats.get.attempts, 0,
+            "local store does not pretend to make HTTP attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_attribution_preserves_checksum_failure_and_cached_verdict() {
+        use loonfs_objectstore::content_timing::ContentReadTiming;
+        let (_temp_dir, store, content_store_id) = test_store();
+        let reference = content_ref(b"right");
+        put_content_object(&store, &content_store_id, &reference, b"wrong").await;
+        let timing = ContentReadTiming::new();
+        let mut stream = timing
+            .scope(open_stream(store, &content_store_id, &reference))
+            .await
+            .expect("size matches");
+        assert_eq!(
+            stream
+                .next_chunk()
+                .await
+                .expect("unverified chunk")
+                .expect("chunk"),
+            "wrong"
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                stream.next_chunk().await,
+                Err(CoreError::DurableContent(
+                    DurableContentValidationError::ContentChecksumMismatch { .. }
+                ))
+            ));
+        }
+        assert_eq!(timing.snapshot().verification_calls, 1);
     }
 
     #[tokio::test]

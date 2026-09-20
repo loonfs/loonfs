@@ -136,6 +136,66 @@ fn inline_request(commit_id: &str, path: &str, encoded: &str) -> Value {
     json!({"commit_id": commit_id, "operations": [{"kind": "put_file", "path": path, "inline_content": encoded}]})
 }
 
+#[tokio::test]
+async fn content_attribution_uses_the_resolved_source_and_survives_lazy_body_handoff() {
+    use loonfs_objectstore::content_timing::{ContentReadTiming, ContentSource};
+    for threshold in [Some(4), None] {
+        let harness = Harness::new(threshold, 1024).await;
+        harness
+            .state
+            .writer
+            .put_file_bytes(
+                &harness.namespace,
+                "/file",
+                b"same",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("write fixture");
+        let timing = ContentReadTiming::new();
+        let response = timing
+            .scope(
+                harness.router.clone().oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!(
+                            "/v0/namespaces/{}/filesystem/content?path=/file",
+                            harness.namespace
+                        ))
+                        .header("authorization", "Bearer test-token")
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                ),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().get("content-length").is_none(),
+            "verified streaming contract"
+        );
+        assert!(response.headers().contains_key("x-request-id"));
+        assert!(timing.snapshot().resolution_us.is_some());
+        let expected_calls = u64::from(threshold.is_none());
+        assert_eq!(timing.snapshot().head.calls, expected_calls);
+        assert_eq!(timing.snapshot().get.calls, 0, "GET remains lazy");
+        assert!(matches!(
+            (threshold, timing.snapshot().source),
+            (Some(_), ContentSource::Inline) | (None, ContentSource::Object)
+        ));
+        let bytes = tokio::spawn(async move {
+            axum::body::to_bytes(response.into_body(), 32)
+                .await
+                .expect("verified body")
+        })
+        .await
+        .expect("body task");
+        assert_eq!(bytes, "same");
+        assert_eq!(timing.snapshot().get.calls, expected_calls);
+        assert_eq!(timing.snapshot().verification_calls, 1);
+        harness.state.writer.shutdown().await.expect("shutdown");
+    }
+}
+
 fn created_content(response: &Value) -> (InodeId, ContentRef) {
     let commit: Commit = serde_json::from_value(response.clone()).expect("commit");
     match &commit.events.expect("events")[0] {

@@ -10,6 +10,7 @@
 //! Stalls are reported as [`HttpErrorKind::Timeout`] so the provider client
 //! can apply its normal retry policy.
 
+use crate::content_timing::{ProviderAttempt, ProviderBodyTimer};
 use crate::provider_object_store::{request_phase_bound, PROVIDER_ATTEMPT_TIMEOUT};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -79,6 +80,9 @@ struct TransferTimeoutService {
 #[async_trait]
 impl HttpService for TransferTimeoutService {
     async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        // This boundary is invoked again by the provider client's own retries.
+        // Capture before the inner connector crosses onto its IO runtime.
+        let mut attempt = ProviderAttempt::start(req.method());
         let request_body_bytes = req.body().content_length() as u64;
         let bound = request_phase_bound(request_body_bytes);
         let response = request_phase_timeout(bound, self.inner.execute(req))
@@ -91,10 +95,12 @@ impl HttpService for TransferTimeoutService {
                         bound_secs: bound.as_secs(),
                     },
                 ))
-            })?;
+            });
+        let timing = attempt.headers(response.as_ref().map(|r| r.status().as_u16()));
+        let response = response?;
 
         let (parts, body) = response.into_parts();
-        let body = IdleDeadlineBody::new(body, PROVIDER_ATTEMPT_TIMEOUT);
+        let body = IdleDeadlineBody::new(body, PROVIDER_ATTEMPT_TIMEOUT, timing);
         Ok(HttpResponse::from_parts(parts, HttpResponseBody::new(body)))
     }
 }
@@ -115,20 +121,25 @@ struct IdleDeadlineBody {
     idle_sleep: Pin<Box<tokio::time::Sleep>>,
     received_bytes: u64,
     timed_out: bool,
+    timing: ProviderBodyTimer,
 }
 
 impl IdleDeadlineBody {
     #[allow(clippy::disallowed_methods)]
-    fn new(inner: HttpResponseBody, idle_bound: Duration) -> Self {
+    fn new(inner: HttpResponseBody, idle_bound: Duration, mut timing: ProviderBodyTimer) -> Self {
         // The idle clock intentionally uses an isolated async timer; it is
         // armed here and re-armed on every frame, so it only ever measures
         // the gap since the last observed progress.
+        if inner.is_end_stream() {
+            timing.finish(None);
+        }
         Self {
             inner,
             idle_bound,
             idle_sleep: Box::pin(tokio::time::sleep(idle_bound)),
             received_bytes: 0,
             timed_out: false,
+            timing,
         }
     }
 }
@@ -154,19 +165,28 @@ impl Body for IdleDeadlineBody {
                 }
                 let deadline = tokio::time::Instant::now() + this.idle_bound;
                 this.idle_sleep.as_mut().reset(deadline);
+                if this.inner.is_end_stream() {
+                    this.timing.finish(None);
+                }
                 Poll::Ready(Some(Ok(frame)))
             }
-            Poll::Ready(other) => Poll::Ready(other),
+            Poll::Ready(other) => {
+                this.timing
+                    .finish(other.as_ref().and_then(|r| r.as_ref().err()));
+                Poll::Ready(other)
+            }
             Poll::Pending => {
                 if this.idle_sleep.as_mut().poll(cx).is_ready() {
                     this.timed_out = true;
-                    return Poll::Ready(Some(Err(HttpError::new(
+                    let error = HttpError::new(
                         HttpErrorKind::Timeout,
                         TransferTimeoutError::ResponseBodyIdle {
                             received_bytes: this.received_bytes,
                             idle_secs: this.idle_bound.as_secs(),
                         },
-                    ))));
+                    );
+                    this.timing.finish(Some(&error));
+                    return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Pending
             }
@@ -385,5 +405,113 @@ mod tests {
             message.contains("5 received bytes"),
             "diagnostic should carry progress, got {message}"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn attribution_separates_headers_and_body_across_runtime_boundaries() {
+        use crate::content_timing::{ContentIo, ContentReadTiming};
+        let timing = ContentReadTiming::new();
+        let service = service_with(
+            Duration::from_millis(20),
+            vec![(Duration::from_millis(30), Bytes::from_static(b"chunk"))],
+        );
+        let other = ContentReadTiming::new();
+        timing
+            .io(ContentIo::Get, async {
+                let response = service
+                    .call(request_with_body(Bytes::new()))
+                    .await
+                    .expect("headers");
+                // The observer is carried by the response, not the consuming task's
+                // task-local scope (which deliberately belongs to another request).
+                let body = tokio::task::spawn_blocking(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("consumer runtime")
+                        .block_on(other.scope(response.into_body().bytes()))
+                        .expect("body")
+                })
+                .await
+                .expect("consumer");
+                assert_eq!(body, "chunk");
+            })
+            .await;
+        let stats = timing.snapshot().get;
+        assert_eq!((stats.calls, stats.attempts, stats.get_attempts), (1, 1, 1));
+        assert!(stats.headers_us >= 20_000);
+        assert!(stats.body_us >= 30_000);
+        assert!(stats.elapsed_us >= stats.headers_us + stats.body_us);
+        assert_eq!(stats.bodies_completed, 1);
+        assert_eq!(stats.attempts_cancelled, 0);
+    }
+
+    #[tokio::test]
+    async fn attribution_counts_provider_internal_read_retries() {
+        use crate::content_timing::{ContentIo, ContentReadTiming};
+        use object_store::ObjectStore as _;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        #[derive(Debug, Clone)]
+        struct RetryService(Arc<AtomicUsize>);
+        #[async_trait]
+        impl HttpService for RetryService {
+            async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+                assert_eq!(req.method(), http::Method::HEAD);
+                let status = if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    503
+                } else {
+                    200
+                };
+                Ok(Response::builder()
+                    .status(status)
+                    .header("content-length", "5")
+                    .header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+                    .header("etag", "test")
+                    .body(HttpResponseBody::new(DelayedFrames {
+                        frames: VecDeque::new(),
+                        armed: None,
+                    }))
+                    .expect("response"))
+            }
+        }
+        #[derive(Debug)]
+        struct Connector(RetryService);
+        impl HttpConnector for Connector {
+            fn connect(&self, _: &ClientOptions) -> object_store::Result<HttpClient> {
+                Ok(HttpClient::new(TransferTimeoutService {
+                    inner: HttpClient::new(self.0.clone()),
+                }))
+            }
+        }
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let store = object_store::aws::AmazonS3Builder::new()
+            .with_region("test")
+            .with_bucket_name("test")
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .with_endpoint("http://provider.invalid")
+            .with_allow_http(true)
+            .with_http_connector(Connector(RetryService(attempts.clone())))
+            .build()
+            .expect("test provider");
+        let timing = ContentReadTiming::new();
+        let metadata = timing
+            .io(ContentIo::Head, store.head(&"fixture".into()))
+            .await
+            .expect("retried HEAD");
+        assert_eq!(metadata.size, 5);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        let stats = timing.snapshot().head;
+        assert_eq!(
+            (stats.calls, stats.attempts, stats.head_attempts),
+            (1, 2, 2)
+        );
+        assert_eq!(stats.failures.http_5xx, 1);
+        assert_eq!(stats.attempts_cancelled, 0);
     }
 }

@@ -265,6 +265,7 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let permit = acquire_download_permit(&state)?;
+    let _resolution = loonfs_objectstore::content_timing::ContentReadTiming::current().resolving();
     let stream = reader
         .read_file_revision_stream_by_inode(&namespace_id, inode_id, revision_no)
         .await
