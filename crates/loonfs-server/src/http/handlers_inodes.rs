@@ -144,7 +144,7 @@ pub(super) async fn list_inode_children(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<ListInodeChildrenQuery>,
-) -> Result<Json<loonfs_api::ListInodeChildrenResponse>, ApiResponseError> {
+) -> Result<Response, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     let inode_id = parse_inode_id(&path.inode_id)?;
@@ -165,7 +165,7 @@ pub(super) async fn list_inode_children(
         )
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    Ok(Json(listing))
+    Ok(super::page_response::page_response(listing))
 }
 
 #[cfg_attr(

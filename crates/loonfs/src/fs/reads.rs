@@ -17,6 +17,7 @@ use loonfs_api::{
     PaginationPolicy, TrashPageCursor,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
+use tracing::Instrument;
 
 /// Runtime readers require callers to pin snapshots explicitly.
 fn reject_snapshot_option(snapshot_id: &Option<SnapshotId>, reader: &str) -> Result<()> {
@@ -567,7 +568,13 @@ impl FsReader {
     ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self
+            .core
+            .pinned_metadata_read(namespace_id)
+            .instrument(
+                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
+            )
+            .await?;
         let page = engine
             .list_path_page(listed_path.as_str(), request, options, &read_context)
             .await?;
@@ -645,7 +652,13 @@ impl FsReader {
         )?;
         reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self
+            .core
+            .pinned_metadata_read(namespace_id)
+            .instrument(
+                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
+            )
+            .await?;
         let page = engine
             .list_inode_children_page(inode_id, request, options, &read_context)
             .await?;
