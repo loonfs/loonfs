@@ -20,15 +20,19 @@ struct Entry {
     credentials: Credentials,
     expires_at: SystemTime,
     refresh_at: SystemTime,
+    retry_after: SystemTime,
 }
 
 impl Entry {
-    fn cached(&self, now: SystemTime) -> Option<Credentials> {
-        (now < self.refresh_at && now < self.expires_at).then(|| self.credentials.clone())
+    fn cached(&self, now: SystemTime, valid_until: Option<SystemTime>) -> Option<Credentials> {
+        let sufficient_lifetime = valid_until.is_none_or(|until| until <= self.expires_at);
+        (now < self.expires_at
+            && ((now < self.refresh_at && sufficient_lifetime) || now < self.retry_after))
+            .then(|| self.credentials.clone())
     }
 
     fn defer_refresh(&mut self, now: SystemTime) {
-        self.refresh_at = now
+        self.retry_after = now
             .checked_add(REFRESH_RETRY_DELAY)
             .unwrap_or(self.expires_at)
             .min(self.expires_at);
@@ -36,17 +40,21 @@ impl Entry {
 }
 
 impl CredentialCache {
+    // A requested signing lifetime can trigger an earlier refresh. The caller
+    // must still check the returned expiry: the provider may return the same
+    // short-lived value, and the retry backoff also applies to presigners.
     pub(super) async fn get(
         &self,
         provider: &(impl ProvideCredentials + ?Sized),
         now: impl Fn() -> SystemTime + Send,
+        valid_until: Option<SystemTime>,
     ) -> Result<Credentials, CredentialsError> {
         if let Some(credentials) = self
             .entry
             .read()
             .await
             .as_ref()
-            .and_then(|entry| entry.cached(now()))
+            .and_then(|entry| entry.cached(now(), valid_until))
         {
             return Ok(credentials);
         }
@@ -55,7 +63,10 @@ impl CredentialCache {
         // drops the guard without removing the previous value. Waiting callers
         // recheck the cache and the current time after acquiring the lock.
         let mut entry = self.entry.write().await;
-        if let Some(credentials) = entry.as_ref().and_then(|entry| entry.cached(now())) {
+        if let Some(credentials) = entry
+            .as_ref()
+            .and_then(|entry| entry.cached(now(), valid_until))
+        {
             return Ok(credentials);
         }
         let loaded = provider.provide_credentials().await;
@@ -79,10 +90,9 @@ impl CredentialCache {
                         credentials: credentials.clone(),
                         expires_at,
                         refresh_at: expires_at.checked_sub(REFRESH_WINDOW).unwrap_or(now),
+                        retry_after: now,
                     };
-                    if next.refresh_at <= now {
-                        next.defer_refresh(now);
-                    }
+                    next.defer_refresh(now);
                     next
                 });
                 Ok(credentials)

@@ -27,7 +27,7 @@ The provider client and presigned URLs use the same credential source. Each ambi
 
 Ambient providers that supply no expiration remain uncached, preserving their lookup and rotation behavior. Explicit static credentials are unchanged. The cache is in memory and scoped to the shared source, with no background task or persistence.
 
-Presigned URLs include the current session token. When the source reports an expiration, issuance rejects a requested lifetime extending beyond it, rather than advertising a URL lifetime the credentials cannot support. This applies to reads, whole-object uploads, multipart operations, and checksum readback. Explicit static session tokens have no declared expiration in the configuration schema, so the caller remains responsible for their validity.
+Presigned URLs include the current session token. A requested signing lifetime can trigger an earlier refresh of the shared cache, subject to the same one-second refresh backoff. When the resolved credentials still expire before that lifetime, issuance rejects the request rather than advertising a URL lifetime the credentials cannot support. This applies to reads, whole-object uploads, multipart operations, and checksum readback. Explicit static session tokens have no declared expiration in the configuration schema, so the caller remains responsible for their validity.
 
 Cloudflare R2 does not use this chain. R2 ambient credentials read `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` when the store starts.
 

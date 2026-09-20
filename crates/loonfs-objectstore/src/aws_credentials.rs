@@ -41,6 +41,15 @@ impl fmt::Debug for AwsSigningCredentials {
 #[async_trait]
 pub(crate) trait AwsCredentialsSource: Send + Sync + fmt::Debug {
     async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError>;
+
+    /// Gives refreshable sources the opportunity to satisfy a signing lifetime.
+    /// The signer must still validate the resolved expiration before issuance.
+    async fn credentials_for(
+        &self,
+        _valid_until: SystemTime,
+    ) -> Result<AwsSigningCredentials, ObjectStoreError> {
+        self.credentials().await
+    }
 }
 
 pub(crate) type SharedAwsCredentialsSource = Arc<dyn AwsCredentialsSource>;
@@ -148,14 +157,14 @@ impl AmbientAwsCredentialsSource {
             })
             .await
     }
-}
 
-#[async_trait]
-impl AwsCredentialsSource for AmbientAwsCredentialsSource {
-    async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
+    async fn resolve(
+        &self,
+        valid_until: Option<SystemTime>,
+    ) -> Result<AwsSigningCredentials, ObjectStoreError> {
         let credentials = self
             .cache
-            .get(self.provider().await, Self::credential_time)
+            .get(self.provider().await, Self::credential_time, valid_until)
             .await
             .map_err(|_| {
                 ObjectStoreError::Configuration(
@@ -169,6 +178,20 @@ impl AwsCredentialsSource for AmbientAwsCredentialsSource {
             session_token: credentials.session_token().map(SecretString::new),
             expires_at: credentials.expiry(),
         })
+    }
+}
+
+#[async_trait]
+impl AwsCredentialsSource for AmbientAwsCredentialsSource {
+    async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
+        self.resolve(None).await
+    }
+
+    async fn credentials_for(
+        &self,
+        valid_until: SystemTime,
+    ) -> Result<AwsSigningCredentials, ObjectStoreError> {
+        self.resolve(Some(valid_until)).await
     }
 }
 

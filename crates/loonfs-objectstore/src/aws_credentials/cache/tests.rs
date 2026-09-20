@@ -97,7 +97,7 @@ impl ProvideCredentials for Provider {
 
 async fn get(cache: &CredentialCache, provider: &Provider, clock: &Clock) -> Credentials {
     cache
-        .get(provider, || clock.now())
+        .get(provider, || clock.now(), None)
         .await
         .expect("resolve credentials")
 }
@@ -205,7 +205,7 @@ async fn refresh_failure_reuses_only_unexpired_credentials_with_bounded_retry_ba
     clock.set(119);
     assert_eq!(get(&cache, &provider, &clock).await.expiry(), Some(at(120)));
     clock.set(120);
-    assert!(cache.get(&provider, || clock.now()).await.is_err());
+    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
     assert_eq!(provider.calls(), 4);
     assert_eq!(
         get(&cache, &provider, &clock).await.access_key_id(),
@@ -266,8 +266,8 @@ async fn expired_results_and_cold_errors_are_rejected_without_poisoning_the_cach
         Step::Return(credentials("valid", Some(3600))),
     ]);
     let clock = Clock::default();
-    assert!(cache.get(&provider, || clock.now()).await.is_err());
-    assert!(cache.get(&provider, || clock.now()).await.is_err());
+    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
+    assert!(cache.get(&provider, || clock.now(), None).await.is_err());
     assert_eq!(
         get(&cache, &provider, &clock).await.access_key_id(),
         "access-valid"
@@ -359,7 +359,7 @@ async fn expiry_is_checked_after_a_suspended_provider_lookup() {
     let clock = Clock::default();
     let task = {
         let (cache, provider, clock) = (cache.clone(), provider.clone(), clock.clone());
-        tokio::spawn(async move { cache.get(provider.as_ref(), || clock.now()).await })
+        tokio::spawn(async move { cache.get(provider.as_ref(), || clock.now(), None).await })
     };
     provider
         .started
@@ -382,4 +382,38 @@ async fn distinct_sources_do_not_share_cached_identities() {
     assert_eq!(get(&first, &a, &clock).await.access_key_id(), "access-a");
     assert_eq!(get(&second, &b, &clock).await.access_key_id(), "access-b");
     assert_eq!(get(&first, &a, &clock).await.access_key_id(), "access-a");
+}
+
+#[tokio::test]
+async fn signing_lifetime_can_refresh_before_the_normal_window_without_refetching_per_call() {
+    let cache = CredentialCache::default();
+    let provider = Provider::new([
+        Step::Return(credentials("old", Some(1200))),
+        Step::Return(credentials("old", Some(1200))),
+        Step::Return(credentials("new", Some(3600))),
+    ]);
+    let clock = Clock::default();
+    get(&cache, &provider, &clock).await;
+    clock.set(1);
+    for _ in 0..32 {
+        let value = cache
+            .get(&provider, || clock.now(), Some(at(1800)))
+            .await
+            .expect("still valid credentials");
+        assert_eq!(value.access_key_id(), "access-old");
+        assert!(value.expiry().expect("known expiry") < at(1800));
+    }
+    assert_eq!(
+        provider.calls(),
+        2,
+        "one early refresh, then backoff for unchanged credentials"
+    );
+    clock.set(2);
+    let value = cache
+        .get(&provider, || clock.now(), Some(at(1800)))
+        .await
+        .expect("refreshed credentials");
+    assert_eq!(value.access_key_id(), "access-new");
+    assert!(value.expiry().expect("known expiry") >= at(1800));
+    assert_eq!(provider.calls(), 3);
 }

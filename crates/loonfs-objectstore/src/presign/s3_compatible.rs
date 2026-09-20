@@ -122,7 +122,7 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign(
             &credentials,
             "HEAD",
@@ -141,7 +141,7 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign_with_query(
             &credentials,
             "POST",
@@ -172,7 +172,7 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign_with_query(
             &credentials,
             "DELETE",
@@ -203,7 +203,7 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign_with_query(
             &credentials,
             "POST",
@@ -221,6 +221,19 @@ impl S3CompatiblePresigner {
             expires_in,
             now,
         )
+    }
+
+    async fn signing_credentials(
+        &self,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<AwsSigningCredentials> {
+        let valid_until = now.checked_add(expires_in).ok_or_else(|| {
+            ObjectStoreError::Configuration(
+                "presigned URL lifetime exceeds AWS credential expiry".to_owned(),
+            )
+        })?;
+        self.credentials.credentials_for(valid_until).await
     }
 
     fn presign(
@@ -383,7 +396,7 @@ impl DirectPutIssuer for S3CompatiblePresigner {
         request: PresignedPutRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(request.expires_in, now).await?;
         self.presign(
             &credentials,
             "PUT",
@@ -408,7 +421,7 @@ impl DirectMultipartIssuer for S3CompatiblePresigner {
         // No create-only header here, deliberately. A part is not the object:
         // re-uploading one is how a client retries a failed transfer, and both
         // providers take the last write and follow it with the checksum.
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(request.expires_in, now).await?;
         self.presign_with_query(
             &credentials,
             "PUT",
@@ -442,7 +455,7 @@ impl DirectGetIssuer for S3CompatiblePresigner {
         // entirely, and one issued URL serves ranged, resumed, and parallel
         // reads of the object without another round trip to the server.
         // Adding a required header here would silently cost that.
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(request.expires_in, now).await?;
         self.presign(
             &credentials,
             "GET",
@@ -536,6 +549,46 @@ mod tests {
                 expires_at: Some(self.0),
             })
         }
+    }
+
+    #[derive(Debug)]
+    struct LifetimeAwareSource(std::time::SystemTime);
+
+    #[async_trait]
+    impl AwsCredentialsSource for LifetimeAwareSource {
+        async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
+            Err(ObjectStoreError::Configuration(
+                "test source requires the requested signing lifetime".to_owned(),
+            ))
+        }
+
+        async fn credentials_for(
+            &self,
+            valid_until: std::time::SystemTime,
+        ) -> Result<AwsSigningCredentials, ObjectStoreError> {
+            assert_eq!(valid_until, self.0);
+            ExpiringCredentialsSource(self.0).credentials().await
+        }
+    }
+
+    #[tokio::test]
+    async fn presigner_supplies_the_requested_lifetime_to_the_shared_source() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let signer = S3CompatiblePresigner::with_credentials(
+            presigner_config(),
+            Arc::new(LifetimeAwareSource(now + Duration::from_secs(900))),
+        )
+        .expect("signer");
+        signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(900),
+                },
+                now,
+            )
+            .await
+            .expect("refreshed lifetime");
     }
 
     #[tokio::test]
