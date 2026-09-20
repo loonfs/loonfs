@@ -65,6 +65,9 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     access: &ReadAccess<'_, S>,
 ) -> Result<CurrentFileState> {
+    if !access.can_read(session, inode_id).await? {
+        return Ok(missing(inode_id, false));
+    }
     let Some(resolved) = resolve_visible_inode(session, ancestor_paths, inode_id).await? else {
         return Ok(missing(inode_id, access.is_unrestricted()));
     };
@@ -79,7 +82,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     Ok(CurrentFileState {
         inode_id,
         visible: true,
-        readable: access.can_read(session, inode_id).await?,
+        readable: true,
         current_revision_no,
         current_path: Some(
             AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {

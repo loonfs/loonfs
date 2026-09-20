@@ -10,6 +10,22 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # object_store 0.12.4 pins quick-xml 0.38.4, and the patched time release
+      # requires Rust 1.88 while LoonFS supports 1.85. Keep these exceptions
+      # explicit until those compatibility upgrades are handled separately.
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2026-0009,RUSTSEC-2026-0194,RUSTSEC-2026-0195
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
