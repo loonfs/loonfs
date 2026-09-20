@@ -12,7 +12,8 @@ use std::time::{Duration, SystemTime};
 pub struct PresignedPutRequest<'a> {
     /// Logical unscoped object key that the issuer resolves beneath its configured prefix.
     pub object_key: &'a str,
-    /// Lifetime of the issued capability measured from the supplied signing time.
+    /// Requested lifetime measured from the supplied signing time. Temporary
+    /// credentials can impose an earlier expiry, reported by the issued URL.
     pub expires_in: Duration,
 }
 
@@ -21,7 +22,8 @@ pub struct PresignedPutRequest<'a> {
 pub struct PresignedGetRequest<'a> {
     /// Logical unscoped object key that the issuer resolves beneath its configured prefix.
     pub object_key: &'a str,
-    /// Lifetime of the issued capability measured from the supplied signing time.
+    /// Requested lifetime measured from the supplied signing time. Temporary
+    /// credentials can impose an earlier expiry, reported by the issued URL.
     pub expires_in: Duration,
 }
 
@@ -36,7 +38,8 @@ pub struct PresignedPartRequest<'a> {
     pub part_number: u32,
     /// Checksum the provider must enforce on this part's bytes.
     pub checksum: &'a Checksum,
-    /// Lifetime of the issued capability measured from the supplied signing time.
+    /// Requested lifetime measured from the supplied signing time. Temporary
+    /// credentials can impose an earlier expiry, reported by the issued URL.
     pub expires_in: Duration,
 }
 

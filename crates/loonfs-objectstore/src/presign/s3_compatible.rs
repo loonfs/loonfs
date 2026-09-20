@@ -12,8 +12,8 @@ use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
-    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
-    V4RequestParts, V4Scheme,
+    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, unix_ms,
+    V4Endpoint, V4RequestParts, V4Scheme,
 };
 use crate::ObjectStoreError;
 use async_trait::async_trait;
@@ -122,7 +122,7 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign(
             &credentials,
             "HEAD",
@@ -141,7 +141,7 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign_with_query(
             &credentials,
             "POST",
@@ -172,7 +172,7 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign_with_query(
             &credentials,
             "DELETE",
@@ -203,7 +203,7 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign_with_query(
             &credentials,
             "POST",
@@ -221,6 +221,19 @@ impl S3CompatiblePresigner {
             expires_in,
             now,
         )
+    }
+
+    async fn signing_credentials(
+        &self,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<AwsSigningCredentials> {
+        let valid_until = now.checked_add(expires_in).ok_or_else(|| {
+            ObjectStoreError::Configuration(
+                "presigned URL lifetime exceeds AWS credential expiry".to_owned(),
+            )
+        })?;
+        self.credentials.credentials_for(valid_until).await
     }
 
     fn presign(
@@ -260,6 +273,11 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
+        if credentials.expires_at.is_some_and(|expiry| expiry <= now) {
+            return Err(ObjectStoreError::Configuration(
+                "resolved AWS signing credentials have expired".to_owned(),
+            ));
+        }
         let endpoint = self.endpoint(object_key)?;
         let dates = signing_dates(object_key, now)?;
         let credential_scope = format!(
@@ -280,7 +298,7 @@ impl S3CompatiblePresigner {
             &dates.short_date,
             &self.config.region,
         );
-        presign_v4(
+        let mut signed = presign_v4(
             V4Scheme {
                 algorithm: "AWS4-HMAC-SHA256",
                 query_prefix: "X-Amz",
@@ -299,7 +317,14 @@ impl S3CompatiblePresigner {
             expires_in,
             now,
             |message| Ok(hex_lower(&hmac_sha256(&signing_key, message))),
-        )
+        )?;
+        // AWS also expires the capability when its session credentials expire.
+        // Report that effective lifetime even when refresh returned the same
+        // still-valid credentials; rotation must not make issuance unavailable.
+        if let Some(expiry) = credentials.expires_at {
+            signed.expires_at_ms = signed.expires_at_ms.min(unix_ms(object_key, expiry)?);
+        }
+        Ok(signed)
     }
 
     fn endpoint(&self, object_key: &str) -> Result<V4Endpoint> {
@@ -375,7 +400,7 @@ impl DirectPutIssuer for S3CompatiblePresigner {
         request: PresignedPutRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(request.expires_in, now).await?;
         self.presign(
             &credentials,
             "PUT",
@@ -400,7 +425,7 @@ impl DirectMultipartIssuer for S3CompatiblePresigner {
         // No create-only header here, deliberately. A part is not the object:
         // re-uploading one is how a client retries a failed transfer, and both
         // providers take the last write and follow it with the checksum.
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(request.expires_in, now).await?;
         self.presign_with_query(
             &credentials,
             "PUT",
@@ -434,7 +459,7 @@ impl DirectGetIssuer for S3CompatiblePresigner {
         // entirely, and one issued URL serves ranged, resumed, and parallel
         // reads of the object without another round trip to the server.
         // Adding a required header here would silently cost that.
-        let credentials = self.credentials.credentials().await?;
+        let credentials = self.signing_credentials(request.expires_in, now).await?;
         self.presign(
             &credentials,
             "GET",
@@ -510,8 +535,140 @@ mod tests {
                 access_key_id: format!("rotating-access-{version}").into(),
                 secret_access_key: format!("rotating-secret-{version}").into(),
                 session_token: None,
+                expires_at: None,
             })
         }
+    }
+
+    #[derive(Debug)]
+    struct ExpiringCredentialsSource(std::time::SystemTime);
+
+    #[async_trait]
+    impl AwsCredentialsSource for ExpiringCredentialsSource {
+        async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
+            Ok(AwsSigningCredentials {
+                access_key_id: "expiring-access".into(),
+                secret_access_key: "expiring-secret".into(),
+                session_token: Some("expiring-token".into()),
+                expires_at: Some(self.0),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct LifetimeAwareSource(std::time::SystemTime);
+
+    #[async_trait]
+    impl AwsCredentialsSource for LifetimeAwareSource {
+        async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
+            Err(ObjectStoreError::Configuration(
+                "test source requires the requested signing lifetime".to_owned(),
+            ))
+        }
+
+        async fn credentials_for(
+            &self,
+            valid_until: std::time::SystemTime,
+        ) -> Result<AwsSigningCredentials, ObjectStoreError> {
+            assert_eq!(valid_until, self.0);
+            ExpiringCredentialsSource(self.0).credentials().await
+        }
+    }
+
+    #[tokio::test]
+    async fn presigner_supplies_the_requested_lifetime_to_the_shared_source() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let signer = S3CompatiblePresigner::with_credentials(
+            presigner_config(),
+            Arc::new(LifetimeAwareSource(now + Duration::from_secs(900))),
+        )
+        .expect("signer");
+        signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(900),
+                },
+                now,
+            )
+            .await
+            .expect("refreshed lifetime");
+    }
+
+    #[tokio::test]
+    async fn presigned_capabilities_report_effective_credential_expiry_without_rejecting_valid_keys(
+    ) {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let expiry = now + Duration::from_secs(300);
+        let signer = S3CompatiblePresigner::with_credentials(
+            presigner_config(),
+            Arc::new(ExpiringCredentialsSource(expiry)),
+        )
+        .expect("signer");
+        let signed = signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(300),
+                },
+                now,
+            )
+            .await
+            .expect("URL fits credential lifetime");
+        assert!(signed.url.contains("X-Amz-Expires=300"));
+        assert_eq!(signed.expires_at_ms, 1_700_000_300_000);
+        let signed = signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(900),
+                },
+                now,
+            )
+            .await
+            .expect("still-valid credentials can issue a shorter-lived URL");
+        assert!(signed.url.contains("X-Amz-Expires=900"));
+        assert_eq!(signed.expires_at_ms, 1_700_000_300_000);
+        let signed = signer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(900),
+                },
+                now,
+            )
+            .await
+            .expect("uploads also report effective expiry");
+        assert_eq!(signed.expires_at_ms, 1_700_000_300_000);
+        let signed = signer
+            .presign_head_stored_checksum(CONTENT_KEY, Duration::from_secs(60), now)
+            .await
+            .expect("shorter requested lifetime is preserved");
+        assert_eq!(signed.expires_at_ms, 1_700_000_060_000);
+        assert!(signer
+            .presign_head_stored_checksum(CONTENT_KEY, Duration::from_secs(1), expiry)
+            .await
+            .is_err());
+        assert!(signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::ZERO,
+                },
+                now
+            )
+            .await
+            .is_err());
+        assert!(signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::MAX,
+                },
+                now
+            )
+            .await
+            .is_err());
     }
 
     fn presigner_config() -> S3PresignerConfig {

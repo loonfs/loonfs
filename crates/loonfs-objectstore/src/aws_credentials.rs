@@ -4,13 +4,17 @@ use crate::store_config::AwsS3Credentials;
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use aws_config::default_provider::credentials::DefaultCredentialsChain;
-use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
+use aws_credential_types::provider::SharedCredentialsProvider;
 use loonfs_api::SecretString;
 use object_store::aws::AwsCredential;
 use object_store::client::CredentialProvider;
 use std::fmt;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::OnceCell;
+
+mod cache;
+use cache::CredentialCache;
 
 /// One credential snapshot used to sign one AWS operation.
 #[derive(Clone, PartialEq, Eq)]
@@ -18,6 +22,7 @@ pub(crate) struct AwsSigningCredentials {
     pub(crate) access_key_id: SecretString,
     pub(crate) secret_access_key: SecretString,
     pub(crate) session_token: Option<SecretString>,
+    pub(crate) expires_at: Option<SystemTime>,
 }
 
 impl fmt::Debug for AwsSigningCredentials {
@@ -36,6 +41,15 @@ impl fmt::Debug for AwsSigningCredentials {
 #[async_trait]
 pub(crate) trait AwsCredentialsSource: Send + Sync + fmt::Debug {
     async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError>;
+
+    /// Gives refreshable sources the opportunity to satisfy a signing lifetime.
+    /// The signer must still account for the resolved expiration at issuance.
+    async fn credentials_for(
+        &self,
+        _valid_until: SystemTime,
+    ) -> Result<AwsSigningCredentials, ObjectStoreError> {
+        self.credentials().await
+    }
 }
 
 pub(crate) type SharedAwsCredentialsSource = Arc<dyn AwsCredentialsSource>;
@@ -56,6 +70,7 @@ pub(crate) fn aws_credentials_source(
                 access_key_id: access_key_id.clone(),
                 secret_access_key: secret_access_key.clone(),
                 session_token: session_token.clone(),
+                expires_at: None,
             },
         ))),
     }
@@ -71,6 +86,7 @@ pub(crate) fn static_aws_credentials_source(
         access_key_id,
         secret_access_key,
         session_token,
+        expires_at: None,
     }))
 }
 
@@ -103,6 +119,7 @@ impl AwsCredentialsSource for StaticAwsCredentialsSource {
 struct AmbientAwsCredentialsSource {
     region: String,
     provider: OnceCell<SharedCredentialsProvider>,
+    cache: CredentialCache,
 }
 
 impl fmt::Debug for AmbientAwsCredentialsSource {
@@ -117,7 +134,16 @@ impl AmbientAwsCredentialsSource {
         Self {
             region: region.to_owned(),
             provider: OnceCell::new(),
+            cache: CredentialCache::default(),
         }
+    }
+
+    // AWS credentials expire at an absolute wall-clock time. This boundary
+    // affects only process-local credential reuse; the cache takes an explicit
+    // clock so refresh and cancellation tests remain deterministic.
+    #[allow(clippy::disallowed_methods)]
+    fn credential_time() -> SystemTime {
+        SystemTime::now()
     }
 
     async fn provider(&self) -> &SharedCredentialsProvider {
@@ -131,15 +157,14 @@ impl AmbientAwsCredentialsSource {
             })
             .await
     }
-}
 
-#[async_trait]
-impl AwsCredentialsSource for AmbientAwsCredentialsSource {
-    async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
+    async fn resolve(
+        &self,
+        valid_until: Option<SystemTime>,
+    ) -> Result<AwsSigningCredentials, ObjectStoreError> {
         let credentials = self
-            .provider()
-            .await
-            .provide_credentials()
+            .cache
+            .get(self.provider().await, Self::credential_time, valid_until)
             .await
             .map_err(|_| {
                 ObjectStoreError::Configuration(
@@ -151,7 +176,22 @@ impl AwsCredentialsSource for AmbientAwsCredentialsSource {
             access_key_id: SecretString::new(credentials.access_key_id()),
             secret_access_key: SecretString::new(credentials.secret_access_key()),
             session_token: credentials.session_token().map(SecretString::new),
+            expires_at: credentials.expiry(),
         })
+    }
+}
+
+#[async_trait]
+impl AwsCredentialsSource for AmbientAwsCredentialsSource {
+    async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
+        self.resolve(None).await
+    }
+
+    async fn credentials_for(
+        &self,
+        valid_until: SystemTime,
+    ) -> Result<AwsSigningCredentials, ObjectStoreError> {
+        self.resolve(Some(valid_until)).await
     }
 }
 
@@ -308,6 +348,90 @@ mod tests {
         assert!(public.contains("credentials"), "{public}");
         for provider_detail in ["Environment", "Profile", "WebIdentity", "Ecs", "Imds"] {
             assert!(!public.contains(provider_detail), "{public}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod shared_cache_tests {
+    use super::*;
+    use crate::presign::{
+        DirectGetIssuer, PresignedGetRequest, S3CompatiblePresigner, S3PresignerConfig,
+        AWS_S3_MAX_DIRECT_PUT_BYTES,
+    };
+    use aws_credential_types::provider::{future, ProvideCredentials};
+    use aws_credential_types::Credentials;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+        credentials: Credentials,
+    }
+
+    impl ProvideCredentials for CountingProvider {
+        fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+        where
+            Self: 'a,
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            future::ProvideCredentials::ready(Ok(self.credentials.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn ambient_cache_is_shared_by_requests_and_presigners_and_debug_is_redacted() {
+        let now = AmbientAwsCredentialsSource::credential_time();
+        let expires_at = now + Duration::from_secs(3600);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(AmbientAwsCredentialsSource::new("us-east-1"));
+        source
+            .provider
+            .set(SharedCredentialsProvider::new(CountingProvider {
+                calls: calls.clone(),
+                credentials: Credentials::new(
+                    "shared-access",
+                    "shared-secret",
+                    Some("shared-token".to_owned()),
+                    Some(expires_at),
+                    "synthetic",
+                ),
+            }))
+            .expect("initialize provider");
+        let bridge = ObjectStoreAwsCredentialProvider::new(source.clone());
+        let signer = S3CompatiblePresigner::with_credentials(
+            S3PresignerConfig {
+                bucket: "bucket".to_owned(),
+                region: "us-east-1".to_owned(),
+                endpoint_url: None,
+                key_prefix: None,
+                force_path_style: false,
+                direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
+            },
+            source.clone(),
+        )
+        .expect("signer");
+        let provider_credentials = bridge.get_credential().await.expect("provider credentials");
+        assert_eq!(provider_credentials.key_id, "shared-access");
+        let signed = signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: "content",
+                    expires_in: Duration::from_secs(900),
+                },
+                now,
+            )
+            .await
+            .expect("signed URL");
+        assert!(signed.url.contains("X-Amz-Credential=shared-access%2F"));
+        assert!(signed.url.contains("X-Amz-Security-Token=shared-token"));
+        let snapshot = source.credentials().await.expect("cached credentials");
+        assert_eq!(snapshot.expires_at, Some(expires_at));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let debug = format!("{source:?} {bridge:?} {signer:?} {snapshot:?}");
+        for secret in ["shared-access", "shared-secret", "shared-token"] {
+            assert!(!debug.contains(secret));
         }
     }
 }
