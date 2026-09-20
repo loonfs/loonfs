@@ -23,7 +23,11 @@ This document is a non-normative reference: provider limits and performance data
 
 AWS S3 credentials with `kind = "ambient"` use the standard AWS SDK credential chain. It checks environment variables, shared config and credentials files, credential processes, SSO, web identity, ECS task credentials, and EC2 instance metadata. `AWS_PROFILE` selects a named profile.
 
-The provider client and presigned URLs use the same credential source. Temporary credentials refresh automatically, and presigned URLs include the current session token.
+The provider client and presigned URLs use the same credential source. Each ambient AWS source caches one resolved credential value with its native expiration. Requests reuse it until 60 seconds before expiry; concurrent callers share a refresh. Refresh is on demand, with the provider's existing timeout/retry policy. Cancellation releases the refresh lock and preserves the previous value. If refresh fails or returns the same nearly expired credentials, a still-valid value may be reused for at most one second before another refresh attempt, never past its expiration. Cold failures and expired values are not cached.
+
+Ambient providers that supply no expiration remain uncached, preserving their lookup and rotation behavior. Explicit static credentials are unchanged. The cache is in memory and scoped to the shared source, with no background task or persistence.
+
+Presigned URLs include the current session token. When the source reports an expiration, issuance rejects a requested lifetime extending beyond it, rather than advertising a URL lifetime the credentials cannot support. This applies to reads, whole-object uploads, multipart operations, and checksum readback. Explicit static session tokens have no declared expiration in the configuration schema, so the caller remains responsible for their validity.
 
 Cloudflare R2 does not use this chain. R2 ambient credentials read `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` when the store starts.
 

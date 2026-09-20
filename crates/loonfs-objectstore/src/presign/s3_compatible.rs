@@ -260,6 +260,14 @@ impl S3CompatiblePresigner {
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
+        if credentials
+            .expires_at
+            .is_some_and(|expiry| now.checked_add(expires_in).is_none_or(|end| end > expiry))
+        {
+            return Err(ObjectStoreError::Configuration(
+                "presigned URL lifetime exceeds AWS credential expiry".to_owned(),
+            ));
+        }
         let endpoint = self.endpoint(object_key)?;
         let dates = signing_dates(object_key, now)?;
         let credential_scope = format!(
@@ -510,8 +518,92 @@ mod tests {
                 access_key_id: format!("rotating-access-{version}").into(),
                 secret_access_key: format!("rotating-secret-{version}").into(),
                 session_token: None,
+                expires_at: None,
             })
         }
+    }
+
+    #[derive(Debug)]
+    struct ExpiringCredentialsSource(std::time::SystemTime);
+
+    #[async_trait]
+    impl AwsCredentialsSource for ExpiringCredentialsSource {
+        async fn credentials(&self) -> Result<AwsSigningCredentials, ObjectStoreError> {
+            Ok(AwsSigningCredentials {
+                access_key_id: "expiring-access".into(),
+                secret_access_key: "expiring-secret".into(),
+                session_token: Some("expiring-token".into()),
+                expires_at: Some(self.0),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn presigned_capabilities_cannot_outlive_the_signing_credentials() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let expiry = now + Duration::from_secs(300);
+        let signer = S3CompatiblePresigner::with_credentials(
+            presigner_config(),
+            Arc::new(ExpiringCredentialsSource(expiry)),
+        )
+        .expect("signer");
+        let signed = signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(300),
+                },
+                now,
+            )
+            .await
+            .expect("URL fits credential lifetime");
+        assert!(signed.url.contains("X-Amz-Expires=300"));
+        assert_eq!(signed.expires_at_ms, 1_700_000_300_000);
+        let error = signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(301),
+                },
+                now,
+            )
+            .await
+            .expect_err("URL would outlive credentials");
+        assert_eq!(error.to_string(), "invalid object store configuration: presigned URL lifetime exceeds AWS credential expiry");
+        assert!(signer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(301),
+                },
+                now
+            )
+            .await
+            .is_err());
+        assert!(signer
+            .presign_head_stored_checksum(CONTENT_KEY, Duration::from_secs(1), expiry)
+            .await
+            .is_err());
+        assert!(signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::ZERO,
+                },
+                now
+            )
+            .await
+            .is_err());
+        assert!(signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::MAX,
+                },
+                now
+            )
+            .await
+            .is_err());
     }
 
     fn presigner_config() -> S3PresignerConfig {
