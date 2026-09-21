@@ -22,8 +22,8 @@ compatibility or rollback. Then publish from the updated `main` branch:
 gh release create vX.Y.Z --target main --title "vX.Y.Z" --notes-file notes.md
 ```
 
-Publishing starts the release workflow. Artifacts, packages, and public
-documentation are updated automatically.
+Publishing starts the release workflow, which builds and publishes the release
+artifacts and packages.
 
 Check the workflow result and the release assets. Archive checksums are in
 `SHA256SUMS`; server image and Helm chart digests are in `ARTIFACTS.txt`.

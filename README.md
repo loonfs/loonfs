@@ -8,8 +8,6 @@
 <br>
 <div align="center">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square"></a>
-  &nbsp;&nbsp;
-  <a href="https://loonfs.com"><img alt="Site: loonfs.com" src="https://img.shields.io/badge/site-loonfs.com-blue?style=flat-square"></a>
 </div>
 <br>
 <br>
@@ -22,7 +20,7 @@ LoonFS is a durable filesystem built on object storage. It can be used to store,
 
 You can use the [install script](https://github.com/loonfs/loonfs/blob/main/scripts/install-loonfs.sh) by running
 ```bash
-curl -fsSL https://install.loonfs.com | sh
+curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loonfs.sh | sh
 ```
 
 If you use Homebrew as your package manager, you can also install it by running
@@ -56,7 +54,7 @@ See [Self-hosting LoonFS](crates/loonfs-server/docs/self-hosting.md) for the com
 
 ## Documentation
 
-Visit [loonfs.com/docs](https://loonfs.com/docs) to learn more.
+See the [documentation](docs/specs/README.md) for the architecture, storage format, and API.
 
 ## Core concepts
 
