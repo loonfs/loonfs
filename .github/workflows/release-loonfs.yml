@@ -47,10 +47,7 @@ jobs:
             exit 1
           fi
 
-      # The chart ships in this release and names the server version it runs,
-      # so a chart that disagrees with the tag would publish a wrong default
-      # image. `sed` reads the two lines rather than a YAML tool, because the
-      # runner promises no such tool.
+      # The chart version and default server image must match the release.
       - name: Validate chart version matches workspace version
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -127,9 +124,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # One image per architecture, each built on a runner of that architecture,
-  # so no emulation is involved. Each leg pushes its image by digest and
-  # carries no tag: the merge job below is what publishes the tag.
+  # Build and test each architecture natively before tagging the combined image.
   server-image:
     name: Build server image ${{ matrix.arch }}
     needs: prepare
@@ -161,13 +156,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # The build carries no cache. A release image is built from the tag's
-      # own source every time.
-      #
-      # `provenance: false` keeps each push a plain single-platform image. An
-      # attestation manifest would make it an index instead, and the merged
-      # manifest would then carry `unknown/unknown` entries beside the two
-      # architectures the release claims.
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -176,13 +164,11 @@ jobs:
           file: crates/loonfs-server/Dockerfile
           platforms: ${{ matrix.platform }}
           tags: ${{ env.IMAGE_NAME }}
+          # Keep attestation entries out of the combined platform manifest.
           provenance: false
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
 
-      # The released image is the tested image: this pulls the digest the step
-      # above pushed and runs the image test against those exact bytes. Both
-      # legs run it, because both images ship.
-      - name: Test the image this job pushed
+      - name: Test the published image by digest
         env:
           LOONFS_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
         run: |
@@ -239,10 +225,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Both per-architecture images are already in the registry, addressed by
-      # digest and carrying no tag. This step publishes the release: it creates
-      # the one manifest the tag names, then reads that manifest back and
-      # proves it carries both architectures.
       - name: Create the multi-platform manifest
         id: manifest
         shell: bash
@@ -296,16 +278,10 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      # The runner ships helm, so this job installs nothing. `helm lint` runs
-      # the chart's strict values schema, and that schema requires a config
-      # Secret name. The chart creates no Secret and reads none while it
-      # renders, so any name works here.
+      # Rendering requires a Secret name, but does not read the Secret.
       - name: Lint the chart
         run: helm lint "$CHART_PATH" --set config.existingSecret=release
 
-      # The chart's own Chart.yaml already carries this version, and prepare
-      # refused the release otherwise. Passing it again names the version this
-      # package claims in the one command that builds it.
       - name: Package the chart
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -348,10 +324,7 @@ jobs:
 
   publish:
     name: Publish release assets
-    # Default needs-gating: publish only when every build leg succeeded, so a
-    # failed target can never ship a release with missing artifacts. The image
-    # and the chart are in that set, so the release names them only once they
-    # are in the registry.
+    # Upload assets only after all binaries, images, and the chart succeed.
     needs: [prepare, build, server-image-manifest, helm-publish]
     runs-on: ubuntu-latest
     permissions:
@@ -363,7 +336,7 @@ jobs:
           pattern: loonfs-*
           merge-multiple: true
 
-      - name: Verify release artifacts and record what the release ships
+      - name: Verify release artifacts and write the manifest
         shell: bash
         working-directory: dist
         env:
@@ -396,9 +369,7 @@ jobs:
           fi
           sha256sum "${expected[@]}" > SHA256SUMS
 
-          # The image and the chart go to a registry rather than to the
-          # release page, so the same check covers them as coordinates. A
-          # release never names an artifact its own jobs did not report.
+          # Require the image and chart details before listing them in the release.
           for name in IMAGE_TAG IMAGE_DIGEST IMAGE_PLATFORMS CHART_VERSION CHART_DIGEST; do
             if [ -z "${!name}" ]; then
               echo "the release records no $name" >&2
@@ -425,14 +396,12 @@ jobs:
           cat ARTIFACTS.txt
 
       - name: Upload assets to GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: |
-            dist/loonfs-*.tar.gz
-            dist/SHA256SUMS
-            dist/ARTIFACTS.txt
-          fail_on_unmatched_files: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            dist/loonfs-*.tar.gz dist/SHA256SUMS dist/ARTIFACTS.txt
 
   publish-crates:
     name: Publish crates

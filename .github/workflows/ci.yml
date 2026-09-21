@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -38,33 +42,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
-  # The blocking-store gates in `loonfs-test-support` wait without a
-  # wall-clock deadline of their own, so a gate nobody opens shows up as a
-  # hung job. This is the bound that reports it; without it the job would
-  # sit at GitHub's six-hour default.
+  # Stop tests that hang while waiting for a blocking-store gate.
   test:
     name: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-test-deps-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-deps-v1-
+          cache-targets: false
       - run: cargo test --all --locked
       - run: cargo test -p loonfs-server --features openapi --locked openapi
 
@@ -74,14 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-sdk-conformance-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-sdk-conformance-
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build -p loonfs-conformance --bin conformance-server --locked
       - uses: actions/upload-artifact@v4
         with:
@@ -110,35 +93,19 @@ jobs:
         if: matrix.language == 'go'
         with:
           go-version: 1.22.x
-          cache: false
+          cache-dependency-path: sdk/conformance/go/go.sum
       - uses: actions/setup-python@v5
         if: matrix.language == 'python'
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: sdk/conformance/python/requirements.txt
       - uses: actions/setup-node@v4
         if: matrix.language == 'typescript'
         with:
           node-version: '20'
-      - uses: actions/cache@v4
-        if: matrix.language == 'go'
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-sdk-conformance-${{ hashFiles('sdk/conformance/go/go.sum', 'sdk/conformance/go/go.mod') }}
-          restore-keys: ${{ runner.os }}-go-sdk-conformance-
-      - uses: actions/cache@v4
-        if: matrix.language == 'python'
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-python-sdk-conformance-${{ hashFiles('sdk/conformance/python/requirements.txt') }}
-          restore-keys: ${{ runner.os }}-python-sdk-conformance-
-      - uses: actions/cache@v4
-        if: matrix.language == 'typescript'
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-typescript-sdk-conformance-${{ hashFiles('sdk/conformance/typescript/package-lock.json') }}
-          restore-keys: ${{ runner.os }}-typescript-sdk-conformance-
+          cache: npm
+          cache-dependency-path: sdk/conformance/typescript/package-lock.json
       - uses: actions/download-artifact@v4
         with:
           name: conformance-server
@@ -149,33 +116,19 @@ jobs:
         env:
           LOONFS_CONFORMANCE_SERVER_BIN: ${{ github.workspace }}/target/debug/conformance-server
 
-  # Checks the declared minimum supported Rust version actually builds the
-  # workspace. Keep the toolchain here in sync with `rust-version` in the
-  # workspace Cargo.toml.
+  # Keep this toolchain in sync with workspace.package.rust-version.
   msrv:
     name: msrv
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install 1.85 --profile minimal
-      - uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-msrv-
-      - run: cargo +1.85 check --workspace --all-targets --all-features --locked
+          toolchain: '1.85'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo check --workspace --all-targets --all-features --locked
 
-  # Builds the server image and proves it works: the probes answer, the
-  # process is not root, the bearer token is enforced, durable state survives
-  # a restart, and SIGTERM exits zero. The script asserts all of that, so this
-  # job is the script's exit code.
-  #
-  # The job runs on every change, the way every other job here does. A path
-  # filter would be wrong for this one in any case: the image carries the
-  # whole workspace's code, so a change to any crate can change it.
+  # Test probes, authentication, persistence, shutdown, and the non-root user.
   container:
     name: container
     runs-on: ubuntu-latest
@@ -187,54 +140,38 @@ jobs:
           context: .
           file: crates/loonfs-server/Dockerfile
           tags: loonfs-server:ci
-          # Into the runner's own image store, so the test below runs the
-          # image this step built.
+          # Load the image into Docker for the test below.
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      # LOONFS_IMAGE is what tells the script to test an existing image
-      # instead of building its own, so the cached build above is the one
-      # under test.
       - run: crates/loonfs-server/scripts/test-image.sh
         env:
           LOONFS_IMAGE: loonfs-server:ci
 
-  # Lints and renders the server's Helm chart. `helm lint` runs the chart's
-  # strict values schema, so a value name the chart does not know fails here
-  # rather than being ignored. The renders cover the combinations that take
-  # different template branches, and the last step greps one render for the
-  # three settings that make the chart correct for a single-writer server.
-  # Those three live in the template rather than in values, so this job is
-  # what stops an edit from turning them into something else.
-  #
-  # The runner ships helm, so the job installs nothing.
+  # Validate the chart's schema, template branches, and single-writer settings.
   helm:
     name: helm
     runs-on: ubuntu-latest
     env:
       CHART: crates/loonfs-server/deploy/helm/loonfs-server
-      # The schema requires a config Secret name, so every command below
-      # supplies one. The chart creates no Secret and reads none while it
-      # renders, so any name works here.
-      SECRET: --set config.existingSecret=test
     steps:
       - uses: actions/checkout@v4
       - run: helm version
       - name: lint
-        run: helm lint "$CHART" $SECRET
+        run: helm lint "$CHART" --set config.existingSecret=test
       - name: render every value combination
         run: |
-          helm template rel "$CHART" $SECRET >/dev/null
-          helm template rel "$CHART" $SECRET \
+          helm template rel "$CHART" --set config.existingSecret=test >/dev/null
+          helm template rel "$CHART" --set config.existingSecret=test \
             --set localCache.enabled=true --set localCache.sizeLimit=100Gi >/dev/null
-          helm template rel "$CHART" $SECRET --set image.tag=9.9.9 >/dev/null
-          helm template rel "$CHART" $SECRET \
+          helm template rel "$CHART" --set config.existingSecret=test --set image.tag=9.9.9 >/dev/null
+          helm template rel "$CHART" --set config.existingSecret=test \
             --set image.digest=sha256:1111111111111111111111111111111111111111111111111111111111111111 >/dev/null
-          helm template rel "$CHART" $SECRET \
+          helm template rel "$CHART" --set config.existingSecret=test \
             --set 'extraEnvFrom[0].secretRef.name=loonfs-server-secrets' >/dev/null
       - name: reject an unbounded local cache
         run: |
-          if output="$(helm template rel "$CHART" $SECRET \
+          if output="$(helm template rel "$CHART" --set config.existingSecret=test \
             --set localCache.enabled=true 2>&1)"; then
             echo "FAIL: enabled cache without localCache.sizeLimit rendered" >&2
             exit 1
@@ -242,7 +179,7 @@ jobs:
           grep -q 'localCache.sizeLimit.*cache emptyDir.*disk_bytes' <<<"$output"
       - name: assert the single-writer settings
         run: |
-          rendered="$(helm template rel "$CHART" $SECRET)"
+          rendered="$(helm template rel "$CHART" --set config.existingSecret=test)"
           assert_line() {
             grep -qE "$1" <<<"$rendered" || {
               echo "FAIL: the render has no line matching $1" >&2
@@ -259,12 +196,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-dist-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-dist-
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: scripts/test-install-loonfs.sh
