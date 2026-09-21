@@ -12,8 +12,24 @@ Each release uses one version for these artifacts:
 Publishing a GitHub release starts `.github/workflows/release-loonfs.yml`.
 The workflow verifies that the tag matches the workspace and chart versions,
 then builds and publishes the CLI archives, server image, and Helm chart.
-Publishing crates, updating the Homebrew tap, and updating the website are
-manual steps.
+After those succeed, it publishes the crates, updates Homebrew and the API
+reference, and checks that the public installer installs the requested version.
+The tap's CI tests the formula; the website's deployment workflow publishes
+the updated reference. These run in their own repositories.
+
+## One-time setup
+
+- On crates.io, add a [GitHub trusted publisher](https://crates.io/docs/trusted-publishing)
+  for each published crate: `loonfs-api`, `loonfs-objectstore`, `loonfs-client`,
+  `loonfs-core`, `loonfs`, `loonfs-grep`, and `loonfs-cli`. Set owner and
+  repository to `loonfs`, workflow to `release-loonfs.yml`, and leave environment
+  empty. The workflow uses a temporary token; no crates.io secret is needed.
+- In this repository's Actions secrets, set `HOMEBREW_TAP_TOKEN` to a GitHub
+  token with Contents read/write access to `loonfs/homebrew-tap`, and
+  `LOONFS_WWW_TOKEN` to one with Contents and Pull requests read/write access
+  to `loonfs/loonfs_www`. The tap token pushes to `main`. The website token
+  opens and merges a PR, as required by that repository's branch rules.
+  These updates start the existing tap CI and website deployment workflows.
 
 ## 1. Prepare the version
 
@@ -49,40 +65,16 @@ release and starts the release workflow:
 gh release create vX.Y.Z --target main --title "vX.Y.Z" --notes-file notes.md
 ```
 
-Watch the workflow with `gh run watch`. After it completes, confirm that the
-release contains the four archives, `SHA256SUMS`, and `ARTIFACTS.txt`. The
-`ARTIFACTS.txt` file contains the published image and chart digests.
+Watch the workflow with `gh run watch`. The release will contain four archives,
+`SHA256SUMS`, and `ARTIFACTS.txt`, which records the image and chart digests.
+Also check the [Homebrew CI](https://github.com/loonfs/homebrew-tap/actions)
+and [website deployment](https://github.com/loonfs/loonfs_www/actions).
 
-## 3. Publish the crates
+## If a step fails
 
-```sh
-cargo publish --workspace
-```
+Fix the cause, then use **Re-run failed jobs** in GitHub Actions. Crate versions
+that are already published are skipped. Homebrew and website updates create a
+commit only when their files change.
 
-Cargo publishes the publishable crates in dependency order and skips the
-`publish = false` ones. If publishing one crate at a time instead, the order
-is: `loonfs-api`, `loonfs-objectstore`, `loonfs-client`, `loonfs-core`,
-`loonfs`, `loonfs-grep`, `loonfs-cli`.
-
-## 4. Update the Homebrew tap
-
-```sh
-scripts/bump-homebrew-tap.sh --version X.Y.Z
-```
-
-The script uses the release checksums to update the formula in the tap checkout
-(`../homebrew-tap` by default). Review the printed diff, then commit and push
-the tap change as `chore: update to vX.Y.Z`.
-
-## 5. Update the website
-
-Update the API reference website through its private release process.
-
-## 6. Verify the release
-
-- `curl -fsSL https://install.loonfs.com | sh` installs a binary that reports
-  `X.Y.Z`. The installer selects the latest release automatically.
-- `brew install loonfs/tap/loonfs` (or `brew upgrade loonfs`) installs
-  `X.Y.Z`.
-- `docker pull ghcr.io/loonfs/loonfs-server:vX.Y.Z` downloads the digest
-  recorded in `ARTIFACTS.txt`.
+Homebrew and the API reference follow the latest non-prerelease GitHub release.
+An older release or prerelease does not update them.
