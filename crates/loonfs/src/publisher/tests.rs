@@ -3438,3 +3438,134 @@ async fn commit_diagnostic_replay_reads_response_history_without_metadata_replay
             >= stages[Stage::RetainedHistory as usize].elapsed_us
     );
 }
+
+#[test]
+fn commit_diagnostic_real_publisher_completion_and_aborts_have_no_private_context() {
+    let log = Arc::new(Mutex::new(Vec::<u8>::new()));
+    #[derive(Clone)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Log(log.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(move || output.clone())
+        .finish();
+    // Current-thread runtime keeps the test subscriber on every publisher poll;
+    // request spans are entered only while polling the request, like production.
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            for outcome in ["ok", "error", "panic", "delete"] {
+                let temp_dir = tempdir().expect("tempdir");
+                let namespace_id = NamespaceId::parse("private-namespace").expect("namespace");
+                let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
+                let runtime = test_runtime(store.clone() as SharedStore);
+                create_namespace(&runtime, &namespace_id).await;
+                let publisher = standalone_publisher(&namespace_id, &runtime);
+                if outcome == "error" {
+                    publisher
+                        .submit(CommitCandidate::new(create_directory_request(
+                            "seed",
+                            "private-path",
+                        )))
+                        .await
+                        .expect("seed existing path");
+                }
+                let timing = CommitTiming::new();
+                let span = tracing::info_span!(
+                    "private-request",
+                    namespace = "private-namespace",
+                    path = "/private-path"
+                );
+                let result = timing
+                    .scope(
+                        async {
+                            if outcome == "panic" {
+                                store.arm_blocking_panic();
+                                store.release_into_panic();
+                            }
+                            // Queued work behind a successful delete is aborted by take_queued_waiters.
+                            let deletion = if outcome == "delete" {
+                                Some(
+                                    publisher
+                                        .admit_delete(DeleteNamespaceOptions {
+                                            expected_head_seq: None,
+                                        })
+                                        .expect("delete"),
+                                )
+                            } else {
+                                None
+                            };
+                            let result = publisher
+                                .submit(CommitCandidate::new(create_directory_request(
+                                    "private-commit",
+                                    "private-path",
+                                )))
+                                .await;
+                            if let Some(deletion) = deletion {
+                                deletion
+                                    .await
+                                    .expect("delete receiver")
+                                    .expect("delete success");
+                            }
+                            result
+                        }
+                        .instrument(span),
+                    )
+                    .await;
+                assert_eq!(result.is_ok(), outcome == "ok");
+                assert!(
+                    timing
+                        .snapshot()
+                        .expect("request")
+                        .work
+                        .expect("work")
+                        .completed
+                );
+            }
+        });
+    let log = String::from_utf8(log.lock().expect("log").clone()).expect("UTF-8");
+    let completions: Vec<serde_json::Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("JSON"))
+        .filter(|row: &serde_json::Value| row["target"] == "loonfs::commit_timing")
+        .collect();
+    assert_eq!(completions.len(), 4, "{log}");
+    for event in &completions {
+        assert!(!event.to_string().contains("private-"), "{event}");
+        assert!(
+            event.get("span").is_none() && event.get("spans").is_none(),
+            "{event}"
+        );
+    }
+    let outcomes: Vec<serde_json::Value> = completions
+        .iter()
+        .map(|event| {
+            serde_json::from_str::<serde_json::Value>(
+                event["fields"]["diagnostic"].as_str().expect("snapshot"),
+            )
+            .expect("snapshot")["outcome"]
+                .clone()
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![
+            serde_json::json!("ok"),
+            serde_json::json!("error"),
+            serde_json::json!("aborted"),
+            serde_json::json!("aborted")
+        ]
+    );
+}

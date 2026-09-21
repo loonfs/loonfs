@@ -459,4 +459,90 @@ mod tests {
         assert_eq!(stats.http_5xx, 1);
         assert_eq!(stats.cancelled, 0);
     }
+    #[tokio::test]
+    async fn attribution_counts_real_s3_adapter_dispatches_on_the_store_io_runtime() {
+        use crate::commit_timing::{CommitTiming, Stage};
+        use crate::s3_compatible::{aws_s3, AwsS3StoreConfig};
+        use crate::{AwsS3Credentials, ObjectStore};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            for status in [503, 200] {
+                let (mut stream, _) =
+                    tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                        .await
+                        .expect("bounded accept")
+                        .expect("accept");
+                let mut header = Vec::new();
+                loop {
+                    let byte = tokio::time::timeout(Duration::from_secs(10), stream.read_u8())
+                        .await
+                        .expect("bounded header")
+                        .expect("request");
+                    header.push(byte);
+                    assert!(header.len() < 8192);
+                    if header.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                assert!(header.starts_with(b"GET /test/fixture HTTP/1.1\r\n"));
+                // Never print request headers: even test credentials are not diagnostics.
+                let body = if status == 200 { "hello" } else { "" };
+                let response = format!("HTTP/1.1 {status} test\r\nContent-Length: {}\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nETag: test\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response");
+            }
+            2
+        });
+        // Public factory: real credentials adapter, retry policy, TransferTimeoutConnector,
+        // SpawnedReqwestConnector, and the independently owned StoreIoRuntime.
+        let store = aws_s3(AwsS3StoreConfig {
+            bucket: "test".into(),
+            region: "us-east-1".into(),
+            endpoint_url: Some(format!("http://{address}")),
+            credentials: AwsS3Credentials::Static {
+                access_key_id: loonfs_api::SecretString::new("test"),
+                secret_access_key: loonfs_api::SecretString::new("test"),
+                session_token: None,
+            },
+            key_prefix: None,
+            force_path_style: true,
+        })
+        .expect("production adapter");
+        let work = CommitTiming::new().admit();
+        work.selected(1);
+        let bytes = work
+            .scope(async {
+                let _response = work.stage(Stage::ResponseHistory);
+                tokio::time::timeout(Duration::from_secs(15), store.get("fixture", None))
+                    .await
+                    .expect("bounded GET")
+                    .expect("retried GET")
+                    .expect("body")
+            })
+            .await;
+        assert_eq!(bytes, "hello");
+        let requests = server.await.expect("loopback server");
+        let snapshot = work.snapshot().expect("work");
+        for http in [
+            snapshot.http.expect("total"),
+            snapshot.response_http.expect("reconstruction"),
+        ] {
+            assert_eq!(
+                (
+                    http.dispatches,
+                    http.get_dispatches,
+                    http.repeat_dispatches,
+                    http.http_5xx,
+                    http.cancelled
+                ),
+                (requests, requests, 1, 1, 0)
+            );
+        }
+    }
 }
