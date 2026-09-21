@@ -577,6 +577,9 @@ impl FsReader {
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
             )
             .await?;
+        // Give awakened validation waiters a turn before synchronous page work.
+        // The read is already pinned and the validation guard has been released.
+        tokio::task::yield_now().await;
         let page = engine
             .list_path_page(listed_path.as_str(), request, options, &read_context)
             .await?;
@@ -661,6 +664,9 @@ impl FsReader {
                 tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
             )
             .await?;
+        // Give awakened validation waiters a turn before synchronous page work.
+        // The read is already pinned and the validation guard has been released.
+        tokio::task::yield_now().await;
         let page = engine
             .list_inode_children_page(inode_id, request, options, &read_context)
             .await?;
