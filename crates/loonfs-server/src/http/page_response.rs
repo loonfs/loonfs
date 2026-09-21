@@ -6,8 +6,11 @@ use axum::{
 use serde::Serialize;
 
 pub(super) fn page_response<T: Serialize>(page: T) -> Response {
-    tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "serialize")
-        .in_scope(|| Json(page).into_response())
+    let span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "serialize", request_id = tracing::field::Empty);
+    if let Ok(request_id) = super::REQUEST_ID.try_with(|id| id.clone()) {
+        span.record("request_id", request_id.as_str());
+    }
+    span.in_scope(|| Json(page).into_response())
 }
 
 #[cfg(test)]
