@@ -16,6 +16,7 @@ type Fixture = {
     mode: string;
     fault?: string;
     error: boolean;
+    inline_limit?: number;
 };
 const cases: Fixture[] = JSON.parse(
     readFileSync(join(__dirname, "../../../../../fixtures/streaming_uploads.json"), "utf8"),
@@ -87,10 +88,16 @@ for (const browser of [false, true])
                         protocol_version: "v0",
                         api_groups: ["filesystem/v0"],
                         features: {
+                            "filesystem.commits.inline_content": fixture.inline_limit !== undefined,
                             "filesystem.uploads.direct_put": fixture.mode === "direct_put",
                             "filesystem.uploads.direct_multipart": fixture.mode === "direct_multipart",
                         },
-                        limits: fixture.mode === "direct_put" ? { "upload.max_content_bytes": 0 } : {},
+                        limits: {
+                            ...(fixture.mode === "direct_put" ? { "upload.max_content_bytes": 0 } : {}),
+                            ...(fixture.inline_limit === undefined
+                                ? {}
+                                : { "commit.max_inline_content_bytes": fixture.inline_limit }),
+                        },
                     };
                 else if (path.endsWith("/uploads")) {
                     assert.equal((await request.json()).mode, fixture.mode);
@@ -177,6 +184,7 @@ for (const browser of [false, true])
                 if (fixture.fault === "payload_error") assert.equal(counts.payload, 1);
             } else {
                 const prepared = await result;
+                assert.ok("contentRef" in prepared);
                 assert.equal(prepared.contentToken?.token, "retained-token");
                 assert.equal(Buffer.concat(bodies).toString(), fixture.content);
                 assert.equal(counts.complete, 1);

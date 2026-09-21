@@ -708,10 +708,28 @@ This works for both inline content and completed uploads.
 | TypeScript server and browser clients | `files.prepare()` | `files.uploadPrepared()` |
 
 In the embedded runtime, preparing content at or below the enabled inline
-threshold makes no storage request. The Rust HTTP client also prepares content
-inline when the server advertises `filesystem.commits.inline_content` and the
-file fits `commit.max_inline_content_bytes`. Once capabilities are cached,
-writing a small file requires only the commit HTTP request.
+threshold makes no storage request. The HTTP clients prepare inline content
+when the server advertises `filesystem.commits.inline_content` and the actual
+file bytes fit `commit.max_inline_content_bytes`. The Go, Python, and TypeScript
+helpers retain at most 64 KiB inline, even if the server advertises a larger
+limit. Streams use bounded lookahead (the effective limit plus one byte); larger
+sources continue through the existing upload path with that prefix preserved.
+The Rust HTTP client caches capabilities; once populated, writing a small file
+requires only the commit HTTP request. The generated SDK helpers still retrieve
+capabilities during preparation, but skip upload creation, payload transfer, and
+completion for inline content.
+
+In Go, Python, and TypeScript, preparation returns `PreparedFile`, either the
+existing staged `PreparedContent` or an `InlinePreparedContent`. The staged type's
+constructor and reference/token fields are unchanged. Callers that inspect those
+fields must first narrow to the staged variant; callers that retain the result
+and pass it to `upload_prepared` / `UploadPrepared` / `uploadPrepared` need no
+transport-specific logic. Inline values retain immutable bytes (base64 in Go and
+TypeScript) and have no uploaded reference before publication. Applications that
+explicitly need a completed upload can still use the lower-level uploads API.
+Publication uses the retained variant without checking capabilities again or
+falling back to another representation after an error. A lost response must be
+retried with the original prepared value and commit ID.
 
 Prepared inline bytes have no expiry. Completed uploads retain their normal
 expiry; preparing content does not extend it. Preparation does not make a file
@@ -720,12 +738,13 @@ visible. A commit is still required.
 The whole-file convenience methods (`files.upload`, `files.uploadStream`,
 `files.upload_stream`, `Files.Upload`, `Files.UploadStream`,
 `put_file_bytes()`, and `put_file_stream()`) prepare content on every call.
-In Rust, small files can be prepared inline, so another call with the same
-bytes, commit ID, and options can replay the original commit. Larger files,
-files prepared with inline writes disabled, and uploads through the generated
-SDKs create new objects. When a new object is created, reusing the original
-commit ID conflicts, even for identical bytes. An unused upload can be reclaimed
-after its grace period.
+Small files can be prepared inline, so another call with the same bytes,
+commit ID, and options can replay the original commit if preparation still
+selects inline content. Larger files and files prepared with inline writes
+disabled create new objects. When a new object is created, reusing the original
+commit ID conflicts, even for identical bytes. A capability change can also
+change the representation; retaining the prepared value avoids that risk. An
+unused upload can be reclaimed after its grace period.
 
 For reliable retries, use the preparation methods above and retain the complete
 commit request. The remote CLI saves this request before submission so it can
@@ -2520,9 +2539,10 @@ longer payload is refused when it asks to authorize the part past that
 ceiling — a client that knows its payload is very large asks for a larger
 part size at begin.
 
-**Choosing a transport.** A payload smaller than one part gains nothing from
-any direct transport and goes to `PUT /content`. Above that, a client works
-down the transports its deployment advertises:
+**Choosing a transport.** The file helpers first retain small content inline
+when supported, as described in section 5.2. Content that requires an upload
+and is smaller than one part goes to `PUT /content` if it fits the proxy limit.
+Above that, a client works down the transports its deployment advertises:
 
 1. `direct_multipart`, where advertised. Parts win because each is retried on
    its own and nothing has to know the payload's length in advance.
@@ -3297,8 +3317,10 @@ used by the byte helpers, without publishing a filesystem entry:
 | TypeScript server/browser | `files.prepareStream({ ...namespace, content, size_bytes }, options)` | `files.uploadStream(input, options)` |
 
 The optional size is checked against the consumed bytes; TypeScript infers it
-for a Blob. Unknown nonempty sources use multipart when advertised, otherwise
-service-proxied uploads. SDK reads are limited to 64 KiB, and multipart uploads
+for a Blob. Small streams become inline prepared content when supported, including
+unknown-size streams. After inline lookahead, larger unknown-size sources use
+multipart when advertised, otherwise service-proxied uploads. SDK reads are
+limited to 64 KiB, and multipart uploads
 retain a provider-sized part plus at most 10,000 part descriptors. Async Python
 and TypeScript retain the caller's current chunk, so callers should also produce
 bounded chunks. Known TypeScript sources up to 8 MiB use a bounded fixed request body to

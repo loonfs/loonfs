@@ -280,5 +280,38 @@
     "mode": "direct_multipart",
     "size": null,
     "fault": "timeout"
+  },
+  {
+    "name": "inline_fallback_service_proxied",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "service_proxied",
+    "size": 9,
+    "inline_limit": 2
+  },
+  {
+    "name": "inline_fallback_direct_put",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "direct_put",
+    "size": 9,
+    "inline_limit": 2
+  },
+  {
+    "name": "inline_fallback_direct_multipart",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "direct_multipart",
+    "size": null,
+    "inline_limit": 2
   }
 ]

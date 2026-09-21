@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import typing
@@ -39,6 +40,10 @@ from .types import (
     UploadPartChecksumClaim,
     UploadSession,
 )
+
+_INLINE_FEATURE = "filesystem.commits.inline_content"
+_INLINE_LIMIT = "commit.max_inline_content_bytes"
+_MAX_INLINE_BYTES = 64 * 1024
 
 _MULTIPART_MIN_BYTES = 8 * 1024 * 1024
 _DIRECT_GET_FEATURE = "filesystem.downloads.direct_get"
@@ -85,6 +90,20 @@ class PreparedContent:
 
     content_ref: ContentRef
     content_token: ContentToken | None
+
+
+@dataclass(frozen=True)
+class InlinePreparedContent:
+    """Immutable bytes retained for a commit; no upload or content reference yet."""
+
+    content: bytes
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", bytes(self.content))
+
+
+# Preserve PreparedContent's existing staged constructor and fields.
+PreparedFile = PreparedContent | InlinePreparedContent
 
 
 _TRANSFER_CHUNK_BYTES = 64 * 1024
@@ -278,8 +297,8 @@ class FilesClient(_GeneratedFilesClient):
         content: bytes,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
-    ) -> PreparedContent:
-        """Stage the streaming path for an existing byte buffer."""
+    ) -> PreparedFile:
+        """Prepare an existing byte buffer through the streaming path."""
         return self.prepare_stream(
             namespace_id,
             content=io.BytesIO(content),
@@ -296,8 +315,8 @@ class FilesClient(_GeneratedFilesClient):
         size_bytes: int | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
-    ) -> PreparedContent:
-        """Stage once with bounded memory; retain the result for publication retries.
+    ) -> PreparedFile:
+        """Prepare inline bytes or stage once; retain the result for publication retries.
 
         The caller owns content. Payload requests are never retried. A known
         size validates the source and selects the usual small-file transport.
@@ -311,6 +330,16 @@ class FilesClient(_GeneratedFilesClient):
             if not first:
                 size_bytes = 0
         source = _UploadSource(content, first, size_bytes)
+        limit = _inline_limit(capabilities)
+        if limit is not None:
+            prefix = bytearray()
+            while len(prefix) <= limit:
+                chunk = source.read(limit + 1 - len(prefix))
+                if not chunk:
+                    return InlinePreparedContent(bytes(prefix))
+                prefix.extend(chunk)
+            # The source is one-pass: replay only the bounded prefix into staging.
+            source = _UploadSource(content, bytes(prefix), size_bytes)
         begin = _create_upload(
             self._root, namespace_id, capabilities, size_bytes, request_options
         )
@@ -367,7 +396,7 @@ class FilesClient(_GeneratedFilesClient):
         namespace_id: str,
         *,
         path: str,
-        prepared: PreparedContent,
+        prepared: PreparedFile,
         commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -377,7 +406,8 @@ class FilesClient(_GeneratedFilesClient):
     ) -> Commit:
         """Pass commit_id explicitly if you may retry. Reuse identical inputs."""
         commit_id = self._publication_ids(commit_id)
-        operation_arguments = {"path": path, "content_ref": prepared.content_ref}
+        content, tokens = _prepared_commit_fields(prepared)
+        operation_arguments = {"path": path, **content}
         if behavior is not None:
             operation_arguments["behavior"] = behavior
         if expected_inode_id is not None:
@@ -388,9 +418,7 @@ class FilesClient(_GeneratedFilesClient):
         commit_arguments = {
             "commit_id": commit_id,
             "operations": [operation],
-            "content_tokens": [prepared.content_token]
-            if prepared.content_token is not None
-            else [],
+            "content_tokens": tokens,
         }
         if message is not None:
             commit_arguments["message"] = message
@@ -667,7 +695,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         content: bytes,
         http_client: httpx.AsyncClient | None = None,
         request_options: RequestOptions | None = None,
-    ) -> PreparedContent:
+    ) -> PreparedFile:
         return await self.prepare_stream(
             namespace_id,
             content=io.BytesIO(content),
@@ -684,8 +712,8 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         size_bytes: int | None = None,
         http_client: httpx.AsyncClient | None = None,
         request_options: RequestOptions | None = None,
-    ) -> PreparedContent:
-        """Stage once with bounded memory; retain the result for publication retries.
+    ) -> PreparedFile:
+        """Prepare inline bytes or stage once; retain the result for publication retries.
 
         The caller owns content. Payload requests are never retried. A known
         size validates the source and selects the usual small-file transport.
@@ -702,6 +730,16 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
             if not first:
                 size_bytes = 0
         source = _AsyncUploadSource(reader, first, size_bytes)
+        limit = _inline_limit(capabilities)
+        if limit is not None:
+            prefix = bytearray()
+            while len(prefix) <= limit:
+                chunk = await source.read(limit + 1 - len(prefix))
+                if not chunk:
+                    return InlinePreparedContent(bytes(prefix))
+                prefix.extend(chunk)
+            # The source is one-pass: replay only the bounded prefix into staging.
+            source = _AsyncUploadSource(reader, bytes(prefix), size_bytes)
         begin = await _create_upload(
             self._root, namespace_id, capabilities, size_bytes, request_options
         )
@@ -760,7 +798,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         namespace_id: str,
         *,
         path: str,
-        prepared: PreparedContent,
+        prepared: PreparedFile,
         commit_id: CommitId | None = None,
         message: str | None = None,
         behavior: DestinationBehavior | None = None,
@@ -770,7 +808,8 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
     ) -> Commit:
         """Pass commit_id explicitly if you may retry. Reuse identical inputs."""
         commit_id = self._publication_ids(commit_id)
-        operation_arguments = {"path": path, "content_ref": prepared.content_ref}
+        content, tokens = _prepared_commit_fields(prepared)
+        operation_arguments = {"path": path, **content}
         if behavior is not None:
             operation_arguments["behavior"] = behavior
         if expected_inode_id is not None:
@@ -781,9 +820,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         commit_arguments = {
             "commit_id": commit_id,
             "operations": [operation],
-            "content_tokens": [prepared.content_token]
-            if prepared.content_token is not None
-            else [],
+            "content_tokens": tokens,
         }
         if message is not None:
             commit_arguments["message"] = message
@@ -914,6 +951,8 @@ __all__ = [
     "DownloadResult",
     "DownloadStream",
     "PreparedContent",
+    "InlinePreparedContent",
+    "PreparedFile",
     "FilesClient",
     "LoonFS",
 ]
@@ -981,6 +1020,27 @@ class _UploadSource:
     def finish(self):
         if not self.ended:
             raise RuntimeError("successful response before upload source reached EOF")
+
+
+def _inline_limit(capabilities):
+    limit = (capabilities.limits or {}).get(_INLINE_LIMIT)
+    if (
+        (capabilities.features or {}).get(_INLINE_FEATURE)
+        and type(limit) is int
+        and limit >= 0
+    ):
+        return min(limit, _MAX_INLINE_BYTES)
+    return None
+
+
+def _prepared_commit_fields(prepared: PreparedFile):
+    if isinstance(prepared, InlinePreparedContent):
+        return {
+            "inline_content": base64.b64encode(prepared.content).decode("ascii")
+        }, []
+    return {"content_ref": prepared.content_ref}, (
+        [prepared.content_token] if prepared.content_token is not None else []
+    )
 
 
 def _create_upload(client, namespace_id, capabilities, size_bytes, request_options):
