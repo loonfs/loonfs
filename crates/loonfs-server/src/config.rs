@@ -187,14 +187,14 @@ pub struct ServerConfig {
     /// accepted transfer size, not per-request memory (streamed writes hold
     /// at most one internal part). Clients may use `direct_put` or direct
     /// multipart for larger transfers when the capability is advertised.
-    /// Advertised as the `upload.max_content_bytes` capability limit.
+    /// Advertised as the `upload.service_proxied.max_content_bytes` capability limit.
     #[serde(default = "default_max_upload_bytes")]
     pub max_upload_bytes: u64,
     /// Largest file content a service-proxied read (`GET .../filesystem/
     /// content` and inode revision content) will stream and return. Checked
     /// against resolved metadata before fetching content bytes; over-limit reads
     /// answer `content_too_large`. Advertised to clients as the
-    /// `download.max_content_bytes` capability limit.
+    /// `download.service_proxied.max_content_bytes` capability limit.
     #[serde(default = "default_max_download_bytes")]
     pub max_download_bytes: u64,
     /// Largest `ttl_ms` accepted by snapshot create and extend requests.

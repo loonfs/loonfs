@@ -42,12 +42,12 @@ writer_id = "loonfs-server-local"
 # Largest request body accepted for service-proxied upload content, in
 # bytes. The server never holds the body whole. It forwards one transfer
 # part at a time while counting the bytes. Advertised to clients as the
-# `upload.max_content_bytes` capability limit. Defaults to 256 MiB.
+# `upload.service_proxied.max_content_bytes` capability limit. Defaults to 256 MiB.
 #max_upload_bytes = 268435456
 
 # Largest file content a service-proxied read will stream and return, in
 # bytes; over-limit reads answer `content_too_large`. Advertised to clients
-# as the `download.max_content_bytes` capability limit. Defaults to 256 MiB.
+# as the `download.service_proxied.max_content_bytes` capability limit. Defaults to 256 MiB.
 #max_download_bytes = 268435456
 
 # Snapshot request ttl, total lifetime from creation, and live quota per

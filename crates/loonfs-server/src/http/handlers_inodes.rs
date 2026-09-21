@@ -248,7 +248,7 @@ pub(super) async fn list_file_revisions_by_inode(
             (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
             (status = 409, description = "Inode is not a file", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
+            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )

@@ -419,7 +419,7 @@ impl Client {
         };
         let proxy_cap = capabilities
             .limits
-            .get(LIMIT_UPLOAD_MAX_CONTENT_BYTES)
+            .get(LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES)
             .copied();
         let fits_proxy = proxy_cap.is_none_or(|cap| size_bytes <= cap);
         let direct_put_cap = capabilities.direct_put_max_content_bytes();
@@ -438,13 +438,13 @@ impl Client {
             reason: match direct_put_cap {
                 Some(cap) => format!(
                     "the service takes at most {proxy_cap} bytes \
-                     (`{LIMIT_UPLOAD_MAX_CONTENT_BYTES}`), `direct_put` at most {cap} \
+                     (`{LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES}`), `direct_put` at most {cap} \
                      (`{LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES}`), and \
                      `{FEATURE_UPLOADS_DIRECT_MULTIPART}` is not advertised"
                 ),
                 None => format!(
                     "the service takes at most {proxy_cap} bytes \
-                     (`{LIMIT_UPLOAD_MAX_CONTENT_BYTES}`), and neither \
+                     (`{LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES}`), and neither \
                      `{FEATURE_UPLOADS_DIRECT_MULTIPART}` nor `{FEATURE_UPLOADS_DIRECT_PUT}` is \
                      advertised"
                 ),

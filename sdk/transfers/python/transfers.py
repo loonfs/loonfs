@@ -43,15 +43,15 @@ from .types import (
 )
 
 _INLINE_FEATURE = "filesystem.commits.inline_content"
-_INLINE_LIMIT = "commit.max_inline_content_bytes"
+_INLINE_LIMIT = "commit.max_inline_content_bytes_per_operation"
 _MAX_INLINE_BYTES = 64 * 1024
 
 _MULTIPART_MIN_BYTES = 8 * 1024 * 1024
 _DIRECT_GET_FEATURE = "filesystem.downloads.direct_get"
 _DIRECT_MULTIPART_FEATURE = "filesystem.uploads.direct_multipart"
 _DIRECT_PUT_FEATURE = "filesystem.uploads.direct_put"
-_PROXY_UPLOAD_LIMIT = "upload.max_content_bytes"
-_DIRECT_PUT_LIMIT = "upload.direct_put_max_content_bytes"
+_PROXY_UPLOAD_LIMIT = "upload.service_proxied.max_content_bytes"
+_DIRECT_PUT_LIMIT = "upload.direct_put.max_content_bytes"
 
 
 def _crc_table(polynomial: int, mask: int) -> tuple[int, ...]:

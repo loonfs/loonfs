@@ -4,7 +4,9 @@ use super::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
 use crate::{Client, ClientError, NamespaceId, PayloadSource, Result};
 use bytes::BytesMut;
 use futures::StreamExt;
-use loonfs_api::{FEATURE_COMMIT_INLINE_CONTENT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES};
+use loonfs_api::{
+    FEATURE_COMMIT_INLINE_CONTENT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
+};
 
 impl Client {
     pub(crate) async fn inline_content_limit(&self) -> Result<Option<usize>> {
@@ -14,7 +16,7 @@ impl Client {
         }
         Ok(capabilities
             .limits
-            .get(LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES)
+            .get(LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION)
             .and_then(|limit| usize::try_from(*limit).ok())
             .filter(|limit| *limit < usize::MAX))
     }

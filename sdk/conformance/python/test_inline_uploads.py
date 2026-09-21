@@ -66,7 +66,7 @@ class Endpoint:
                     },
                     limits={}
                     if limit is None
-                    else {"commit.max_inline_content_bytes": limit},
+                    else {"commit.max_inline_content_bytes_per_operation": limit},
                 ),
             )
         if path.endswith("/uploads"):
@@ -268,7 +268,7 @@ def test_async_inline_peek_cancellation_starts_no_upload():
                     protocol_version="v0",
                     api_groups=[],
                     features={"filesystem.commits.inline_content": True},
-                    limits={"commit.max_inline_content_bytes": 65536},
+                    limits={"commit.max_inline_content_bytes_per_operation": 65536},
                 ),
             )
 

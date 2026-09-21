@@ -3816,7 +3816,8 @@ mod direct_download {
     use loonfs_api::{
         v0::UploadContentClaim, Checksum, ChecksumAlgorithm, RevisionNo,
         FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-        LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+        LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
+        LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     };
     use loonfs_objectstore::presign::{
         DirectGetIssuer, DirectPutIssuer, DirectTransferIssuers, PresignedGetRequest,
@@ -4577,7 +4578,9 @@ mod direct_download {
             "the provider's own single-request ceiling is advertised, not the proxy's"
         );
         assert_eq!(
-            advertised.limits.get(LIMIT_DOWNLOAD_MAX_CONTENT_BYTES),
+            advertised
+                .limits
+                .get(LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES),
             Some(&PROXY_CAP_BYTES),
             "the proxy cap stays advertised: it is what tells a client which reads need a grant"
         );

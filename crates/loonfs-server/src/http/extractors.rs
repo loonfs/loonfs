@@ -286,7 +286,7 @@ fn failed_query_parameter(path: &serde_path_to_error::Path) -> Option<String> {
 /// request's 401 into a 400.
 pub(super) struct AppJson<T>(pub(super) T);
 
-const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 async fn extract_json<S, T>(
     req: axum::extract::Request,
@@ -642,12 +642,12 @@ fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
 }
 
 /// 413 for over-limit upload bodies: the guidance names the upload byte cap
-/// and the optional `direct_put` path that bypasses proxied buffering.
+/// and the optional `direct_put` path that bypasses the proxy.
 fn upload_body_too_large_error() -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::ContentTooLarge,
         "request body exceeds this deployment's limit; check the \
-         `upload.max_content_bytes` capability limit, and use `direct_put` \
+         `upload.service_proxied.max_content_bytes` capability limit, and use `direct_put` \
          for large content when `filesystem.uploads.direct_put` is advertised",
     )
 }

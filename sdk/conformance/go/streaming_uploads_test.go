@@ -86,10 +86,10 @@ func TestStreamingUploads(t *testing.T) {
 				case strings.HasSuffix(path, "/capabilities"):
 					limits := map[string]int{}
 					if fixture.Mode == "direct_put" {
-						limits["upload.max_content_bytes"] = 0
+						limits["upload.service_proxied.max_content_bytes"] = 0
 					}
 					if fixture.InlineLimit != nil {
-						limits["commit.max_inline_content_bytes"] = *fixture.InlineLimit
+						limits["commit.max_inline_content_bytes_per_operation"] = *fixture.InlineLimit
 					}
 					value = map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.commits.inline_content": fixture.InlineLimit != nil, "filesystem.uploads.direct_put": fixture.Mode == "direct_put", "filesystem.uploads.direct_multipart": fixture.Mode == "direct_multipart"}, "limits": limits}
 				case strings.HasSuffix(path, "/uploads"):

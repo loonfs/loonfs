@@ -70,7 +70,7 @@ for (const browser of [false, true])
                         api_groups: ["filesystem/v0"],
                         features: { "filesystem.commits.inline_content": fixture.feature ?? true },
                         limits:
-                            fixture.limit === null ? {} : { "commit.max_inline_content_bytes": fixture.limit ?? 65536 },
+                            fixture.limit === null ? {} : { "commit.max_inline_content_bytes_per_operation": fixture.limit ?? 65536 },
                     };
                 } else if (path.endsWith("/uploads")) {
                     assert.ok(!fixture.inline && !fixture.error, "inline preparation starts no upload");
@@ -204,7 +204,7 @@ test("inline preparation copies a caller-owned buffer", async () => {
                 protocol_version: "v0",
                 api_groups: [],
                 features: { "filesystem.commits.inline_content": true },
-                limits: { "commit.max_inline_content_bytes": 65536 },
+                limits: { "commit.max_inline_content_bytes_per_operation": 65536 },
             }),
     });
     const prepared = await client.files.prepare({ namespace_id: "demo", content });

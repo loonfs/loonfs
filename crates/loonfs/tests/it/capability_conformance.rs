@@ -39,7 +39,7 @@ fn without_host_capabilities(mut document: CapabilityDocument) -> CapabilityDocu
         .features
         .retain(|key, _| !is_grep_key(key) && !is_host_feature_key(key));
     document.limits.retain(|key, _| {
-        !is_grep_key(key) && key != loonfs_api::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES
+        !is_grep_key(key) && key != loonfs_api::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION
     });
     document
 }

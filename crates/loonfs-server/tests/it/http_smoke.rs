@@ -13,11 +13,13 @@ use loonfs_api::{
     API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
     LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
-    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT,
+    LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT,
     LIMIT_PAGINATION_MAX, LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
 use loonfs_client::{ClientError, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
@@ -205,9 +207,19 @@ async fn capabilities_endpoint_advertises_capabilities() {
         "http-smoke",
     );
     for (limit, expected) in [
-        (LIMIT_UPLOAD_MAX_CONTENT_BYTES, config.max_upload_bytes),
-        (LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES, 8 * 1024 * 1024),
-        (LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, config.max_download_bytes),
+        (
+            LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
+            config.max_upload_bytes,
+        ),
+        (
+            LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
+            8 * 1024 * 1024,
+        ),
+        (LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, 2 * 1024 * 1024),
+        (
+            LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
+            config.max_download_bytes,
+        ),
         (LIMIT_SNAPSHOT_MAX_TTL_MS, config.snapshot_max_ttl_ms),
         (
             LIMIT_SNAPSHOT_MAX_LIFETIME_MS,
@@ -218,11 +230,11 @@ async fn capabilities_endpoint_advertises_capabilities() {
             config.snapshot_max_live_per_namespace as u64,
         ),
         (
-            LIMIT_UPLOAD_MAX_CONCURRENT,
+            LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
             config.max_concurrent_uploads as u64,
         ),
         (
-            LIMIT_DOWNLOAD_MAX_CONCURRENT,
+            LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
             config.max_concurrent_downloads as u64,
         ),
         (LIMIT_COMMIT_MAX_OPERATIONS, MAX_COMMIT_OPERATIONS as u64),

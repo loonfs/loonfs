@@ -11,7 +11,7 @@ use loonfs_api::{
     },
     AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
     DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
-    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
+    LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::http::{
@@ -229,7 +229,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         .await
         .expect("fetch capabilities")
         .limits
-        .get(LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES)
+        .get(LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES)
         .copied()
         .and_then(|limit| usize::try_from(limit).ok())
         .expect("completion body limit is advertised and fits usize");

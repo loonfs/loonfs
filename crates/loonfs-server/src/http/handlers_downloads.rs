@@ -34,7 +34,7 @@ use std::time::Duration;
         path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
-        description = "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
+        description = "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id")
         ),
@@ -142,7 +142,7 @@ fn direct_get_issuer(state: &AppState) -> Result<&dyn DirectGetIssuer, ApiRespon
                 FEATURE_DOWNLOADS_DIRECT_GET,
                 "direct_get requires an object store that can presign object reads; \
                  this deployment's endpoint cannot, so every read is proxied and \
-                 bounded by `download.max_content_bytes`",
+                 bounded by `download.service_proxied.max_content_bytes`",
             )
         })
 }

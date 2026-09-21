@@ -97,7 +97,7 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 			source = io.MultiReader(bytes.NewReader(first[:n]), source)
 		}
 	}
-	if limit, ok := capabilities.Limits["commit.max_inline_content_bytes"]; ok && limit >= 0 && capabilities.Features["filesystem.commits.inline_content"] {
+	if limit, ok := capabilities.Limits["commit.max_inline_content_bytes_per_operation"]; ok && limit >= 0 && capabilities.Features["filesystem.commits.inline_content"] {
 		// Bound lookahead even if a deployment advertises a larger inline budget.
 		if limit > maxInlineBytes {
 			limit = maxInlineBytes

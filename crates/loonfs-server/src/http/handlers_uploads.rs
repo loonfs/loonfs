@@ -525,7 +525,7 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload content conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Body exceeds the advertised `upload.max_content_bytes` limit", body = ApiError),
+            (status = 413, description = "Body exceeds the advertised `upload.service_proxied.max_content_bytes` limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -577,7 +577,7 @@ pub(super) async fn put_upload_content(
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload completion conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Completion body exceeds the advertised `upload.completion_max_body_bytes` limit", body = ApiError),
+            (status = 413, description = "Completion body exceeds the advertised `upload.complete.max_request_body_bytes` limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )

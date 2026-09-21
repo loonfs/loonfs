@@ -93,10 +93,10 @@ for (const browser of [false, true])
                             "filesystem.uploads.direct_multipart": fixture.mode === "direct_multipart",
                         },
                         limits: {
-                            ...(fixture.mode === "direct_put" ? { "upload.max_content_bytes": 0 } : {}),
+                            ...(fixture.mode === "direct_put" ? { "upload.service_proxied.max_content_bytes": 0 } : {}),
                             ...(fixture.inline_limit === undefined
                                 ? {}
-                                : { "commit.max_inline_content_bytes": fixture.inline_limit }),
+                                : { "commit.max_inline_content_bytes_per_operation": fixture.inline_limit }),
                         },
                     };
                 else if (path.endsWith("/uploads")) {

@@ -26,8 +26,8 @@ const (
 	featureDirectGet           = "filesystem.downloads.direct_get"
 	featureDirectPut           = "filesystem.uploads.direct_put"
 	featureDirectMultipart     = "filesystem.uploads.direct_multipart"
-	limitUploadMaximumBytes    = "upload.max_content_bytes"
-	limitDirectPutMaximumBytes = "upload.direct_put_max_content_bytes"
+	limitUploadMaximumBytes    = "upload.service_proxied.max_content_bytes"
+	limitDirectPutMaximumBytes = "upload.direct_put.max_content_bytes"
 
 	crc64NVMePolynomial = 0x9a6c9329ac4bc9b5
 )

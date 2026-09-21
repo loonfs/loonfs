@@ -22,13 +22,15 @@ use loonfs_api::{
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
     FEATURE_COMMIT_INLINE_CONTENT, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
     FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES, LIMIT_DOWNLOAD_MAX_CONCURRENT,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
-    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION, LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES,
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
     LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
 
 /// Advertises a feature, or removes the key: an absent key and an
@@ -82,7 +84,7 @@ pub(super) async fn get_capabilities(
     if let Some(threshold) = state.config.inline_content.inline_content_threshold_bytes {
         set_feature(&mut capabilities, FEATURE_COMMIT_INLINE_CONTENT, true);
         capabilities.limits.insert(
-            LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES.to_owned(),
+            LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
             threshold as u64,
         );
     }
@@ -120,23 +122,27 @@ pub(super) async fn get_capabilities(
         );
     }
     capabilities.limits.insert(
-        LIMIT_UPLOAD_MAX_CONTENT_BYTES.to_owned(),
+        LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
         state.config.max_upload_bytes,
     );
     capabilities.limits.insert(
-        LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES.to_owned(),
+        LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES.to_owned(),
         super::MAX_COMPLETION_BODY_BYTES as u64,
     );
     capabilities.limits.insert(
-        LIMIT_DOWNLOAD_MAX_CONTENT_BYTES.to_owned(),
+        LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES.to_owned(),
+        super::MAX_JSON_BODY_BYTES as u64,
+    );
+    capabilities.limits.insert(
+        LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
         state.config.max_download_bytes,
     );
     capabilities.limits.insert(
-        LIMIT_UPLOAD_MAX_CONCURRENT.to_owned(),
+        LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS.to_owned(),
         state.config.max_concurrent_uploads as u64,
     );
     capabilities.limits.insert(
-        LIMIT_DOWNLOAD_MAX_CONCURRENT.to_owned(),
+        LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS.to_owned(),
         state.config.max_concurrent_downloads as u64,
     );
     capabilities.limits.insert(

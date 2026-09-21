@@ -89,10 +89,10 @@ either way.
     "query.grep": true
   },
   "limits": {
-    "access.max_principals": 64,
+    "access.max_principals_per_request": 64,
     "commit.max_content_tokens": 4096,
     "commit.max_external_content_refs": 4096,
-    "commit.max_inline_content_bytes": 65536,
+    "commit.max_inline_content_bytes_per_operation": 65536,
     "commit.max_message_bytes": 4096,
     "commit.max_operations": 4096,
     "commit.max_preconditions": 1024,
@@ -132,14 +132,15 @@ Registered limit keys:
 | --- | --- |
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. An explicit `limit=0` is rejected with 400 `invalid_request`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. A `limit` greater than this value is rejected with 400 `invalid_request`. |
-| `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `filesystem.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
-| `upload.direct_put_max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.max_content_bytes`, which bounds service-proxied uploads. A size hint above this limit returns `content_too_large` at begin, and completion checks the actual stored size. Advertised only alongside `filesystem.uploads.direct_put`. |
-| `upload.completion_max_body_bytes` | Largest JSON body accepted by `POST .../uploads/{upload_id}/complete`. Larger requests return `content_too_large`. |
-| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will stream and return in one response. Over-limit reads answer `content_too_large`; proxied reads use bounded chunks but do not support range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
-| `upload.max_concurrent` | How many service-proxied upload streams the deployment accepts at once; requests past the cap answer `server_busy`. |
-| `download.max_concurrent` | How many service-proxied content streams the deployment serves at once; requests past the cap answer `server_busy`. |
-| `access.max_principals` | Most principal ids one request may act as. Over-limit headers answer `invalid_request`. |
-| `commit.max_inline_content_bytes` | Maximum file size for one `inline_content` value, measured before base64 encoding. Advertised only with `filesystem.commits.inline_content`. Larger values return `invalid_request` before commit planning. |
+| `upload.service_proxied.max_content_bytes` | Largest request body accepted by one service-proxied upload content request (`PUT .../uploads/{upload_id}/content`). This is not a maximum file size. Clients may use `direct_put` for larger content only when `filesystem.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
+| `upload.direct_put.max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.service_proxied.max_content_bytes`, which bounds service-proxied uploads. A size hint above this limit returns `content_too_large` at begin, and completion checks the actual stored size. Advertised only alongside `filesystem.uploads.direct_put`. |
+| `upload.complete.max_request_body_bytes` | Largest JSON body accepted by `POST .../uploads/{upload_id}/complete`. Larger requests return `content_too_large`. |
+| `download.service_proxied.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will stream and return in one response. Over-limit reads answer `content_too_large`; proxied reads use bounded chunks but do not support range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. The check is against the whole file. The proxied read has no ranged form. |
+| `upload.service_proxied.max_concurrent_requests` | How many service-proxied upload requests a serving process streams at once. The cap is shared by all callers and is not a per-caller allowance. Requests past it answer `server_busy`. |
+| `download.service_proxied.max_concurrent_requests` | How many service-proxied content reads a serving process streams at once. The cap is shared by all callers and is not a per-caller allowance. Requests past it answer `server_busy`. A read holds its place until its body finishes or is dropped. |
+| `access.max_principals_per_request` | Most principal ids one request may act as. Over-limit headers answer `invalid_request`. |
+| `commit.max_inline_content_bytes_per_operation` | Maximum file size for one `inline_content` value, measured before base64 encoding. Advertised only with `filesystem.commits.inline_content`. Larger values return `invalid_request` before commit planning. This bounds each value. `commit.max_request_body_bytes` bounds the whole request. |
+| `commit.max_request_body_bytes` | Largest JSON body accepted by a commit request, with base64 inline content and every other field included. A larger body answers `content_too_large`. Advertised by HTTP deployments. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_preconditions` | Most precondition entries one commit may carry, counting entries rather than resources. A longer list answers `invalid_request` before planning, on every transport. |
 | `commit.max_content_tokens` | Most content tokens one commit may carry. Over-limit requests answer `invalid_request` before planning. |
@@ -169,10 +170,10 @@ hoc.
 | `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
 | `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
-| `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | Advertised when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes`. Without this feature, upload content before committing. |
+| `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | Advertised when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, upload content before committing. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `filesystem.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
-| `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
+| `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.service_proxied.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep manifest, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `maintenance/v0`'s only feature key is `maintenance.grep.index`; the rest of that API group
@@ -276,7 +277,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
 | `forbidden` | 403 | The subject holds a right on the inode but not the one the operation needs. An inode on which the subject holds no right at all is reported as not found instead. |
-| `content_too_large` | 413 | A request or proxied response exceeds its advertised size limit. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.completion_max_body_bytes`. For large reads, request a download grant when `filesystem.downloads.direct_get` is available. |
+| `content_too_large` | 413 | A request or proxied response exceeds its advertised size limit. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.complete.max_request_body_bytes`. For large reads, request a download grant when `filesystem.downloads.direct_get` is available. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
@@ -623,7 +624,7 @@ Principal, subject, and scope ids never contain a comma, so the list is
 unambiguous.
 `Loonfs-Subject` identifies the subject the request acts as and defaults to
 `Loonfs-Actor`. The principal count is capped by the advertised
-`access.max_principals` limit. `Loonfs-Subject` or `Loonfs-Principal-Scope`
+`access.max_principals_per_request` limit. `Loonfs-Subject` or `Loonfs-Principal-Scope`
 without `Loonfs-Principals` answers `invalid_request` with `param` set to
 `Loonfs-Principals`. Principals without scope answer `invalid_request` with
 `param` set to `Loonfs-Principal-Scope`. Omitting all three headers uses the
@@ -710,7 +711,7 @@ This works for both inline content and completed uploads.
 In the embedded runtime, preparing content at or below the enabled inline
 threshold makes no storage request. The HTTP clients prepare inline content
 when the server advertises `filesystem.commits.inline_content` and the actual
-file bytes fit `commit.max_inline_content_bytes`. The Go, Python, and TypeScript
+file bytes fit `commit.max_inline_content_bytes_per_operation`. The Go, Python, and TypeScript
 helpers retain at most 64 KiB inline, even if the server advertises a larger
 limit. Streams use bounded lookahead (the effective limit plus one byte); larger
 sources continue through the existing upload path with that prefix preserved.
@@ -1237,7 +1238,7 @@ writes them to object storage.
 
 The server streams the body to object storage without buffering the complete
 file. While streaming, it counts the bytes and computes SHA-256. A body larger
-than `upload.max_content_bytes` fails with `content_too_large`. The resulting
+than `upload.service_proxied.max_content_bytes` fails with `content_too_large`. The resulting
 content reference stores the server-computed SHA-256 in `checksum`.
 
 #### Direct single-PUT upload
@@ -1255,7 +1256,7 @@ content facts at completion.
 ```
 
 `size_bytes` is optional and advisory. When present, the server compares it
-with `upload.direct_put_max_content_bytes`, the provider's single-request
+with `upload.direct_put.max_content_bytes`, the provider's single-request
 ceiling, and answers `content_too_large` before issuing a capability when it
 is too large. The provider enforces the same limit when accepting the PUT.
 Larger content uses `direct_multipart` when available.
@@ -1878,7 +1879,7 @@ The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
 
 The server streams and verifies content in bounded chunks. A file past
-`download.max_content_bytes` answers `content_too_large` before content bytes
+`download.service_proxied.max_content_bytes` answers `content_too_large` before content bytes
 are fetched; clients may use a download grant when direct GET is advertised.
 The limit is a transfer policy, not an allocation size.
 
@@ -2057,15 +2058,15 @@ An empty string writes an empty file. The content ID is assigned by the server,
 and the size and SHA-256 checksum are computed from the decoded bytes.
 
 Inline writes are enabled by default for files up to 64 KiB. The configured
-limit is advertised as `commit.max_inline_content_bytes`, alongside
+limit is advertised as `commit.max_inline_content_bytes_per_operation`, alongside
 `filesystem.commits.inline_content`. If inline writes are disabled, both keys
 are absent. An inline request then returns `not_supported` with `feature` set
 to `filesystem.commits.inline_content`.
 
 The size limit applies to each file before base64 encoding. A larger value
 returns `invalid_request` before any storage write. The complete JSON body,
-including base64 content and all other fields, must also fit the 2 MiB request
-limit.
+including base64 content and all other fields, must also fit
+`commit.max_request_body_bytes`, 2 MiB by default.
 
 Some inline files may be uploaded to the content store before the commit to
 meet the configured WAL limits. All operations still commit together. Retry
@@ -2547,19 +2548,19 @@ Above that, a client works down the transports its deployment advertises:
 1. `direct_multipart`, where advertised. Parts win because each is retried on
    its own and nothing has to know the payload's length in advance.
 2. `direct_put`, where advertised and `size_bytes` is at most
-   `upload.direct_put_max_content_bytes`. This is the rung a provider that
+   `upload.direct_put.max_content_bytes`. This is the rung a provider that
    can sign a write but has no multipart API to open offers. It is the one
    transport that sends one whole object directly. The client counts and
    hashes the bytes while sending them, then reports both values at completion.
    The source is read once and does not have to be held in memory.
 3. `PUT /content` as a streaming request body, where `size_bytes` is at most
-   `upload.max_content_bytes`. The server hashes the payload as it forwards
+   `upload.service_proxied.max_content_bytes`. The server hashes the payload as it forwards
    it on. A body whose length is unknown is sent with chunked transfer
    encoding, and the server's incremental accounting is what bounds it.
 
 Every rung with a known size is judged against the advertised limits, never
 against an assumed one: a payload under one part is not thereby known to fit
-`upload.max_content_bytes`, since a deployment may set that cap anywhere. A
+`upload.service_proxied.max_content_bytes`, since a deployment may set that cap anywhere. A
 payload that none of the three can carry should be refused by the client,
 naming the limits it passed, rather than sent into the proxy to be refused
 there.
@@ -2655,7 +2656,7 @@ Representative complete-upload response:
 A deployment must be able to serve back whatever it let a client create.
 That is the whole rule, and it is why this exists: `direct_put` and
 `direct_multipart` let a client write an object of any size, while a proxied
-read enforces the transfer limit `download.max_content_bytes`. Direct reads
+read enforces the transfer limit `download.service_proxied.max_content_bytes`. Direct reads
 bypass that service limit and keep object traffic off the server. So
 `filesystem.downloads.direct_get` is advertised by every deployment that offers
 any direct write — the read is not a separate decision, and a deployment

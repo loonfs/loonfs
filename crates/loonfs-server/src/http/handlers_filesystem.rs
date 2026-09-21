@@ -349,7 +349,7 @@ pub(super) async fn get_path_entry(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ApiError),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
-            (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
+            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
