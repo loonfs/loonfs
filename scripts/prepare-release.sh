@@ -82,8 +82,7 @@ current=$(awk '
 
 echo "bumping $current -> $version"
 
-# Update the workspace version and the pinned registry versions of the
-# published workspace crates. RELEASING.md explains why both are required.
+# Update the workspace version and pinned versions of published workspace crates.
 sed "/^\[workspace\.package\]$/,/^\[/ s/^version = \"$current\"\$/version = \"$version\"/
      s/\(^loonfs[a-z-]* = { path = \"crates\/[a-z-]*\", version = \"\)$current\(\" }\)\$/\1$version\2/" \
     Cargo.toml > Cargo.toml.tmp

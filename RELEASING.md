@@ -1,88 +1,34 @@
 # Releasing LoonFS
 
-Each release uses one version for these artifacts:
+Each release uses one version for the CLI, server, Helm chart, and Rust crates.
 
-- four CLI archives and their `SHA256SUMS` on the GitHub release
-- the server image `ghcr.io/loonfs/loonfs-server:vX.Y.Z` (linux/amd64 and linux/arm64)
-- the Helm chart at `oci://ghcr.io/loonfs/charts/loonfs-server`
-- the published workspace crates on crates.io
-- the Homebrew formula `loonfs/tap/loonfs`
-- the API reference on [loonfs.com](https://loonfs.com)
+## Prepare the version
 
-Publishing a GitHub release starts `.github/workflows/release-loonfs.yml`.
-The workflow verifies that the tag matches the workspace and chart versions,
-then builds and publishes the CLI archives, server image, and Helm chart.
-Publishing crates, updating the Homebrew tap, and updating the website are
-manual steps.
-
-## 1. Prepare the version
-
-Start from a clean branch based on `main` after CI passes:
+Start from a clean branch based on `main`:
 
 ```sh
 scripts/prepare-release.sh --version X.Y.Z
 ```
 
-The script updates `workspace.package.version` and the pinned registry
-versions in `Cargo.toml`, updates the server chart, regenerates the OpenAPI
-specification, and refreshes `Cargo.lock`. Its workspace and chart version checks
-match the release workflow; its OpenAPI specification test matches CI.
+Commit the changes as `chore(release): prepare vX.Y.Z` and open a PR. Merge it
+after CI passes.
 
-Commit the result as `chore(release): prepare vX.Y.Z` and open a PR. Merge it
-only after the normal PR checks pass.
+## Publish the release
 
-## 2. Publish the GitHub release
-
-Write the release notes before publishing. Start with a short summary of the
-important changes and whether the previous release reads this release's
-durable format (rollback is supported only where the notes say so), followed
-by the generated PR list:
-
-```sh
-gh api repos/loonfs/loonfs/releases/generate-notes -f tag_name=vX.Y.Z --jq .body
-```
-
-Create the release from the updated `main` branch. This command publishes the
-release and starts the release workflow:
+Write release notes that summarize the changes and any limits on format
+compatibility or rollback. Then publish from the updated `main` branch:
 
 ```sh
 gh release create vX.Y.Z --target main --title "vX.Y.Z" --notes-file notes.md
 ```
 
-Watch the workflow with `gh run watch`. After it completes, confirm that the
-release contains the four archives, `SHA256SUMS`, and `ARTIFACTS.txt`. The
-`ARTIFACTS.txt` file contains the published image and chart digests.
+Publishing starts the release workflow, which builds and publishes the release
+artifacts and packages.
 
-## 3. Publish the crates
+Check the workflow result and the release assets. Archive checksums are in
+`SHA256SUMS`; server image and Helm chart digests are in `ARTIFACTS.txt`.
 
-```sh
-cargo publish --workspace
-```
+## Retry a failed step
 
-Cargo publishes the publishable crates in dependency order and skips the
-`publish = false` ones. If publishing one crate at a time instead, the order
-is: `loonfs-api`, `loonfs-objectstore`, `loonfs-client`, `loonfs-core`,
-`loonfs`, `loonfs-grep`, `loonfs-cli`.
-
-## 4. Update the Homebrew tap
-
-```sh
-scripts/bump-homebrew-tap.sh --version X.Y.Z
-```
-
-The script uses the release checksums to update the formula in the tap checkout
-(`../homebrew-tap` by default). Review the printed diff, then commit and push
-the tap change as `chore: update to vX.Y.Z`.
-
-## 5. Update the website
-
-Update the API reference website through its private release process.
-
-## 6. Verify the release
-
-- `curl -fsSL https://install.loonfs.com | sh` installs a binary that reports
-  `X.Y.Z`. The installer selects the latest release automatically.
-- `brew install loonfs/tap/loonfs` (or `brew upgrade loonfs`) installs
-  `X.Y.Z`.
-- `docker pull ghcr.io/loonfs/loonfs-server:vX.Y.Z` downloads the digest
-  recorded in `ARTIFACTS.txt`.
+Fix the cause, then select **Re-run failed jobs** in GitHub Actions. Crate
+versions that are already published are skipped.
