@@ -29,6 +29,7 @@ mod row;
 mod runs;
 mod scan;
 mod snapshot;
+mod statistics;
 mod stored_block_cache;
 mod streaming_compaction;
 #[cfg(test)]
@@ -54,6 +55,9 @@ pub use self::reorganize::{MetadataCompactionPolicy, MetadataReorganizeOutcome};
 pub use self::runs::MetadataFamilyGroup;
 pub(crate) use self::runs::MetadataLsmPolicy;
 pub use self::snapshot::load_snapshot_read_basis;
+pub use self::statistics::{
+    load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
+};
 pub use self::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
     StoredMetadataBlockKind,

@@ -368,6 +368,11 @@ fn sample_wal_inline_content_payload() -> WalSegmentPayload {
 
 fn sample_manifest_payload() -> NamespaceManifestPayload {
     let mut manifest = NamespaceManifestPayload {
+        stats: loonfs_api::wire::manifest::ManifestStats {
+            committed_content_bytes_total: 100_000_000_000,
+            committed_file_revisions_total: 10_000,
+            committed_mutations_total: 14_000,
+        },
         content_store_id: content_store_id(),
         created_at_ms: 1_000,
         created_by: loonfs_api::ActorId::parse("test").expect("actor"),
@@ -1609,6 +1614,30 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
 }
 
 #[test]
+fn namespace_manifest_requires_every_statistics_counter() {
+    for field in [
+        "stats",
+        "committed_content_bytes_total",
+        "committed_file_revisions_total",
+        "committed_mutations_total",
+    ] {
+        let encoded = control_document_with_payload_edit("namespace_manifest.v1.json", |payload| {
+            if field == "stats" {
+                payload.as_object_mut().expect("object").remove(field);
+            } else {
+                payload["stats"]
+                    .as_object_mut()
+                    .expect("stats")
+                    .remove(field);
+            }
+        });
+        assert!(
+            matches!(decode_namespace_manifest_json(&encoded), Err(EnvelopeCodecError::PayloadDecode(message)) if message.contains("missing field"))
+        );
+    }
+}
+
+#[test]
 fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
     let encoded = encode_namespace_manifest_json(sample_manifest_payload())
         .expect("manifest")
@@ -1661,6 +1690,7 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
     for path in [
         "",
         "/access",
+        "/stats",
         "/runs/0",
         "/runs/0/segments/0",
         "/runs/0/segments/0/index_block",

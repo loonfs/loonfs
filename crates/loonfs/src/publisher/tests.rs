@@ -1434,6 +1434,12 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         .expect("delete task")
         .expect("delete succeeds");
     assert_eq!(response.head_seq, ChangeSeq(2));
+    let statistics = loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
+        .await
+        .expect("final statistics");
+    assert_eq!(statistics.stats.committed_mutations_total, 2);
+    assert_eq!(statistics.manifest.manifest_head_seq, response.head_seq);
+    assert_eq!(statistics.inode_record_count, 3);
 
     // Admitted-after work is rejected, and the tombstone fails new
     // admissions immediately.
@@ -2294,6 +2300,14 @@ async fn a_runtime_fold_materializes_inline_content_and_reloads_an_empty_tail() 
         .await
         .expect("publish");
     writer.wait_for_fold(&namespace_id).await.expect("fold");
+    let folded = loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
+        .await
+        .expect("inline statistics");
+    assert_eq!(
+        folded.stats.committed_content_bytes_total,
+        value.bytes().len() as u64
+    );
+    assert_eq!(folded.stats.committed_file_revisions_total, 1);
     assert_eq!(store.count(OperationClass::Put), 1);
     let reader = crate::FsReader::builder_with_store(store.clone())
         .build()
@@ -2333,6 +2347,13 @@ async fn a_runtime_fold_materializes_inline_content_and_reloads_an_empty_tail() 
     assert_eq!(input.tail_state.weight().rows, 0);
     assert_eq!(input.tail_state.weight().bytes, 0);
     assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(
+        loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
+            .await
+            .expect("after extraction and retry")
+            .stats,
+        folded.stats
+    );
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -2643,16 +2664,20 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
                 .await
         })
     };
-    while !matches!(
-        publisher_state(&publisher).admission,
-        PublisherAdmissionState::Deleted
-    ) {
-        tokio::task::yield_now().await;
-    }
     if let Ok(completed) = timeout(Duration::from_millis(100), &mut delete).await {
         blocking.release();
         panic!("delete completed while its earlier fold was parked: {completed:?}");
     }
+
+    assert!(!matches!(
+        publisher_state(&publisher).admission,
+        PublisherAdmissionState::Deleted
+    ));
+    let manifest =
+        loonfs_core::control::load_namespace_current_manifest(blocking.inner(), &namespace_id)
+            .await
+            .expect("manifest during fold");
+    assert!(!manifest.envelope.payload().status.is_deleted());
 
     blocking.release();
     settle_delete(delete, "delete waiting for the earlier fold")

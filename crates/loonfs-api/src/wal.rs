@@ -206,10 +206,38 @@ pub enum WalDelta {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalCommitDelta {
-    /// Zero-based request-operation position used to attribute one or more resulting deltas.
+    /// Internal operation position within this commit. Convenience requests can
+    /// expand into several operations; each operation's deltas are contiguous.
     pub semantic_op_index: u32,
     /// Replay mutation produced for that semantic operation.
     pub delta: WalDelta,
+}
+
+/// Groups a commit's ordered deltas by their durable semantic operation.
+/// Indices are local to the commit and need not be consecutive.
+pub fn semantic_operation_groups(
+    deltas: &[WalCommitDelta],
+) -> impl Iterator<Item = &[WalCommitDelta]> {
+    deltas.chunk_by(|left, right| left.semantic_op_index == right.semantic_op_index)
+}
+
+/// Counts activity represented by one committed delta vector.
+/// Returns `None` if a counter overflows.
+pub fn committed_stats(deltas: &[WalCommitDelta]) -> Option<crate::manifest::ManifestStats> {
+    let mut stats = crate::manifest::ManifestStats::default();
+    for group in semantic_operation_groups(deltas) {
+        stats.committed_mutations_total = stats.committed_mutations_total.checked_add(1)?;
+        for delta in group {
+            if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
+                stats.committed_content_bytes_total = stats
+                    .committed_content_bytes_total
+                    .checked_add(content_ref.size_bytes)?;
+                stats.committed_file_revisions_total =
+                    stats.committed_file_revisions_total.checked_add(1)?;
+            }
+        }
+    }
+    Some(stats)
 }
 
 /// Carries bytes named by a revision delta in the same commit.
@@ -427,6 +455,32 @@ mod tests {
     #![allow(clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn committed_statistics_count_full_revisions_and_semantic_groups() {
+        let mut deltas: Vec<_> = inline_segment(&[5, 5, 0])
+            .records
+            .into_iter()
+            .flat_map(|record| record.deltas)
+            .collect();
+        // Several deltas in one group count once, and indices can have gaps.
+        deltas[0].semantic_op_index = 2;
+        deltas[1].semantic_op_index = 2;
+        deltas[2].semantic_op_index = 9;
+        assert_eq!(
+            committed_stats(&deltas),
+            Some(crate::manifest::ManifestStats {
+                committed_content_bytes_total: 10,
+                committed_file_revisions_total: 3,
+                committed_mutations_total: 2,
+            })
+        );
+        assert_eq!(committed_stats(&[]), Some(Default::default()));
+        if let WalDelta::AppendFileRevision { content_ref, .. } = &mut deltas[0].delta {
+            content_ref.size_bytes = u64::MAX;
+        }
+        assert_eq!(committed_stats(&deltas), None);
+    }
 
     fn inline_segment(lengths: &[usize]) -> WalSegmentPayload {
         let namespace_id = NamespaceId::parse("bounded").expect("namespace");

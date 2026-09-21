@@ -85,6 +85,16 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             .payload()
             .ensure_successor_identity(manifest.envelope().payload())
             .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
+        if !current
+            .envelope
+            .payload()
+            .preserves_stats(manifest.envelope().payload())
+        {
+            return Err(CoreError::NamespaceCorrupt(
+                "manifest changes statistics without folding new activity or lowers a counter"
+                    .to_owned(),
+            ));
+        }
         if manifest.envelope().payload().last_folded_wal_no
             < current.envelope.payload().last_folded_wal_no
             || manifest.envelope().payload().retention_floor_wal_no

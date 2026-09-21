@@ -94,7 +94,7 @@ where
         current_head.head_commit_id = record.commit_id.clone();
         current_head.next_inode_id =
             replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-        current_tail.rows.apply_committed_wal_record_parts_mut(
+        current_tail.apply_commit_parts(
             CommitReceiptRecord {
                 commit_id: record.commit_id.clone(),
                 committed_by: record.committed_by.clone(),
@@ -104,7 +104,7 @@ where
                 message: record.message.map(str::to_owned),
             },
             &record.deltas,
-        );
+        )?;
     }
 
     Ok(ReplayedWalTail {

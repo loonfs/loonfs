@@ -396,6 +396,17 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     projection: &ManifestProjection<'_, S>,
     manifest_no: ManifestNo,
 ) -> Result<NamespaceManifestPayload> {
+    let stats = projection
+        .manifest_segments
+        .manifest()
+        .payload()
+        .stats
+        .checked_add(projection.tail_state.stats)
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(
+                "committed activity exceeds the statistics counter range".to_owned(),
+            )
+        })?;
     let head_seq = projection.head.seq;
     let tail_state = projection.tail_with_deletion_inodes().await?;
     // A WAL flush keeps existing runs and writes the WAL delta as one new delta
@@ -456,6 +467,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     };
 
     Ok(NamespaceManifestPayload {
+        stats,
         manifest_no,
         head_seq,
         head_commit_id: projection.head.head_commit_id.clone(),

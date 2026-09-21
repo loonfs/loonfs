@@ -34,14 +34,18 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 });
             }
         }
+        // The delete barrier has drained admitted commits. Fold the final tail
+        // before publishing a terminal manifest, so its rows and totals cover
+        // the same head. A failed fold leaves the namespace active.
+        if anchor.manifest.envelope.payload().last_folded_wal_no != head.wal_no {
+            crate::checkpoint::flush_wal(store, namespace_id).await?;
+            continue;
+        }
         let mut payload = anchor.manifest.envelope.payload().clone();
         payload.manifest_no = payload
             .manifest_no
             .successor()
             .map_err(|error| CoreError::Internal(format!("manifest number {error}")))?;
-        payload.head_seq = head.seq;
-        payload.head_commit_id = head.head_commit_id.clone();
-        payload.next_inode_id = head.next_inode_id;
         payload.status = NamespaceStatus::Deleted {
             reclaim_after_ms: None,
         };

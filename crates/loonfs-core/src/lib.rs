@@ -128,7 +128,8 @@ pub mod cache {
 /// Used by `loonfs` read and write paths and by layout tests.
 pub mod control {
     pub use crate::checkpoint::{
-        load_checkpoint_read_basis, load_snapshot_read_basis, CheckpointReadBasis,
+        load_checkpoint_read_basis, load_checkpoint_statistics, load_namespace_statistics,
+        load_snapshot_read_basis, CheckpointReadBasis, NamespaceStatistics,
     };
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::namespace::catalog::{

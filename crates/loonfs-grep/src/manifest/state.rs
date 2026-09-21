@@ -252,6 +252,21 @@ impl GrepManifestState {
         &self.index
     }
 
+    /// Total stored bytes of segments referenced by this manifest, without
+    /// reading the segment objects. Pair this with `manifest_no` and `status`;
+    /// grep's position is independent of the core manifest's folded head.
+    pub fn index_stored_bytes(&self) -> crate::Result<u64> {
+        self.segments.iter().try_fold(0_u64, |total, segment| {
+            let key = crate::keyspace::segment_key(&self.namespace_id, &segment.segment_id);
+            let bytes = crate::index_read::segment_object_len(&key, segment)?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| crate::GrepError::CorruptIndex {
+                    message: "index byte count overflow".to_owned(),
+                })
+        })
+    }
+
     pub fn segments(&self) -> &[GrepSegmentRef] {
         &self.segments
     }

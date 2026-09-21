@@ -85,7 +85,7 @@ struct WholeSegment {
     entries: Arc<Vec<SegmentIndexEntry>>,
 }
 
-fn segment_object_len(object_key: &str, descriptor: &GrepSegmentRef) -> Result<u64> {
+pub(crate) fn segment_object_len(object_key: &str, descriptor: &GrepSegmentRef) -> Result<u64> {
     descriptor
         .index_block
         .offset

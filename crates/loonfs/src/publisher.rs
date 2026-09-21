@@ -1679,16 +1679,6 @@ impl NamespacePublisher {
                     state.admission = PublisherAdmissionState::Deleted;
                     take_queued_waiters(&mut state)
                 };
-                if let Err(error) = self.wait_for_fold().await {
-                    phase_event!(
-                        self.read_core,
-                        "wal_fold",
-                        self.namespace_id,
-                        tracing::Level::WARN,
-                        error = %error.public_message(),
-                        "wal fold failed while the namespace was deleted"
-                    );
-                }
                 // The publisher is terminal; drop it from the registry map
                 // so the map stays bounded by live namespaces. Clones still
                 // in flight fail fast on `Deleted`, and a later submission
@@ -1721,9 +1711,17 @@ impl NamespacePublisher {
     }
 
     async fn delete_through_engine(&self, options: DeleteNamespaceOptions) -> DeleteResult {
+        self.wait_for_fold().await?;
         let Some(writer) = self.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
+        let waiting = WaitingFold::new(&writer.wal_folds_waiting, self.read_core.instruments());
+        let _permit = writer
+            .wal_fold_permits
+            .acquire()
+            .await
+            .expect("fold permit semaphore should remain open");
+        drop(waiting);
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
         crate::fs::delete_namespace_with_engine(

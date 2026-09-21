@@ -1089,6 +1089,51 @@ impl NamespaceAccess {
     }
 }
 
+/// Cumulative committed activity through a manifest's folded position.
+/// Forks inherit these totals; retention and compaction never subtract from them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestStats {
+    /// Full content length of every committed file revision, including reused content.
+    pub committed_content_bytes_total: u64,
+    /// Number of committed file revisions, including empty revisions.
+    pub committed_file_revisions_total: u64,
+    /// Number of durable semantic operations, rather than requests or raw deltas.
+    pub committed_mutations_total: u64,
+}
+
+impl ManifestStats {
+    /// Adds activity, returning `None` if any counter overflows.
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            committed_content_bytes_total: self
+                .committed_content_bytes_total
+                .checked_add(other.committed_content_bytes_total)?,
+            committed_file_revisions_total: self
+                .committed_file_revisions_total
+                .checked_add(other.committed_file_revisions_total)?,
+            committed_mutations_total: self
+                .committed_mutations_total
+                .checked_add(other.committed_mutations_total)?,
+        })
+    }
+
+    /// Subtracts a baseline, returning `None` if any counter regressed.
+    pub fn checked_sub(self, baseline: Self) -> Option<Self> {
+        Some(Self {
+            committed_content_bytes_total: self
+                .committed_content_bytes_total
+                .checked_sub(baseline.committed_content_bytes_total)?,
+            committed_file_revisions_total: self
+                .committed_file_revisions_total
+                .checked_sub(baseline.committed_file_revisions_total)?,
+            committed_mutations_total: self
+                .committed_mutations_total
+                .checked_sub(baseline.committed_mutations_total)?,
+        })
+    }
+}
+
 /// Carries one complete namespace file-set description inside a manifest envelope.
 ///
 /// See [manifest publication](../../../docs/specs/format.md#72-publishing-a-materialized-file-set).
@@ -1123,10 +1168,12 @@ pub struct NamespaceManifestPayload {
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
     /// Grep publishes each bounded step, so a lost race costs only one step.
     pub compactor_epoch: u64,
-    /// Materialized head sequence, or the final namespace sequence on deletion.
+    /// Materialized head sequence, including the final sequence on deletion.
     pub head_seq: ChangeSeq,
     /// Commit identity used when no newer data segment exists.
     pub head_commit_id: CommitId,
+    /// Committed activity, including inherited activity, through `head_seq`.
+    pub stats: ManifestStats,
     /// Oldest run sequence still represented by `runs`.
     pub base_seq: ChangeSeq,
     /// Current writer fencing epoch.
@@ -1184,6 +1231,7 @@ impl NamespaceManifestPayload {
             compactor_epoch: 0,
             head_seq: ChangeSeq(0),
             head_commit_id: crate::control::genesis_commit_id(),
+            stats: ManifestStats::default(),
             base_seq: ChangeSeq(0),
             writer_epoch: WriterEpoch(0),
             next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
@@ -1193,6 +1241,12 @@ impl NamespaceManifestPayload {
             retention_floor_seq: ChangeSeq(0),
             runs: Vec::new(),
         }
+    }
+
+    /// Whether a successor preserves folded activity or advances it with the head.
+    pub fn preserves_stats(&self, successor: &Self) -> bool {
+        successor.stats.checked_sub(self.stats).is_some()
+            && (successor.head_seq > self.head_seq || successor.stats == self.stats)
     }
 
     /// Rejects changes to permanent identity and terminal lifecycle state.
@@ -1287,6 +1341,49 @@ mod tests {
             name_key: NameKey::parse("report.txt").expect("valid name key"),
             display_name: crate::DisplayName::parse("report.txt").expect("valid display name"),
         }
+    }
+
+    #[test]
+    fn statistics_arithmetic_and_successors_reject_invalid_totals() {
+        let maximum = super::ManifestStats {
+            committed_content_bytes_total: u64::MAX,
+            committed_file_revisions_total: u64::MAX,
+            committed_mutations_total: u64::MAX,
+        };
+        for increment in [
+            super::ManifestStats {
+                committed_content_bytes_total: 1,
+                ..Default::default()
+            },
+            super::ManifestStats {
+                committed_file_revisions_total: 1,
+                ..Default::default()
+            },
+            super::ManifestStats {
+                committed_mutations_total: 1,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(maximum.checked_add(increment), None);
+            assert_eq!(super::ManifestStats::default().checked_sub(increment), None);
+        }
+        assert_eq!(maximum.checked_sub(maximum), Some(Default::default()));
+        let initial = NamespaceManifestPayload::initial(
+            NamespaceId::parse("stats").expect("namespace"),
+            crate::ContentStoreId::parse("cs_00000000000000000000000000000001").expect("store"),
+            0,
+            crate::ActorId::parse("test").expect("actor"),
+            super::NamespaceAccess::unrestricted(),
+        );
+        let mut successor = initial.clone();
+        successor.stats = maximum;
+        assert!(!initial.preserves_stats(&successor));
+        successor.head_seq = ChangeSeq(1);
+        assert!(initial.preserves_stats(&successor));
+        let mut regression = successor.clone();
+        regression.stats.committed_mutations_total -= 1;
+        regression.head_seq = ChangeSeq(2);
+        assert!(!successor.preserves_stats(&regression));
     }
 
     #[test]
@@ -1415,6 +1512,7 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
+            stats: Default::default(),
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("content store"),
             created_at_ms: 1_000,
@@ -1463,6 +1561,7 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_inherited_source_segments() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
+            stats: Default::default(),
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("content store"),
             created_at_ms: 1_000,

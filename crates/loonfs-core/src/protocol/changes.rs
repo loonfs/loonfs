@@ -141,19 +141,10 @@ pub(crate) fn events_from_wal_deltas(
     deltas: &[WalCommitDelta],
 ) -> Result<Vec<FilesystemChange>> {
     let mut events = Vec::new();
-    let mut group: Vec<&WalDelta> = Vec::new();
-    let mut group_op_index = None;
-    for delta in deltas {
-        if group_op_index != Some(delta.semantic_op_index) {
-            if group_op_index.is_some() {
-                events.push(event_from_op_deltas(namespace_id, committed_seq, &group)?);
-                group.clear();
-            }
-            group_op_index = Some(delta.semantic_op_index);
-        }
-        group.push(&delta.delta);
-    }
-    if group_op_index.is_some() {
+    let mut group = Vec::new();
+    for deltas in loonfs_api::wire::wal::semantic_operation_groups(deltas) {
+        group.clear();
+        group.extend(deltas.iter().map(|delta| &delta.delta));
         events.push(event_from_op_deltas(namespace_id, committed_seq, &group)?);
     }
     Ok(events)

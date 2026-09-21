@@ -1,7 +1,10 @@
 //! Metadata rows and inline content from the unfolded WAL tail.
 
-use crate::metadata::MetadataState;
+use super::frame::WalSegmentError;
+use crate::metadata::{CommitReceiptRecord, MetadataState};
 use bytes::Bytes;
+use loonfs_api::wire::manifest::ManifestStats;
+use loonfs_api::wire::wal::{committed_stats, WalCommitDelta, WalCommitPayload};
 use loonfs_api::{ContentId, ContentRef};
 use std::collections::HashMap;
 
@@ -11,6 +14,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectedWalTail {
     pub(crate) rows: MetadataState,
+    pub(crate) stats: ManifestStats,
     inline_content: HashMap<ContentId, ProjectedInlineContent>,
     inline_bytes: usize,
 }
@@ -27,6 +31,37 @@ impl ProjectedWalTail {
             rows,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn apply_commit(
+        &mut self,
+        record: &WalCommitPayload,
+    ) -> Result<(), WalSegmentError> {
+        self.apply_commit_parts(
+            CommitReceiptRecord {
+                commit_id: record.commit_id.clone(),
+                committed_by: record.committed_by.clone(),
+                semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
+                committed_seq: record.seq,
+                committed_at_ms: record.committed_at_ms,
+                message: record.message.clone(),
+            },
+            &record.deltas,
+        )
+    }
+
+    pub(crate) fn apply_commit_parts(
+        &mut self,
+        receipt: CommitReceiptRecord,
+        deltas: &[WalCommitDelta],
+    ) -> Result<(), WalSegmentError> {
+        let stats = committed_stats(deltas)
+            .and_then(|activity| self.stats.checked_add(activity))
+            .ok_or(WalSegmentError::StatsOverflow)?;
+        self.rows
+            .apply_committed_wal_record_parts_mut(receipt, deltas);
+        self.stats = stats;
+        Ok(())
     }
 
     pub(crate) fn inline_content(&self, content_id: &ContentId) -> Option<&Bytes> {

@@ -322,13 +322,18 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     .await
     .expect("delete namespace");
 
+    let final_stats = crate::control::load_namespace_statistics(&store, &namespace_id)
+        .await
+        .expect("final statistics")
+        .stats;
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass");
     assert!(report.deleted.wal_segments >= 1);
     assert_eq!(report.deleted.metadata_segments, 0);
-    assert_eq!(report.deleted.manifests, 4);
+    // Deletion also folds its acquired writer fence before the tombstone.
+    assert_eq!(report.deleted.manifests, 5);
     assert_eq!(report.deleted_checkpoints_by_owner.expired, 1);
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
@@ -355,6 +360,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .await
         .expect("tombstone");
     assert!(current.envelope.payload().status.is_deleted());
+    assert_eq!(current.envelope.payload().stats, final_stats);
     assert!(current
         .envelope
         .payload()

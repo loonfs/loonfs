@@ -816,7 +816,17 @@ impl NamespaceCommitEngine {
                         .insert_inline_content(value.content_ref().clone(), value.bytes().clone());
                 }
                 for record in &records {
-                    tail_state.rows.apply_committed_wal_record_mut(record);
+                    if let Err(error) = tail_state.apply_commit(record) {
+                        // The WAL is already durable. Discard this cache; replay
+                        // and folding will report the accounting error.
+                        tracing::error!(%error, "could not update the committed WAL projection");
+                        self.invalidate_projection();
+                        return (
+                            projection.wal_tail_segments,
+                            tail_state.inline_bytes(),
+                            None,
+                        );
+                    }
                 }
                 projection.reanchor(head.clone());
                 Some(ResultingReadState {
