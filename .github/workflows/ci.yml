@@ -18,9 +18,9 @@ jobs:
       checks: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # object_store 0.12.4 pins quick-xml 0.38.4, and the patched time release
-      # requires Rust 1.88 while LoonFS supports 1.85. Keep these exceptions
-      # explicit until those compatibility upgrades are handled separately.
+      # The quick-xml fixes require 0.41; object_store 0.12.4 uses 0.38.
+      # The time fix requires Rust 1.88; LoonFS supports Rust 1.85.
+      # Remove these exceptions when those dependencies can be upgraded.
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
