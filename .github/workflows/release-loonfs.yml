@@ -436,7 +436,7 @@ jobs:
 
   publish-crates:
     name: Publish crates
-    needs: publish
+    needs: [prepare, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -455,35 +455,33 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
 
-      - name: Publish unpublished crate versions
+      - name: Publish crates in dependency order
         shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          packages="$(cargo metadata --locked --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.publish != []) | [.name, .version] | @tsv')"
-          excluded=()
-          pending=0
-          while read -r name version; do
+          for crate in \
+            loonfs-api \
+            loonfs-objectstore \
+            loonfs-client \
+            loonfs-core \
+            loonfs \
+            loonfs-grep \
+            loonfs-cli
+          do
             status="$(curl --silent --show-error --retry 3 --output /dev/null \
               --user-agent 'loonfs-release (https://github.com/loonfs/loonfs)' \
-              --write-out '%{http_code}' "https://crates.io/api/v1/crates/$name/$version")"
+              --write-out '%{http_code}' "https://crates.io/api/v1/crates/$crate/$VERSION")"
             case "$status" in
-              200)
-                echo "$name $version is already published"
-                excluded+=(--exclude "$name")
-                ;;
-              404) pending=$((pending + 1)) ;;
+              200) echo "$crate $VERSION is already published" ;;
+              404) cargo publish --package "$crate" --locked ;;
               *)
-                echo "could not check $name $version on crates.io (HTTP $status)" >&2
+                echo "could not check $crate $VERSION on crates.io (HTTP $status)" >&2
                 exit 1
                 ;;
             esac
-          done <<< "$packages"
-
-          if [ "$pending" -gt 0 ]; then
-            cargo publish --workspace --locked "${excluded[@]}"
-          fi
+          done
 
   update-homebrew:
     name: Update Homebrew
@@ -503,19 +501,23 @@ jobs:
           path: homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
-      - name: Update and push the formula
+      - name: Update the formula
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.event.release.tag_name }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           latest="$(gh release view --repo loonfs/loonfs --json tagName --jq .tagName)"
-          if [ "$TAG_NAME" != "$latest" ]; then
+          if [ "v$VERSION" != "$latest" ]; then
             echo "Skipping Homebrew update for an older release"
             exit 0
           fi
           scripts/bump-homebrew-tap.sh --version "$VERSION" --tap-dir homebrew-tap
-          cd homebrew-tap
+
+      - name: Commit and push the formula
+        working-directory: homebrew-tap
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
           if git diff --quiet -- Formula/loonfs.rb; then
             exit 0
           fi
@@ -544,10 +546,11 @@ jobs:
           path: loonfs_www
           token: ${{ secrets.LOONFS_WWW_TOKEN }}
 
-      - name: Sync and merge the API reference
+      - name: Sync the API reference
+        id: sync
         working-directory: loonfs_www
         env:
-          GH_TOKEN: ${{ secrets.LOONFS_WWW_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           LOONFS_OPENAPI_REF: ${{ github.event.release.tag_name }}
         run: |
           latest="$(gh release view --repo loonfs/loonfs --json tagName --jq .tagName)"
@@ -555,32 +558,30 @@ jobs:
             echo "Skipping API reference update for an older release"
             exit 0
           fi
-          branch="release/$LOONFS_OPENAPI_REF"
-          remote_branch="$(git ls-remote --heads origin "$branch")"
-          if [ -n "$remote_branch" ]; then
-            git fetch origin "$branch"
-            git checkout -b "$branch" FETCH_HEAD
-          else
-            git checkout -b "$branch"
-          fi
           npm run sync:openapi
-          if ! git diff --quiet -- src/openapi/loonfs.json; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add src/openapi/loonfs.json
-            git commit -m "docs: update API reference for $LOONFS_OPENAPI_REF"
-            git push origin "HEAD:refs/heads/$branch"
-          fi
-          if git diff --quiet origin/main -- src/openapi/loonfs.json; then
-            exit 0
-          fi
-          pr="$(gh pr list --head "$branch" --base main --state open --json url --jq '.[0].url // empty')"
-          if [ -z "$pr" ]; then
-            pr="$(gh pr create --head "$branch" --base main \
-              --title "docs: update API reference for $LOONFS_OPENAPI_REF" \
-              --body "Update the API reference from LoonFS $LOONFS_OPENAPI_REF.")"
-          fi
-          gh pr merge "$pr" --squash --match-head-commit "$(git rev-parse HEAD)"
+          echo "synced=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the reference PR
+        if: steps.sync.outputs.synced == 'true'
+        id: pull_request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          token: ${{ secrets.LOONFS_WWW_TOKEN }}
+          path: loonfs_www
+          add-paths: src/openapi/loonfs.json
+          branch: release/${{ github.event.release.tag_name }}
+          title: "docs: update API reference for ${{ github.event.release.tag_name }}"
+          commit-message: "docs: update API reference for ${{ github.event.release.tag_name }}"
+          body: "Update the API reference from LoonFS ${{ github.event.release.tag_name }}."
+
+      - name: Merge the reference PR
+        if: steps.pull_request.outputs.pull-request-number
+        working-directory: loonfs_www
+        env:
+          GH_TOKEN: ${{ secrets.LOONFS_WWW_TOKEN }}
+          PR_URL: ${{ steps.pull_request.outputs.pull-request-url }}
+          PR_HEAD: ${{ steps.pull_request.outputs.pull-request-head-sha }}
+        run: gh pr merge "$PR_URL" --squash --match-head-commit "$PR_HEAD"
 
   verify-install:
     name: Verify published CLI install
@@ -592,7 +593,8 @@ jobs:
           TAG_NAME: ${{ github.event.release.tag_name }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          curl -fsSL https://install.loonfs.com -o "$RUNNER_TEMP/install-loonfs.sh"
+          curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loonfs.sh \
+            -o "$RUNNER_TEMP/install-loonfs.sh"
           sh "$RUNNER_TEMP/install-loonfs.sh" \
             --version "$TAG_NAME" --install-dir "$RUNNER_TEMP/loonfs-bin"
           test "$("$RUNNER_TEMP/loonfs-bin/loonfs" --version)" = "loonfs $VERSION"
