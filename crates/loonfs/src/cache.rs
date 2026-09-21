@@ -245,6 +245,7 @@ impl ReadCore {
             .lock
             .lock()
             .instrument(phase_span!(self, "namespace_validation_wait", namespace_id))
+            .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wait"))
             .await;
         {
             let mut cache = self.inner.control_cache();
@@ -258,9 +259,10 @@ impl ReadCore {
                 // probe already in flight when we arrived cannot authorize
                 // this shortcut: it may have observed before an intervening
                 // write completed. Local publication is not a remote proof.
-                return Ok(cache
-                    .cached_namespace_head(namespace_id)
-                    .expect("checked cached head"));
+                return tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse")
+                    .in_scope(|| Ok(cache
+                        .cached_namespace_head(namespace_id)
+                        .expect("checked cached head")));
             }
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop
@@ -272,6 +274,7 @@ impl ReadCore {
             .unwrap_or(u64::MAX);
         let result = self
             .refresh_namespace_head(namespace_id)
+            .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
             .await
             .map(|mut head| {
                 head.validation = Arc::clone(&validation);
@@ -306,19 +309,24 @@ impl ReadCore {
                 >= self
                     .runtime_cache_config()
                     .manifest_revalidation_interval_ms;
-            let matches = !check_due || self.manifest_is_current(namespace_id, &head.basis).await?;
+            let matches = !check_due || self.manifest_is_current(namespace_id, &head.basis)
+                .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
+                .await?;
             if matches {
                 if check_due {
                     head.last_control_check_ms = now_ms;
                 }
                 let mut context = self.runtime_read_context(&head);
-                if loonfs_core::control::probe_namespace_wal(self.store(), &mut context).await? {
+                if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
+                    .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
+                    .await? {
                     head.head = context.head;
                     return Ok(head);
                 }
             }
         }
         load_namespace_read_anchor(self.store(), namespace_id)
+            .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_anchor_load"))
             .await
             .map(|loaded| cached_anchor(loaded, now_ms))
     }

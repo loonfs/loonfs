@@ -18,6 +18,7 @@ mod handlers_uploads;
 mod metrics;
 #[cfg(feature = "openapi")]
 mod openapi;
+mod page_response;
 mod query_params;
 mod serve;
 #[cfg(test)]

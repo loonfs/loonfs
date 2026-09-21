@@ -45,6 +45,7 @@ use loonfs_api::{
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use tracing::Instrument;
 
 /// Read context pinned by the runtime for one request. It contains the head,
 /// metadata basis, and shared caches needed to serve every read from the same
@@ -283,9 +284,19 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: ListPathEntriesOptions,
         context: &RuntimeReadContext,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
-        let head_view = self.authorization_head_view().await?;
+        let head_view = self
+            .authorization_head_view()
+            .instrument(
+                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
+            )
+            .await?;
         let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
+        let view = self
+            .load_read_view(context)
+            .instrument(
+                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
+            )
+            .await?;
         view.list_path_page(path.as_ref(), request, options.include_attributes, &access)
             .await
     }
@@ -299,9 +310,19 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: ListInodeChildrenOptions,
         context: &RuntimeReadContext,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
-        let head_view = self.authorization_head_view().await?;
+        let head_view = self
+            .authorization_head_view()
+            .instrument(
+                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
+            )
+            .await?;
         let access = self.read_access(context, head_view.as_ref())?;
-        let view = self.load_read_view(context).await?;
+        let view = self
+            .load_read_view(context)
+            .instrument(
+                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "load_view"),
+            )
+            .await?;
         view.list_inode_children_page(inode_id, request, options.include_attributes, &access)
             .await
     }

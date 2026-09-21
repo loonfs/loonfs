@@ -874,6 +874,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .as_ref()
             .map(|cursor| cursor.last_name_key.as_str());
         let select_span = tracing::debug_span!(
+            target: "loonfs::page",
             "loonfs.phase",
             phase = "list_page_select_children",
             list_page_requested_limit = request.limit.as_usize() as u64,
@@ -888,6 +889,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .instrument(select_span.clone())
             .await?;
         select_span.record("list_page_children_returned", children.len() as u64);
+        // Close at the phase boundary, not after entry materialization.
+        drop(select_span);
         let next_cursor = request
             .limit
             .finish_page(&mut children, |last| DirectoryPageCursor {
@@ -898,15 +901,23 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             });
 
         let mut readable = vec![true; children.len()];
-        if !access.is_unrestricted() {
-            for (child, readable) in children.iter().zip(&mut readable) {
-                *readable = access
-                    .can_read(session, child.binding.child_inode_id)
-                    .await?;
+        async {
+            if !access.is_unrestricted() {
+                for (child, readable) in children.iter().zip(&mut readable) {
+                    *readable = access
+                        .can_read(session, child.binding.child_inode_id)
+                        .await?;
+                }
             }
+            Ok::<_, CoreError>(())
         }
+        .instrument(
+            tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "child_access"),
+        )
+        .await?;
 
         let build_span = tracing::debug_span!(
+            target: "loonfs::page",
             "loonfs.phase",
             phase = "list_page_build_entries",
             list_page_children_returned = children.len() as u64,
@@ -956,6 +967,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         .instrument(build_span.clone())
         .await?;
         session.counters().record_on(&build_span);
+        drop(build_span);
 
         Ok(Page {
             items: entries,

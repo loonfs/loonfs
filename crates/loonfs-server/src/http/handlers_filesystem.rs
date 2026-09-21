@@ -250,7 +250,7 @@ pub(super) async fn list_path_entries(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ListPathPageQuery>,
-) -> Result<Json<loonfs_api::ListPathEntriesResponse>, ApiResponseError> {
+) -> Result<Response, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
     let path = required_query_param(query.path, "path")?;
@@ -273,7 +273,7 @@ pub(super) async fn list_path_entries(
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
                 .with_invalid_request_param("path")
         })?;
-    Ok(Json(listing))
+    Ok(super::page_response::page_response(listing))
 }
 
 #[cfg_attr(
