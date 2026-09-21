@@ -527,62 +527,6 @@ jobs:
           git commit -m "chore: update to $TAG_NAME"
           git push origin HEAD:main
 
-  update-website:
-    name: Update API reference
-    needs: publish
-    if: ${{ !github.event.release.prerelease }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.release.tag_name }}
-          path: loonfs
-          persist-credentials: false
-
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: loonfs/loonfs_www
-          ref: main
-          path: loonfs_www
-          token: ${{ secrets.LOONFS_WWW_TOKEN }}
-
-      - name: Sync the API reference
-        id: sync
-        working-directory: loonfs_www
-        env:
-          GH_TOKEN: ${{ github.token }}
-          LOONFS_OPENAPI_REF: ${{ github.event.release.tag_name }}
-        run: |
-          latest="$(gh release view --repo loonfs/loonfs --json tagName --jq .tagName)"
-          if [ "$LOONFS_OPENAPI_REF" != "$latest" ]; then
-            echo "Skipping API reference update for an older release"
-            exit 0
-          fi
-          npm run sync:openapi
-          echo "synced=true" >> "$GITHUB_OUTPUT"
-
-      - name: Open or update the reference PR
-        if: steps.sync.outputs.synced == 'true'
-        id: pull_request
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
-        with:
-          token: ${{ secrets.LOONFS_WWW_TOKEN }}
-          path: loonfs_www
-          add-paths: src/openapi/loonfs.json
-          branch: release/${{ github.event.release.tag_name }}
-          title: "docs: update API reference for ${{ github.event.release.tag_name }}"
-          commit-message: "docs: update API reference for ${{ github.event.release.tag_name }}"
-          body: "Update the API reference from LoonFS ${{ github.event.release.tag_name }}."
-
-      - name: Merge the reference PR
-        if: steps.pull_request.outputs.pull-request-number
-        working-directory: loonfs_www
-        env:
-          GH_TOKEN: ${{ secrets.LOONFS_WWW_TOKEN }}
-          PR_URL: ${{ steps.pull_request.outputs.pull-request-url }}
-          PR_HEAD: ${{ steps.pull_request.outputs.pull-request-head-sha }}
-        run: gh pr merge "$PR_URL" --squash --match-head-commit "$PR_HEAD"
-
   verify-install:
     name: Verify published CLI install
     needs: [prepare, publish]
