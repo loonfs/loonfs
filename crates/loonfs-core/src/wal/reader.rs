@@ -14,6 +14,7 @@ use crate::metadata::MetadataState;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
+use loonfs_objectstore::commit_timing::{CommitWork, Stage};
 use loonfs_objectstore::keys::wal_segment;
 use loonfs_objectstore::ObjectStore;
 
@@ -30,23 +31,25 @@ pub(super) async fn load_wal_segment<S: ObjectStore + ?Sized>(
 ) -> LoadedWalSegment {
     let object_key = wal_segment(namespace_id, &wal_no);
     let envelope = async {
-        let Some(bytes) =
-            store
-                .get(&object_key, None)
-                .await
-                .map_err(|error| WalTailLoadError::ReadWal {
-                    object_key: object_key.clone(),
-                    message: error.public_message().into_owned(),
-                    class: crate::error::StoreFailureClass::of(&error),
-                })?
+        let Some(bytes) = CommitWork::current()
+            .read_wal(store.get(&object_key, None))
+            .await
+            .map_err(|error| WalTailLoadError::ReadWal {
+                object_key: object_key.clone(),
+                message: error.public_message().into_owned(),
+                class: crate::error::StoreFailureClass::of(&error),
+            })?
         else {
             return Ok(None);
         };
+        let decode = CommitWork::current().stage(Stage::WalDecode);
         let envelope =
             decode_wal_segment_envelope_zstd(&bytes).map_err(|error| WalTailLoadError::Replay {
                 object_key: object_key.clone(),
                 error: WalSegmentError::Codec(error.to_string()),
             })?;
+        drop(decode);
+        let _validate = CommitWork::current().stage(Stage::WalValidate);
         if envelope.payload().wal_no != wal_no {
             return Err(WalTailLoadError::NumberMismatch {
                 object_key: object_key.clone(),
@@ -126,6 +129,7 @@ impl<'a> WalWalk<'a> {
                 None => Ok(None),
             };
         };
+        let _validate = CommitWork::current().stage(Stage::WalValidate);
         validate_wal_segment_for_replay(self.namespace_id, self.seq, &envelope).map_err(
             |error| WalTailLoadError::Replay {
                 object_key: object_key.clone(),
@@ -176,6 +180,7 @@ pub(crate) async fn load_retained_wal_tail<S: ObjectStore + ?Sized>(
     head: &NamespaceReadState,
     retention_floor_seq: ChangeSeq,
 ) -> Result<ValidatedWalTail, WalTailLoadError> {
+    let _retained = CommitWork::current().stage(Stage::RetainedHistory);
     load_wal_tail(
         store,
         WalTailLoadRequest {
@@ -210,6 +215,7 @@ pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
     )
     .await?;
     let replayed = {
+        let _project = CommitWork::current().stage(Stage::WalProject);
         let _span =
             tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
         project_validated_wal_tail(

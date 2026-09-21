@@ -79,6 +79,7 @@ struct TransferTimeoutService {
 #[async_trait]
 impl HttpService for TransferTimeoutService {
     async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let attempt = crate::commit_timing::HttpAttempt::start(req.method());
         let request_body_bytes = req.body().content_length() as u64;
         let bound = request_phase_bound(request_body_bytes);
         let response = request_phase_timeout(bound, self.inner.execute(req))
@@ -91,9 +92,9 @@ impl HttpService for TransferTimeoutService {
                         bound_secs: bound.as_secs(),
                     },
                 ))
-            })?;
-
-        let (parts, body) = response.into_parts();
+            });
+        attempt.finish(response.as_ref().ok().map(|r| r.status().as_u16()));
+        let (parts, body) = response?.into_parts();
         let body = IdleDeadlineBody::new(body, PROVIDER_ATTEMPT_TIMEOUT);
         Ok(HttpResponse::from_parts(parts, HttpResponseBody::new(body)))
     }
@@ -385,5 +386,77 @@ mod tests {
             message.contains("5 received bytes"),
             "diagnostic should carry progress, got {message}"
         );
+    }
+    #[tokio::test]
+    async fn attribution_counts_provider_internal_read_retries() {
+        use crate::commit_timing::{provider_read, CommitTiming};
+        use object_store::ObjectStore as _;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        #[derive(Debug, Clone)]
+        struct RetryService(Arc<AtomicUsize>);
+        #[async_trait]
+        impl HttpService for RetryService {
+            async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+                assert_eq!(req.method(), http::Method::HEAD);
+                let status = if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    503
+                } else {
+                    200
+                };
+                Ok(Response::builder()
+                    .status(status)
+                    .header("content-length", "5")
+                    .header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+                    .header("etag", "test")
+                    .body(HttpResponseBody::new(DelayedFrames {
+                        frames: VecDeque::new(),
+                        armed: None,
+                    }))
+                    .expect("response"))
+            }
+        }
+        #[derive(Debug)]
+        struct Connector(RetryService);
+        impl HttpConnector for Connector {
+            fn connect(&self, _: &ClientOptions) -> object_store::Result<HttpClient> {
+                Ok(HttpClient::new(TransferTimeoutService {
+                    inner: HttpClient::new(self.0.clone()),
+                }))
+            }
+        }
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let store = object_store::aws::AmazonS3Builder::new()
+            .with_region("test")
+            .with_bucket_name("test")
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .with_endpoint("http://provider.invalid")
+            .with_allow_http(true)
+            .with_http_connector(Connector(RetryService(attempts.clone())))
+            .build()
+            .expect("test provider");
+        let timing = CommitTiming::new().admit();
+        timing.selected(1);
+        let metadata = timing
+            .scope(provider_read(store.head(&"fixture".into())))
+            .await
+            .expect("retried HEAD");
+        assert_eq!(metadata.size, 5);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        let stats = timing.snapshot().expect("work").http.expect("attributed");
+        assert_eq!(
+            (
+                stats.dispatches,
+                stats.head_dispatches,
+                stats.repeat_dispatches
+            ),
+            (2, 2, 1)
+        );
+        assert_eq!(stats.http_5xx, 1);
+        assert_eq!(stats.cancelled, 0);
     }
 }

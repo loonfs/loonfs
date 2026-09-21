@@ -753,6 +753,7 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
     publisher_state(&publisher).in_flight.insert(
         commit_id.clone(),
         InFlightRequest {
+            diagnostic: CommitWork::default(),
             semantic_identity,
             waiters: vec![AdmittedWaiter::new(
                 sender,
@@ -987,6 +988,7 @@ async fn publisher_contender_retries_after_active_request_fails() {
     publisher_state(&publisher).in_flight.insert(
         commit_id.clone(),
         InFlightRequest {
+            diagnostic: CommitWork::default(),
             semantic_identity: primary_identity,
             waiters: Vec::new(),
         },
@@ -1036,6 +1038,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
     publisher_state(&publisher).in_flight.insert(
         commit_id.clone(),
         InFlightRequest {
+            diagnostic: CommitWork::default(),
             semantic_identity: primary_identity,
             waiters: Vec::new(),
         },
@@ -3272,3 +3275,166 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
 }
 
 mod inline_writer;
+
+// Return the admitted receiver without awaiting it, to exercise caller cancellation.
+#[allow(clippy::async_yields_async)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_diagnostic_survives_caller_cancellation_and_in_flight_join() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
+    let runtime = test_runtime(store.clone() as SharedStore);
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+    store.block_next();
+    let original = CommitTiming::new();
+    let receiver = original
+        .scope(async {
+            admit_commit(
+                &publisher,
+                &namespace_id,
+                create_directory_request("original", "directory"),
+            )
+        })
+        .await;
+    store.wait_until_blocked().await;
+    let snapshot = original.snapshot().expect("request");
+    let work = snapshot.work.expect("work");
+    assert!(snapshot.attributed && !work.completed);
+    let work_id = work.work_id;
+    // Same cancellation as an HTTP deadline: only the result receiver is dropped.
+    drop(receiver);
+    let duplicate = CommitTiming::new();
+    let receiver = duplicate
+        .scope(async {
+            admit_commit(
+                &publisher,
+                &namespace_id,
+                create_directory_request("original", "directory"),
+            )
+        })
+        .await;
+    let joined = duplicate.snapshot().expect("joined");
+    assert!(joined.joined_in_flight);
+    assert_eq!(joined.work.expect("work").work_id, work_id);
+    store.release();
+    assert_eq!(
+        recv_commit(receiver, "duplicate").await.committed_seq,
+        ChangeSeq(1)
+    );
+    for observer in [original, duplicate] {
+        let work = observer.snapshot().expect("request").work.expect("work");
+        assert_eq!(work.work_id, work_id);
+        assert!(work.completed && work.attributed);
+        assert!(matches!(work.outcome, Outcome::Ok));
+    }
+}
+
+// Retain both receivers without yielding to the worker between admissions.
+#[allow(clippy::async_yields_async)]
+#[tokio::test(flavor = "current_thread")]
+async fn commit_diagnostic_does_not_attribute_coalesced_batches() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let runtime =
+        test_runtime(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore);
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+    let one = CommitTiming::new();
+    let two = CommitTiming::new();
+    // No await that yields to the worker between the two synchronous admissions.
+    let a = one
+        .scope(async {
+            admit_commit(
+                &publisher,
+                &namespace_id,
+                create_directory_request("a", "a"),
+            )
+        })
+        .await;
+    let b = two
+        .scope(async {
+            admit_commit(
+                &publisher,
+                &namespace_id,
+                create_directory_request("b", "b"),
+            )
+        })
+        .await;
+    recv_commit(a, "a").await;
+    recv_commit(b, "b").await;
+    for request in [one, two] {
+        let snapshot = request.snapshot().expect("request");
+        assert!(!snapshot.attributed);
+        assert_eq!(
+            snapshot.unavailable,
+            Some(loonfs_objectstore::commit_timing::Unavailable::CoalescedBatch)
+        );
+        let work = snapshot.work.expect("work");
+        assert_eq!(work.batch_size, 2);
+        assert!(work.completed && work.stages.is_none() && work.http.is_none());
+    }
+}
+
+#[tokio::test]
+async fn commit_diagnostic_replay_reads_response_history_without_metadata_replay() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let runtime = test_runtime(store.clone() as SharedStore);
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
+    for name in ["first", "second", "third"] {
+        recv_commit(
+            admit_commit(
+                &publisher,
+                &namespace_id,
+                create_directory_request(name, name),
+            ),
+            name,
+        )
+        .await;
+    }
+    // Retained history includes bootstrap/writer-control segments as well as commits.
+    let retained = store
+        .list_prefix(&wal_segment_prefix(&namespace_id))
+        .await
+        .expect("WAL keys");
+    let mut retained_bytes = 0;
+    for key in &retained {
+        retained_bytes += store
+            .get(key, None)
+            .await
+            .expect("read")
+            .expect("segment")
+            .len() as u64;
+    }
+    let request = CommitTiming::new();
+    let replay = request
+        .scope(
+            publisher.submit(CommitCandidate::new(create_directory_request(
+                "first", "first",
+            ))),
+        )
+        .await
+        .expect("exact replay");
+    assert_eq!(replay.committed_seq, ChangeSeq(1));
+    let work = request.snapshot().expect("request").work.expect("work");
+    assert_eq!(work.projection_cache_hit, Some(true));
+    assert_eq!(work.receipt_found, Some(true));
+    assert_eq!(work.metadata_wal.expect("metadata WAL").reads, 0);
+    let response_wal = work.response_wal.expect("response WAL");
+    assert_eq!(response_wal.segments, retained.len() as u64);
+    assert_eq!(response_wal.bytes, retained_bytes);
+    let stages = work.stages.expect("attributed");
+    assert_eq!(stages[Stage::MetadataReplay as usize].elapsed_us, None);
+    assert!(stages[Stage::ResponseHistory as usize].elapsed_us.is_some());
+    assert!(
+        stages[Stage::WalRead as usize].calls > response_wal.reads,
+        "head discovery performs WAL reads outside the retained-history walk"
+    );
+    assert!(
+        stages[Stage::ResponseHistory as usize].elapsed_us
+            >= stages[Stage::RetainedHistory as usize].elapsed_us
+    );
+}

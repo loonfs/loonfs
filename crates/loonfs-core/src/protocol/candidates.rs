@@ -219,6 +219,8 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     view: &PublishMetadataView<'_, S>,
     record: &CommitReceiptRecord,
 ) -> Result<Commit> {
+    let _history = loonfs_objectstore::commit_timing::CommitWork::current()
+        .stage(loonfs_objectstore::commit_timing::Stage::ResponseHistory);
     let change = match view.find_committed_change_at(record.committed_seq).await {
         Ok(Some(change)) => change,
         Ok(None) => {

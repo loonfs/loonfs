@@ -15,6 +15,7 @@ use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
+use loonfs_objectstore::commit_timing::{CommitWork, Stage};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -48,7 +49,13 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         &self,
         commit_id: &CommitId,
     ) -> Result<Option<CommitReceiptRecord>> {
-        self.metadata_view().find_commit_receipt(commit_id).await
+        let diagnostic = CommitWork::current();
+        let _receipt = diagnostic.stage(Stage::ReceiptLookup);
+        let result = self.metadata_view().find_commit_receipt(commit_id).await;
+        if let Ok(receipt) = &result {
+            diagnostic.receipt_found(receipt.is_some());
+        }
+        result
     }
 
     /// Reads the retained change for a commit receipt.
@@ -148,6 +155,8 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
+    let diagnostic = CommitWork::current();
+    let _view = diagnostic.stage(Stage::MetadataView);
     let loaded = if let Some(cached) = cached_projection {
         crate::namespace::read_anchor::LoadedNamespaceBasis {
             head: cached.head.clone(),
@@ -179,8 +188,10 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     let projection = if let Some(cached) =
         cached_projection.filter(|cached| cached.is_reusable_for(&key, options))
     {
+        diagnostic.projection_reused(true);
         cached.clone()
     } else {
+        diagnostic.projection_reused(false);
         load_publish_tail_projection(store, &head, retention_floor_seq, key, &loaded_basis).await?
     };
 
@@ -208,6 +219,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     key: PublishProjectionKey,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<PublishTailProjection> {
+    let _replay = CommitWork::current().stage(Stage::MetadataReplay);
     let manifest_head = loaded_basis.replay_head(head);
     let replayed = load_replayed_wal_tail(
         store,

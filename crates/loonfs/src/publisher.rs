@@ -30,6 +30,7 @@ use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_SEGMENTS};
 use loonfs_core::publish::{
     NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
 };
+use loonfs_objectstore::commit_timing::{CommitTiming, CommitWork, Outcome, Stage};
 use loonfs_objectstore::timing::MonotonicTimer;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
@@ -983,6 +984,7 @@ impl PreparedCandidate {
 
 #[derive(Clone)]
 struct BatchCandidate {
+    diagnostic: CommitWork,
     permit: Arc<AdmissionPermit>,
     commit_id: CommitId,
     candidate: CommitCandidate,
@@ -990,6 +992,7 @@ struct BatchCandidate {
 }
 
 struct InFlightRequest {
+    diagnostic: CommitWork,
     semantic_identity: CommitFingerprint,
     waiters: Vec<AdmittedWaiter<CommitResult>>,
 }
@@ -1171,6 +1174,7 @@ impl NamespacePublisher {
         let mut state = self.lock_state();
         self.check_admission(&state)?;
         if let Some(existing) = state.in_flight.get_mut(&commit_id) {
+            CommitTiming::current().join(&existing.diagnostic);
             if existing.semantic_identity != semantic_identity {
                 let primary_identity = existing.semantic_identity.clone();
                 existing.waiters.push(waiter);
@@ -1189,7 +1193,9 @@ impl NamespacePublisher {
         let queued = queued_candidates(&state);
         let wal_record_bytes_upper_bound = candidate.wal_record_bytes_upper_bound;
         let inline_content_bytes = candidate.inline_content_bytes;
+        let diagnostic = CommitTiming::current().admit();
         let candidate = BatchCandidate {
+            diagnostic: diagnostic.clone(),
             permit: Arc::clone(&waiter.permit),
             commit_id: commit_id.clone(),
             candidate: candidate.candidate,
@@ -1225,6 +1231,7 @@ impl NamespacePublisher {
         state.in_flight.insert(
             commit_id,
             InFlightRequest {
+                diagnostic,
                 semantic_identity,
                 waiters: vec![waiter],
             },
@@ -1309,12 +1316,22 @@ impl NamespacePublisher {
             self.await_publish_slot().await;
             // Queue ownership and admission remain intact while another
             // namespace uses the shared publication slots. No engine is held.
+            let diagnostic = match self.lock_state().queue.front() {
+                Some(WorkItem::Batch(batch)) => batch
+                    .candidates
+                    .first()
+                    .map(|c| c.diagnostic.clone())
+                    .unwrap_or_default(),
+                _ => CommitWork::default(),
+            };
+            let permit_wait = diagnostic.stage(Stage::PublicationPermit);
             let _publication = self
                 .admission
                 .publications
                 .acquire()
                 .await
                 .expect("publication semaphore is never closed");
+            drop(permit_wait);
             let Some(item) = self.take_next_item() else {
                 return;
             };
@@ -1401,7 +1418,10 @@ impl NamespacePublisher {
             taken_commit_ids
                 .into_iter()
                 .filter_map(|commit_id| state.in_flight.remove(&commit_id))
-                .flat_map(|request| request.waiters)
+                .flat_map(|request| {
+                    request.diagnostic.finish(Outcome::Aborted);
+                    request.waiters
+                })
                 .collect::<Vec<_>>()
         };
         for waiter in orphaned_waiters {
@@ -1414,7 +1434,14 @@ impl NamespacePublisher {
 
     async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) {
         let selected_at = self.timer.monotonic_now_ms();
+        // Shared stages are attributable only when exactly one candidate owns the batch.
+        let diagnostic = if candidates.len() == 1 {
+            candidates[0].diagnostic.clone()
+        } else {
+            CommitWork::default()
+        };
         for candidate in &candidates {
+            candidate.diagnostic.selected(candidates.len());
             phase_event!(
                 self.read_core,
                 "wait_for_batch",
@@ -1441,33 +1468,35 @@ impl NamespacePublisher {
             result = tracing::field::Empty,
             retry_count = tracing::field::Empty,
         );
-        let (results, retry_count) = async {
-            let mut results = Vec::new();
-            let mut retry_count = 0_u64;
-            for attempt in 0..CONTENTION_RETRY_LIMIT {
-                let Some(writer) = self.writer.upgrade() else {
-                    results = candidates
-                        .iter()
-                        .map(|_| Err(CoreError::ShuttingDown.into()))
-                        .collect();
-                    break;
-                };
-                results = self
-                    .publish_through_engine(&writer, &candidates, &permits)
-                    .await;
-                if !results.iter().any(is_retryable_wal_publish) {
-                    break;
+        let (results, retry_count) = diagnostic
+            .scope(async {
+                let _publish = diagnostic.stage(Stage::Publish);
+                let mut results = Vec::new();
+                let mut retry_count = 0_u64;
+                for attempt in 0..CONTENTION_RETRY_LIMIT {
+                    let Some(writer) = self.writer.upgrade() else {
+                        results = candidates
+                            .iter()
+                            .map(|_| Err(CoreError::ShuttingDown.into()))
+                            .collect();
+                        break;
+                    };
+                    results = self
+                        .publish_through_engine(&writer, &candidates, &permits)
+                        .await;
+                    if !results.iter().any(is_retryable_wal_publish) {
+                        break;
+                    }
+                    if attempt + 1 == CONTENTION_RETRY_LIMIT {
+                        break;
+                    }
+                    retry_count += 1;
+                    self.claim_publish_slot().await;
                 }
-                if attempt + 1 == CONTENTION_RETRY_LIMIT {
-                    break;
-                }
-                retry_count += 1;
-                self.claim_publish_slot().await;
-            }
-            (results, retry_count)
-        }
-        .instrument(publish_span.clone())
-        .await;
+                (results, retry_count)
+            })
+            .instrument(publish_span.clone())
+            .await;
         publish_span.record("result", batch_result_label(&results).as_str());
         publish_span.record("retry_count", retry_count);
         drop(publish_span);
@@ -1483,7 +1512,9 @@ impl NamespacePublisher {
         candidates: &[CommitCandidate],
         permits: &[Arc<AdmissionPermit>],
     ) -> Vec<CommitResult> {
+        let wait = CommitWork::current().stage(Stage::EngineLock);
         let mut slot = self.engine.lock().await;
+        drop(wait);
         let engine = self.engine_for(&mut slot);
         let publish = crate::fs::publish_batch_with_engine(
             &self.read_core,
@@ -1862,8 +1893,22 @@ impl NamespacePublisher {
                         .next()
                         .expect("equal-length batch should hold one result per candidate"),
                 };
-                wait_traces.push((result_label(&result), self.elapsed_ms_since(selected_at)));
-                if let Some(in_flight) = state.in_flight.remove(&commit_id) {
+                let in_flight = state.in_flight.remove(&commit_id);
+                let diagnostic = in_flight
+                    .as_ref()
+                    .map(|v| v.diagnostic.clone())
+                    .unwrap_or_default();
+                wait_traces.push((
+                    result_label(&result),
+                    self.elapsed_ms_since(selected_at),
+                    diagnostic,
+                    if result.is_ok() {
+                        Outcome::Ok
+                    } else {
+                        Outcome::Error
+                    },
+                ));
+                if let Some(in_flight) = in_flight {
                     for waiter in in_flight.waiters {
                         deliveries.push((waiter, result.clone()));
                     }
@@ -1871,7 +1916,8 @@ impl NamespacePublisher {
             }
         }
 
-        for (outcome, wait_ms) in wait_traces {
+        for (outcome, wait_ms, diagnostic, completion) in wait_traces {
+            diagnostic.finish(completion);
             self.read_core.instruments().publisher_publish(outcome);
             phase_event!(
                 self.read_core,
@@ -1992,6 +2038,7 @@ fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
             WorkItem::Batch(batch) => {
                 for candidate in batch.candidates {
                     if let Some(request) = state.in_flight.remove(&candidate.commit_id) {
+                        request.diagnostic.finish(Outcome::Aborted);
                         waiters.commits.extend(request.waiters);
                     }
                 }

@@ -1,0 +1,20 @@
+# Temporary commit-replay attribution
+
+This diagnostic is off unless the host explicitly scopes a `CommitTiming` around a commit request. It changes no admission, limits, pacing, retries, timeouts, WAL validation, or protocol behavior. It is separate from the WAL redesign.
+
+Admission binds the request observer to one publisher-owned, opaque `work_<32 hex>` ID. An identical in-flight request joins the original work. The existing publisher owns completion after the HTTP waiter drops. Each work handle emits at most one root `loonfs::commit_timing` / `commit_work_finished` event, containing a bounded numeric/enum JSON snapshot. It retains no HTTP request IDs, waiter lists, tenant identifiers, commit IDs, paths, keys, tokens, payloads, or raw errors. The publisher emits after exiting its publication span; exporters must discard any ambient span context added by a logger. The host binds the actual response request ID to a frozen snapshot when creating the response.
+
+Only a single-candidate batch receives inner-stage attribution. `attributed=false` carries a bounded `unavailable` reason; stages and I/O groups are null, not zero. A request rebound after contention is explicitly incomplete. Missing context or completion and interference during the one-request diagnostic are inconclusive; they do not justify automatic extra probes. Hard process termination can prevent the final event; this is not a durable event system.
+
+## Interpretation
+
+All stage durations are **inclusive**, in microseconds, and must not be added together. Active snapshots include the running interval. Unentered stage durations are null. Queue covers admission through selection; publication-permit wait is a subset. Publish covers engine-lock wait, metadata view, receipt lookup, response reconstruction, and existing publication retries.
+
+- `metadata_view` includes `metadata_replay` only when the cached projection cannot be reused. `projection_cache_hit` records the actual branch, not a guess from zero reads.
+- `response_history` reconstructs a receipt's original events. `retained_history` is specifically the retained WAL walk within it, excluding head discovery and including the walk’s decode and validation. `metadata_wal` and `response_wal` count successful compressed object bytes/segments and logical reads in these separate paths. Reads outside both paths still contribute to `wal_read`, but neither per-path WAL group claims them.
+- WAL decode, validation, and projection are separately timed. No validation is removed or weakened.
+- HTTP dispatches count calls at the existing transport connector, immediately before request execution. They do not count logical adapter reads or permission to retry. `repeat_dispatches` counts a repeated method within one logical provider read, including provider-internal retries and explicit ranged-read fallback. It is not a measurement of retry backoff or proof of throttling. Status 429/5xx, transport errors, and pre-header cancellation have separate counters. Successful headers do not imply the response body completed; WAL read duration includes body consumption.
+- `http` covers all observed work; `response_http` is its subset during the entire receipt-response reconstruction, including discovery and the retained walk. These actual transport dispatches remain visible even when retained-history segment counts are small. Neither group is additive to the other.
+- Counts are aggregate for the observed work; stage durations establish where time was spent. Background maintenance has no work scope. Any coalescing or unexpected concurrent activity disqualifies the planned isolated diagnostic.
+
+Local tests exercise disabled/lost contexts, nested stage accounting, actual provider-internal retries, caller cancellation and identical in-flight joining, coalesced batches, and warm exact replay with separate retained-history and metadata counts. Hosted integration additionally tests actual response identity, frozen timeout snapshots, one eventual completion event, sanitization, and export bounds.

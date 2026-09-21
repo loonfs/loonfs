@@ -14,6 +14,7 @@
 pub mod abs;
 mod attempts;
 mod aws_credentials;
+pub mod commit_timing;
 mod configured;
 pub mod crypto;
 mod endpoint;
