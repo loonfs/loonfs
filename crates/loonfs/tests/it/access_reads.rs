@@ -141,6 +141,11 @@ async fn check_buffered_read_access(content_size: usize) {
             ErrorCode::PathNotFound
         );
     }
+    let inode_id = reader
+        .get_path_entry(&namespace_id, "/team/file", StatPathOptions::default())
+        .await
+        .expect("shared file before revocation")
+        .inode_id;
     writer
         .create_commit(
             &namespace_id,
@@ -176,6 +181,17 @@ async fn check_buffered_read_access(content_size: usize) {
             .code(),
         ErrorCode::PathNotFound
     );
+    let states = reader
+        .resolve_current_files(&namespace_id, &[inode_id])
+        .await
+        .expect("resolve revoked file");
+    assert_eq!(states.len(), 1);
+    let state = &states[0];
+    assert_eq!(state.inode_id, inode_id);
+    assert!(!state.visible);
+    assert!(!state.readable);
+    assert_eq!(state.current_revision_no, None);
+    assert_eq!(state.current_path, None);
 }
 
 #[tokio::test]

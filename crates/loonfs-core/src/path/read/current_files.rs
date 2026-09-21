@@ -1,6 +1,6 @@
 //! Resolves the current state and path of a batch of inode IDs.
 //!
-//! Stale or unknown IDs are returned as not visible rather than rejected.
+//! Missing or unreadable inodes return `visible: false` with no path or revision.
 
 use super::materialized_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
@@ -18,19 +18,19 @@ pub const MAX_RESOLVE_CURRENT_FILES: usize = loonfs_api::DEFAULT_MAX_PAGE_LIMIT 
 pub struct CurrentFileState {
     /// Requested inode ID.
     pub inode_id: InodeId,
-    /// Whether the inode exists and has a visible path from the root.
+    /// Whether the inode has a visible path and the subject can read it.
     pub visible: bool,
     /// Whether the subject can read this inode.
     pub readable: bool,
     /// Current revision number for a visible file.
     pub current_revision_no: Option<RevisionNo>,
-    /// Current path when visible.
+    /// Current path when `visible` is true.
     pub current_path: Option<AbsolutePath>,
 }
 
-/// Refuses an oversized batch before anything is loaded.
+/// Rejects an oversized batch before reading metadata.
 ///
-/// Called at the API boundary so an over-cap request costs no reads.
+/// Called at the API boundary to enforce the batch limit.
 pub(crate) fn ensure_resolve_batch_within_cap(requested: usize) -> Result<()> {
     if requested > MAX_RESOLVE_CURRENT_FILES {
         return Err(CoreError::BatchTooLarge {
@@ -65,6 +65,9 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     access: &ReadAccess<'_, S>,
 ) -> Result<CurrentFileState> {
+    if !access.can_read(session, inode_id).await? {
+        return Ok(missing(inode_id, false));
+    }
     let Some(resolved) = resolve_visible_inode(session, ancestor_paths, inode_id).await? else {
         return Ok(missing(inode_id, access.is_unrestricted()));
     };
@@ -79,7 +82,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     Ok(CurrentFileState {
         inode_id,
         visible: true,
-        readable: access.can_read(session, inode_id).await?,
+        readable: true,
         current_revision_no,
         current_path: Some(
             AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {

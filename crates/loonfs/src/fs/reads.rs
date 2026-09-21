@@ -198,6 +198,8 @@ impl FsReadSnapshot {
     }
 
     /// Resolves current visibility, revision, and path against this snapshot.
+    ///
+    /// Unreadable inodes return `visible: false` with no path or revision.
     pub async fn resolve_current_files(
         &self,
         inode_ids: &[InodeId],
@@ -817,12 +819,12 @@ impl FsReader {
 
     /// Resolves the current state of each inode ID.
     ///
-    /// Results use one pinned read and preserve input order. Unknown IDs return
-    /// `visible: false`. Directories have a path but no revision.
+    /// Results use one pinned read and preserve input order. Missing or unreadable
+    /// inodes return `visible: false` with no path or revision. Readable directories
+    /// have a path but no revision.
     ///
-    /// At most [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES)
-    /// ids per call; a larger batch is refused with `invalid_request`
-    /// before anything is read.
+    /// A batch larger than [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES)
+    /// returns `invalid_request` before reading metadata.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.resolve_current_files",
