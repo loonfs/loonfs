@@ -23,11 +23,40 @@ jobs:
     name: Validate release tag
     runs-on: ubuntu-latest
     outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release source is on the default branch
+        id: source
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          tag_sha="$(git rev-parse --verify "refs/tags/$TAG_NAME^{commit}")"
+          default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+
+          if [ "$source_sha" != "$tag_sha" ]; then
+            echo "checked out $source_sha, but $TAG_NAME resolves to $tag_sha" >&2
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "$default_ref"; then
+            echo "checkout did not fetch $default_ref" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$source_sha" "$default_ref"; then
+            echo "release tag $TAG_NAME is not on $DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal --no-self-update
@@ -83,7 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Install stable toolchain
         id: rust
@@ -151,7 +180,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -282,7 +311,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       # Rendering requires a Secret name, but does not read the Secret.
       - name: Lint the chart
@@ -419,7 +448,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
       - name: Install stable toolchain
@@ -478,7 +507,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -521,10 +550,11 @@ jobs:
     steps:
       - name: Install the release and check its version
         env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           TAG_NAME: ${{ github.event.release.tag_name }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loonfs.sh \
+          curl -fsSL "https://raw.githubusercontent.com/loonfs/loonfs/$SOURCE_SHA/scripts/install-loonfs.sh" \
             -o "$RUNNER_TEMP/install-loonfs.sh"
           sh "$RUNNER_TEMP/install-loonfs.sh" \
             --version "$TAG_NAME" --install-dir "$RUNNER_TEMP/loonfs-bin"
